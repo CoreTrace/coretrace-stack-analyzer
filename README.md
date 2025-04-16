@@ -6,7 +6,7 @@
 ./build.sh
 ```
 
-#### CORETRACE-COMPILER USAGE
+#### CORETRACE-STACK-USAGE CLI
 
 ```zsh
 ./stack_usage_analyzer test.ll
