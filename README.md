@@ -114,3 +114,5 @@ Function: main
 ##### TODO:
 - Library mode
 - Define json API
+- Unmangling symbols
+
