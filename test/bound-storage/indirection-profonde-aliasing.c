@@ -2,6 +2,9 @@ int main(void)
 {
     char test[10];
     char *ptr = test;
+    char **pp = &ptr;
+    (ptr)[14] = 'a';
+    (*pp)[15] = 'a';
 
     // [!!] potential stack buffer overflow on variable '<test>' (size 10)
     //    index variable may go up to 19 (array last valid index: 9)
