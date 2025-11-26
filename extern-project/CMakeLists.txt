@@ -19,5 +19,5 @@ add_executable(sa_consumer src/main.cpp)
 
 target_link_libraries(sa_consumer
     PRIVATE
-        coretrace::stack_usage_analyzer_static
+        coretrace::stack_usage_analyzer_lib
 )
