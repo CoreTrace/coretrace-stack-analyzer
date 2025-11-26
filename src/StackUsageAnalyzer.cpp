@@ -7,6 +7,11 @@
 #include <vector>
 #include <iostream>
 #include <algorithm>
+#include <sstream>
+#include <cstdio>     // std::snprintf
+
+#include <optional>
+#include <llvm/ADT/SmallPtrSet.h>
 
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
@@ -15,8 +20,12 @@
 #include <llvm/IR/Type.h>
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/InstrTypes.h>
+#include <llvm/IR/IntrinsicInst.h>
+#include <llvm/IR/GlobalVariable.h>
 #include <llvm/IR/Dominators.h>
+#include <llvm/IR/CFG.h>
 #include <llvm/IRReader/IRReader.h>
+#include <llvm/IR/DebugInfoMetadata.h>
 #include <llvm/Support/Alignment.h>
 #include <llvm/Support/MathExtras.h>
 #include <llvm/Support/SourceMgr.h>
@@ -42,9 +51,900 @@ struct InternalAnalysisState {
     std::set<const llvm::Function*> InfiniteRecursionFuncs;   // auto-récursion “infinie”
 };
 
+// Rapport interne pour les dépassements de buffer sur la stack
+struct StackBufferOverflow {
+    std::string  funcName;
+    std::string  varName;
+    StackSize    arraySize = 0;
+    StackSize    indexOrUpperBound = 0; // utilisé pour les bornes sup (UB) ou index constant
+    bool         isWrite = false;
+    bool         indexIsConstant = false;
+    const llvm::Instruction *inst = nullptr;
+
+    // Nouveau : violation basée sur une borne inférieure (index potentiellement négatif)
+    bool         isLowerBoundViolation = false;
+    long long    lowerBound = 0;        // borne inférieure déduite (signée)
+    std::string  aliasPath;   // ex: "pp -> ptr -> buf"
+};
+
+// Intervalle d'entier pour une valeur : borne inférieure / supérieure (signées)
+struct IntRange {
+    bool      hasLower = false;
+    long long lower    = 0;
+    bool      hasUpper = false;
+    long long upper    = 0;
+};
+
+// Rapport interne pour les allocations dynamiques sur la stack (VLA / alloca variable)
+struct DynamicAllocaIssue {
+    std::string  funcName;
+    std::string  varName;
+    std::string  typeName;
+    const llvm::AllocaInst *allocaInst = nullptr;
+};
+
+// Rapport interne pour les usages dangereux de memcpy/memset sur la stack
+struct MemIntrinsicIssue {
+    std::string  funcName;
+    std::string  varName;
+    std::string  intrinsicName; // "memcpy" / "memset" / "memmove"
+    StackSize    destSizeBytes = 0;
+    StackSize    lengthBytes   = 0;
+    const llvm::Instruction *inst = nullptr;
+};
+
+// Rapport interne pour plusieurs stores dans un même buffer de stack
+struct MultipleStoreIssue {
+    std::string  funcName;
+    std::string  varName;
+    std::size_t  storeCount = 0;           // nombre total de StoreInst vers ce buffer
+    std::size_t  distinctIndexCount = 0;   // nombre d'expressions d'index distinctes
+    const llvm::AllocaInst *allocaInst = nullptr;
+};
+
+// Rapport interne pour les fuites de pointeurs vers la stack
+struct StackPointerEscapeIssue {
+    std::string  funcName;
+    std::string  varName;
+    std::string  escapeKind;  // "return", "store_global", "store_unknown", "call_arg", "call_callback"
+    std::string  targetName;  // nom du global, si applicable
+    const llvm::Instruction *inst = nullptr;
+};
+// Analyse intra-fonction pour détecter les "fuites" de pointeurs de stack :
+//  - retour d'une adresse de variable locale (return buf;)
+//  - stockage de l'adresse d'une variable locale dans un global (global = buf;)
+//
+// Heuristique : pour chaque AllocaInst, on remonte son graphe d'utilisation
+// en suivant les bitcast, GEP, PHI, select de type pointeur, et on marque
+// comme "escape" :
+//   - tout return qui renvoie une valeur dérivée de cette alloca
+//   - tout store qui écrit cette valeur dans une GlobalVariable.
+static void analyzeStackPointerEscapesInFunction(
+    llvm::Function &F,
+    std::vector<StackPointerEscapeIssue> &out)
+{
+    using namespace llvm;
+
+    if (F.isDeclaration())
+        return;
+
+    for (BasicBlock &BB : F) {
+        for (Instruction &I : BB) {
+            auto *AI = dyn_cast<AllocaInst>(&I);
+            if (!AI)
+                continue;
+
+            // On limite l'analyse aux slots "classiques" de stack (tout alloca)
+            SmallPtrSet<const Value *, 16> visited;
+            SmallVector<const Value *, 8> worklist;
+            worklist.push_back(AI);
+
+            while (!worklist.empty()) {
+                const Value *V = worklist.back();
+                worklist.pop_back();
+                if (visited.contains(V))
+                    continue;
+                visited.insert(V);
+
+                for (const Use &U : V->uses()) {
+                    const User *Usr = U.getUser();
+
+                    // 1) Retour direct ou via chaîne d'alias : return <V>
+                    if (auto *RI = dyn_cast<ReturnInst>(Usr)) {
+                        StackPointerEscapeIssue issue;
+                        issue.funcName   = F.getName().str();
+                        issue.varName    = AI->hasName() ? AI->getName().str() : std::string("<unnamed>");
+                        issue.escapeKind = "return";
+                        issue.targetName = {};
+                        issue.inst       = RI;
+                        out.push_back(std::move(issue));
+                        continue;
+                    }
+
+                    // 2) Stockage de l'adresse : global = <V>; ou *out = <V>;
+                    if (auto *SI = dyn_cast<StoreInst>(Usr)) {
+                        // Si la valeur stockée est notre pointeur (ou un alias de celui-ci)
+                        if (SI->getValueOperand() == V) {
+                            const Value *dstRaw = SI->getPointerOperand();
+                            const Value *dst    = dstRaw->stripPointerCasts();
+
+                            // 2.a) Stockage direct dans une variable globale : fuite évidente
+                            if (auto *GV = dyn_cast<GlobalVariable>(dst)) {
+                                StackPointerEscapeIssue issue;
+                                issue.funcName   = F.getName().str();
+                                issue.varName    = AI->hasName() ? AI->getName().str() : std::string("<unnamed>");
+                                issue.escapeKind = "store_global";
+                                issue.targetName = GV->hasName() ? GV->getName().str() : std::string{};
+                                issue.inst       = SI;
+                                out.push_back(std::move(issue));
+                                continue;
+                            }
+
+                            // 2.b) Stockage via un pointeur non local (ex: *out = buf;)
+                            // On ne connaît pas la durée de vie de la mémoire pointée par dst,
+                            // mais si ce n'est pas une alloca de cette fonction, on considère
+                            // que le pointeur de stack peut s'échapper (paramètre, heap, etc.).
+                            if (!isa<AllocaInst>(dst)) {
+                                StackPointerEscapeIssue issue;
+                                issue.funcName   = F.getName().str();
+                                issue.varName    = AI->hasName() ? AI->getName().str() : std::string("<unnamed>");
+                                issue.escapeKind = "store_unknown";
+                                issue.targetName = dst->hasName() ? dst->getName().str() : std::string{};
+                                issue.inst       = SI;
+                                out.push_back(std::move(issue));
+                                continue;
+                            }
+
+                            // 2.c) Stockage dans une alloca locale : on laisse l'alias
+                            // continuer à être exploré via la boucle de travail. On ne
+                            // considère pas cela comme une fuite immédiate.
+                            const AllocaInst *dstAI = cast<AllocaInst>(dst);
+                            worklist.push_back(dstAI);
+                        }
+                        // Sinon, c'est un store vers la stack ou un autre emplacement local
+                        // qui ne contient pas directement notre pointeur, pas une fuite en soi.
+                        continue;
+                    }
+
+                    // 3) Passage de l'adresse à un appel de fonction : cb(buf); ou f(buf);
+                    if (auto *CB = dyn_cast<CallBase>(Usr)) {
+                        // On inspecte tous les arguments; si l'un d'eux est V (ou un alias direct),
+                        // on considère que l'adresse de la variable locale est transmise.
+                        for (unsigned argIndex = 0; argIndex < CB->arg_size(); ++argIndex) {
+                            if (CB->getArgOperand(argIndex) != V)
+                                continue;
+
+                            const Value *calledVal = CB->getCalledOperand();
+                            const Value *calledStripped = calledVal ? calledVal->stripPointerCasts() : nullptr;
+                            const Function *directCallee =
+                                calledStripped ? dyn_cast<Function>(calledStripped) : nullptr;
+
+                            StackPointerEscapeIssue issue;
+                            issue.funcName = F.getName().str();
+                            issue.varName  = AI->hasName() ? AI->getName().str() : std::string("<unnamed>");
+                            issue.inst     = cast<Instruction>(CB);
+
+                            if (!directCallee) {
+                                // Appel indirect via pointeur de fonction : callback typique.
+                                issue.escapeKind = "call_callback";
+                                issue.targetName.clear();
+                            } else {
+                                // Appel direct : on n'a pas de connaissance précise de la sémantique
+                                // de la fonction appelée; on marque ça comme une fuite potentielle
+                                // plus permissive.
+                                issue.escapeKind = "call_arg";
+                                issue.targetName = directCallee->hasName()
+                                                    ? directCallee->getName().str()
+                                                    : std::string{};
+                            }
+
+                            out.push_back(std::move(issue));
+                        }
+
+                        // On ne propage pas l'alias via l'appel, mais on considère que
+                        // l'adresse peut être capturée par la fonction appelée.
+                        continue;
+                    }
+
+                    // 4) Propagation des alias de pointeurs :
+                    if (auto *BC = dyn_cast<BitCastInst>(Usr)) {
+                        if (BC->getType()->isPointerTy())
+                            worklist.push_back(BC);
+                        continue;
+                    }
+                    if (auto *GEP = dyn_cast<GetElementPtrInst>(Usr)) {
+                        worklist.push_back(GEP);
+                        continue;
+                    }
+                    if (auto *PN = dyn_cast<PHINode>(Usr)) {
+                        if (PN->getType()->isPointerTy())
+                            worklist.push_back(PN);
+                        continue;
+                    }
+                    if (auto *Sel = dyn_cast<SelectInst>(Usr)) {
+                        if (Sel->getType()->isPointerTy())
+                            worklist.push_back(Sel);
+                        continue;
+                    }
+
+                    // Autres usages (load, comparaison, etc.) : pas une fuite,
+                    // et on ne propage pas davantage.
+                }
+            }
+        }
+    }
+}
+
+// --------------------------------------------------------------------------
+// Helpers pour analyser les allocas et les bornes d'index
+// --------------------------------------------------------------------------
+
+// Taille (en nombre d'éléments) pour une alloca de tableau sur la stack
+static std::optional<StackSize> getAllocaElementCount(llvm::AllocaInst *AI)
+{
+    using namespace llvm;
+
+    Type *elemTy = AI->getAllocatedType();
+    StackSize count = 1;
+
+    // Cas "char test[10];" => alloca [10 x i8]
+    if (auto *arrTy = dyn_cast<ArrayType>(elemTy)) {
+        count *= arrTy->getNumElements();
+        elemTy = arrTy->getElementType();
+    }
+
+    // Cas "alloca i8, i64 10" => alloca tableau avec taille constante
+    if (AI->isArrayAllocation()) {
+        if (auto *C = dyn_cast<ConstantInt>(AI->getArraySize())) {
+            count *= C->getZExtValue();
+        } else {
+            // taille non constante - analyse plus compliquée, on ignore pour l'instant
+            return std::nullopt;
+        }
+    }
+
+    return count;
+}
+
+// Taille totale en octets pour une alloca sur la stack.
+// Retourne std::nullopt si la taille dépend d'une valeur non constante (VLA).
+static std::optional<StackSize>
+getAllocaTotalSizeBytes(const llvm::AllocaInst *AI, const llvm::DataLayout &DL)
+{
+    using namespace llvm;
+
+    Type *allocatedTy = AI->getAllocatedType();
+
+    // Cas alloca [N x T] (taille connue dans le type)
+    if (!AI->isArrayAllocation()) {
+        return DL.getTypeAllocSize(allocatedTy);
+    }
+
+    // Cas alloca T, i64 <N> (taille passée séparément)
+    if (auto *C = dyn_cast<ConstantInt>(AI->getArraySize())) {
+        uint64_t count = C->getZExtValue();
+        uint64_t elemSize = DL.getTypeAllocSize(allocatedTy);
+        return count * elemSize;
+    }
+
+    // Taille dynamique - traitée par l'analyse DynamicAllocaIssue
+    return std::nullopt;
+}
+
+// Analyse des comparaisons ICmp pour déduire les intervalles d'entiers (bornes inf/sup)
+static std::map<const llvm::Value*, IntRange>
+computeIntRangesFromICmps(llvm::Function &F)
+{
+    using namespace llvm;
+
+    std::map<const Value*, IntRange> ranges;
+
+    auto applyConstraint = [&ranges](const Value *V,
+                                     bool hasLB, long long newLB,
+                                     bool hasUB, long long newUB) {
+        auto &R = ranges[V];
+        if (hasLB) {
+            if (!R.hasLower || newLB > R.lower) {
+                R.hasLower = true;
+                R.lower    = newLB;
+            }
+        }
+        if (hasUB) {
+            if (!R.hasUpper || newUB < R.upper) {
+                R.hasUpper = true;
+                R.upper    = newUB;
+            }
+        }
+    };
+
+    for (BasicBlock &BB : F) {
+        for (Instruction &I : BB) {
+            auto *icmp = dyn_cast<ICmpInst>(&I);
+            if (!icmp)
+                continue;
+
+            Value *op0 = icmp->getOperand(0);
+            Value *op1 = icmp->getOperand(1);
+
+            ConstantInt *C = nullptr;
+            Value       *V = nullptr;
+
+            // On cherche un pattern "V ? C" ou "C ? V"
+            if ((C = dyn_cast<ConstantInt>(op1)) && !isa<ConstantInt>(op0)) {
+                V = op0;
+            } else if ((C = dyn_cast<ConstantInt>(op0)) && !isa<ConstantInt>(op1)) {
+                V = op1;
+            } else {
+                continue;
+            }
+
+            auto pred = icmp->getPredicate();
+
+            bool      hasLB = false, hasUB = false;
+            long long lb = 0,   ub = 0;
+
+            auto updateForSigned = [&](bool valueIsOp0) {
+                long long c = C->getSExtValue();
+                if (valueIsOp0) {
+                    switch (pred) {
+                        case ICmpInst::ICMP_SLT: // V < C  => V <= C-1
+                            hasUB = true; ub = c - 1; break;
+                        case ICmpInst::ICMP_SLE: // V <= C => V <= C
+                            hasUB = true; ub = c;     break;
+                        case ICmpInst::ICMP_SGT: // V > C  => V >= C+1
+                            hasLB = true; lb = c + 1; break;
+                        case ICmpInst::ICMP_SGE: // V >= C => V >= C
+                            hasLB = true; lb = c;     break;
+                        case ICmpInst::ICMP_EQ:  // V == C => [C, C]
+                            hasLB = true; lb = c;
+                            hasUB = true; ub = c;
+                            break;
+                        case ICmpInst::ICMP_NE:
+                            // approximation : V != C  => V <= C (très conservateur)
+                            hasUB = true; ub = c;
+                            break;
+                        default:
+                            break;
+                    }
+                } else {
+                    // C ? V  <=>  V ? C (inversé)
+                    switch (pred) {
+                        case ICmpInst::ICMP_SGT: // C > V  => V < C => V <= C-1
+                            hasUB = true; ub = c - 1; break;
+                        case ICmpInst::ICMP_SGE: // C >= V => V <= C
+                            hasUB = true; ub = c;     break;
+                        case ICmpInst::ICMP_SLT: // C < V  => V > C => V >= C+1
+                            hasLB = true; lb = c + 1; break;
+                        case ICmpInst::ICMP_SLE: // C <= V => V >= C
+                            hasLB = true; lb = c;     break;
+                        case ICmpInst::ICMP_EQ:  // C == V => [C, C]
+                            hasLB = true; lb = c;
+                            hasUB = true; ub = c;
+                            break;
+                        case ICmpInst::ICMP_NE:
+                            hasUB = true; ub = c;
+                            break;
+                        default:
+                            break;
+                    }
+                }
+            };
+
+            auto updateForUnsigned = [&](bool valueIsOp0) {
+                unsigned long long cu = C->getZExtValue();
+                long long c = static_cast<long long>(cu);
+                if (valueIsOp0) {
+                    switch (pred) {
+                        case ICmpInst::ICMP_ULT: // V < C  => V <= C-1
+                            hasUB = true; ub = c - 1; break;
+                        case ICmpInst::ICMP_ULE: // V <= C
+                            hasUB = true; ub = c;     break;
+                        case ICmpInst::ICMP_UGT: // V > C  => V >= C+1
+                            hasLB = true; lb = c + 1; break;
+                        case ICmpInst::ICMP_UGE: // V >= C
+                            hasLB = true; lb = c;     break;
+                        case ICmpInst::ICMP_EQ:
+                            hasLB = true; lb = c;
+                            hasUB = true; ub = c;
+                            break;
+                        case ICmpInst::ICMP_NE:
+                            hasUB = true; ub = c;
+                            break;
+                        default:
+                            break;
+                    }
+                } else {
+                    switch (pred) {
+                        case ICmpInst::ICMP_UGT: // C > V => V < C
+                            hasUB = true; ub = c - 1; break;
+                        case ICmpInst::ICMP_UGE: // C >= V => V <= C
+                            hasUB = true; ub = c;     break;
+                        case ICmpInst::ICMP_ULT: // C < V => V > C
+                            hasLB = true; lb = c + 1; break;
+                        case ICmpInst::ICMP_ULE: // C <= V => V >= C
+                            hasLB = true; lb = c;     break;
+                        case ICmpInst::ICMP_EQ:
+                            hasLB = true; lb = c;
+                            hasUB = true; ub = c;
+                            break;
+                        case ICmpInst::ICMP_NE:
+                            hasUB = true; ub = c;
+                            break;
+                        default:
+                            break;
+                    }
+                }
+            };
+
+            bool valueIsOp0 = (V == op0);
+
+            // On choisit le groupe de prédicats
+            if (pred == ICmpInst::ICMP_SLT || pred == ICmpInst::ICMP_SLE ||
+                pred == ICmpInst::ICMP_SGT || pred == ICmpInst::ICMP_SGE ||
+                pred == ICmpInst::ICMP_EQ  || pred == ICmpInst::ICMP_NE) {
+                updateForSigned(valueIsOp0);
+            } else if (pred == ICmpInst::ICMP_ULT || pred == ICmpInst::ICMP_ULE ||
+                       pred == ICmpInst::ICMP_UGT || pred == ICmpInst::ICMP_UGE) {
+                updateForUnsigned(valueIsOp0);
+            }
+
+            if (!(hasLB || hasUB))
+                continue;
+
+            // Applique la contrainte sur V lui-même
+            applyConstraint(V, hasLB, lb, hasUB, ub);
+
+            // Et éventuellement sur le pointeur sous-jacent si V est un load
+            if (auto *LI = dyn_cast<LoadInst>(V)) {
+                const Value *ptr = LI->getPointerOperand();
+                applyConstraint(ptr, hasLB, lb, hasUB, ub);
+            }
+        }
+    }
+
+    return ranges;
+}
+
+// Forward declaration : essaie de retrouver une constante derrière une Value
+static const llvm::ConstantInt* tryGetConstFromValue(const llvm::Value *V,
+                                                     const llvm::Function &F);
+
+// Analyse intra-fonction pour détecter les allocations dynamiques sur la stack
+// (par exemple : int n = read(); char buf[n];)
+static void analyzeDynamicAllocasInFunction(
+    llvm::Function &F,
+    std::vector<DynamicAllocaIssue> &out)
+{
+    using namespace llvm;
+
+    if (F.isDeclaration())
+        return;
+
+    for (BasicBlock &BB : F) {
+        for (Instruction &I : BB) {
+            auto *AI = dyn_cast<AllocaInst>(&I);
+            if (!AI)
+                continue;
+
+            // Taille d'allocation : on distingue trois cas :
+            //  - constante immédiate               -> pas une VLA
+            //  - dérivée d'une constante simple    -> pas une VLA (heuristique)
+            //  - vraiment dépendante d'une valeur  -> VLA / alloca variable
+            Value *arraySizeVal = AI->getArraySize();
+
+            // 1) Cas taille directement constante dans l'IR
+            if (llvm::isa<llvm::ConstantInt>(arraySizeVal))
+                continue; // taille connue à la compilation, OK
+
+            // 2) Heuristique "smart" : essayer de remonter à une constante
+            //    via les stores dans une variable locale (tryGetConstFromValue).
+            //    Exemple typique :
+            //      int n = 6;
+            //      char buf[n];   // en C : VLA, mais ici n est en fait constant
+            //
+            //    Dans ce cas, on ne veut pas spammer avec un warning VLA :
+            //    on traite ça comme une taille effectivement constante.
+            if (tryGetConstFromValue(arraySizeVal, F) != nullptr)
+                continue;
+
+            // 3) Ici, on considère que c'est une vraie VLA / alloca dynamique
+            DynamicAllocaIssue issue;
+            issue.funcName   = F.getName().str();
+            issue.varName    = AI->hasName() ? AI->getName().str() : std::string("<unnamed>");
+            if (AI->getAllocatedType()) {
+                std::string tyStr;
+                llvm::raw_string_ostream rso(tyStr);
+                AI->getAllocatedType()->print(rso);
+                issue.typeName = rso.str();
+            } else {
+                issue.typeName = "<unknown type>";
+            }
+            issue.allocaInst = AI;
+            out.push_back(std::move(issue));
+        }
+    }
+}
+
+// Forward declaration pour la résolution d'alloca de tableau depuis un pointeur
+static const llvm::AllocaInst* resolveArrayAllocaFromPointer(const llvm::Value *V,
+                                                             llvm::Function &F,
+                                                             std::vector<std::string> &path);
+
+// Analyse intra-fonction pour détecter des accès potentiellement hors bornes
+// sur des buffers alloués sur la stack (alloca).
+static void analyzeStackBufferOverflowsInFunction(
+    llvm::Function &F,
+    std::vector<StackBufferOverflow> &out)
+{
+    using namespace llvm;
+
+    auto ranges = computeIntRangesFromICmps(F);
+
+    for (BasicBlock &BB : F) {
+        for (Instruction &I : BB) {
+            auto *GEP = dyn_cast<GetElementPtrInst>(&I);
+            if (!GEP)
+                continue;
+
+            // 1) Trouver la base du pointeur (test, &test[0], ptr, etc.)
+            const Value *basePtr = GEP->getPointerOperand();
+            std::vector<std::string> aliasPath;
+            const AllocaInst *AI = resolveArrayAllocaFromPointer(basePtr, F, aliasPath);
+            if (!AI)
+                continue;
+
+            // 2) Déterminer la taille logique du tableau ciblé et récupérer l'index
+            //    On essaie d'abord de la déduire du type traversé par la GEP
+            //    (cas struct S { char buf[10]; }; s.buf[i]) puis on retombe
+            //    sur la taille de l'alloca pour les cas plus simples (char buf[10]).
+            StackSize arraySize = 0;
+            Value *idxVal = nullptr;
+
+            Type *srcElemTy = GEP->getSourceElementType();
+
+            if (auto *arrTy = dyn_cast<ArrayType>(srcElemTy)) {
+                // Cas direct : alloca [N x T]; GEP indices [0, i]
+                if (GEP->getNumIndices() < 2)
+                    continue;
+                auto idxIt = GEP->idx_begin();
+                ++idxIt; // saute le premier indice (souvent 0)
+                idxVal   = idxIt->get();
+                arraySize = arrTy->getNumElements();
+            } else if (auto *ST = dyn_cast<StructType>(srcElemTy)) {
+                // Cas struct avec champ tableau:
+                //   %ptr = getelementptr inbounds %struct.S, %struct.S* %s,
+                //          i32 0, i32 <field>, i64 %i
+                //
+                // On attend donc au moins 3 indices: [0, field, i]
+                if (GEP->getNumIndices() >= 3) {
+                    auto idxIt = GEP->idx_begin();
+
+                    // premier indice (souvent 0)
+                    auto *idx0 = dyn_cast<ConstantInt>(idxIt->get());
+                    ++idxIt;
+                    // second indice: index de champ dans la struct
+                    auto *fieldIdxC = dyn_cast<ConstantInt>(idxIt->get());
+                    ++idxIt;
+
+                    if (idx0 && fieldIdxC) {
+                        unsigned fieldIdx =
+                            static_cast<unsigned>(fieldIdxC->getZExtValue());
+                        if (fieldIdx < ST->getNumElements()) {
+                            Type *fieldTy = ST->getElementType(fieldIdx);
+                            if (auto *fieldArrTy = dyn_cast<ArrayType>(fieldTy)) {
+                                arraySize = fieldArrTy->getNumElements();
+                                // Troisième indice = index dans le tableau interne
+                                idxVal = idxIt->get();
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Si on n'a pas réussi à déduire une taille via la GEP,
+            // on retombe sur la taille dérivée de l'alloca (cas char buf[10]; ptr = buf; ptr[i]).
+            if (arraySize == 0 || !idxVal) {
+                auto maybeCount = getAllocaElementCount(const_cast<AllocaInst *>(AI));
+                if (!maybeCount)
+                    continue;
+                arraySize = *maybeCount;
+                if (arraySize == 0)
+                    continue;
+
+                // Pour ces cas-là, on considère le premier indice comme l'index logique.
+                if (GEP->getNumIndices() < 1)
+                    continue;
+                auto idxIt = GEP->idx_begin();
+                idxVal = idxIt->get();
+            }
+
+            std::string varName = AI->hasName() ? AI->getName().str()
+                                                : std::string("<unnamed>");
+
+            // "baseIdxVal" = variable de boucle "i" sans les casts (sext/zext...)
+            Value *baseIdxVal = idxVal;
+            while (auto *cast = dyn_cast<CastInst>(baseIdxVal)) {
+                baseIdxVal = cast->getOperand(0);
+            }
+
+            // 4) Cas index constant : test[11]
+            if (auto *CIdx = dyn_cast<ConstantInt>(idxVal)) {
+                auto idxValue = CIdx->getSExtValue();
+                if (idxValue < 0 ||
+                    static_cast<StackSize>(idxValue) >= arraySize) {
+
+                    for (User *GU : GEP->users()) {
+                        if (auto *S = dyn_cast<StoreInst>(GU)) {
+                            StackBufferOverflow report;
+                            report.funcName          = F.getName().str();
+                            report.varName           = varName;
+                            report.arraySize         = arraySize;
+                            report.indexOrUpperBound = static_cast<StackSize>(idxValue);
+                            report.isWrite           = true;
+                            report.indexIsConstant   = true;
+                            report.inst              = S;
+                            if (!aliasPath.empty()) {
+                                std::reverse(aliasPath.begin(), aliasPath.end());
+                                std::string chain;
+                                for (size_t i = 0; i < aliasPath.size(); ++i) {
+                                    chain += aliasPath[i];
+                                    if (i + 1 < aliasPath.size())
+                                        chain += " -> ";
+                                }
+                                report.aliasPath = chain;
+                            }
+                            out.push_back(std::move(report));
+                        } else if (auto *L = dyn_cast<LoadInst>(GU)) {
+                            StackBufferOverflow report;
+                            report.funcName          = F.getName().str();
+                            report.varName           = varName;
+                            report.arraySize         = arraySize;
+                            report.indexOrUpperBound = static_cast<StackSize>(idxValue);
+                            report.isWrite           = false;
+                            report.indexIsConstant   = true;
+                            report.inst              = L;
+                            if (!aliasPath.empty()) {
+                                std::reverse(aliasPath.begin(), aliasPath.end());
+                                std::string chain;
+                                for (size_t i = 0; i < aliasPath.size(); ++i) {
+                                    chain += aliasPath[i];
+                                    if (i + 1 < aliasPath.size())
+                                        chain += " -> ";
+                                }
+                                report.aliasPath = chain;
+                            }
+                            out.push_back(std::move(report));
+                        }
+                    }
+                }
+                continue;
+            }
+
+            // 5) Cas index variable : test[i] / ptr[i]
+            // On regarde si on a un intervalle pour la valeur de base (i, pas le cast)
+            const Value *key = baseIdxVal;
+
+            // Si l'index vient d'un load (pattern -O0 : load i, icmp, load i, gep),
+            // on utilise le pointeur sous-jacent comme clé (l'alloca de i).
+            if (auto *LI = dyn_cast<LoadInst>(baseIdxVal)) {
+                key = LI->getPointerOperand();
+            }
+
+            auto itRange = ranges.find(key);
+            if (itRange == ranges.end()) {
+                // pas de borne connue => on ne dit rien ici
+                continue;
+            }
+
+            const IntRange &R = itRange->second;
+
+            // 5.a) Borne supérieure hors bornes: UB >= arraySize
+            if (R.hasUpper && R.upper >= 0 &&
+                static_cast<StackSize>(R.upper) >= arraySize) {
+
+                StackSize ub = static_cast<StackSize>(R.upper);
+
+                for (User *GU : GEP->users()) {
+                    if (auto *S = dyn_cast<StoreInst>(GU)) {
+                        StackBufferOverflow report;
+                        report.funcName          = F.getName().str();
+                        report.varName           = varName;
+                        report.arraySize         = arraySize;
+                        report.indexOrUpperBound = ub;
+                        report.isWrite           = true;
+                        report.indexIsConstant   = false;
+                        report.inst              = S;
+                        if (!aliasPath.empty()) {
+                            std::reverse(aliasPath.begin(), aliasPath.end());
+                            std::string chain;
+                            for (size_t i = 0; i < aliasPath.size(); ++i) {
+                                chain += aliasPath[i];
+                                if (i + 1 < aliasPath.size())
+                                    chain += " -> ";
+                            }
+                            report.aliasPath = chain;
+                        }
+                        out.push_back(std::move(report));
+                    } else if (auto *L = dyn_cast<LoadInst>(GU)) {
+                        StackBufferOverflow report;
+                        report.funcName          = F.getName().str();
+                        report.varName           = varName;
+                        report.arraySize         = arraySize;
+                        report.indexOrUpperBound = ub;
+                        report.isWrite           = false;
+                        report.indexIsConstant   = false;
+                        report.inst              = L;
+                        if (!aliasPath.empty()) {
+                            std::reverse(aliasPath.begin(), aliasPath.end());
+                            std::string chain;
+                            for (size_t i = 0; i < aliasPath.size(); ++i) {
+                                chain += aliasPath[i];
+                                if (i + 1 < aliasPath.size())
+                                    chain += " -> ";
+                            }
+                            report.aliasPath = chain;
+                        }
+                        out.push_back(std::move(report));
+                    }
+                }
+            }
+
+            // 5.b) Borne inférieure négative: LB < 0  => index potentiellement négatif
+            if (R.hasLower && R.lower < 0) {
+                for (User *GU : GEP->users()) {
+                    if (auto *S = dyn_cast<StoreInst>(GU)) {
+                        StackBufferOverflow report;
+                        report.funcName              = F.getName().str();
+                        report.varName               = varName;
+                        report.arraySize             = arraySize;
+                        report.isWrite               = true;
+                        report.indexIsConstant       = false;
+                        report.inst                  = S;
+                        report.isLowerBoundViolation = true;
+                        report.lowerBound            = R.lower;
+                        if (!aliasPath.empty()) {
+                            std::reverse(aliasPath.begin(), aliasPath.end());
+                            std::string chain;
+                            for (size_t i = 0; i < aliasPath.size(); ++i) {
+                                chain += aliasPath[i];
+                                if (i + 1 < aliasPath.size())
+                                    chain += " -> ";
+                            }
+                            report.aliasPath = chain;
+                        }
+                        out.push_back(std::move(report));
+                    } else if (auto *L = dyn_cast<LoadInst>(GU)) {
+                        StackBufferOverflow report;
+                        report.funcName              = F.getName().str();
+                        report.varName               = varName;
+                        report.arraySize             = arraySize;
+                        report.isWrite               = false;
+                        report.indexIsConstant       = false;
+                        report.inst                  = L;
+                        report.isLowerBoundViolation = true;
+                        report.lowerBound            = R.lower;
+                        if (!aliasPath.empty()) {
+                            std::reverse(aliasPath.begin(), aliasPath.end());
+                            std::string chain;
+                            for (size_t i = 0; i < aliasPath.size(); ++i) {
+                                chain += aliasPath[i];
+                                if (i + 1 < aliasPath.size())
+                                    chain += " -> ";
+                            }
+                            report.aliasPath = chain;
+                        }
+                        out.push_back(std::move(report));
+                    }
+                }
+            }
+            // Si R.hasUpper && R.upper < arraySize et (pas de LB problématique),
+            // on considère l'accès comme probablement sûr.
+        }
+    }
+}
+
 // ============================================================================
 // Helpers
 // ============================================================================
+
+static void analyzeMemIntrinsicOverflowsInFunction(
+    llvm::Function &F,
+    const llvm::DataLayout &DL,
+    std::vector<MemIntrinsicIssue> &out)
+{
+    using namespace llvm;
+
+    if (F.isDeclaration())
+        return;
+
+    for (BasicBlock &BB : F) {
+        for (Instruction &I : BB) {
+
+            // On s'intéresse uniquement aux appels (intrinsics ou libc)
+            auto *CB = dyn_cast<CallBase>(&I);
+            if (!CB)
+                continue;
+
+            Function *callee = CB->getCalledFunction();
+            if (!callee)
+                continue;
+
+            StringRef name = callee->getName();
+
+            enum class MemKind { None, MemCpy, MemSet, MemMove };
+            MemKind kind = MemKind::None;
+
+            // 1) Cas intrinsics LLVM: llvm.memcpy.*, llvm.memset.*, llvm.memmove.*
+            if (auto *II = dyn_cast<IntrinsicInst>(CB)) {
+                switch (II->getIntrinsicID()) {
+                    case Intrinsic::memcpy:  kind = MemKind::MemCpy;  break;
+                    case Intrinsic::memset:  kind = MemKind::MemSet;  break;
+                    case Intrinsic::memmove: kind = MemKind::MemMove; break;
+                    default: break;
+                }
+            }
+
+            // 2) Cas appels libc classiques ou symboles similaires
+            if (kind == MemKind::None) {
+                if (name == "memcpy" || name.contains("memcpy"))
+                    kind = MemKind::MemCpy;
+                else if (name == "memset" || name.contains("memset"))
+                    kind = MemKind::MemSet;
+                else if (name == "memmove" || name.contains("memmove"))
+                    kind = MemKind::MemMove;
+            }
+
+            if (kind == MemKind::None)
+                continue;
+
+            // On attend au moins 3 arguments: dest, src/val, len
+            if (CB->arg_size() < 3)
+                continue;
+
+            Value *dest = CB->getArgOperand(0);
+
+            // Résolution heuristique : on enlève les casts/GEPI de surface
+            // et on remonte jusqu'à une alloca éventuelle.
+            const Value *cur = dest->stripPointerCasts();
+            if (auto *GEP = dyn_cast<GetElementPtrInst>(cur)) {
+                cur = GEP->getPointerOperand();
+            }
+            const AllocaInst *AI = dyn_cast<AllocaInst>(cur);
+            if (!AI)
+                continue;
+
+            auto maybeSize = getAllocaTotalSizeBytes(AI, DL);
+            if (!maybeSize)
+                continue;
+            StackSize destBytes = *maybeSize;
+
+            Value *lenV = CB->getArgOperand(2);
+            auto *lenC = dyn_cast<ConstantInt>(lenV);
+            if (!lenC)
+                continue; // pour l'instant, on ne traite que les tailles constantes
+
+            uint64_t len = lenC->getZExtValue();
+            if (len <= destBytes)
+                continue; // pas de débordement évident
+
+            MemIntrinsicIssue issue;
+            issue.funcName      = F.getName().str();
+            issue.varName       = AI->hasName() ? AI->getName().str() : std::string("<unnamed>");
+            issue.destSizeBytes = destBytes;
+            issue.lengthBytes   = len;
+            issue.inst          = &I;
+
+            switch (kind) {
+                case MemKind::MemCpy:  issue.intrinsicName = "memcpy";  break;
+                case MemKind::MemSet:  issue.intrinsicName = "memset";  break;
+                case MemKind::MemMove: issue.intrinsicName = "memmove"; break;
+                default: break;
+            }
+
+            out.push_back(std::move(issue));
+        }
+    }
+}
 
 // Appelle-t-on une autre fonction que soi-même ?
 static bool hasNonSelfCall(const llvm::Function &F)
@@ -158,7 +1058,8 @@ static StackSize computeLocalStack(llvm::Function &F,
                                    const llvm::DataLayout &DL,
                                    AnalysisMode mode)
 {
-    switch (mode) {
+    switch (mode)
+    {
         case AnalysisMode::IR:
             return computeLocalStackIR(F, DL);
         case AnalysisMode::ABI:
@@ -175,24 +1076,31 @@ static CallGraph buildCallGraph(llvm::Module &M)
 {
     CallGraph CG;
 
-    for (llvm::Function &F : M) {
+    for (llvm::Function &F : M)
+    {
         if (F.isDeclaration())
             continue;
 
         auto &vec = CG[&F];
 
-        for (llvm::BasicBlock &BB : F) {
-            for (llvm::Instruction &I : BB) {
+        for (llvm::BasicBlock &BB : F)
+        {
+            for (llvm::Instruction &I : BB)
+            {
 
                 const llvm::Function *Callee = nullptr;
 
-                if (auto *CI = llvm::dyn_cast<llvm::CallInst>(&I)) {
+                if (auto *CI = llvm::dyn_cast<llvm::CallInst>(&I))
+                {
                     Callee = CI->getCalledFunction();
-                } else if (auto *II = llvm::dyn_cast<llvm::InvokeInst>(&I)) {
+                }
+                else if (auto *II = llvm::dyn_cast<llvm::InvokeInst>(&I))
+                {
                     Callee = II->getCalledFunction();
                 }
 
-                if (Callee && !Callee->isDeclaration()) {
+                if (Callee && !Callee->isDeclaration())
+                {
                     vec.push_back(Callee);
                 }
             }
@@ -211,7 +1119,8 @@ static StackSize dfsComputeStack(
     const CallGraph &CG,
     const std::map<const llvm::Function*, StackSize> &LocalStack,
     std::map<const llvm::Function*, VisitState> &State,
-    InternalAnalysisState &Res)
+    InternalAnalysisState &Res
+)
 {
     auto itState = State.find(F);
     if (itState != State.end()) {
@@ -335,6 +1244,279 @@ static bool detectInfiniteSelfRecursion(llvm::Function &F)
     return true;
 }
 
+// HELPERS
+// Essaie de retrouver une alloca de tableau à partir d'un pointeur,
+// en suivant les bitcast, GEP(0,0), et un pattern simple de pointeur local :
+//   char test[10];
+//   char *ptr = test;
+//   ... load ptr ... ; gep -> ptr[i]
+static const llvm::AllocaInst*
+resolveArrayAllocaFromPointer(const llvm::Value *V, llvm::Function &F, std::vector<std::string> &path)
+{
+    using namespace llvm;
+
+    auto isArrayAlloca = [](const AllocaInst *AI) -> bool {
+        Type *T = AI->getAllocatedType();
+        // On considère comme "buffer de stack" :
+        //  - les vrais tableaux,
+        //  - les allocas de type tableau (VLA côté IR),
+        //  - les structs qui contiennent au moins un champ tableau.
+        if (T->isArrayTy() || AI->isArrayAllocation())
+            return true;
+
+        if (auto *ST = llvm::dyn_cast<llvm::StructType>(T)) {
+            for (unsigned i = 0; i < ST->getNumElements(); ++i) {
+                if (ST->getElementType(i)->isArrayTy())
+                    return true;
+            }
+        }
+        return false;
+    };
+
+    // Pour éviter les boucles d'aliasing bizarres
+    SmallPtrSet<const Value *, 16> visited;
+    const Value *cur = V;
+
+    while (cur && !visited.contains(cur)) {
+        visited.insert(cur);
+        if (cur->hasName())
+            path.push_back(cur->getName().str());
+
+        // Cas 1 : on tombe sur une alloca.
+        if (auto *AI = dyn_cast<AllocaInst>(cur)) {
+            if (isArrayAlloca(AI)) {
+                // Alloca d'un buffer de stack (tableau) : cible finale.
+                return AI;
+            }
+
+            // Sinon, c'est très probablement une variable locale de type pointeur
+            // (char *ptr; char **pp; etc.). On parcourt les stores vers cette
+            // variable pour voir quelles valeurs lui sont assignées, et on
+            // tente de remonter jusqu'à une vraie alloca de tableau.
+            const AllocaInst *foundAI = nullptr;
+
+            for (BasicBlock &BB : F) {
+                for (Instruction &I : BB) {
+                    auto *SI = dyn_cast<StoreInst>(&I);
+                    if (!SI)
+                        continue;
+                    if (SI->getPointerOperand() != AI)
+                        continue;
+
+                    const Value *storedPtr = SI->getValueOperand();
+                    std::vector<std::string> subPath;
+                    const AllocaInst *cand =
+                        resolveArrayAllocaFromPointer(storedPtr, F, subPath);
+                    if (!cand)
+                        continue;
+
+                    if (!foundAI) {
+                        foundAI = cand;
+                        // Append subPath to path
+                        path.insert(path.end(), subPath.begin(), subPath.end());
+                    } else if (foundAI != cand) {
+                        // Plusieurs bases différentes : aliasing ambigu,
+                        // on préfère abandonner plutôt que de se tromper.
+                        return nullptr;
+                    }
+                }
+            }
+            return foundAI;
+        }
+
+        // Cas 2 : bitcast -> on remonte l'opérande.
+        if (auto *BC = dyn_cast<BitCastInst>(cur)) {
+            cur = BC->getOperand(0);
+            continue;
+        }
+
+        // Cas 3 : GEP -> on remonte sur le pointeur de base.
+        if (auto *GEP = dyn_cast<GetElementPtrInst>(cur)) {
+            cur = GEP->getPointerOperand();
+            continue;
+        }
+
+        // Cas 4 : load d'un pointeur. Exemple typique :
+        //    char *ptr = test;
+        //    char *p2  = ptr;
+        //    char **pp = &ptr;
+        //    (*pp)[i] = ...
+        //
+        // On remonte au "container" du pointeur (variable locale, ou autre valeur)
+        // en suivant l'opérande du load.
+        if (auto *LI = dyn_cast<LoadInst>(cur)) {
+            cur = LI->getPointerOperand();
+            continue;
+        }
+
+        // Cas 5 : PHI de pointeurs (fusion de plusieurs alias) :
+        // on tente de résoudre chaque incoming et on s'assure qu'ils
+        // pointent tous vers la même alloca de tableau.
+        if (auto *PN = dyn_cast<PHINode>(cur)) {
+            const AllocaInst *foundAI = nullptr;
+            std::vector<std::string> phiPath;
+            for (unsigned i = 0; i < PN->getNumIncomingValues(); ++i) {
+                const Value *inV = PN->getIncomingValue(i);
+                std::vector<std::string> subPath;
+                const AllocaInst *cand =
+                    resolveArrayAllocaFromPointer(inV, F, subPath);
+                if (!cand)
+                    continue;
+                if (!foundAI) {
+                    foundAI = cand;
+                    phiPath = subPath;
+                } else if (foundAI != cand) {
+                    // PHI mélange plusieurs bases différentes : trop ambigu.
+                    return nullptr;
+                }
+            }
+            path.insert(path.end(), phiPath.begin(), phiPath.end());
+            return foundAI;
+        }
+
+        // Autres cas (arguments, globales complexes, etc.) : on arrête l'heuristique.
+        break;
+    }
+
+    return nullptr;
+}
+
+// Analyse intra-fonction pour détecter plusieurs stores dans un même buffer de stack.
+// Heuristique : on compte le nombre de StoreInst qui écrivent dans un GEP basé sur
+// une alloca de tableau sur la stack. Si une même alloca reçoit plus d'un store,
+// on émet un warning.
+static void analyzeMultipleStoresInFunction(
+    llvm::Function &F,
+    std::vector<MultipleStoreIssue> &out)
+{
+    using namespace llvm;
+
+    if (F.isDeclaration())
+        return;
+
+    struct Info {
+        std::size_t storeCount = 0;
+        llvm::SmallPtrSet<const Value *, 8> indexKeys;
+        const AllocaInst *AI = nullptr;
+    };
+
+    std::map<const AllocaInst *, Info> infoMap;
+
+    for (BasicBlock &BB : F) {
+        for (Instruction &I : BB) {
+            auto *S = dyn_cast<StoreInst>(&I);
+            if (!S)
+                continue;
+
+            Value *ptr = S->getPointerOperand();
+            auto *GEP = dyn_cast<GetElementPtrInst>(ptr);
+            if (!GEP)
+                continue;
+
+            // On remonte à la base pour trouver une alloca de tableau sur la stack.
+            const Value *basePtr = GEP->getPointerOperand();
+            std::vector<std::string> dummyAliasPath;
+            const AllocaInst *AI = resolveArrayAllocaFromPointer(basePtr, F, dummyAliasPath);
+            if (!AI)
+                continue;
+
+            // On récupère l'expression d'index utilisée dans le GEP.
+            Value *idxVal = nullptr;
+            Type *srcElemTy = GEP->getSourceElementType();
+
+            if (auto *arrTy = dyn_cast<ArrayType>(srcElemTy)) {
+                // Pattern [N x T]* -> indices [0, i]
+                if (GEP->getNumIndices() < 2)
+                    continue;
+                auto idxIt = GEP->idx_begin();
+                ++idxIt; // saute le premier indice (souvent 0)
+                idxVal = idxIt->get();
+            } else {
+                // Pattern T* -> indice unique [i] (cas char *ptr = test; ptr[i])
+                if (GEP->getNumIndices() < 1)
+                    continue;
+                auto idxIt = GEP->idx_begin();
+                idxVal = idxIt->get();
+            }
+
+            if (!idxVal)
+                continue;
+
+            // On normalise un peu la clé d'index en enlevant les casts SSA.
+            const Value *idxKey = idxVal;
+            while (auto *cast = dyn_cast<CastInst>(const_cast<Value *>(idxKey))) {
+                idxKey = cast->getOperand(0);
+            }
+
+            auto &info = infoMap[AI];
+            info.AI = AI;
+            info.storeCount++;
+            info.indexKeys.insert(idxKey);
+        }
+    }
+
+    // Construction des warnings pour chaque buffer qui reçoit plusieurs stores.
+    for (auto &entry : infoMap) {
+        const AllocaInst *AI = entry.first;
+        const Info &info = entry.second;
+
+        if (info.storeCount <= 1)
+            continue; // un seul store -> pas de warning
+
+        MultipleStoreIssue issue;
+        issue.funcName          = F.getName().str();
+        issue.varName           = AI->hasName() ? AI->getName().str() : std::string("<unnamed>");
+        issue.storeCount        = info.storeCount;
+        issue.distinctIndexCount = info.indexKeys.size();
+        issue.allocaInst        = AI;
+
+        out.push_back(std::move(issue));
+    }
+}
+
+// HELPERS
+static const llvm::ConstantInt* tryGetConstFromValue(const llvm::Value *V,
+                                                     const llvm::Function &F)
+{
+    using namespace llvm;
+
+    // On enlève d'abord les cast (sext/zext/trunc, etc.) pour arriver
+    // à la vraie valeur “de base”.
+    const Value *cur = V;
+    while (auto *cast = dyn_cast<const CastInst>(cur))
+    {
+        cur = cast->getOperand(0);
+    }
+
+    // Cas trivial : c'est déjà une constante entière.
+    if (auto *C = dyn_cast<const ConstantInt>(cur))
+        return C;
+
+    // Cas -O0 typique : on compare un load d'une variable locale.
+    auto *LI = dyn_cast<const LoadInst>(cur);
+    if (!LI)
+        return nullptr;
+
+    const Value *ptr = LI->getPointerOperand();
+    const ConstantInt *found = nullptr;
+
+    // Version ultra-simple : on cherche un store de constante dans la fonction.
+    for (const BasicBlock &BB : F) {
+        for (const Instruction &I : BB) {
+            auto *SI = dyn_cast<const StoreInst>(&I);
+            if (!SI)
+                continue;
+            if (SI->getPointerOperand() != ptr)
+                continue;
+            if (auto *C = dyn_cast<const ConstantInt>(SI->getValueOperand())) {
+                // On garde la dernière constante trouvée (si plusieurs stores, c'est naïf).
+                found = C;
+            }
+        }
+    }
+    return found;
+}
+
 // ============================================================================
 //  API publique : analyzeModule / analyzeFile
 // ============================================================================
@@ -402,6 +1584,374 @@ AnalysisResult analyzeModule(llvm::Module &mod,
         fr.exceedsLimit = (total > config.stackLimit);
 
         result.functions.push_back(std::move(fr));
+    }
+
+    // 6) Détection des dépassements de buffer sur la stack (analyse intra-fonction)
+    std::vector<StackBufferOverflow> bufferIssues;
+    for (llvm::Function &F : mod) {
+        if (F.isDeclaration())
+            continue;
+        analyzeStackBufferOverflowsInFunction(F, bufferIssues);
+    }
+
+    // 7) Affichage des problèmes détectés (pour l'instant, sortie directe)
+    for (const auto &issue : bufferIssues)
+    {
+        unsigned line = 0;
+        unsigned column = 0;
+        bool haveLoc = false;
+
+        if (issue.inst) {
+            llvm::DebugLoc DL = issue.inst->getDebugLoc();
+            if (DL)
+            {
+                line   = DL.getLine();
+                column = DL.getCol();
+                haveLoc = true;
+            }
+        }
+
+        bool isUnreachable = false;
+        {
+            using namespace llvm;
+
+            if (issue.inst) {
+                auto *BB = issue.inst->getParent();
+
+                // Parcourt les prédécesseurs du bloc pour voir si certains
+                // ont une branche conditionnelle avec une condition constante.
+                for (auto *Pred : predecessors(BB)) {
+                    auto *BI = dyn_cast<BranchInst>(Pred->getTerminator());
+                    if (!BI || !BI->isConditional())
+                        continue;
+
+                    auto *CI = dyn_cast<ICmpInst>(BI->getCondition());
+                    if (!CI)
+                        continue;
+
+                    const llvm::Function &Func = *issue.inst->getFunction();
+
+                    auto *C0 = tryGetConstFromValue(CI->getOperand(0), Func);
+                    auto *C1 = tryGetConstFromValue(CI->getOperand(1), Func);
+                    if (!C0 || !C1)
+                        continue;
+
+                    // Évalue le résultat de l'ICmp pour ces constantes (implémentation maison).
+                    bool condTrue = false;
+                    auto pred = CI->getPredicate();
+                    const auto &v0 = C0->getValue();
+                    const auto &v1 = C1->getValue();
+
+                    switch (pred) {
+                        case ICmpInst::ICMP_EQ:
+                            condTrue = (v0 == v1);
+                            break;
+                        case ICmpInst::ICMP_NE:
+                            condTrue = (v0 != v1);
+                            break;
+                        case ICmpInst::ICMP_SLT:
+                            condTrue = v0.slt(v1);
+                            break;
+                        case ICmpInst::ICMP_SLE:
+                            condTrue = v0.sle(v1);
+                            break;
+                        case ICmpInst::ICMP_SGT:
+                            condTrue = v0.sgt(v1);
+                            break;
+                        case ICmpInst::ICMP_SGE:
+                            condTrue = v0.sge(v1);
+                            break;
+                        case ICmpInst::ICMP_ULT:
+                            condTrue = v0.ult(v1);
+                            break;
+                        case ICmpInst::ICMP_ULE:
+                            condTrue = v0.ule(v1);
+                            break;
+                        case ICmpInst::ICMP_UGT:
+                            condTrue = v0.ugt(v1);
+                            break;
+                        case ICmpInst::ICMP_UGE:
+                            condTrue = v0.uge(v1);
+                            break;
+                        default:
+                            // On ne traite pas d'autres prédicats exotiques ici
+                            continue;
+                    }
+
+                    // Branchement du type:
+                    //   br i1 %cond, label %then, label %else
+                    // Successeur 0 pris si condTrue == true
+                    // Successeur 1 pris si condTrue == false
+                    if (BB == BI->getSuccessor(0) && condTrue == false) {
+                        // Le bloc "then" n'est jamais atteint.
+                        isUnreachable = true;
+                    } else if (BB == BI->getSuccessor(1) && condTrue == true) {
+                        // Le bloc "else" n'est jamais atteint.
+                        isUnreachable = true;
+                    }
+                }
+            }
+        }
+
+        std::ostringstream body;
+
+        if (issue.isLowerBoundViolation) {
+            body << "  [!!] potential negative index on variable '"
+                      << issue.varName << "' (size " << issue.arraySize << ")\n";
+            if (!issue.aliasPath.empty()) {
+                body << "       alias path: " << issue.aliasPath << "\n";
+            }
+            body << "       inferred lower bound for index expression: "
+                      << issue.lowerBound << " (index may be < 0)\n";
+        } else {
+            body << "  [!!] potential stack buffer overflow on variable '"
+                      << issue.varName << "' (size " << issue.arraySize << ")\n";
+            if (!issue.aliasPath.empty()) {
+                body << "       alias path: " << issue.aliasPath << "\n";
+            }
+            if (issue.indexIsConstant) {
+                body << "       constant index " << issue.indexOrUpperBound
+                          << " is out of bounds (0.."
+                          << (issue.arraySize ? issue.arraySize - 1 : 0)
+                          << ")\n";
+            } else {
+                body << "       index variable may go up to "
+                          << issue.indexOrUpperBound
+                          << " (array last valid index: "
+                          << (issue.arraySize ? issue.arraySize - 1 : 0) << ")\n";
+            }
+        }
+
+        if (issue.isWrite)
+        {
+            body << "       (this is a write access)\n";
+        }
+        else
+        {
+            body << "       (this is a read access)\n";
+        }
+        if (isUnreachable)
+        {
+            body << "       [info] this access appears unreachable at runtime "
+                         "(condition is always false for this branch)\n";
+        }
+        Diagnostic diag;
+        diag.funcName = issue.funcName;
+        diag.line     = haveLoc ? line : 0;
+        diag.column   = haveLoc ? column : 0;
+        diag.severity  = DiagnosticSeverity::Warning;
+        diag.message  = body.str();
+        result.diagnostics.push_back(std::move(diag));
+    }
+
+    // 8) Détection des allocations dynamiques sur la stack (VLA / alloca variable)
+    std::vector<DynamicAllocaIssue> dynAllocaIssues;
+    for (llvm::Function &F : mod) {
+        if (F.isDeclaration())
+            continue;
+        analyzeDynamicAllocasInFunction(F, dynAllocaIssues);
+    }
+
+    // 9) Affichage des allocations dynamiques détectées
+    for (const auto &d : dynAllocaIssues)
+    {
+        unsigned line = 0;
+        unsigned column = 0;
+        bool haveLoc = false;
+        if (d.allocaInst) {
+            llvm::DebugLoc DL = d.allocaInst->getDebugLoc();
+            if (DL) {
+                line   = DL.getLine();
+                column = DL.getCol();
+                haveLoc = true;
+            }
+        }
+
+        std::ostringstream body;
+
+        body << "  [!] dynamic stack allocation detected for variable '"
+                  << d.varName << "'\n";
+        body << "       allocated type: " << d.typeName << "\n";
+        body << "       size of this allocation is not compile-time constant "
+                     "(VLA / variable alloca) and may lead to unbounded stack usage\n";
+
+        Diagnostic diag;
+        diag.funcName = d.funcName;
+        diag.line     = haveLoc ? line : 0;
+        diag.column   = haveLoc ? column : 0;
+        diag.severity  = DiagnosticSeverity::Warning;
+        diag.message  = body.str();
+        result.diagnostics.push_back(std::move(diag));
+    }
+
+    // 10) Détection des débordements via memcpy/memset sur des buffers de stack
+    std::vector<MemIntrinsicIssue> memIssues;
+    for (llvm::Function &F : mod) {
+        if (F.isDeclaration())
+            continue;
+        analyzeMemIntrinsicOverflowsInFunction(F, DL, memIssues);
+    }
+
+    for (const auto &m : memIssues)
+    {
+        unsigned line = 0;
+        unsigned column = 0;
+        bool haveLoc = false;
+        if (m.inst) {
+            llvm::DebugLoc DL = m.inst->getDebugLoc();
+            if (DL) {
+                line   = DL.getLine();
+                column = DL.getCol();
+                haveLoc = true;
+            }
+        }
+
+        std::ostringstream body;
+
+        body << "Function: " << m.funcName;
+        if (haveLoc) {
+            body << " (line " << line << ", column " << column << ")";
+        }
+        body << "\n";
+
+        body << "  [!!] potential stack buffer overflow in "
+                << m.intrinsicName << " on variable '"
+                << m.varName << "'\n";
+        body << "       destination stack buffer size: "
+                  << m.destSizeBytes << " bytes\n";
+        body << "       requested " << m.lengthBytes
+                  << " bytes to be copied/initialized\n";
+
+        Diagnostic diag;
+        diag.funcName = m.funcName;
+        diag.line     = haveLoc ? line : 0;
+        diag.column   = haveLoc ? column : 0;
+        diag.severity  = DiagnosticSeverity::Warning;
+        diag.message  = body.str();
+        result.diagnostics.push_back(std::move(diag));
+    }
+
+    // 11) Détection de plusieurs stores dans un même buffer de stack
+    std::vector<MultipleStoreIssue> multiStoreIssues;
+    for (llvm::Function &F : mod) {
+        if (F.isDeclaration())
+            continue;
+        analyzeMultipleStoresInFunction(F, multiStoreIssues);
+    }
+
+    for (const auto &ms : multiStoreIssues)
+    {
+        unsigned line = 0;
+        unsigned column = 0;
+        bool haveLoc = false;
+        if (ms.allocaInst) {
+            llvm::DebugLoc DL = ms.allocaInst->getDebugLoc();
+            if (DL) {
+                line   = DL.getLine();
+                column = DL.getCol();
+                haveLoc = true;
+            }
+        }
+
+        std::ostringstream body;
+
+        body << "  [!Info] multiple stores to stack buffer '"
+                << ms.varName << "' in this function ("
+                << ms.storeCount << " store instruction(s)";
+        if (ms.distinctIndexCount > 0)
+        {
+            body << ", " << ms.distinctIndexCount
+                      << " distinct index expression(s)";
+        }
+        body << ")\n";
+
+        if (ms.distinctIndexCount == 1)
+        {
+            body << "       all stores use the same index expression "
+                         "(possible redundant or unintended overwrite)\n";
+        }
+        else if (ms.distinctIndexCount > 1)
+        {
+            body << "       stores use different index expressions; "
+                         "verify indices are correct and non-overlapping\n";
+        }
+
+        Diagnostic diag;
+        diag.funcName = ms.funcName;
+        diag.line     = haveLoc ? line : 0;
+        diag.column   = haveLoc ? column : 0;
+        diag.severity  = DiagnosticSeverity::Info;
+        diag.message  = body.str();
+        result.diagnostics.push_back(std::move(diag));
+    }
+
+    // 12) Détection de fuite de pointeurs de stack (use-after-return potentiel)
+    std::vector<StackPointerEscapeIssue> escapeIssues;
+    for (llvm::Function &F : mod) {
+        if (F.isDeclaration())
+            continue;
+        analyzeStackPointerEscapesInFunction(F, escapeIssues);
+    }
+
+    for (const auto &e : escapeIssues)
+    {
+        unsigned line = 0;
+        unsigned column = 0;
+        bool haveLoc = false;
+        if (e.inst) {
+            llvm::DebugLoc DL = e.inst->getDebugLoc();
+            if (DL) {
+                line   = DL.getLine();
+                column = DL.getCol();
+                haveLoc = true;
+            }
+        }
+
+        std::ostringstream body;
+
+        body << "  [!!] stack pointer escape: address of variable '"
+                  << e.varName << "' escapes this function\n";
+
+        if (e.escapeKind == "return") {
+            body << "       escape via return statement "
+                         "(pointer to stack returned to caller)\n";
+        } else if (e.escapeKind == "store_global") {
+            if (!e.targetName.empty()) {
+                body << "       stored into global variable '"
+                          << e.targetName
+                          << "' (pointer may be used after the function returns)\n";
+            } else {
+                body << "       stored into a global variable "
+                             "(pointer may be used after the function returns)\n";
+            }
+        } else if (e.escapeKind == "store_unknown") {
+            body << "       stored through a non-local pointer "
+                         "(e.g. via an out-parameter; pointer may outlive this function)\n";
+            if (!e.targetName.empty()) {
+                body << "       destination pointer/value name: '"
+                          << e.targetName << "'\n";
+            }
+        } else if (e.escapeKind == "call_callback") {
+            body << "       address passed as argument to an indirect call "
+                         "(callback may capture the pointer beyond this function)\n";
+        } else if (e.escapeKind == "call_arg") {
+            if (!e.targetName.empty()) {
+                body << "       address passed as argument to function '"
+                          << e.targetName
+                          << "' (callee may capture the pointer beyond this function)\n";
+            } else {
+                body << "       address passed as argument to a function "
+                             "(callee may capture the pointer beyond this function)\n";
+            }
+        }
+
+        Diagnostic diag;
+        diag.funcName = e.funcName;
+        diag.line     = haveLoc ? line : 0;
+        diag.column   = haveLoc ? column : 0;
+        diag.severity  = DiagnosticSeverity::Warning;
+        diag.message  = body.str();
+        result.diagnostics.push_back(std::move(diag));
     }
 
     return result;
@@ -481,6 +2031,8 @@ AnalysisResult analyzeFile(const std::string &filename,
         std::vector<std::string> args;
         args.push_back("-emit-llvm");
         args.push_back("-S");
+        args.push_back("-g");
+        args.push_back("-fno-discard-value-names");
         args.push_back(filename);
         compilerlib::OutputMode mode = compilerlib::OutputMode::ToMemory;
         auto res = compilerlib::compile(args, mode);
@@ -522,6 +2074,159 @@ AnalysisResult analyzeFile(const std::string &filename,
         }
     }
     return analyzeModule(*mod, config);
+}
+
+// ---------------------------------------------------------------------------
+// JSON / SARIF serialization helpers
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Petit helper pour échapper les chaînes JSON.
+static std::string jsonEscape(const std::string &s)
+{
+    std::string out;
+    out.reserve(s.size() + 16);
+    for (char c : s) {
+        switch (c) {
+        case '\\': out += "\\\\"; break;
+        case '\"': out += "\\\""; break;
+        case '\n': out += "\\n"; break;
+        case '\r': out += "\\r"; break;
+        case '\t': out += "\\t"; break;
+        default:
+            if (static_cast<unsigned char>(c) < 0x20) {
+                char buf[7];
+                std::snprintf(buf, sizeof(buf), "\\u%04x", c & 0xFF);
+                out += buf;
+            } else {
+                out += c;
+            }
+            break;
+        }
+    }
+    return out;
+}
+
+static const char *severityToJsonString(DiagnosticSeverity sev)
+{
+    switch (sev) {
+    case DiagnosticSeverity::Info:    return "info";
+    case DiagnosticSeverity::Warning: return "warning";
+    case DiagnosticSeverity::Error:   return "error";
+    }
+    return "info";
+}
+
+static const char *severityToSarifLevel(DiagnosticSeverity sev)
+{
+    // SARIF levels: "none", "note", "warning", "error"
+    switch (sev) {
+    case DiagnosticSeverity::Info:    return "note";
+    case DiagnosticSeverity::Warning: return "warning";
+    case DiagnosticSeverity::Error:   return "error";
+    }
+    return "note";
+}
+
+} // anonymous namespace
+
+std::string toJson(const AnalysisResult &result,
+                   const std::string &inputFile)
+{
+    std::ostringstream os;
+    os << "{\n";
+    os << "  \"inputFile\": \"" << jsonEscape(inputFile) << "\",\n";
+    os << "  \"mode\": \"" << (result.config.mode == AnalysisMode::IR ? "IR" : "ABI") << "\",\n";
+    os << "  \"stackLimit\": " << result.config.stackLimit << ",\n";
+
+    // Fonctions
+    os << "  \"functions\": [\n";
+    for (std::size_t i = 0; i < result.functions.size(); ++i) {
+        const auto &f = result.functions[i];
+        os << "    {\n";
+        os << "      \"name\": \"" << jsonEscape(f.name) << "\",\n";
+        os << "      \"localStack\": " << f.localStack << ",\n";
+        os << "      \"maxStack\": " << f.maxStack << ",\n";
+        os << "      \"isRecursive\": " << (f.isRecursive ? "true" : "false") << ",\n";
+        os << "      \"hasInfiniteSelfRecursion\": " << (f.hasInfiniteSelfRecursion ? "true" : "false") << ",\n";
+        os << "      \"exceedsLimit\": " << (f.exceedsLimit ? "true" : "false") << "\n";
+        os << "    }";
+        if (i + 1 < result.functions.size())
+            os << ",";
+        os << "\n";
+    }
+    os << "  ],\n";
+
+    // Diagnostics
+    os << "  \"diagnostics\": [\n";
+    for (std::size_t i = 0; i < result.diagnostics.size(); ++i) {
+        const auto &d = result.diagnostics[i];
+        os << "    {\n";
+        os << "      \"function\": \"" << jsonEscape(d.funcName) << "\",\n";
+        os << "      \"line\": " << d.line << ",\n";
+        os << "      \"column\": " << d.column << ",\n";
+        os << "      \"severity\": \"" << severityToJsonString(d.severity) << "\",\n";
+        os << "      \"message\": \"" << jsonEscape(d.message) << "\"\n";
+        os << "    }";
+        if (i + 1 < result.diagnostics.size())
+            os << ",";
+        os << "\n";
+    }
+    os << "  ]\n";
+    os << "}\n";
+    return os.str();
+}
+
+std::string toSarif(const AnalysisResult &result,
+                    const std::string &inputFile,
+                    const std::string &toolName,
+                    const std::string &toolVersion)
+{
+    std::ostringstream os;
+    os << "{\n";
+    os << "  \"version\": \"2.1.0\",\n";
+    os << "  \"$schema\": \"https://schemastore.azurewebsites.net/schemas/json/sarif-2.1.0.json\",\n";
+    os << "  \"runs\": [\n";
+    os << "    {\n";
+    os << "      \"tool\": {\n";
+    os << "        \"driver\": {\n";
+    os << "          \"name\": \"" << jsonEscape(toolName) << "\",\n";
+    os << "          \"version\": \"" << jsonEscape(toolVersion) << "\"\n";
+    os << "        }\n";
+    os << "      },\n";
+    os << "      \"results\": [\n";
+
+    for (std::size_t i = 0; i < result.diagnostics.size(); ++i) {
+        const auto &d = result.diagnostics[i];
+        os << "        {\n";
+        // Pour le moment, un seul ruleId générique; tu pourras le spécialiser plus tard.
+        os << "          \"ruleId\": \"CORETRACE_STACK_DIAGNOSTIC\",\n";
+        os << "          \"level\": \"" << severityToSarifLevel(d.severity) << "\",\n";
+        os << "          \"message\": { \"text\": \"" << jsonEscape(d.message) << "\" },\n";
+        os << "          \"locations\": [\n";
+        os << "            {\n";
+        os << "              \"physicalLocation\": {\n";
+        os << "                \"artifactLocation\": { \"uri\": \"" << jsonEscape(inputFile) << "\" },\n";
+        os << "                \"region\": {\n";
+        os << "                  \"startLine\": " << d.line << ",\n";
+        os << "                  \"startColumn\": " << d.column << "\n";
+        os << "                }\n";
+        os << "              }\n";
+        os << "            }\n";
+        os << "          ]\n";
+        os << "        }";
+        if (i + 1 < result.diagnostics.size())
+            os << ",";
+        os << "\n";
+    }
+
+    os << "      ]\n";
+    os << "    }\n";
+    os << "  ]\n";
+    os << "}\n";
+
+    return os.str();
 }
 
 } // namespace ctrace::stack
