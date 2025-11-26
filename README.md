@@ -12,6 +12,11 @@
 ./stack_usage_analyzer --mode=[abi/ir] test.[ll/c/cpp]
 ```
 
+```
+--quiet coupe complètement les diagnostics
+--warnings-only garde seulement les diagnostics importants
+````
+
 ### Example
 
 Given this code:
@@ -116,3 +121,33 @@ Function: main
 - Define json API
 - Unmangling symbols
 
+---
+
+#### 9. Détection de fuite de stack pointer
+
+Exemples :
+```c
+char buf[10];
+return buf;    // renvoi pointeur vers stack → use-after-return
+```
+
+Ou stockage :
+
+```c
+global = buf; // leaking address of stack variable
+```
+
+---
+
+Actually done:
+
+- 1. adding VLA : Detection of potentially dangerous dynamic alloca
+- 2. Detection of memcpy/memset on stack buffers
+- 3. Warning when a function performs multiple stores into the same buffer
+- 4. Deeper traversal analysis: constraint propagation
+- 5. Detection of deep indirection in aliasing
+- 6. Detection of overflow in a struct containing an internal array
+- 7. Detection of stack pointer leaks:
+	- store_unknown -> storing the pointer in a non-local location (typically out-parameter, heap, etc.)
+	- call_callback -> passing it to a callback (indirect call)
+	- call_arg -> passing it as an argument to a direct function, potentially capturable
