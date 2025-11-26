@@ -1,9 +1,15 @@
 cmake_minimum_required(VERSION 3.16)
 project(stack_usage_analyzer)
 
-include(${CMAKE_SOURCE_DIR}/cmake/CheckLLVMVersion.cmake)
-set(LLVM_MIN_REQUIRED_VERSION "19" CACHE STRING "Minimum required LLVM version")
-check_llvm_version(${LLVM_MIN_REQUIRED_VERSION})
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}/cmake")
+include(CheckLLVMVersion OPTIONAL)
+
+if(COMMAND check_llvm_version)
+    set(LLVM_MIN_REQUIRED_VERSION "19" CACHE STRING "Minimum required LLVM version")
+    check_llvm_version(${LLVM_MIN_REQUIRED_VERSION})
+else()
+    message(WARNING "check_llvm_version() not available, skipping LLVM version check")
+endif()
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
