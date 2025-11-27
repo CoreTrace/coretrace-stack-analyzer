@@ -57,4 +57,4 @@ jobs:
     - name: Test Stack Usage Analyzer (Linux/macOS)
       if: runner.os == 'Linux' || runner.os == 'macOS'
       run: |
-        python3 run_tests.py
+        python3 run_test.py
