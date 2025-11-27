@@ -51,9 +51,6 @@ jobs:
                 -DClang_DIR=${{ env.Clang_DIR }} \
                 -DUSE_SHARED_LIB=OFF \
                 -DBUILD_TESTS=OFF
-        
-        # Patch coretrace-compiler for LLVM 19/20 compatibility
-        perl -pi -e 's/ci->createDiagnostics\(\*fs, &dc, false\);/ci->createDiagnostics(&dc, false);/g' _deps/cc-src/src/compilerlib/compiler.cpp
 
         cmake --build . --config Release
 
