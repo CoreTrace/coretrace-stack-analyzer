@@ -13,7 +13,7 @@ endif()
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_EXTENSIONS OFF)  # Optionnel mais recommandé
+set(CMAKE_CXX_EXTENSIONS OFF)
 
 set(LLVM_LINK_LLVM_DYLIB ON)
 
@@ -38,7 +38,7 @@ option(BUILD_CLI "Build stack_usage_analyzer CLI tool" ON)
 option(BUILD_SHARED_LIB "Build shared library variant" ON)
 
 # ===========================
-#  Sources communs
+#  Communs Sources
 # ===========================
 set(STACK_ANALYZER_SOURCES
     src/StackUsageAnalyzer.cpp
@@ -55,7 +55,7 @@ add_definitions(${LLVM_DEFINITIONS})
 # )
 
 # ===== LIBRARY =====
-add_library(stack_usage_analyzer_lib
+add_library(stack_usage_analyzer_lib STATIC
     ${STACK_ANALYZER_SOURCES}
 )
 
