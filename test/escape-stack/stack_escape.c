@@ -1,5 +1,5 @@
-// tests/stack_escape.c
 char *g_ptr;
+
 struct Holder {
     char *p;
 };

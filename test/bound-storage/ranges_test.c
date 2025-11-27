@@ -18,6 +18,11 @@ void ub_overflow(int i)
 {
     char buf[10];
 
+    // at line 27, column 16
+    // [!!] potential stack buffer overflow on variable 'buf' (size 10)
+    //     alias path: buf
+    //     index variable may go up to 10 (array last valid index: 9)
+    //     (this is a write access)
     if (i <= 10)
         buf[i] = 'B';
 }
@@ -31,6 +36,11 @@ void lb_negative(int i)
 {
     char buf[10];
 
+    // at line 45, column 16
+    // [!!] potential negative index on variable 'buf' (size 10)
+    //     alias path: buf
+    //     inferred lower bound for index expression: -3 (index may be < 0)
+    //     (this is a write access)
     if (i >= -3 && i < 5)
         buf[i] = 'C';
 }
@@ -40,6 +50,17 @@ void lb_and_ub(int i)
 {
     char buf[10];
 
+    // at line 65, column 16
+    // [!!] potential stack buffer overflow on variable 'buf' (size 10)
+    //     alias path: buf
+    //     index variable may go up to 15 (array last valid index: 9)
+    //     (this is a write access)
+
+    // at line 65, column 16
+    // [!!] potential negative index on variable 'buf' (size 10)
+    //     alias path: buf
+    //     inferred lower bound for index expression: -3 (index may be < 0)
+    //     (this is a write access)
     if (i >= -3 && i <= 15)
         buf[i] = 'D';
 }
@@ -61,6 +82,11 @@ void nested_if_overflow(int i)
 {
     char buf[8];
 
+    // at line 92, column 20
+    // [!!] potential stack buffer overflow on variable 'buf' (size 8)
+    //     alias path: buf
+    //     index variable may go up to 10 (array last valid index: 7)
+    //     (this is a write access)
     if (i <= 10) {
         if (i > 5) {
             buf[i] = 'E';
@@ -98,6 +124,11 @@ void loop_ub_overflow(void)
 {
     char buf[10];
 
+    // at line 133, column 16
+    // [!!] potential stack buffer overflow on variable 'buf' (size 10)
+    //     alias path: buf
+    //     index variable may go up to 10 (array last valid index: 9)
+    //     (this is a write access)
     for (int i = 0; i <= 10; ++i)
         buf[i] = 'H';
 }
@@ -122,6 +153,12 @@ void unreachable_example(void)
     int i = 1;
     char buf[10];
 
+    // at line 163, column 17
+    // [!!] potential stack buffer overflow on variable 'buf' (size 10)
+    //     alias path: buf
+    //     constant index 11 is out of bounds (0..9)
+    //     (this is a write access)
+    //     [info] this access appears unreachable at runtime (condition is always false for this branch)
     if (i > 10) {    // condition fausse à l’exécution
         buf[11] = 'J';
     }
@@ -137,6 +174,17 @@ void alias_lb_ub(int i)
     char buf[10];
     char *p = buf;
 
+    // at line 189, column 14
+    // [!!] potential stack buffer overflow on variable 'buf' (size 10)
+    //     alias path: buf -> arraydecay -> p
+    //     index variable may go up to 12 (array last valid index: 9)
+    //     (this is a write access)
+
+    // at line 189, column 14
+    // [!!] potential negative index on variable 'buf' (size 10)
+    //     alias path: p -> arraydecay -> buf
+    //     inferred lower bound for index expression: -2 (index may be < 0)
+    //     (this is a write access)
     if (i >= -2 && i <= 12)
         p[i] = 'K';
 }
@@ -173,6 +221,17 @@ void huge_range(int i)
 {
     char buf[10];
 
+    // at line 236, column 16
+    // [!!] potential stack buffer overflow on variable 'buf' (size 10)
+    //     alias path: buf
+    //     index variable may go up to 100 (array last valid index: 9)
+    //     (this is a write access)
+
+    // at line 236, column 16
+    // [!!] potential negative index on variable 'buf' (size 10)
+    //     alias path: buf
+    //     inferred lower bound for index expression: -100 (index may be < 0)
+    //     (this is a write access)
     if (i >= -100 && i <= 100)
         buf[i] = 'N';
 }
