@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [ main, feature/stack-buffer-bounds-check ]
   pull_request:
 
 jobs:
