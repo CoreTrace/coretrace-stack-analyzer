@@ -2,7 +2,7 @@ name: Build
 
 on:
   push:
-    branches: [ main, feat/*, 3-feat-ci-add-build-workflow ]
+    branches: [ main, 3-feat-ci-add-build-workflow ]
   pull_request:
     branches: [ main ]
   workflow_dispatch:
@@ -25,7 +25,7 @@ jobs:
       if: runner.os == 'Linux'
       run: |
         sudo apt-get update
-        sudo apt-get install -y build-essential cmake
+        sudo apt-get install -y build-essential cmake python3
         # Install LLVM and Clang 20
         wget -O - https://apt.llvm.org/llvm-snapshot.gpg.key | sudo apt-key add -
         sudo apt-add-repository "deb http://apt.llvm.org/jammy/ llvm-toolchain-jammy-20 main"
@@ -37,7 +37,7 @@ jobs:
     - name: Install dependencies (macOS)
       if: runner.os == 'macOS'
       run: |
-        brew install cmake llvm@20
+        brew install cmake python llvm@20
         echo "LLVM_DIR=$(brew --prefix llvm@20)/lib/cmake/llvm" >> $GITHUB_ENV
         echo "Clang_DIR=$(brew --prefix llvm@20)/lib/cmake/clang" >> $GITHUB_ENV
         echo "$(brew --prefix llvm@20)/bin" >> $GITHUB_PATH
@@ -57,15 +57,4 @@ jobs:
     - name: Test Stack Usage Analyzer (Linux/macOS)
       if: runner.os == 'Linux' || runner.os == 'macOS'
       run: |
-        cd build
-        # Create a test file with some stack usage
-        cat <<EOF > test_stack.c
-        #define SIZE_LARGE 1024
-        int main(void) {
-            char test[SIZE_LARGE];
-            return 0;
-        }
-        EOF
-        
-        # Run the analyzer
-        ./stack_usage_analyzer --mode=ir test_stack.c
+        python3 run_tests.py
