@@ -26,21 +26,21 @@ jobs:
       run: |
         sudo apt-get update
         sudo apt-get install -y build-essential cmake
-        # Install LLVM and Clang 19
+        # Install LLVM and Clang 20
         wget -O - https://apt.llvm.org/llvm-snapshot.gpg.key | sudo apt-key add -
-        sudo apt-add-repository "deb http://apt.llvm.org/jammy/ llvm-toolchain-jammy-19 main"
+        sudo apt-add-repository "deb http://apt.llvm.org/jammy/ llvm-toolchain-jammy-20 main"
         sudo apt-get update
-        sudo apt-get install -y llvm-19 llvm-19-dev clang-19 libclang-19-dev
-        echo "LLVM_DIR=/usr/lib/llvm-19/lib/cmake/llvm" >> $GITHUB_ENV
-        echo "Clang_DIR=/usr/lib/llvm-19/lib/cmake/clang" >> $GITHUB_ENV
+        sudo apt-get install -y llvm-20 llvm-20-dev clang-20 libclang-20-dev
+        echo "LLVM_DIR=/usr/lib/llvm-20/lib/cmake/llvm" >> $GITHUB_ENV
+        echo "Clang_DIR=/usr/lib/llvm-20/lib/cmake/clang" >> $GITHUB_ENV
 
     - name: Install dependencies (macOS)
       if: runner.os == 'macOS'
       run: |
-        brew install cmake llvm@19
-        echo "LLVM_DIR=$(brew --prefix llvm@19)/lib/cmake/llvm" >> $GITHUB_ENV
-        echo "Clang_DIR=$(brew --prefix llvm@19)/lib/cmake/clang" >> $GITHUB_ENV
-        echo "$(brew --prefix llvm@19)/bin" >> $GITHUB_PATH
+        brew install cmake llvm@20
+        echo "LLVM_DIR=$(brew --prefix llvm@20)/lib/cmake/llvm" >> $GITHUB_ENV
+        echo "Clang_DIR=$(brew --prefix llvm@20)/lib/cmake/clang" >> $GITHUB_ENV
+        echo "$(brew --prefix llvm@20)/bin" >> $GITHUB_PATH
 
     - name: Configure and Build (Linux/macOS)
       if: runner.os == 'Linux' || runner.os == 'macOS'
@@ -51,6 +51,10 @@ jobs:
                 -DClang_DIR=${{ env.Clang_DIR }} \
                 -DUSE_SHARED_LIB=OFF \
                 -DBUILD_TESTS=OFF
+        
+        # Patch coretrace-compiler for LLVM 19/20 compatibility
+        perl -pi -e 's/ci->createDiagnostics\(\*fs, &dc, false\);/ci->createDiagnostics(&dc, false);/g' _deps/cc-src/src/compilerlib/compiler.cpp
+
         cmake --build . --config Release
 
     - name: Test compiler (Linux/macOS)
