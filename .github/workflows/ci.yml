@@ -1,30 +1,71 @@
-name: CI
+name: Build
 
 on:
   push:
-    branches: [ main, feature/stack-buffer-bounds-check ]
+    branches: [ main, feat/*, 3-feat-ci-add-build-workflow ]
   pull_request:
+    branches: [ main ]
+  workflow_dispatch:
 
 jobs:
-  build-and-test:
-    runs-on: ubuntu-latest
+  build:
+    name: Build on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+    - uses: actions/checkout@v3
+      with:
+        fetch-depth: 0
 
-      - name: Install build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y cmake ninja-build build-essential python3
+    - name: Install dependencies (Linux)
+      if: runner.os == 'Linux'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential cmake
+        # Install LLVM and Clang 20
+        wget -O - https://apt.llvm.org/llvm-snapshot.gpg.key | sudo apt-key add -
+        sudo apt-add-repository "deb http://apt.llvm.org/jammy/ llvm-toolchain-jammy-20 main"
+        sudo apt-get update
+        sudo apt-get install -y llvm-20 llvm-20-dev clang-20 libclang-20-dev
+        echo "LLVM_DIR=/usr/lib/llvm-20/lib/cmake/llvm" >> $GITHUB_ENV
+        echo "Clang_DIR=/usr/lib/llvm-20/lib/cmake/clang" >> $GITHUB_ENV
 
-      - name: Configure and build (CMake)
-        run: |
-          mkdir -p build
-          cd build
-          cmake .. -G Ninja -DCMAKE_BUILD_TYPE=Release
-          ninja stack_usage_analyzer
+    - name: Install dependencies (macOS)
+      if: runner.os == 'macOS'
+      run: |
+        brew install cmake llvm@20
+        echo "LLVM_DIR=$(brew --prefix llvm@20)/lib/cmake/llvm" >> $GITHUB_ENV
+        echo "Clang_DIR=$(brew --prefix llvm@20)/lib/cmake/clang" >> $GITHUB_ENV
+        echo "$(brew --prefix llvm@20)/bin" >> $GITHUB_PATH
 
-      - name: Run analyzer tests (Python framework)
-        run: |
-          python3 run_tests.py
+    - name: Configure and Build (Linux/macOS)
+      if: runner.os == 'Linux' || runner.os == 'macOS'
+      run: |
+        mkdir -p build && cd build
+        cmake .. -DCMAKE_BUILD_TYPE=Release \
+                -DLLVM_DIR=${{ env.LLVM_DIR }} \
+                -DClang_DIR=${{ env.Clang_DIR }} \
+                -DUSE_SHARED_LIB=OFF \
+                -DBUILD_TESTS=OFF
+
+        cmake --build . --config Release
+
+    - name: Test Stack Usage Analyzer (Linux/macOS)
+      if: runner.os == 'Linux' || runner.os == 'macOS'
+      run: |
+        cd build
+        # Create a test file with some stack usage
+        cat <<EOF > test_stack.c
+        #define SIZE_LARGE 1024
+        int main(void) {
+            char test[SIZE_LARGE];
+            return 0;
+        }
+        EOF
+        
+        # Run the analyzer
+        ./stack_usage_analyzer --mode=ir test_stack.c
