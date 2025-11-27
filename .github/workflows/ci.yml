@@ -54,18 +54,18 @@ jobs:
 
         cmake --build . --config Release
 
-    - name: Test compiler (Linux/macOS)
+    - name: Test Stack Usage Analyzer (Linux/macOS)
       if: runner.os == 'Linux' || runner.os == 'macOS'
       run: |
         cd build
-        echo 'int main() { return 0; }' > test.cc
-        ./cc -S -emit-llvm test.cc
-
-        # Vérifier que le fichier LLVM IR a été généré
-        if [ -f "test.ll" ]; then
-          echo "Test réussi: Fichier LLVM IR généré avec succès"
-          cat test.ll | head -n 10
-        else
-          echo "Test échoué: Fichier LLVM IR non généré"
-          exit 1
-        fi
+        # Create a test file with some stack usage
+        cat <<EOF > test_stack.c
+        #define SIZE_LARGE 1024
+        int main(void) {
+            char test[SIZE_LARGE];
+            return 0;
+        }
+        EOF
+        
+        # Run the analyzer
+        ./stack_usage_analyzer --mode=ir test_stack.c
