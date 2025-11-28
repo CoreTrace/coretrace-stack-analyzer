@@ -24,8 +24,7 @@ include(FetchContent)
 FetchContent_Declare(
   cc
   GIT_REPOSITORY https://github.com/CoreTrace/coretrace-compiler.git
-  GIT_TAG feat/ir-output-mode
-  # GIT_TAG main
+    GIT_TAG main
 )
 
 FetchContent_MakeAvailable(cc)
