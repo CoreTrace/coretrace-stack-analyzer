@@ -64,7 +64,20 @@ struct StackBufferOverflow {
     // Nouveau : violation basée sur une borne inférieure (index potentiellement négatif)
     bool         isLowerBoundViolation = false;
     long long    lowerBound = 0;        // borne inférieure déduite (signée)
+
     std::string  aliasPath;   // ex: "pp -> ptr -> buf"
+    std::vector<std::string> aliasPathVec; // {"pp", "ptr", "buf"}
+    // Optional : helper for sync string <- vector
+    void rebuildAliasPathString(const std::string& sep = " -> ")
+    {
+        aliasPath.clear();
+        for (size_t i = 0; i < aliasPathVec.size(); ++i)
+        {
+            aliasPath += aliasPathVec[i];
+            if (i + 1 < aliasPathVec.size())
+                aliasPath += sep;
+        }
+    }
 };
 
 // Intervalle d'entier pour une valeur : borne inférieure / supérieure (signées)
@@ -683,6 +696,7 @@ static void analyzeStackBufferOverflowsInFunction(
                             report.isWrite           = true;
                             report.indexIsConstant   = true;
                             report.inst              = S;
+                            report.aliasPathVec      = aliasPath;
                             if (!aliasPath.empty()) {
                                 std::reverse(aliasPath.begin(), aliasPath.end());
                                 std::string chain;
@@ -703,6 +717,7 @@ static void analyzeStackBufferOverflowsInFunction(
                             report.isWrite           = false;
                             report.indexIsConstant   = true;
                             report.inst              = L;
+                            report.aliasPathVec     = aliasPath;
                             if (!aliasPath.empty()) {
                                 std::reverse(aliasPath.begin(), aliasPath.end());
                                 std::string chain;
@@ -754,6 +769,7 @@ static void analyzeStackBufferOverflowsInFunction(
                         report.isWrite           = true;
                         report.indexIsConstant   = false;
                         report.inst              = S;
+                        report.aliasPathVec     = aliasPath;
                         if (!aliasPath.empty()) {
                             std::reverse(aliasPath.begin(), aliasPath.end());
                             std::string chain;
@@ -774,6 +790,7 @@ static void analyzeStackBufferOverflowsInFunction(
                         report.isWrite           = false;
                         report.indexIsConstant   = false;
                         report.inst              = L;
+                        report.aliasPathVec      = aliasPath;
                         if (!aliasPath.empty()) {
                             std::reverse(aliasPath.begin(), aliasPath.end());
                             std::string chain;
@@ -802,6 +819,7 @@ static void analyzeStackBufferOverflowsInFunction(
                         report.inst                  = S;
                         report.isLowerBoundViolation = true;
                         report.lowerBound            = R.lower;
+                        report.aliasPathVec          = aliasPath;
                         if (!aliasPath.empty()) {
                             std::reverse(aliasPath.begin(), aliasPath.end());
                             std::string chain;
@@ -823,6 +841,7 @@ static void analyzeStackBufferOverflowsInFunction(
                         report.inst                  = L;
                         report.isLowerBoundViolation = true;
                         report.lowerBound            = R.lower;
+                        report.aliasPathVec          = aliasPath;
                         if (!aliasPath.empty()) {
                             std::reverse(aliasPath.begin(), aliasPath.end());
                             std::string chain;
@@ -1599,15 +1618,37 @@ AnalysisResult analyzeModule(llvm::Module &mod,
     {
         unsigned line = 0;
         unsigned column = 0;
+        unsigned startLine   = 0;
+        unsigned startColumn = 0;
+        unsigned endLine     = 0;
+        unsigned endColumn   = 0;
         bool haveLoc = false;
 
-        if (issue.inst) {
+        if (issue.inst)
+        {
             llvm::DebugLoc DL = issue.inst->getDebugLoc();
             if (DL)
             {
                 line   = DL.getLine();
+                startLine   = DL.getLine();
+
+                startColumn = DL.getCol();
                 column = DL.getCol();
+
+                // By default, same as start
+                endLine     = DL.getLine();
+                endColumn   = DL.getCol();
                 haveLoc = true;
+                if (auto *loc = DL.get())
+                {
+                    if (auto *scope = llvm::dyn_cast<llvm::DILocation>(loc))
+                    {
+                        if (scope->getColumn() != 0)
+                        {
+                            endColumn = scope->getColumn() + 1;
+                        }
+                    }
+                }
             }
         }
 
@@ -1694,8 +1735,11 @@ AnalysisResult analyzeModule(llvm::Module &mod,
         }
 
         std::ostringstream body;
+        Diagnostic diag;
 
-        if (issue.isLowerBoundViolation) {
+        if (issue.isLowerBoundViolation)
+        {
+            diag.errCode = DescriptiveErrorCode::NegativeStackIndex;
             body << "  [!!] potential negative index on variable '"
                       << issue.varName << "' (size " << issue.arraySize << ")\n";
             if (!issue.aliasPath.empty()) {
@@ -1704,6 +1748,7 @@ AnalysisResult analyzeModule(llvm::Module &mod,
             body << "       inferred lower bound for index expression: "
                       << issue.lowerBound << " (index may be < 0)\n";
         } else {
+            diag.errCode = DescriptiveErrorCode::StackBufferOverflow;
             body << "  [!!] potential stack buffer overflow on variable '"
                       << issue.varName << "' (size " << issue.arraySize << ")\n";
             if (!issue.aliasPath.empty()) {
@@ -1735,12 +1780,17 @@ AnalysisResult analyzeModule(llvm::Module &mod,
             body << "       [info] this access appears unreachable at runtime "
                          "(condition is always false for this branch)\n";
         }
-        Diagnostic diag;
+
         diag.funcName = issue.funcName;
         diag.line     = haveLoc ? line : 0;
         diag.column   = haveLoc ? column : 0;
+        diag.startLine   = haveLoc ? startLine : 0;
+        diag.startColumn = haveLoc ? startColumn : 0;
+        diag.endLine     = haveLoc ? endLine : 0;
+        diag.endColumn   = haveLoc ? endColumn : 0;
         diag.severity  = DiagnosticSeverity::Warning;
         diag.message  = body.str();
+        diag.variableAliasingVec = issue.aliasPathVec;
         result.diagnostics.push_back(std::move(diag));
     }
 
@@ -1776,11 +1826,12 @@ AnalysisResult analyzeModule(llvm::Module &mod,
                      "(VLA / variable alloca) and may lead to unbounded stack usage\n";
 
         Diagnostic diag;
-        diag.funcName = d.funcName;
-        diag.line     = haveLoc ? line : 0;
-        diag.column   = haveLoc ? column : 0;
-        diag.severity  = DiagnosticSeverity::Warning;
-        diag.message  = body.str();
+        diag.funcName   = d.funcName;
+        diag.line       = haveLoc ? line : 0;
+        diag.column     = haveLoc ? column : 0;
+        diag.severity   = DiagnosticSeverity::Warning;
+        diag.errCode    = DescriptiveErrorCode::VLAUsage;
+        diag.message    = body.str();
         result.diagnostics.push_back(std::move(diag));
     }
 
@@ -1854,10 +1905,12 @@ AnalysisResult analyzeModule(llvm::Module &mod,
         }
 
         std::ostringstream body;
+        Diagnostic diag;
 
         body << "  [!Info] multiple stores to stack buffer '"
                 << ms.varName << "' in this function ("
                 << ms.storeCount << " store instruction(s)";
+        diag.errCode = DescriptiveErrorCode::MultipleStoresToStackBuffer;
         if (ms.distinctIndexCount > 0)
         {
             body << ", " << ms.distinctIndexCount
@@ -1876,7 +1929,6 @@ AnalysisResult analyzeModule(llvm::Module &mod,
                          "verify indices are correct and non-overlapping\n";
         }
 
-        Diagnostic diag;
         diag.funcName = ms.funcName;
         diag.line     = haveLoc ? line : 0;
         diag.column   = haveLoc ? column : 0;
@@ -1946,71 +1998,52 @@ AnalysisResult analyzeModule(llvm::Module &mod,
         }
 
         Diagnostic diag;
-        diag.funcName = e.funcName;
-        diag.line     = haveLoc ? line : 0;
-        diag.column   = haveLoc ? column : 0;
-        diag.severity  = DiagnosticSeverity::Warning;
-        diag.message  = body.str();
+        diag.funcName   = e.funcName;
+        diag.line       = haveLoc ? line : 0;
+        diag.column     = haveLoc ? column : 0;
+        diag.severity   = DiagnosticSeverity::Warning;
+        diag.errCode    = DescriptiveErrorCode::StackPointerEscape;
+        diag.message    = body.str();
         result.diagnostics.push_back(std::move(diag));
     }
 
     return result;
 }
 
-enum class Language {
-    Unknown = 0,
-    LLVM_IR,
-    C,
-    CXX
-};
-
-std::string toString(Language lang)
-{
-    switch (lang) {
-        case Language::LLVM_IR: return "LLVM_IR";
-        case Language::C:       return "C";
-        case Language::CXX:     return "C++";
-        default:                return "Unknown";
-    }
-}
-
-
-static Language detectFromExtension(const std::string &path)
+static LanguageType detectFromExtension(const std::string &path)
 {
     auto pos = path.find_last_of('.');
     if (pos == std::string::npos)
-        return Language::Unknown;
+        return LanguageType::Unknown;
 
     std::string ext = path.substr(pos + 1);
     std::transform(ext.begin(), ext.end(), ext.begin(),
                    [](unsigned char c) { return std::tolower(c); });
 
     if (ext == "ll")
-        return Language::LLVM_IR;
+        return LanguageType::LLVM_IR;
 
     if (ext == "c")
-        return Language::C;
+        return LanguageType::C;
 
     if (ext == "cpp" || ext == "cc" || ext == "cxx" ||
         ext == "c++" || ext == "cp" || ext == "C")
-        return Language::CXX;
+        return LanguageType::CXX;
 
-    return Language::Unknown;
+    return LanguageType::Unknown;
 }
 
-Language detectLanguageFromFile(const std::string &path,
+LanguageType detectLanguageFromFile(const std::string &path,
                                 llvm::LLVMContext &ctx)
 {
-    // 1) Tentative LLVM IR (texte)
     {
         llvm::SMDiagnostic diag;
-        if (auto mod = llvm::parseIRFile(path, diag, ctx)) {
-            return Language::LLVM_IR;
+        if (auto mod = llvm::parseIRFile(path, diag, ctx))
+        {
+            return LanguageType::LLVM_IR;
         }
-        // si parse échoue, on ignore diag ici (tu peux le log si tu veux)
     }
 
-    // 2) Heuristique extension pour C / C++
     return detectFromExtension(path);
 }
 
@@ -2020,14 +2053,16 @@ AnalysisResult analyzeFile(const std::string &filename,
                            llvm::SMDiagnostic &err)
 {
 
-    Language lang = detectLanguageFromFile(filename, ctx);
+    LanguageType lang = detectLanguageFromFile(filename, ctx);
     std::unique_ptr<llvm::Module> mod;
 
-    std::cout << "Language: " << toString(lang) << "\n";
+    // if (verboseLevel >= 1)
+    //     std::cout << "Language: " << ctrace::stack::enumToString(lang) << "\n";
 
-    if (lang != Language::LLVM_IR)
+    if (lang != LanguageType::LLVM_IR)
     {
-        std::cout << "Compiling source file to LLVM IR...\n";
+        // if (verboseLevel >= 1)
+        //     std::cout << "Compiling source file to LLVM IR...\n";
         std::vector<std::string> args;
         args.push_back("-emit-llvm");
         args.push_back("-S");
@@ -2064,7 +2099,7 @@ AnalysisResult analyzeFile(const std::string &filename,
         }
     }
 
-    if (lang == Language::LLVM_IR)
+    if (lang == LanguageType::LLVM_IR)
     {
         mod = llvm::parseIRFile(filename, err, ctx);
         if (!mod)
@@ -2108,6 +2143,7 @@ static std::string jsonEscape(const std::string &s)
     return out;
 }
 
+// Old helper to convert DiagnosticSeverity to string, don't use it anymore.
 static const char *severityToJsonString(DiagnosticSeverity sev)
 {
     switch (sev) {
@@ -2136,9 +2172,13 @@ std::string toJson(const AnalysisResult &result,
 {
     std::ostringstream os;
     os << "{\n";
-    os << "  \"inputFile\": \"" << jsonEscape(inputFile) << "\",\n";
-    os << "  \"mode\": \"" << (result.config.mode == AnalysisMode::IR ? "IR" : "ABI") << "\",\n";
-    os << "  \"stackLimit\": " << result.config.stackLimit << ",\n";
+    os << "  \"meta\": {\n";
+    os << "    \"tool\": \"" << "ctrace-stack)analyzer" << "\",\n";
+    os << "    \"inputFile\": \"" << jsonEscape(inputFile) << "\",\n";
+    os << "    \"mode\": \"" << (result.config.mode == AnalysisMode::IR ? "IR" : "ABI") << "\",\n";
+    os << "    \"stackLimit\": " << result.config.stackLimit << ",\n";
+    os << "    \"analysisTimeMs\": " << -1 << "\n";
+    os << " },\n";
 
     // Fonctions
     os << "  \"functions\": [\n";
@@ -2163,12 +2203,29 @@ std::string toJson(const AnalysisResult &result,
     for (std::size_t i = 0; i < result.diagnostics.size(); ++i) {
         const auto &d = result.diagnostics[i];
         os << "    {\n";
-        os << "      \"function\": \"" << jsonEscape(d.funcName) << "\",\n";
-        os << "      \"line\": " << d.line << ",\n";
-        os << "      \"column\": " << d.column << ",\n";
-        os << "      \"severity\": \"" << severityToJsonString(d.severity) << "\",\n";
-        os << "      \"message\": \"" << jsonEscape(d.message) << "\"\n";
-        os << "    }";
+        os << "      \"id\": \"diag-" << (i + 1) << "\",\n";
+        os << "      \"severity\": \"" << ctrace::stack::enumToString(d.severity) << "\",\n";
+        os << "      \"ruleId\": \"" << ctrace::stack::enumToString(d.errCode) << "\",\n";
+
+        os << "      \"location\": {\n";
+        os << "        \"function\": \"" << jsonEscape(d.funcName) << "\",\n";
+        os << "        \"startLine\": " << d.line << ",\n";
+        os << "        \"startColumn\": " << d.column << ",\n";
+        os << "        \"endLine\": " << d.endLine << ",\n";
+        os << "        \"endColumn\": " << d.endColumn << "\n";
+        os << "      },\n";
+
+        os << "      \"details\": {\n";
+        os << "        \"message\": \"" << jsonEscape(d.message) << "\",\n";
+        os << "        \"variableAliasing\": [";
+        for (std::size_t j = 0; j < d.variableAliasingVec.size(); ++j) {
+            os << "\"" << jsonEscape(d.variableAliasingVec[j]) << "\"";
+            if (j + 1 < d.variableAliasingVec.size())
+                os << ", ";
+        }
+        os << "]\n";
+        os << "      }\n";        // <-- ferme "details"
+        os << "    }";           // <-- ferme le diagnostic
         if (i + 1 < result.diagnostics.size())
             os << ",";
         os << "\n";
