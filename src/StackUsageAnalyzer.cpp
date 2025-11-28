@@ -2173,7 +2173,7 @@ std::string toJson(const AnalysisResult &result,
     std::ostringstream os;
     os << "{\n";
     os << "  \"meta\": {\n";
-    os << "    \"tool\": \"" << "ctrace-stack)analyzer" << "\",\n";
+    os << "    \"tool\": \"" << "ctrace-stack-analyzer" << "\",\n";
     os << "    \"inputFile\": \"" << jsonEscape(inputFile) << "\",\n";
     os << "    \"mode\": \"" << (result.config.mode == AnalysisMode::IR ? "IR" : "ABI") << "\",\n";
     os << "    \"stackLimit\": " << result.config.stackLimit << ",\n";
