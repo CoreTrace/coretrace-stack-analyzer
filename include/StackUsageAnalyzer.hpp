@@ -6,6 +6,8 @@
 #include <string>
 #include <vector>
 
+#include "helpers.hpp"
+
 namespace llvm
 {
     class Module;
@@ -45,6 +47,33 @@ struct FunctionResult
     bool exceedsLimit             = false; // maxStack > config.stackLimit
 };
 
+/*
+    DiagnosticSeverity EnumTraits specialization
+*/
+
+enum class LanguageType
+{
+    Unknown = 0,
+    LLVM_IR = 1,
+    C       = 2,
+    CXX     = 3
+};
+
+template<>
+struct EnumTraits<LanguageType>
+{
+    static constexpr std::array<std::string_view, 4> names = {
+        "UNKNOWN",
+        "LLVM_IR",
+        "C",
+        "CXX"
+    };
+};
+
+/*
+    DiagnosticSeverity EnumTraits specialization
+*/
+
 enum class DiagnosticSeverity
 {
     Info    = 0,
@@ -52,12 +81,64 @@ enum class DiagnosticSeverity
     Error   = 2
 };
 
+template<>
+struct EnumTraits<DiagnosticSeverity>
+{
+    static constexpr std::array<std::string_view, 3> names = {
+        "INFO",
+        "WARNING",
+        "ERROR"
+    };
+};
+
+/*
+    DescriptiveErrorCode EnumTraits specialization
+*/
+
+enum class DescriptiveErrorCode
+{
+    None                        = 0,
+    StackBufferOverflow         = 1,
+    NegativeStackIndex          = 2,
+    VLAUsage                    = 3,
+    StackPointerEscape          = 4,
+    MemcpyWithStackDest         = 5,
+    MultipleStoresToStackBuffer = 6
+};
+
+template<>
+struct EnumTraits<DescriptiveErrorCode>
+{
+    static constexpr std::array<std::string_view, 7> names = {
+        "None",
+        "StackBufferOverflow",
+        "NegativeStackIndex",
+        "VLAUsage",
+        "StackPointerEscape",
+        "MemcpyWithStackDest",
+        "MultipleStoresToStackBuffer"
+    };
+};
+
+/*
+    Diagnostic struct
+*/
+
 struct Diagnostic
 {
     std::string funcName;
-    unsigned    line   = 0;
-    unsigned    column = 0;
-    DiagnosticSeverity severity = DiagnosticSeverity::Warning;
+    unsigned line                   = 0;
+    unsigned column                 = 0;
+
+    // for SARIF / structured reporting
+    unsigned startLine   = 0;
+    unsigned startColumn = 0;
+    unsigned endLine     = 0;
+    unsigned endColumn   = 0;
+
+    DiagnosticSeverity severity     = DiagnosticSeverity::Warning;
+    DescriptiveErrorCode errCode    = DescriptiveErrorCode::None;
+    std::vector<std::string> variableAliasingVec;
     std::string message;
 };
 
