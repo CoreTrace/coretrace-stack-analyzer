@@ -41,6 +41,9 @@ struct FunctionResult
     std::string name;
     StackSize   localStack = 0;   // taille frame locale (suivant le mode)
     StackSize   maxStack   = 0;   // max stack incluant les callees
+    bool        localStackUnknown = false; // taille locale inconnue (alloca dynamique)
+    bool        maxStackUnknown   = false; // max stack inconnue (propagée via appels)
+    bool        hasDynamicAlloca  = false; // alloca dynamique détectée dans la fonction
 
     bool isRecursive              = false; // dans un cycle F <-> G ...
     bool hasInfiniteSelfRecursion = false; // heuristique DominatorTree
@@ -103,20 +106,26 @@ enum class DescriptiveErrorCode
     VLAUsage                    = 3,
     StackPointerEscape          = 4,
     MemcpyWithStackDest         = 5,
-    MultipleStoresToStackBuffer = 6
+    MultipleStoresToStackBuffer = 6,
+    AllocaUserControlled        = 7,
+    AllocaTooLarge              = 8,
+    AllocaUsageWarning          = 9
 };
 
 template<>
 struct EnumTraits<DescriptiveErrorCode>
 {
-    static constexpr std::array<std::string_view, 7> names = {
+    static constexpr std::array<std::string_view, 10> names = {
         "None",
         "StackBufferOverflow",
         "NegativeStackIndex",
         "VLAUsage",
         "StackPointerEscape",
         "MemcpyWithStackDest",
-        "MultipleStoresToStackBuffer"
+        "MultipleStoresToStackBuffer",
+        "AllocaUserControlled",
+        "AllocaTooLarge",
+        "AllocaUsageWarning"
     };
 };
 
