@@ -16,6 +16,25 @@ enum class OutputFormat
     Sarif
 };
 
+static void printHelp()
+{
+    llvm::outs()
+        << "Stack Usage Analyzer - static stack usage analysis for LLVM IR/bitcode\n\n"
+        << "Usage:\n"
+        << "  stack_usage_analyzer <file.ll> [options]\n\n"
+        << "Options:\n"
+        << "  --mode=ir|abi          Analysis mode (default: ir)\n"
+        << "  --format=json          Output JSON report\n"
+        << "  --format=sarif         Output SARIF report\n"
+        << "  --quiet                Suppress per-function diagnostics\n"
+        << "  --warnings-only        Show warnings and errors only\n"
+        << "  -h, --help             Show this help message and exit\n\n"
+        << "Examples:\n"
+        << "  stack_usage_analyzer input.ll\n"
+        << "  stack_usage_analyzer input.ll --mode=abi --format=json\n"
+        << "  stack_usage_analyzer input.ll --warnings-only\n";
+}
+
 int main(int argc, char **argv)
 {
     llvm::LLVMContext  context;
@@ -29,6 +48,15 @@ int main(int argc, char **argv)
     cfg.warningsOnly = false;
     // cfg.mode = AnalysisMode::IR; -> already set by default constructor
     // cfg.stackLimit = 8ull * 1024ull * 1024ull; // 8 MiB -> already set by default constructor but needed to be set with args
+
+    for (int i = 1; i < argc; ++i)
+    {
+        if (std::strcmp(argv[i], "-h") == 0 || std::strcmp(argv[i], "--help") == 0)
+        {
+            printHelp();
+            return 0;
+        }
+    }
 
     for (int i = 1; i < argc; ++i)
     {
@@ -54,6 +82,11 @@ int main(int argc, char **argv)
             outputFormat = OutputFormat::Sarif;
             continue;
         }
+        else if (argStr == "--format=human")
+        {
+            outputFormat = OutputFormat::Human;
+            continue;
+        }
         if (std::strncmp(arg, "--mode=", 7) == 0)
         {
             const char *modeStr = arg + 7;
@@ -77,7 +110,8 @@ int main(int argc, char **argv)
     }
 
     if (!inputFilename) {
-        llvm::errs() << "Usage: stack_usage_analyzer <file.ll> [--mode=ir|abi]\n";
+        llvm::errs() << "Usage: stack_usage_analyzer <file.ll> [options]\n"
+                     << "Try --help for more information.\n";
         return 1;
     }
 

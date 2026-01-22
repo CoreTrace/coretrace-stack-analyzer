@@ -78,6 +78,36 @@ def run_analyzer_on_file(c_path: Path) -> str:
     return output
 
 
+def check_help_flags() -> bool:
+    """
+    Vérifie que -h et --help affichent l'aide sur stdout et retournent 0.
+    """
+    print("=== Testing help flags ===")
+    ok = True
+    for flag in ["-h", "--help"]:
+        result = subprocess.run(
+            [str(ANALYZER), flag],
+            capture_output=True,
+            text=True,
+        )
+        stdout = result.stdout or ""
+        if result.returncode != 0:
+            print(f"  ❌ {flag} returned {result.returncode} (expected 0)")
+            ok = False
+            continue
+        missing = []
+        for needle in ["Stack Usage Analyzer", "Usage:", "Options:", "-h, --help", "Examples:"]:
+            if needle not in stdout:
+                missing.append(needle)
+        if missing:
+            print(f"  ❌ {flag} missing help sections: {', '.join(missing)}")
+            ok = False
+        else:
+            print(f"  ✅ {flag} OK")
+    print()
+    return ok
+
+
 def check_file(c_path: Path) -> bool:
     """
     Vérifie qu'avec ce fichier, toutes les attentes sont présentes
@@ -112,12 +142,13 @@ def check_file(c_path: Path) -> bool:
 
 
 def main() -> int:
+    global_ok = check_help_flags()
+
     c_files = sorted(TEST_DIR.glob("**/*.c"))
     if not c_files:
         print(f"No .c files found under {TEST_DIR}")
-        return
+        return 0 if global_ok else 1
 
-    global_ok = True
     for f in c_files:
         ok = check_file(f)
         if not ok:
