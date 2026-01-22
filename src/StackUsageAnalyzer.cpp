@@ -44,9 +44,20 @@ using CallGraph = std::map<const llvm::Function*, std::vector<const llvm::Functi
 
 enum VisitState { NotVisited = 0, Visiting = 1, Visited = 2 };
 
+struct StackEstimate {
+    StackSize bytes = 0;
+    bool unknown = false;
+};
+
+struct LocalStackInfo {
+    StackSize bytes = 0;
+    bool unknown = false;
+    bool hasDynamicAlloca = false;
+};
+
 // État interne pour la propagation
 struct InternalAnalysisState {
-    std::map<const llvm::Function*, StackSize> TotalStack;    // stack max, callees inclus
+    std::map<const llvm::Function*, StackEstimate> TotalStack;    // stack max, callees inclus
     std::set<const llvm::Function*> RecursiveFuncs;           // fonctions dans au moins un cycle
     std::set<const llvm::Function*> InfiniteRecursionFuncs;   // auto-récursion “infinie”
 };
@@ -1230,70 +1241,63 @@ static bool hasNonSelfCall(const llvm::Function &F)
 //  Analyse locale de la stack (deux variantes)
 // ============================================================================
 
-// Mode IR pur : somme des allocas, alignée
-static StackSize computeLocalStackIR(llvm::Function &F, const llvm::DataLayout &DL)
+static LocalStackInfo computeLocalStackBase(llvm::Function &F, const llvm::DataLayout &DL)
 {
-    StackSize allocSize = 0;
+    LocalStackInfo info;
 
     for (llvm::BasicBlock &BB : F) {
         for (llvm::Instruction &I : BB) {
-            if (auto *alloca = llvm::dyn_cast<llvm::AllocaInst>(&I)) {
-                llvm::Type *ty = alloca->getAllocatedType();
-                StackSize count = 1;
+            auto *alloca = llvm::dyn_cast<llvm::AllocaInst>(&I);
+            if (!alloca)
+                continue;
 
-                if (auto *CI = llvm::dyn_cast<llvm::ConstantInt>(alloca->getArraySize())) {
-                    count = CI->getZExtValue();
-                } else {
-                    llvm::errs() << "Warning: dynamic alloca in function "
-                                 << F.getName() << "\n";
-                }
+            llvm::Type *ty = alloca->getAllocatedType();
+            StackSize count = 1;
 
-                StackSize size = DL.getTypeAllocSize(ty) * count;
-                allocSize += size;
+            if (auto *CI = llvm::dyn_cast<llvm::ConstantInt>(alloca->getArraySize())) {
+                count = CI->getZExtValue();
+            } else if (auto *C = tryGetConstFromValue(alloca->getArraySize(), F)) {
+                count = C->getZExtValue();
+            } else {
+                info.hasDynamicAlloca = true;
+                info.unknown = true;
+                continue;
             }
+
+            StackSize size = DL.getTypeAllocSize(ty) * count;
+            info.bytes += size;
         }
     }
 
-    if (allocSize == 0)
-        return 0;
+    return info;
+}
+
+// Mode IR pur : somme des allocas, alignée
+static LocalStackInfo computeLocalStackIR(llvm::Function &F, const llvm::DataLayout &DL)
+{
+    LocalStackInfo info = computeLocalStackBase(F, DL);
+
+    if (info.bytes == 0)
+        return info;
 
     llvm::MaybeAlign MA = DL.getStackAlignment();
     unsigned stackAlign = MA ? MA->value() : 1u;
 
     if (stackAlign > 1)
-        allocSize = llvm::alignTo(allocSize, stackAlign);
+        info.bytes = llvm::alignTo(info.bytes, stackAlign);
 
-    return allocSize;
+    return info;
 }
 
 // Mode ABI heuristique : frame minimale + overhead sur calls
-static StackSize computeLocalStackABI(llvm::Function &F, const llvm::DataLayout &DL)
+static LocalStackInfo computeLocalStackABI(llvm::Function &F, const llvm::DataLayout &DL)
 {
-    StackSize allocSize = 0;
-
-    for (llvm::BasicBlock &BB : F) {
-        for (llvm::Instruction &I : BB) {
-            if (auto *alloca = llvm::dyn_cast<llvm::AllocaInst>(&I)) {
-                llvm::Type *ty = alloca->getAllocatedType();
-                StackSize count = 1;
-
-                if (auto *CI = llvm::dyn_cast<llvm::ConstantInt>(alloca->getArraySize())) {
-                    count = CI->getZExtValue();
-                } else {
-                    llvm::errs() << "Warning: dynamic alloca in function "
-                                 << F.getName() << "\n";
-                }
-
-                StackSize size = DL.getTypeAllocSize(ty) * count;
-                allocSize += size;
-            }
-        }
-    }
+    LocalStackInfo info = computeLocalStackBase(F, DL);
 
     llvm::MaybeAlign MA = DL.getStackAlignment();
     unsigned stackAlign = MA ? MA->value() : 1u;  // 16 sur beaucoup de cibles
 
-    StackSize frameSize = allocSize;
+    StackSize frameSize = info.bytes;
 
     if (stackAlign > 1)
         frameSize = llvm::alignTo(frameSize, stackAlign);
@@ -1306,13 +1310,14 @@ static StackSize computeLocalStackABI(llvm::Function &F, const llvm::DataLayout 
         frameSize = llvm::alignTo(frameSize + stackAlign, stackAlign);
     }
 
-    return frameSize;
+    info.bytes = frameSize;
+    return info;
 }
 
 // Wrapper qui sélectionne le mode
-static StackSize computeLocalStack(llvm::Function &F,
-                                   const llvm::DataLayout &DL,
-                                   AnalysisMode mode)
+static LocalStackInfo computeLocalStack(llvm::Function &F,
+                                        const llvm::DataLayout &DL,
+                                        AnalysisMode mode)
 {
     switch (mode)
     {
@@ -1321,7 +1326,7 @@ static StackSize computeLocalStack(llvm::Function &F,
         case AnalysisMode::ABI:
             return computeLocalStackABI(F, DL);
     }
-    return 0;
+    return {};
 }
 
 // Threshold heuristic: consider an alloca "too large" if it consumes at least
@@ -1387,10 +1392,10 @@ static CallGraph buildCallGraph(llvm::Module &M)
 //  Propagation de la stack + détection de cycles
 // ============================================================================
 
-static StackSize dfsComputeStack(
+static StackEstimate dfsComputeStack(
     const llvm::Function *F,
     const CallGraph &CG,
-    const std::map<const llvm::Function*, StackSize> &LocalStack,
+    const std::map<const llvm::Function*, LocalStackInfo> &LocalStack,
     std::map<const llvm::Function*, VisitState> &State,
     InternalAnalysisState &Res
 )
@@ -1405,29 +1410,40 @@ static StackSize dfsComputeStack(
                 }
             }
             auto itLocal = LocalStack.find(F);
-            return (itLocal != LocalStack.end()) ? itLocal->second : 0;
+            if (itLocal != LocalStack.end()) {
+                return StackEstimate{itLocal->second.bytes, itLocal->second.unknown};
+            }
+            return {};
         } else if (itState->second == Visited) {
             auto itTotal = Res.TotalStack.find(F);
-            return (itTotal != Res.TotalStack.end()) ? itTotal->second : 0;
+            return (itTotal != Res.TotalStack.end()) ? itTotal->second : StackEstimate{};
         }
     }
 
     State[F] = Visiting;
 
     auto itLocal = LocalStack.find(F);
-    StackSize local = (itLocal != LocalStack.end()) ? itLocal->second : 0;
-    StackSize maxCallee = 0;
+    StackEstimate local = {};
+    if (itLocal != LocalStack.end()) {
+        local.bytes = itLocal->second.bytes;
+        local.unknown = itLocal->second.unknown;
+    }
+    StackEstimate maxCallee = {};
 
     auto itCG = CG.find(F);
     if (itCG != CG.end()) {
         for (const llvm::Function *Callee : itCG->second) {
-            StackSize calleeStack = dfsComputeStack(Callee, CG, LocalStack, State, Res);
-            if (calleeStack > maxCallee)
-                maxCallee = calleeStack;
+            StackEstimate calleeStack = dfsComputeStack(Callee, CG, LocalStack, State, Res);
+            if (calleeStack.bytes > maxCallee.bytes)
+                maxCallee.bytes = calleeStack.bytes;
+            if (calleeStack.unknown)
+                maxCallee.unknown = true;
         }
     }
 
-    StackSize total = local + maxCallee;
+    StackEstimate total;
+    total.bytes = local.bytes + maxCallee.bytes;
+    total.unknown = local.unknown || maxCallee.unknown;
     Res.TotalStack[F] = total;
     State[F] = Visited;
     return total;
@@ -1435,7 +1451,7 @@ static StackSize dfsComputeStack(
 
 static InternalAnalysisState computeGlobalStackUsage(
     const CallGraph &CG,
-    const std::map<const llvm::Function*, StackSize> &LocalStack)
+    const std::map<const llvm::Function*, LocalStackInfo> &LocalStack)
 {
     InternalAnalysisState Res;
     std::map<const llvm::Function*, VisitState> State;
@@ -1800,12 +1816,12 @@ AnalysisResult analyzeModule(llvm::Module &mod,
     const llvm::DataLayout &DL = mod.getDataLayout();
 
     // 1) Stack locale par fonction
-    std::map<const llvm::Function*, StackSize> LocalStack;
+    std::map<const llvm::Function*, LocalStackInfo> LocalStack;
     for (llvm::Function &F : mod) {
         if (F.isDeclaration())
             continue;
-        StackSize sz = computeLocalStack(F, DL, config.mode);
-        LocalStack[&F] = sz;
+        LocalStackInfo info = computeLocalStack(F, DL, config.mode);
+        LocalStack[&F] = info;
     }
 
     // 2) Graphe d'appels
@@ -1838,24 +1854,27 @@ AnalysisResult analyzeModule(llvm::Module &mod,
 
         const llvm::Function *Fn = &F;
 
-        StackSize local = 0;
-        StackSize total = 0;
+        LocalStackInfo localInfo;
+        StackEstimate totalInfo;
 
         auto itLocal = LocalStack.find(Fn);
         if (itLocal != LocalStack.end())
-            local = itLocal->second;
+            localInfo = itLocal->second;
 
         auto itTotal = state.TotalStack.find(Fn);
         if (itTotal != state.TotalStack.end())
-            total = itTotal->second;
+            totalInfo = itTotal->second;
 
         FunctionResult fr;
         fr.name       = F.getName().str();
-        fr.localStack = local;
-        fr.maxStack   = total;
+        fr.localStack = localInfo.bytes;
+        fr.localStackUnknown = localInfo.unknown;
+        fr.maxStack   = totalInfo.bytes;
+        fr.maxStackUnknown = totalInfo.unknown;
+        fr.hasDynamicAlloca = localInfo.hasDynamicAlloca;
         fr.isRecursive = state.RecursiveFuncs.count(Fn) != 0;
         fr.hasInfiniteSelfRecursion = state.InfiniteRecursionFuncs.count(Fn) != 0;
-        fr.exceedsLimit = (total > config.stackLimit);
+        fr.exceedsLimit = (!fr.maxStackUnknown && totalInfo.bytes > config.stackLimit);
 
         result.functions.push_back(std::move(fr));
     }
@@ -2538,8 +2557,23 @@ std::string toJson(const AnalysisResult &result,
         const auto &f = result.functions[i];
         os << "    {\n";
         os << "      \"name\": \"" << jsonEscape(f.name) << "\",\n";
-        os << "      \"localStack\": " << f.localStack << ",\n";
-        os << "      \"maxStack\": " << f.maxStack << ",\n";
+        os << "      \"localStack\": ";
+        if (f.localStackUnknown) {
+            os << "null";
+        } else {
+            os << f.localStack;
+        }
+        os << ",\n";
+        os << "      \"localStackUnknown\": " << (f.localStackUnknown ? "true" : "false") << ",\n";
+        os << "      \"maxStack\": ";
+        if (f.maxStackUnknown) {
+            os << "null";
+        } else {
+            os << f.maxStack;
+        }
+        os << ",\n";
+        os << "      \"maxStackUnknown\": " << (f.maxStackUnknown ? "true" : "false") << ",\n";
+        os << "      \"hasDynamicAlloca\": " << (f.hasDynamicAlloca ? "true" : "false") << ",\n";
         os << "      \"isRecursive\": " << (f.isRecursive ? "true" : "false") << ",\n";
         os << "      \"hasInfiniteSelfRecursion\": " << (f.hasInfiniteSelfRecursion ? "true" : "false") << ",\n";
         os << "      \"exceedsLimit\": " << (f.exceedsLimit ? "true" : "false") << "\n";

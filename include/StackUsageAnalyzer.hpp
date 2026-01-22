@@ -41,6 +41,9 @@ struct FunctionResult
     std::string name;
     StackSize   localStack = 0;   // taille frame locale (suivant le mode)
     StackSize   maxStack   = 0;   // max stack incluant les callees
+    bool        localStackUnknown = false; // taille locale inconnue (alloca dynamique)
+    bool        maxStackUnknown   = false; // max stack inconnue (propagée via appels)
+    bool        hasDynamicAlloca  = false; // alloca dynamique détectée dans la fonction
 
     bool isRecursive              = false; // dans un cycle F <-> G ...
     bool hasInfiniteSelfRecursion = false; // heuristique DominatorTree
