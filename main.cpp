@@ -110,8 +110,25 @@ int main(int argc, char **argv)
         param_types.push_back("void"); // dummy to avoid empty vector issue // refaire avec les paramèters réels
 
         llvm::outs() << "Function: " << f.name << " " << ((ctrace_tools::isMangled(f.name)) ? ctrace_tools::demangle(f.name.c_str()) : "") <<  "\n";
-        llvm::outs() << "  local stack: " << f.localStack << " bytes\n";
-        llvm::outs() << "  max stack (including callees): " << f.maxStack << " bytes\n";
+        if (f.localStackUnknown) {
+            llvm::outs() << "  local stack: unknown";
+            if (f.localStack > 0) {
+                llvm::outs() << " (>= " << f.localStack << " bytes)";
+            }
+            llvm::outs() << "\n";
+        } else {
+            llvm::outs() << "  local stack: " << f.localStack << " bytes\n";
+        }
+
+        if (f.maxStackUnknown) {
+            llvm::outs() << "  max stack (including callees): unknown";
+            if (f.maxStack > 0) {
+                llvm::outs() << " (>= " << f.maxStack << " bytes)";
+            }
+            llvm::outs() << "\n";
+        } else {
+            llvm::outs() << "  max stack (including callees): " << f.maxStack << " bytes\n";
+        }
 
         if (f.isRecursive) {
             llvm::outs() << "  [!] recursive or mutually recursive function detected\n";
