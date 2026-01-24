@@ -109,13 +109,14 @@ enum class DescriptiveErrorCode
     MultipleStoresToStackBuffer = 6,
     AllocaUserControlled        = 7,
     AllocaTooLarge              = 8,
-    AllocaUsageWarning          = 9
+    AllocaUsageWarning          = 9,
+    InvalidBaseReconstruction   = 10
 };
 
 template<>
 struct EnumTraits<DescriptiveErrorCode>
 {
-    static constexpr std::array<std::string_view, 10> names = {
+    static constexpr std::array<std::string_view, 11> names = {
         "None",
         "StackBufferOverflow",
         "NegativeStackIndex",
@@ -125,7 +126,8 @@ struct EnumTraits<DescriptiveErrorCode>
         "MultipleStoresToStackBuffer",
         "AllocaUserControlled",
         "AllocaTooLarge",
-        "AllocaUsageWarning"
+        "AllocaUsageWarning",
+        "InvalidBaseReconstruction"
     };
 };
 

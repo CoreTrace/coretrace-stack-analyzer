@@ -150,6 +150,17 @@ struct StackPointerEscapeIssue {
     std::string  targetName;  // nom du global, si applicable
     const llvm::Instruction *inst = nullptr;
 };
+
+// Rapport interne pour les reconstructions invalides de pointeur de base (offsetof/container_of)
+struct InvalidBaseReconstructionIssue {
+    std::string  funcName;
+    std::string  varName;           // nom de la variable alloca (stack object)
+    std::string  sourceMember;      // membre source (ex: "b")
+    int64_t      offsetUsed = 0;    // offset utilisé dans le calcul (peut être négatif)
+    std::string  targetType;        // type vers lequel on cast (ex: "struct A*")
+    bool         isOutOfBounds = false;  // true si on peut prouver que c'est hors bornes
+    const llvm::Instruction *inst = nullptr;
+};
 // Analyse intra-fonction pour détecter les "fuites" de pointeurs de stack :
 //  - retour d'une adresse de variable locale (return buf;)
 //  - stockage de l'adresse d'une variable locale dans un global (global = buf;)
@@ -310,6 +321,282 @@ static void analyzeStackPointerEscapesInFunction(
                     // Autres usages (load, comparaison, etc.) : pas une fuite,
                     // et on ne propage pas davantage.
                 }
+            }
+        }
+    }
+}
+
+// --------------------------------------------------------------------------
+// Détection des reconstructions invalides de pointeur de base (offsetof/container_of)
+// --------------------------------------------------------------------------
+
+// Forward declaration
+static std::optional<StackSize>
+getAllocaTotalSizeBytes(const llvm::AllocaInst *AI, const llvm::DataLayout &DL);
+
+// Détecte les patterns de type:
+//   inttoptr(ptrtoint(P) +/- C)
+//   ou (char*)P +/- C
+// où P est un membre d'une structure sur la stack et C est un offset constant,
+// et le résultat est utilisé comme pointeur vers la structure de base.
+//
+// Ce pattern est typiquement utilisé dans container_of() / offsetof() mais peut
+// être incorrect si l'offset ne correspond pas au membre réel.
+static void analyzeInvalidBaseReconstructionsInFunction(
+    llvm::Function &F,
+    const llvm::DataLayout &DL,
+    std::vector<InvalidBaseReconstructionIssue> &out)
+{
+    using namespace llvm;
+
+    if (F.isDeclaration())
+        return;
+
+    // Recherche des allocas (objets stack)
+    std::map<const AllocaInst*, std::pair<std::string, uint64_t>> allocaInfo;
+    
+    for (BasicBlock &BB : F) {
+        for (Instruction &I : BB) {
+            auto *AI = dyn_cast<AllocaInst>(&I);
+            if (!AI)
+                continue;
+
+            // Calcul de la taille de l'objet alloué
+            std::optional<StackSize> sizeOpt = getAllocaTotalSizeBytes(AI, DL);
+            if (!sizeOpt.has_value())
+                continue; // Taille dynamique, on ne peut pas analyser
+
+            std::string varName = AI->hasName() ? AI->getName().str() : std::string("<unnamed>");
+            allocaInfo[AI] = {varName, sizeOpt.value()};
+        }
+    }
+
+    // Maintenant, recherchons les patterns de reconstruction de pointeur de base
+    for (BasicBlock &BB : F) {
+        for (Instruction &I : BB) {
+            
+            // Pattern 1: inttoptr(ptrtoint(P) +/- C)
+            if (auto *ITP = dyn_cast<IntToPtrInst>(&I)) {
+                Value *IntVal = ITP->getOperand(0);
+                
+                // Chercher une addition/soustraction
+                if (auto *BinOp = dyn_cast<BinaryOperator>(IntVal)) {
+                    if (BinOp->getOpcode() != Instruction::Add &&
+                        BinOp->getOpcode() != Instruction::Sub)
+                        continue;
+
+                    // Vérifier si un des opérandes est ptrtoint
+                    PtrToIntInst *PTI = nullptr;
+                    ConstantInt *OffsetCI = nullptr;
+
+                    if (auto *PTI0 = dyn_cast<PtrToIntInst>(BinOp->getOperand(0))) {
+                        PTI = PTI0;
+                        OffsetCI = dyn_cast<ConstantInt>(BinOp->getOperand(1));
+                    } else if (auto *PTI1 = dyn_cast<PtrToIntInst>(BinOp->getOperand(1))) {
+                        PTI = PTI1;
+                        OffsetCI = dyn_cast<ConstantInt>(BinOp->getOperand(0));
+                    }
+
+                    if (!PTI || !OffsetCI)
+                        continue;
+
+                    // Récupérer le pointeur original
+                    Value *OrigPtr = PTI->getOperand(0);
+                    
+                    // Remonter à travers bitcasts et GEPs pour trouver l'alloca source
+                    const AllocaInst *SourceAlloca = nullptr;
+                    int64_t memberOffset = 0;
+                    
+                    SmallVector<const Value*, 8> worklist;
+                    SmallPtrSet<const Value*, 8> visited;
+                    worklist.push_back(OrigPtr);
+                    
+                    while (!worklist.empty() && !SourceAlloca) {
+                        const Value *V = worklist.back();
+                        worklist.pop_back();
+                        
+                        if (!visited.insert(V).second)
+                            continue;
+                        
+                        if (auto *AI = dyn_cast<AllocaInst>(V)) {
+                            SourceAlloca = AI;
+                            break;
+                        }
+                        
+                        if (auto *BC = dyn_cast<BitCastInst>(V)) {
+                            worklist.push_back(BC->getOperand(0));
+                        } else if (auto *GEP = dyn_cast<GetElementPtrInst>(V)) {
+                            // Essayer de calculer l'offset du GEP
+                            APInt offset(64, 0);
+                            if (GEP->accumulateConstantOffset(DL, offset)) {
+                                memberOffset += offset.getSExtValue();
+                            }
+                            worklist.push_back(GEP->getPointerOperand());
+                        }
+                    }
+
+                    if (!SourceAlloca)
+                        continue;
+
+                    auto it = allocaInfo.find(SourceAlloca);
+                    if (it == allocaInfo.end())
+                        continue;
+
+                    const std::string &varName = it->second.first;
+                    uint64_t allocaSize = it->second.second;
+
+                    // Calculer l'offset total appliqué
+                    int64_t totalOffset = OffsetCI->getSExtValue();
+                    if (BinOp->getOpcode() == Instruction::Sub)
+                        totalOffset = -totalOffset;
+
+                    // Calculer le pointeur résultant par rapport à l'alloca de base
+                    int64_t resultOffset = memberOffset + totalOffset;
+
+                    // Vérifier si le pointeur résultant est en dehors de l'objet
+                    bool isOutOfBounds = (resultOffset < 0) || 
+                                        (static_cast<uint64_t>(resultOffset) >= allocaSize);
+
+                    // Récupérer le type cible
+                    std::string targetType;
+                    Type *targetTy = ITP->getType();
+                    if (auto *PtrTy = dyn_cast<PointerType>(targetTy)) {
+                        raw_string_ostream rso(targetType);
+                        PtrTy->print(rso);
+                    }
+
+                    // Créer le rapport
+                    InvalidBaseReconstructionIssue issue;
+                    issue.funcName = F.getName().str();
+                    issue.varName = varName;
+                    issue.sourceMember = memberOffset != 0 ? 
+                        ("offset +" + std::to_string(memberOffset)) : "base";
+                    issue.offsetUsed = totalOffset;
+                    issue.targetType = targetType.empty() ? "<unknown>" : targetType;
+                    issue.isOutOfBounds = isOutOfBounds;
+                    issue.inst = &I;
+
+                    out.push_back(std::move(issue));
+                }
+            }
+            
+            // Pattern 2: GEP avec offset négatif sur un membre
+            // (équivalent à (char*)ptr + offset)
+            if (auto *GEP = dyn_cast<GetElementPtrInst>(&I)) {
+                // Vérifier si c'est un GEP sur i8* (char*)
+                Value *PtrOp = GEP->getPointerOperand();
+                Type *SrcTy = PtrOp->getType();
+                
+                if (!SrcTy->isPointerTy())
+                    continue;
+
+                // Essayer de calculer l'offset
+                APInt offset(64, 0);
+                if (!GEP->accumulateConstantOffset(DL, offset))
+                    continue;
+
+                int64_t gepOffset = offset.getSExtValue();
+                
+                // Si l'offset est négatif, c'est suspect (container_of pattern)
+                if (gepOffset >= 0)
+                    continue; // Offset positif, probablement normal
+
+                // Remonter pour trouver l'alloca source et le member offset
+                // en suivant les loads, stores, GEPs, bitcasts
+                const AllocaInst *SourceAlloca = nullptr;
+                int64_t memberOffset = 0;
+                
+                SmallVector<const Value*, 16> worklist;
+                SmallPtrSet<const Value*, 16> visited;
+                std::map<const Value*, int64_t> valueOffsets; // Track offsets for each value
+                
+                worklist.push_back(PtrOp);
+                valueOffsets[PtrOp] = 0;
+                
+                while (!worklist.empty() && !SourceAlloca) {
+                    const Value *V = worklist.back();
+                    worklist.pop_back();
+                    
+                    if (!visited.insert(V).second)
+                        continue;
+                    
+                    int64_t currentOffset = valueOffsets[V];
+                    
+                    if (auto *AI = dyn_cast<AllocaInst>(V)) {
+                        // Check if this is a struct alloca (the base object)
+                        Type *allocaTy = AI->getAllocatedType();
+                        if (allocaTy->isStructTy()) {
+                            SourceAlloca = AI;
+                            memberOffset = currentOffset;
+                            break;
+                        }
+                        // If it's a pointer alloca, we need to find what it points to
+                        // Look for stores to this alloca
+                        for (auto *User : AI->users()) {
+                            if (auto *SI = dyn_cast<StoreInst>(User)) {
+                                if (SI->getPointerOperand() == AI) {
+                                    const Value *StoredVal = SI->getValueOperand();
+                                    if (!visited.count(StoredVal)) {
+                                        worklist.push_back(StoredVal);
+                                        valueOffsets[StoredVal] = currentOffset;
+                                    }
+                                }
+                            }
+                        }
+                    } else if (auto *BC = dyn_cast<BitCastInst>(V)) {
+                        const Value *Src = BC->getOperand(0);
+                        worklist.push_back(Src);
+                        valueOffsets[Src] = currentOffset;
+                    } else if (auto *InnerGEP = dyn_cast<GetElementPtrInst>(V)) {
+                        APInt innerOffset(64, 0);
+                        int64_t addOffset = 0;
+                        if (InnerGEP->accumulateConstantOffset(DL, innerOffset)) {
+                            addOffset = innerOffset.getSExtValue();
+                        }
+                        const Value *Src = InnerGEP->getPointerOperand();
+                        worklist.push_back(Src);
+                        valueOffsets[Src] = currentOffset + addOffset;
+                    } else if (auto *LI = dyn_cast<LoadInst>(V)) {
+                        // Load from a pointer variable - follow back to find what was stored
+                        const Value *PtrOp = LI->getPointerOperand();
+                        worklist.push_back(PtrOp);
+                        valueOffsets[PtrOp] = currentOffset;
+                    }
+                }
+
+                if (!SourceAlloca)
+                    continue;
+
+                auto it = allocaInfo.find(SourceAlloca);
+                if (it == allocaInfo.end())
+                    continue;
+
+                const std::string &varName = it->second.first;
+                uint64_t allocaSize = it->second.second;
+
+                // Le pointeur résultant
+                int64_t resultOffset = memberOffset + gepOffset;
+                
+                bool isOutOfBounds = (resultOffset < 0) || 
+                                    (static_cast<uint64_t>(resultOffset) >= allocaSize);
+
+                // Type cible
+                std::string targetType;
+                Type *targetTy = GEP->getType();
+                raw_string_ostream rso(targetType);
+                targetTy->print(rso);
+
+                InvalidBaseReconstructionIssue issue;
+                issue.funcName = F.getName().str();
+                issue.varName = varName;
+                issue.sourceMember = memberOffset != 0 ? 
+                    ("offset +" + std::to_string(memberOffset)) : "base";
+                issue.offsetUsed = gepOffset;
+                issue.targetType = targetType;
+                issue.isOutOfBounds = isOutOfBounds;
+                issue.inst = &I;
+
+                out.push_back(std::move(issue));
             }
         }
     }
@@ -2308,7 +2595,77 @@ AnalysisResult analyzeModule(llvm::Module &mod,
         result.diagnostics.push_back(std::move(diag));
     }
 
-    // 13) Détection de fuite de pointeurs de stack (use-after-return potentiel)
+    // 13) Détection des reconstructions invalides de pointeur de base (offsetof/container_of)
+    std::vector<InvalidBaseReconstructionIssue> baseReconIssues;
+    for (llvm::Function &F : mod) {
+        if (F.isDeclaration())
+            continue;
+        analyzeInvalidBaseReconstructionsInFunction(F, DL, baseReconIssues);
+    }
+
+    for (const auto &br : baseReconIssues)
+    {
+        unsigned line = 0;
+        unsigned column = 0;
+        unsigned startLine   = 0;
+        unsigned startColumn = 0;
+        unsigned endLine     = 0;
+        unsigned endColumn   = 0;
+        bool haveLoc = false;
+
+        if (br.inst) {
+            llvm::DebugLoc DL = br.inst->getDebugLoc();
+            if (DL) {
+                line   = DL.getLine();
+                startLine   = DL.getLine();
+                startColumn = DL.getCol();
+                column = DL.getCol();
+                endLine     = DL.getLine();
+                endColumn   = DL.getCol();
+                haveLoc = true;
+
+                if (auto *loc = DL.get()) {
+                    if (auto *scope = llvm::dyn_cast<llvm::DILocation>(loc)) {
+                        if (scope->getColumn() != 0) {
+                            endColumn = scope->getColumn() + 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        std::ostringstream body;
+
+        body << "  [!!] potential UB: invalid base reconstruction via offsetof/container_of\n";
+        body << "       variable: '" << br.varName << "'\n";
+        body << "       source member: " << br.sourceMember << "\n";
+        body << "       offset applied: " << (br.offsetUsed >= 0 ? "+" : "") 
+             << br.offsetUsed << " bytes\n";
+        body << "       target type: " << br.targetType << "\n";
+
+        if (br.isOutOfBounds) {
+            body << "       [ERROR] derived pointer points OUTSIDE the valid object range\n";
+            body << "               (this will cause undefined behavior if dereferenced)\n";
+        } else {
+            body << "       [WARNING] unable to verify that derived pointer points to a valid object\n";
+            body << "                 (potential undefined behavior if offset is incorrect)\n";
+        }
+
+        Diagnostic diag;
+        diag.funcName    = br.funcName;
+        diag.line        = haveLoc ? line : 0;
+        diag.column      = haveLoc ? column : 0;
+        diag.startLine   = haveLoc ? startLine : 0;
+        diag.startColumn = haveLoc ? startColumn : 0;
+        diag.endLine     = haveLoc ? endLine : 0;
+        diag.endColumn   = haveLoc ? endColumn : 0;
+        diag.severity    = br.isOutOfBounds ? DiagnosticSeverity::Error : DiagnosticSeverity::Warning;
+        diag.errCode     = DescriptiveErrorCode::InvalidBaseReconstruction;
+        diag.message     = body.str();
+        result.diagnostics.push_back(std::move(diag));
+    }
+
+    // 14) Détection de fuite de pointeurs de stack (use-after-return potentiel)
     std::vector<StackPointerEscapeIssue> escapeIssues;
     for (llvm::Function &F : mod) {
         if (F.isDeclaration())
