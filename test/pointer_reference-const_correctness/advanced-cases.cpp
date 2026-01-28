@@ -21,9 +21,9 @@ void caller_ref_mut(int &v) {
 }
 
 // at line 27, column 0
-// [!]ConstParameterNotModified.ReferenceRvalue: parameter 'v' in function 'rvalue_use(int&&)' is never used to modify the referred object
+// [!]ConstParameterNotModified.ReferenceRvaluePreferValue: parameter 'v' in function 'rvalue_use(int&&)' is an rvalue reference and is never used to modify the referred object
+//     consider passing by value (int v) or const reference (const int &v)
 //     current type: int &&v
-//     suggested type: const int &&v
 int rvalue_use(int &&v) {
     return v;
 }
