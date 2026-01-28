@@ -135,7 +135,6 @@ def check_file(c_path: Path):
             print("----- Expected block -----")
             print(exp)
             print("----- Analyzer output (normalized) -----")
-            # tu peux commenter cette ligne si l'output est trop gros
             # print(norm_output)
             print("---------------------------")
             all_ok = False
