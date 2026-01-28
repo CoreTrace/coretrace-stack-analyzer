@@ -3936,8 +3936,9 @@ AnalysisResult analyzeFile(const std::string &filename,
         args.push_back("-emit-llvm");
         args.push_back("-S");
         args.push_back("-g");
-        // args.push_back("-O0");
-        // std::cout << "-O0 enabled for stack analysis compilation\n";
+        if (lang == LanguageType::CXX) {
+            args.push_back("-std=c++17");
+        }
         args.push_back("-fno-discard-value-names");
         args.push_back(filename);
         compilerlib::OutputMode mode = compilerlib::OutputMode::ToMemory;
