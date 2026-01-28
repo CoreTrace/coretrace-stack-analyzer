@@ -947,226 +947,192 @@ static void analyzeInvalidBaseReconstructionsInFunction(
             
             // Pattern 1: inttoptr(ptrtoint(P) +/- C)
             if (auto *ITP = dyn_cast<IntToPtrInst>(&I)) {
+                if (!isPointerDereferencedOrUsed(ITP))
+                    continue;
+
                 Value *IntVal = ITP->getOperand(0);
-                
-                // Chercher une addition/soustraction
-                if (auto *BinOp = dyn_cast<BinaryOperator>(IntVal)) {
-                    if (BinOp->getOpcode() != Instruction::Add &&
-                        BinOp->getOpcode() != Instruction::Sub)
-                        continue;
 
-                    // Vérifier si un des opérandes est ptrtoint
-                    PtrToIntInst *PTI = nullptr;
-                    ConstantInt *OffsetCI = nullptr;
+                SmallVector<PtrIntMatch, 8> matches;
+                collectPtrToIntMatches(IntVal, matches);
+                if (matches.empty())
+                    continue;
 
-                    if (auto *PTI0 = dyn_cast<PtrToIntInst>(BinOp->getOperand(0))) {
-                        PTI = PTI0;
-                        OffsetCI = dyn_cast<ConstantInt>(BinOp->getOperand(1));
-                    } else if (auto *PTI1 = dyn_cast<PtrToIntInst>(BinOp->getOperand(1))) {
-                        PTI = PTI1;
-                        OffsetCI = dyn_cast<ConstantInt>(BinOp->getOperand(0));
-                    }
-
-                    if (!PTI || !OffsetCI)
-                        continue;
-
-                    // Récupérer le pointeur original
-                    Value *OrigPtr = PTI->getOperand(0);
-                    
-                    // Remonter à travers bitcasts et GEPs pour trouver l'alloca source
-                    const AllocaInst *SourceAlloca = nullptr;
-                    int64_t memberOffset = 0;
-                    
-                    SmallVector<const Value*, 8> worklist;
-                    SmallPtrSet<const Value*, 8> visited;
-                    worklist.push_back(OrigPtr);
-                    
-                    while (!worklist.empty() && !SourceAlloca) {
-                        const Value *V = worklist.back();
-                        worklist.pop_back();
-                        
-                        if (!visited.insert(V).second)
-                            continue;
-                        
-                        if (auto *AI = dyn_cast<AllocaInst>(V)) {
-                            SourceAlloca = AI;
-                            break;
-                        }
-                        
-                        if (auto *BC = dyn_cast<BitCastInst>(V)) {
-                            worklist.push_back(BC->getOperand(0));
-                        } else if (auto *GEP = dyn_cast<GetElementPtrInst>(V)) {
-                            // Essayer de calculer l'offset du GEP
-                            APInt offset(64, 0);
-                            if (GEP->accumulateConstantOffset(DL, offset)) {
-                                memberOffset += offset.getSExtValue();
-                            }
-                            worklist.push_back(GEP->getPointerOperand());
-                        }
-                    }
-
-                    if (!SourceAlloca)
-                        continue;
-
-                    auto it = allocaInfo.find(SourceAlloca);
-                    if (it == allocaInfo.end())
-                        continue;
-
-                    const std::string &varName = it->second.first;
-                    uint64_t allocaSize = it->second.second;
-
-                    // Calculer l'offset total appliqué
-                    int64_t totalOffset = OffsetCI->getSExtValue();
-                    if (BinOp->getOpcode() == Instruction::Sub)
-                        totalOffset = -totalOffset;
-
-                    // Calculer le pointeur résultant par rapport à l'alloca de base
-                    int64_t resultOffset = memberOffset + totalOffset;
-
-                    // Vérifier si le pointeur résultant est en dehors de l'objet
-                    bool isOutOfBounds = (resultOffset < 0) || 
-                                        (static_cast<uint64_t>(resultOffset) >= allocaSize);
-
-                    // Récupérer le type cible
+                struct AggEntry {
+                    std::set<int64_t> memberOffsets;
+                    bool anyOutOfBounds = false;
+                    bool anyNonZeroResult = false;
+                    std::string varName;
+                    uint64_t allocaSize = 0;
                     std::string targetType;
-                    Type *targetTy = ITP->getType();
-                    if (auto *PtrTy = dyn_cast<PointerType>(targetTy)) {
-                        raw_string_ostream rso(targetType);
-                        PtrTy->print(rso);
+                };
+
+                std::map<std::pair<const llvm::AllocaInst*, int64_t>, AggEntry> agg;
+
+                for (const auto &match : matches) {
+                    if (!match.sawOffset)
+                        continue;
+
+                    SmallVector<PtrOrigin, 8> origins;
+                    collectPointerOrigins(match.ptrOperand, DL, origins);
+                    if (origins.empty())
+                        continue;
+
+                    for (const auto &origin : origins) {
+                        auto it = allocaInfo.find(origin.alloca);
+                        if (it == allocaInfo.end())
+                            continue;
+
+                        const std::string &varName = it->second.first;
+                        uint64_t allocaSize = it->second.second;
+
+                        int64_t resultOffset = origin.offset + match.offset;
+                        bool isOutOfBounds = (resultOffset < 0) ||
+                                             (static_cast<uint64_t>(resultOffset) >= allocaSize);
+
+                        std::string targetType;
+                        Type *targetTy = ITP->getType();
+                        if (auto *PtrTy = dyn_cast<PointerType>(targetTy)) {
+                            raw_string_ostream rso(targetType);
+                            PtrTy->print(rso);
+                        }
+
+                        auto key = std::make_pair(origin.alloca, match.offset);
+                        auto &entry = agg[key];
+                        entry.memberOffsets.insert(origin.offset);
+                        entry.anyOutOfBounds |= isOutOfBounds;
+                        if (resultOffset != 0)
+                            entry.anyNonZeroResult = true;
+                        entry.varName = varName;
+                        entry.allocaSize = allocaSize;
+                        entry.targetType = targetType.empty() ? "<unknown>" : targetType;
+                    }
+                }
+
+                for (auto &kv : agg) {
+                    const auto &entry = kv.second;
+                    if (entry.memberOffsets.empty())
+                        continue;
+                    if (!entry.anyOutOfBounds && !entry.anyNonZeroResult)
+                        continue;
+
+                    std::ostringstream memberStr;
+                    if (entry.memberOffsets.size() == 1) {
+                        int64_t mo = *entry.memberOffsets.begin();
+                        memberStr << (mo != 0 ? "offset +" + std::to_string(mo) : "base");
+                    } else {
+                        memberStr << "offsets ";
+                        bool first = true;
+                        for (int64_t mo : entry.memberOffsets) {
+                            if (!first)
+                                memberStr << ", ";
+                            memberStr << (mo != 0 ? "+" + std::to_string(mo) : "base");
+                            first = false;
+                        }
                     }
 
-                    // Créer le rapport
                     InvalidBaseReconstructionIssue issue;
                     issue.funcName = F.getName().str();
-                    issue.varName = varName;
-                    issue.sourceMember = memberOffset != 0 ? 
-                        ("offset +" + std::to_string(memberOffset)) : "base";
-                    issue.offsetUsed = totalOffset;
-                    issue.targetType = targetType.empty() ? "<unknown>" : targetType;
-                    issue.isOutOfBounds = isOutOfBounds;
+                    issue.varName = entry.varName;
+                    issue.sourceMember = memberStr.str();
+                    issue.offsetUsed = kv.first.second;
+                    issue.targetType = entry.targetType;
+                    issue.isOutOfBounds = entry.anyOutOfBounds;
                     issue.inst = &I;
 
                     out.push_back(std::move(issue));
                 }
             }
             
-            // Pattern 2: GEP avec offset négatif sur un membre
+            // Pattern 2: GEP avec offset constant sur un membre
             // (équivalent à (char*)ptr + offset)
             if (auto *GEP = dyn_cast<GetElementPtrInst>(&I)) {
-                // Vérifier si c'est un GEP sur i8* (char*)
-                Value *PtrOp = GEP->getPointerOperand();
-                Type *SrcTy = PtrOp->getType();
-                
-                if (!SrcTy->isPointerTy())
+                if (!isPointerDereferencedOrUsed(GEP))
                     continue;
 
-                // Essayer de calculer l'offset
-                APInt offset(64, 0);
-                if (!GEP->accumulateConstantOffset(DL, offset))
+                int64_t gepOffset = 0;
+                const Value *PtrOp = nullptr;
+                if (!getGEPConstantOffsetAndBase(GEP, DL, gepOffset, PtrOp))
                     continue;
 
-                int64_t gepOffset = offset.getSExtValue();
-                
-                // Si l'offset est négatif, c'est suspect (container_of pattern)
-                if (gepOffset >= 0)
-                    continue; // Offset positif, probablement normal
+                SmallVector<PtrOrigin, 8> origins;
+                collectPointerOrigins(PtrOp, DL, origins);
+                if (origins.empty())
+                    continue;
 
-                // Remonter pour trouver l'alloca source et le member offset
-                // en suivant les loads, stores, GEPs, bitcasts
-                const AllocaInst *SourceAlloca = nullptr;
-                int64_t memberOffset = 0;
-                
-                SmallVector<const Value*, 16> worklist;
-                SmallPtrSet<const Value*, 16> visited;
-                std::map<const Value*, int64_t> valueOffsets; // Track offsets for each value
-                
-                worklist.push_back(PtrOp);
-                valueOffsets[PtrOp] = 0;
-                
-                while (!worklist.empty() && !SourceAlloca) {
-                    const Value *V = worklist.back();
-                    worklist.pop_back();
-                    
-                    if (!visited.insert(V).second)
+                struct AggEntry {
+                    std::set<int64_t> memberOffsets;
+                    bool anyOutOfBounds = false;
+                    bool anyNonZeroResult = false;
+                    std::string varName;
+                    std::string targetType;
+                };
+
+                std::map<const llvm::AllocaInst*, AggEntry> agg;
+
+                for (const auto &origin : origins) {
+                    if (origin.offset == 0 && gepOffset >= 0) {
+                        // Likely a normal member access from the base object.
                         continue;
-                    
-                    int64_t currentOffset = valueOffsets[V];
-                    
-                    if (auto *AI = dyn_cast<AllocaInst>(V)) {
-                        // Check if this is a struct alloca (the base object)
-                        Type *allocaTy = AI->getAllocatedType();
-                        if (allocaTy->isStructTy()) {
-                            SourceAlloca = AI;
-                            memberOffset = currentOffset;
-                            break;
-                        }
-                        // If it's a pointer alloca, we need to find what it points to
-                        // Look for stores to this alloca
-                        for (auto *User : AI->users()) {
-                            if (auto *SI = dyn_cast<StoreInst>(User)) {
-                                if (SI->getPointerOperand() == AI) {
-                                    const Value *StoredVal = SI->getValueOperand();
-                                    if (!visited.count(StoredVal)) {
-                                        worklist.push_back(StoredVal);
-                                        valueOffsets[StoredVal] = currentOffset;
-                                    }
-                                }
-                            }
-                        }
-                    } else if (auto *BC = dyn_cast<BitCastInst>(V)) {
-                        const Value *Src = BC->getOperand(0);
-                        worklist.push_back(Src);
-                        valueOffsets[Src] = currentOffset;
-                    } else if (auto *InnerGEP = dyn_cast<GetElementPtrInst>(V)) {
-                        APInt innerOffset(64, 0);
-                        int64_t addOffset = 0;
-                        if (InnerGEP->accumulateConstantOffset(DL, innerOffset)) {
-                            addOffset = innerOffset.getSExtValue();
-                        }
-                        const Value *Src = InnerGEP->getPointerOperand();
-                        worklist.push_back(Src);
-                        valueOffsets[Src] = currentOffset + addOffset;
-                    } else if (auto *LI = dyn_cast<LoadInst>(V)) {
-                        // Load from a pointer variable - follow back to find what was stored
-                        const Value *PtrOp = LI->getPointerOperand();
-                        worklist.push_back(PtrOp);
-                        valueOffsets[PtrOp] = currentOffset;
                     }
+
+                    auto it = allocaInfo.find(origin.alloca);
+                    if (it == allocaInfo.end())
+                        continue;
+
+                    const std::string &varName = it->second.first;
+                    uint64_t allocaSize = it->second.second;
+
+                    int64_t resultOffset = origin.offset + gepOffset;
+                    bool isOutOfBounds = (resultOffset < 0) ||
+                                         (static_cast<uint64_t>(resultOffset) >= allocaSize);
+
+                    std::string targetType;
+                    Type *targetTy = GEP->getType();
+                    raw_string_ostream rso(targetType);
+                    targetTy->print(rso);
+
+                    auto &entry = agg[origin.alloca];
+                    entry.memberOffsets.insert(origin.offset);
+                    entry.anyOutOfBounds |= isOutOfBounds;
+                    if (resultOffset != 0)
+                        entry.anyNonZeroResult = true;
+                    entry.varName = varName;
+                    entry.targetType = targetType;
                 }
 
-                if (!SourceAlloca)
-                    continue;
+                for (auto &kv : agg) {
+                    const auto &entry = kv.second;
+                    if (entry.memberOffsets.empty())
+                        continue;
+                    if (!entry.anyOutOfBounds && !entry.anyNonZeroResult)
+                        continue;
 
-                auto it = allocaInfo.find(SourceAlloca);
-                if (it == allocaInfo.end())
-                    continue;
+                    std::ostringstream memberStr;
+                    if (entry.memberOffsets.size() == 1) {
+                        int64_t mo = *entry.memberOffsets.begin();
+                        memberStr << (mo != 0 ? "offset +" + std::to_string(mo) : "base");
+                    } else {
+                        memberStr << "offsets ";
+                        bool first = true;
+                        for (int64_t mo : entry.memberOffsets) {
+                            if (!first)
+                                memberStr << ", ";
+                            memberStr << (mo != 0 ? "+" + std::to_string(mo) : "base");
+                            first = false;
+                        }
+                    }
 
-                const std::string &varName = it->second.first;
-                uint64_t allocaSize = it->second.second;
+                    InvalidBaseReconstructionIssue issue;
+                    issue.funcName = F.getName().str();
+                    issue.varName = entry.varName;
+                    issue.sourceMember = memberStr.str();
+                    issue.offsetUsed = gepOffset;
+                    issue.targetType = entry.targetType;
+                    issue.isOutOfBounds = entry.anyOutOfBounds;
+                    issue.inst = &I;
 
-                // Le pointeur résultant
-                int64_t resultOffset = memberOffset + gepOffset;
-                
-                bool isOutOfBounds = (resultOffset < 0) || 
-                                    (static_cast<uint64_t>(resultOffset) >= allocaSize);
-
-                // Type cible
-                std::string targetType;
-                Type *targetTy = GEP->getType();
-                raw_string_ostream rso(targetType);
-                targetTy->print(rso);
-
-                InvalidBaseReconstructionIssue issue;
-                issue.funcName = F.getName().str();
-                issue.varName = varName;
-                issue.sourceMember = memberOffset != 0 ? 
-                    ("offset +" + std::to_string(memberOffset)) : "base";
-                issue.offsetUsed = gepOffset;
-                issue.targetType = targetType;
-                issue.isOutOfBounds = isOutOfBounds;
-                issue.inst = &I;
-
-                out.push_back(std::move(issue));
+                    out.push_back(std::move(issue));
+                }
             }
         }
     }
@@ -3209,7 +3175,7 @@ AnalysisResult analyzeModule(llvm::Module &mod,
         body << "  [!!] potential UB: invalid base reconstruction via offsetof/container_of\n";
         body << "       variable: '" << br.varName << "'\n";
         body << "       source member: " << br.sourceMember << "\n";
-        body << "       offset applied: " << (br.offsetUsed >= 0 ? "+" : "") 
+        body << "       offset applied: " << (br.offsetUsed >= 0 ? "+" : "")
              << br.offsetUsed << " bytes\n";
         body << "       target type: " << br.targetType << "\n";
 
@@ -3365,6 +3331,8 @@ AnalysisResult analyzeFile(const std::string &filename,
         args.push_back("-emit-llvm");
         args.push_back("-S");
         args.push_back("-g");
+        // args.push_back("-O0");
+        // std::cout << "-O0 enabled for stack analysis compilation\n";
         args.push_back("-fno-discard-value-names");
         args.push_back(filename);
         compilerlib::OutputMode mode = compilerlib::OutputMode::ToMemory;
