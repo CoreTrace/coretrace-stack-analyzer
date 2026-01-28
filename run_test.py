@@ -20,7 +20,11 @@ def normalize(s: str) -> str:
         line = line.rstrip("\n")
         # "a   b   c" -> "a b c"
         parts = line.strip().split()
-        lines.append(" ".join(parts))
+        normalized = " ".join(parts)
+        # Normalize spacing around pointer/reference symbols for cross-platform demangler output.
+        normalized = normalized.replace(" *", "*").replace("* ", "*")
+        normalized = normalized.replace(" &", "&").replace("& ", "&")
+        lines.append(normalized)
     return "\n".join(lines).strip()
 
 
