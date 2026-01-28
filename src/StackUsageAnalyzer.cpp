@@ -3937,7 +3937,9 @@ AnalysisResult analyzeFile(const std::string &filename,
         args.push_back("-S");
         args.push_back("-g");
         if (lang == LanguageType::CXX) {
-            args.push_back("-std=c++17");
+            args.push_back("-x");
+            args.push_back("c++");
+            args.push_back("-std=gnu++17");
         }
         args.push_back("-fno-discard-value-names");
         args.push_back(filename);
