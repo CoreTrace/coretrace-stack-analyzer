@@ -139,7 +139,7 @@ def check_file(c_path: Path):
             print("----- Expected block -----")
             print(exp)
             print("----- Analyzer output (normalized) -----")
-            # print(norm_output)
+            print(f"<{norm_output}>")
             print("---------------------------")
             all_ok = False
 
