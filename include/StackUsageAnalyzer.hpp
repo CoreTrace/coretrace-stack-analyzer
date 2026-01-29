@@ -110,13 +110,14 @@ enum class DescriptiveErrorCode
     AllocaUserControlled        = 7,
     AllocaTooLarge              = 8,
     AllocaUsageWarning          = 9,
-    InvalidBaseReconstruction   = 10
+    InvalidBaseReconstruction   = 10,
+    ConstParameterNotModified   = 11
 };
 
 template<>
 struct EnumTraits<DescriptiveErrorCode>
 {
-    static constexpr std::array<std::string_view, 11> names = {
+    static constexpr std::array<std::string_view, 12> names = {
         "None",
         "StackBufferOverflow",
         "NegativeStackIndex",
@@ -127,7 +128,8 @@ struct EnumTraits<DescriptiveErrorCode>
         "AllocaUserControlled",
         "AllocaTooLarge",
         "AllocaUsageWarning",
-        "InvalidBaseReconstruction"
+        "InvalidBaseReconstruction",
+        "ConstParameterNotModified"
     };
 };
 
@@ -149,6 +151,7 @@ struct Diagnostic
 
     DiagnosticSeverity severity     = DiagnosticSeverity::Warning;
     DescriptiveErrorCode errCode    = DescriptiveErrorCode::None;
+    std::string ruleId;
     std::vector<std::string> variableAliasingVec;
     std::string message;
 };

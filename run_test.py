@@ -20,7 +20,11 @@ def normalize(s: str) -> str:
         line = line.rstrip("\n")
         # "a   b   c" -> "a b c"
         parts = line.strip().split()
-        lines.append(" ".join(parts))
+        normalized = " ".join(parts)
+        # Normalize spacing around pointer/reference symbols for cross-platform demangler output.
+        normalized = normalized.replace(" *", "*").replace("* ", "*")
+        normalized = normalized.replace(" &", "&").replace("& ", "&")
+        lines.append(normalized)
     return "\n".join(lines).strip()
 
 
@@ -108,7 +112,7 @@ def check_help_flags() -> bool:
     return ok
 
 
-def check_file(c_path: Path) -> bool:
+def check_file(c_path: Path):
     """
     Vérifie qu'avec ce fichier, toutes les attentes sont présentes
     dans la sortie de l'analyseur.
@@ -117,48 +121,56 @@ def check_file(c_path: Path) -> bool:
     expectations = extract_expectations(c_path)
     if not expectations:
         print("  (no expectations found, skipping)\n")
-        return True
+        return True, 0, 0
 
     analyzer_output = run_analyzer_on_file(c_path)
     norm_output = normalize(analyzer_output)
 
     all_ok = True
+    total = len(expectations)
+    passed = 0
     for idx, exp in enumerate(expectations, start=1):
         norm_exp = normalize(exp)
         if norm_exp in norm_output:
             print(f"  ✅ expectation #{idx} FOUND")
+            passed += 1
         else:
             print(f"  ❌ expectation #{idx} MISSING")
             print("----- Expected block -----")
             print(exp)
             print("----- Analyzer output (normalized) -----")
-            # tu peux commenter cette ligne si l'output est trop gros
-            # print(norm_output)
+            print(f"<{norm_output}>")
             print("---------------------------")
             all_ok = False
 
     print()
-    return all_ok
+    return all_ok, total, passed
 
 
 def main() -> int:
     global_ok = check_help_flags()
+    total_tests = 0
+    passed_tests = 0
 
-    c_files = sorted(TEST_DIR.glob("**/*.c"))
+    c_files = sorted(list(TEST_DIR.glob("**/*.c")) + list(TEST_DIR.glob("**/*.cpp")))
     if not c_files:
-        print(f"No .c files found under {TEST_DIR}")
+        print(f"No .c/.cpp files found under {TEST_DIR}")
         return 0 if global_ok else 1
 
     for f in c_files:
-        ok = check_file(f)
+        ok, total, passed = check_file(f)
+        passed_tests += passed
+        total_tests += total
         if not ok:
             global_ok = False
 
     if global_ok:
         print("✅ All tests passed.")
+        print(f"✅ Passed {passed_tests}/{total_tests} tests.")
         return 0
     else:
         print("❌ Some tests failed.")
+        print(f"❌ Passed {passed_tests}/{total_tests} tests.")
         return 1
 
 
