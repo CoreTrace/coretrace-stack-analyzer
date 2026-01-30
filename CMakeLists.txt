@@ -126,3 +126,16 @@ if(BUILD_CLI)
         # il est déjà dans la lib
     )
 endif()
+
+# ============
+#  FORMATTING
+# ============
+add_custom_target(format
+  COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/scripts/format.sh"
+  WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+  COMMENT "Run clang-format on source files")
+
+add_custom_target(format-check
+  COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/scripts/format-check.sh"
+  WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+  COMMENT "Verify clang-format compliance")
