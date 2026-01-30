@@ -18,7 +18,7 @@ int main(void)
     //     (this is a write access)
     (*pp)[15] = 'a';
 
-    // at line 27, column 17
+    // at line 28, column 17
     // [!!] potential stack buffer overflow on variable 'test' (size 10)
     //     alias path: test
     //     index variable may go up to 19 (array last valid index: 9)
@@ -28,7 +28,7 @@ int main(void)
         test[i] = 'a';
     }
 
-    // at line 36, column 17
+    // at line 37, column 17
     // [!!] potential stack buffer overflow on variable 'test' (size 10)
     //     alias path: test
     //     index variable may go up to 11 (array last valid index: 9)
@@ -42,7 +42,7 @@ int main(void)
         test[i] = 'b';
     }
 
-    // at line 49, column 16
+    // at line 52, column 16
     // [!!] potential stack buffer overflow on variable 'test' (size 10)
     //     alias path: test -> arraydecay -> ptr
     //     index variable may go up to 19 (array last valid index: 9)

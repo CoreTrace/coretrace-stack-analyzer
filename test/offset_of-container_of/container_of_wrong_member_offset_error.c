@@ -17,7 +17,7 @@ int main(void)
     int32_t* pb = &obj.b;
 
     /* Bug: subtract offset of the WRONG member (i instead of b). */
-    // at line 28, column 50
+    // at line 28, column 48
     // [!!] potential UB: invalid base reconstruction via offsetof/container_of
     //     variable: 'obj'
     //     source member: offset +4

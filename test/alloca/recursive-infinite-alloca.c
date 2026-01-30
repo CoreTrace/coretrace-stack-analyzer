@@ -3,7 +3,7 @@
 
 void boom(size_t n)
 {
-    // at line 12, column 23
+    // at line 12, column 22
     // [!!] user-controlled alloca size for variable 'p'
     //     allocation performed via alloca/VLA; stack usage grows with runtime value
     //     size is unbounded at compile time

@@ -18,7 +18,7 @@ void consume_mut(int* p)
     }
 }
 
-// at line 21, column 0
+// at line 25, column 0
 // [!]ConstParameterNotModified.Pointer: parameter 'p' in function 'caller_const' is never used to modify the pointed object
 //     current type: int *p
 //     suggested type: const int *p
@@ -32,7 +32,7 @@ void caller_mut(int* p)
     consume_mut(p);
 }
 
-// at line 33, column 0
+// at line 39, column 0
 // [!]ConstParameterNotModified.Pointer: parameter 'p' in function 'read_only' is never used to modify the pointed object
 //     current type: int *p
 //     suggested type: const int *p
@@ -47,7 +47,7 @@ void variadic_use(int* p)
     printf("%p\n", (void*)p);
 }
 
-// at line 46, column 0
+// at line 54, column 0
 // [!]ConstParameterNotModified.Pointer: parameter 'reg' in function 'read_mmio' is never used to modify the pointed object
 //     current type: volatile int *reg
 //     suggested type: const volatile int *reg

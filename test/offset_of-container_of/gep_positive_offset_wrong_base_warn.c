@@ -16,7 +16,7 @@ int test_gep_positive_offset_missed(void)
 
     // Wrong reconstruction with a positive offset (+4).
     // Correct behavior: diagnostic (base points inside the object, not at the base).
-    // at line 27, column 50
+    // at line 27, column 48
     // [!!] potential UB: invalid base reconstruction via offsetof/container_of
     //     variable: 'obj'
     //     source member: offset +4

@@ -10,7 +10,7 @@ void consume_ref_mut(int& v)
     v += 1;
 }
 
-// at line 15, column 0
+// at line 17, column 0
 // [!]ConstParameterNotModified.Reference: parameter 'v' in function 'caller_ref(int&)' is never used to modify the referred object
 //     current type: int &v
 //     suggested type: const int &v
@@ -24,7 +24,7 @@ void caller_ref_mut(int& v)
     consume_ref_mut(v);
 }
 
-// at line 27, column 0
+// at line 31, column 0
 // [!]ConstParameterNotModified.ReferenceRvaluePreferValue: parameter 'v' in function 'rvalue_use(int&&)' is an rvalue reference and is never used to modify the referred object
 //     consider passing by value (int v) or const reference (const int &v)
 //     current type: int &&v
@@ -33,7 +33,7 @@ int rvalue_use(int&& v)
     return v;
 }
 
-// at line 35, column 0
+// at line 40, column 0
 // [!]ConstParameterNotModified.Pointer: parameter 'p' in function 'read_only_ptr(int*)' is never used to modify the pointed object
 //     current type: int *p
 //     suggested type: const int *p

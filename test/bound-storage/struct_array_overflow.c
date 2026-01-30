@@ -16,7 +16,7 @@ void ok_direct(void)
 void overflow_eq_10(void)
 {
     struct S s;
-    // at line 24, column 18
+    // at line 25, column 18
     // [!!] potential stack buffer overflow on variable 's' (size 10)
     //     alias path: s -> buf
     //     index variable may go up to 10 (array last valid index: 9)
@@ -28,7 +28,7 @@ void overflow_eq_10(void)
 void overflow_const_index(void)
 {
     struct S s;
-    // at line 35, column 15
+    // at line 36, column 15
     // [!!] potential stack buffer overflow on variable 's' (size 10)
     //     alias path: s -> buf
     //     constant index 11 is out of bounds (0..9)
@@ -41,7 +41,7 @@ void nested_if_overflow(void)
     struct S s;
     int i = 15;
 
-    // at line 49, column 18
+    // at line 50, column 18
     // [!!] potential stack buffer overflow on variable 's' (size 10)
     //     alias path: s -> buf
     //     index variable may go up to 15 (array last valid index: 9)

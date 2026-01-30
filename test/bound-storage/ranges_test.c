@@ -82,7 +82,7 @@ void nested_if_overflow(int i)
 {
     char buf[8];
 
-    // at line 92, column 20
+    // at line 94, column 20
     // [!!] potential stack buffer overflow on variable 'buf' (size 8)
     //     alias path: buf
     //     index variable may go up to 10 (array last valid index: 7)
@@ -128,7 +128,7 @@ void loop_ub_overflow(void)
 {
     char buf[10];
 
-    // at line 133, column 16
+    // at line 137, column 16
     // [!!] potential stack buffer overflow on variable 'buf' (size 10)
     //     alias path: buf
     //     index variable may go up to 10 (array last valid index: 9)
@@ -157,7 +157,7 @@ void unreachable_example(void)
     int i = 1;
     char buf[10];
 
-    // at line 163, column 17
+    // at line 168, column 17
     // [!!] potential stack buffer overflow on variable 'buf' (size 10)
     //     alias path: buf
     //     constant index 11 is out of bounds (0..9)
@@ -179,13 +179,13 @@ void alias_lb_ub(int i)
     char buf[10];
     char* p = buf;
 
-    // at line 189, column 14
+    // at line 194, column 14
     // [!!] potential stack buffer overflow on variable 'buf' (size 10)
     //     alias path: buf -> arraydecay -> p
     //     index variable may go up to 12 (array last valid index: 9)
     //     (this is a write access)
 
-    // at line 189, column 14
+    // at line 194, column 14
     // [!!] potential negative index on variable 'buf' (size 10)
     //     alias path: p -> arraydecay -> buf
     //     inferred lower bound for index expression: -2 (index may be < 0)
@@ -226,13 +226,13 @@ void huge_range(int i)
 {
     char buf[10];
 
-    // at line 236, column 16
+    // at line 241, column 16
     // [!!] potential stack buffer overflow on variable 'buf' (size 10)
     //     alias path: buf
     //     index variable may go up to 100 (array last valid index: 9)
     //     (this is a write access)
 
-    // at line 236, column 16
+    // at line 241, column 16
     // [!!] potential negative index on variable 'buf' (size 10)
     //     alias path: buf
     //     inferred lower bound for index expression: -100 (index may be < 0)

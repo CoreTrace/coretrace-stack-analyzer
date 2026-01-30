@@ -17,7 +17,7 @@ void test_ptrtoint_pattern(void)
     // BUG: using wrong offset (8 instead of 4)
     uintptr_t addr = (uintptr_t)ptr_y;
     addr -= 8;
-    // at line 27, column 31
+    // at line 28, column 31
     // [!!] potential UB: invalid base reconstruction via offsetof/container_of
     //     variable: 'obj'
     //     source member: offset +4

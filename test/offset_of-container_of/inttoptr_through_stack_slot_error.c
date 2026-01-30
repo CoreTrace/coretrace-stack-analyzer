@@ -19,7 +19,7 @@ int test_inttoptr_load_store(void)
 
     uintptr_t addr = (uintptr_t)p;
     addr -= offsetof(struct A, i); // wrong offset (12 instead of 4)
-    // at line 29, column 26
+    // at line 30, column 26
     // [!!] potential UB: invalid base reconstruction via offsetof/container_of
     //     variable: 'obj'
     //     source member: offset +4

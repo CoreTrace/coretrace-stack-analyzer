@@ -14,7 +14,7 @@ void test_invalid_container_of(void)
     int32_t* ptr_b = &obj.field_b;
 
     // BUG: using wrong offset (8 instead of 4)
-    // at line 25, column 69
+    // at line 25, column 67
     // [!!] potential UB: invalid base reconstruction via offsetof/container_of
     //     variable: 'obj'
     //     source member: offset +4
