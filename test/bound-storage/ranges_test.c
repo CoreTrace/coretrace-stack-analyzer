@@ -87,8 +87,10 @@ void nested_if_overflow(int i)
     //     alias path: buf
     //     index variable may go up to 10 (array last valid index: 7)
     //     (this is a write access)
-    if (i <= 10) {
-        if (i > 5) {
+    if (i <= 10)
+    {
+        if (i > 5)
+        {
             buf[i] = 'E';
         }
     }
@@ -99,8 +101,10 @@ void nested_if_ok(int i)
 {
     char buf[16];
 
-    if (i <= 10) {
-        if (i > 5) {
+    if (i <= 10)
+    {
+        if (i > 5)
+        {
             buf[i] = 'F';
         }
     }
@@ -159,7 +163,8 @@ void unreachable_example(void)
     //     constant index 11 is out of bounds (0..9)
     //     (this is a write access)
     //     [info] this access appears unreachable at runtime (condition is always false for this branch)
-    if (i > 10) {    // condition fausse à l’exécution
+    if (i > 10)
+    { // condition fausse à l’exécution
         buf[11] = 'J';
     }
 }
@@ -172,7 +177,7 @@ void unreachable_example(void)
 void alias_lb_ub(int i)
 {
     char buf[10];
-    char *p = buf;
+    char* p = buf;
 
     // at line 189, column 14
     // [!!] potential stack buffer overflow on variable 'buf' (size 10)
@@ -193,7 +198,7 @@ void alias_lb_ub(int i)
 void alias_ok(int i)
 {
     char buf[10];
-    char *p = buf;
+    char* p = buf;
 
     if (i >= 0 && i < 10)
         p[i] = 'L';

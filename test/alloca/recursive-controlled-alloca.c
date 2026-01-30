@@ -9,7 +9,7 @@ int rec(size_t n)
     //     size is unbounded at compile time
     //     function is recursive; this allocation repeats at each recursion depth and can exhaust the stack
     //     size depends on user-controlled input (function argument or non-local value)
-    char *p = (char *)alloca(n);
+    char* p = (char*)alloca(n);
     if (n == 0)
         return 0;
     return 1 + rec(n - 1);

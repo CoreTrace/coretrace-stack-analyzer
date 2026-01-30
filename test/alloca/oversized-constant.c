@@ -9,7 +9,7 @@ void big_alloca(void)
     //     allocation performed via alloca/VLA; stack usage grows with runtime value
     //     requested stack size: 2097152 bytes
     //     exceeds safety threshold of 1048576 bytes (stack limit: 8388608 bytes)
-    char *buf = (char *)alloca(n);
+    char* buf = (char*)alloca(n);
     if (buf)
         buf[0] = 0;
 }

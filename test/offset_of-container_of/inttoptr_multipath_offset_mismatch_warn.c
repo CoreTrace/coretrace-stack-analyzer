@@ -16,7 +16,7 @@ int test_multipath_select(int cond)
     // Multi-path source: either &obj.b or &obj.c.
     // Correct behavior: diagnostic because when cond == 0, the base
     // reconstruction uses the wrong member offset.
-    int32_t *p = cond ? &obj.b : &obj.c;
+    int32_t* p = cond ? &obj.b : &obj.c;
 
     uintptr_t addr = (uintptr_t)p;
     addr -= offsetof(struct A, b); // uses offset of b
@@ -28,7 +28,7 @@ int test_multipath_select(int cond)
     //     target type: ptr
     //     [WARNING] unable to verify that derived pointer points to a valid object
     //                 (potential undefined behavior if offset is incorrect)
-    struct A *base = (struct A *)addr;
+    struct A* base = (struct A*)addr;
 
     // Expected: invalid base reconstruction diagnostic.
     return base->a;

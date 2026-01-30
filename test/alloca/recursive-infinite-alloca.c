@@ -9,7 +9,7 @@ void boom(size_t n)
     //     size is unbounded at compile time
     //     function is infinitely recursive; this alloca runs at every frame and guarantees stack overflow
     //     size depends on user-controlled input (function argument or non-local value)
-    char *p = (char *)alloca(n);
+    char* p = (char*)alloca(n);
     boom(n);
 }
 

@@ -8,7 +8,7 @@ void foo(size_t n)
     //     allocation performed via alloca/VLA; stack usage grows with runtime value
     //     size is unbounded at compile time
     //     size depends on user-controlled input (function argument or non-local value)
-    char *buf = (char *)alloca(n);
+    char* buf = (char*)alloca(n);
     if (buf)
         buf[0] = 0;
 }

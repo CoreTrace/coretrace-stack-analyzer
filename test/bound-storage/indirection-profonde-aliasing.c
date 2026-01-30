@@ -3,8 +3,8 @@
 int main(void)
 {
     char test[10];
-    char *ptr = test;
-    char **pp = &ptr;
+    char* ptr = test;
+    char** pp = &ptr;
     // at line 13, column 15
     // [!!] potential stack buffer overflow on variable 'test' (size 10)
     //     alias path: test -> arraydecay -> ptr
@@ -23,7 +23,8 @@ int main(void)
     //     alias path: test
     //     index variable may go up to 19 (array last valid index: 9)
     //     (this is a write access)
-    for (int i = 0; i < 20; i++) {
+    for (int i = 0; i < 20; i++)
+    {
         test[i] = 'a';
     }
 
@@ -36,7 +37,8 @@ int main(void)
         test[i] = 'a';
 
     // OK
-    for (int i = 0; i < 10; i++) {
+    for (int i = 0; i < 10; i++)
+    {
         test[i] = 'b';
     }
 
@@ -45,11 +47,12 @@ int main(void)
     //     alias path: test -> arraydecay -> ptr
     //     index variable may go up to 19 (array last valid index: 9)
     //     (this is a write access)
-    for (int i = 0; i < 20; i++) {
+    for (int i = 0; i < 20; i++)
+    {
         ptr[i] = 'a';
     }
 
     int n = 6;
-    char buf[n];   // alloca variable
+    char buf[n]; // alloca variable
     return 0;
 }

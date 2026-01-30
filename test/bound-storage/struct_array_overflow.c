@@ -1,15 +1,16 @@
 #include <stdio.h>
 
-struct S {
+struct S
+{
     char buf[10];
-    int  x;
+    int x;
 };
 
 void ok_direct(void)
 {
     struct S s;
     for (int i = 0; i < 10; ++i)
-        s.buf[i] = 'A';           // OK
+        s.buf[i] = 'A'; // OK
 }
 
 void overflow_eq_10(void)
@@ -21,7 +22,7 @@ void overflow_eq_10(void)
     //     index variable may go up to 10 (array last valid index: 9)
     //     (this is a write access)
     for (int i = 0; i <= 10; ++i)
-        s.buf[i] = 'B';           // i == 10 -> overflow
+        s.buf[i] = 'B'; // i == 10 -> overflow
 }
 
 void overflow_const_index(void)
@@ -32,7 +33,7 @@ void overflow_const_index(void)
     //     alias path: s -> buf
     //     constant index 11 is out of bounds (0..9)
     //     (this is a write access)
-    s.buf[11] = 'C';              // overflow constant
+    s.buf[11] = 'C'; // overflow constant
 }
 
 void nested_if_overflow(void)
@@ -45,8 +46,8 @@ void nested_if_overflow(void)
     //     alias path: s -> buf
     //     index variable may go up to 15 (array last valid index: 9)
     //     (this is a write access)
-    if (i > 5 && i <= 15)         // UB = 15
-        s.buf[i] = 'D';           // overflow
+    if (i > 5 && i <= 15) // UB = 15
+        s.buf[i] = 'D';   // overflow
 }
 
 int main(void)

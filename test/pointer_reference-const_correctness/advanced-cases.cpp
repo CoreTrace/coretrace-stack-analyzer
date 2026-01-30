@@ -1,10 +1,12 @@
 #include <utility>
 
-void consume_ref(const int &v) {
+void consume_ref(const int& v)
+{
     (void)v;
 }
 
-void consume_ref_mut(int &v) {
+void consume_ref_mut(int& v)
+{
     v += 1;
 }
 
@@ -12,11 +14,13 @@ void consume_ref_mut(int &v) {
 // [!]ConstParameterNotModified.Reference: parameter 'v' in function 'caller_ref(int&)' is never used to modify the referred object
 //     current type: int &v
 //     suggested type: const int &v
-void caller_ref(int &v) {
+void caller_ref(int& v)
+{
     consume_ref(v);
 }
 
-void caller_ref_mut(int &v) {
+void caller_ref_mut(int& v)
+{
     consume_ref_mut(v);
 }
 
@@ -24,7 +28,8 @@ void caller_ref_mut(int &v) {
 // [!]ConstParameterNotModified.ReferenceRvaluePreferValue: parameter 'v' in function 'rvalue_use(int&&)' is an rvalue reference and is never used to modify the referred object
 //     consider passing by value (int v) or const reference (const int &v)
 //     current type: int &&v
-int rvalue_use(int &&v) {
+int rvalue_use(int&& v)
+{
     return v;
 }
 
@@ -32,7 +37,8 @@ int rvalue_use(int &&v) {
 // [!]ConstParameterNotModified.Pointer: parameter 'p' in function 'read_only_ptr(int*)' is never used to modify the pointed object
 //     current type: int *p
 //     suggested type: const int *p
-void read_only_ptr(int *p) {
+void read_only_ptr(int* p)
+{
     int x = *p;
     (void)x;
 }
