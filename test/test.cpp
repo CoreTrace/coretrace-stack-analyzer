@@ -29,7 +29,8 @@ int main(void)
     int sum = a + b;
     const bool is_ok = false;
 
-    if (is_ok) {
+    if (is_ok)
+    {
         char test[100];
         test[0] = '\0'; // Initialize the string
         snprintf(test, sizeof(test), "Hello, World! %d %d %d\n", a, b, sum);

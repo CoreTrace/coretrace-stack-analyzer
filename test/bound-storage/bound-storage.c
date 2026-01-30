@@ -11,7 +11,7 @@ int main(void)
     //     (this is a write access)
     test[11] = 'a';
 
-    test[9] = 'b';  // OK
+    test[9] = 'b'; // OK
 
     // at line 21, column 14
     // [!!] potential stack buffer overflow on variable 'test' (size 10)
@@ -20,7 +20,7 @@ int main(void)
     //     (this is a write access)
     test[-1] = 'c';
 
-    test[11 - 2] = 'd';  // OK
+    test[11 - 2] = 'd'; // OK
 
     return 0;
 }

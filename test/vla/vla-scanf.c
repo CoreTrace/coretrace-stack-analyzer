@@ -13,7 +13,7 @@ int main(void)
     // [!] dynamic stack allocation detected for variable 'vla'
     //     allocated type: i8
     //     size of this allocation is not compile-time constant (VLA / variable alloca) and may lead to unbounded stack usage
-    char buf[n];  // VLA too
+    char buf[n]; // VLA too
 
     return 0;
 }

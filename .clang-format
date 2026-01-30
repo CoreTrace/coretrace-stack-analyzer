@@ -1,0 +1,12 @@
+BasedOnStyle: LLVM
+Standard: c++17
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+BreakBeforeBraces: Allman
+AllowShortFunctionsOnASingleLine: Empty
+ColumnLimit: 100
+PointerAlignment: Left
+NamespaceIndentation: All
+SortIncludes: Never
+ReflowComments: false

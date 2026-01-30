@@ -3,13 +3,13 @@
 
 int rec(size_t n)
 {
-    // at line 12, column 23
+    // at line 12, column 22
     // [!!] user-controlled alloca size for variable 'p'
     //     allocation performed via alloca/VLA; stack usage grows with runtime value
     //     size is unbounded at compile time
     //     function is recursive; this allocation repeats at each recursion depth and can exhaust the stack
     //     size depends on user-controlled input (function argument or non-local value)
-    char *p = (char *)alloca(n);
+    char* p = (char*)alloca(n);
     if (n == 0)
         return 0;
     return 1 + rec(n - 1);

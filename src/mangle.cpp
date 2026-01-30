@@ -1,10 +1,10 @@
 #include "mangle.hpp"
 
-namespace ctrace_tools {
+namespace ctrace_tools
+{
 
-    std::string mangleFunction(const std::string& namespaceName,
-        const std::string& functionName,
-        const std::vector<std::string>& paramTypes)
+    std::string mangleFunction(const std::string& namespaceName, const std::string& functionName,
+                               const std::vector<std::string>& paramTypes)
     {
         std::stringstream mangled;
 
@@ -22,7 +22,8 @@ namespace ctrace_tools {
         mangled << functionName.length() << functionName;
 
         // Encoder les types de paramètres
-        for (const std::string& param : paramTypes) {
+        for (const std::string& param : paramTypes)
+        {
             if (param == "int")
             {
                 mangled << "i";
@@ -51,8 +52,9 @@ namespace ctrace_tools {
             {
                 mangled << "v";
             }
-            else {
-            // Pour les types complexes ou non reconnus, encoder avec longueur + nom
+            else
+            {
+                // Pour les types complexes ou non reconnus, encoder avec longueur + nom
                 mangled << param.length() << param;
             }
         }
@@ -66,17 +68,15 @@ namespace ctrace_tools {
         return mangled.str();
     }
 
-    std::string demangle(const char *name)
+    std::string demangle(const char* name)
     {
         int status = 0;
         char* demangled = abi::__cxa_demangle(name, nullptr, nullptr, &status);
 
-        std::string result = (status == 0 && demangled)
-            ? demangled
-            : name;
+        std::string result = (status == 0 && demangled) ? demangled : name;
 
         free(demangled);
 
         return result;
     }
-};
+}; // namespace ctrace_tools

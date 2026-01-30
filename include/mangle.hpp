@@ -13,8 +13,7 @@ namespace ctrace_tools
      * The `StringLike` concept ensures that any type passed to functions
      * requiring it can be implicitly converted to `std::string_view`.
      */
-    template<typename T>
-    concept StringLike = std::convertible_to<T, std::string_view>;
+    template <typename T> concept StringLike = std::convertible_to<T, std::string_view>;
     // TODO: add mangling for windows
 
     /**
@@ -35,7 +34,7 @@ namespace ctrace_tools
      *       should not be ignored. It is also `noexcept`, indicating that it
      *       does not throw exceptions.
      */
-    [[nodiscard]]bool isMangled(StringLike auto name) noexcept
+    [[nodiscard]] bool isMangled(StringLike auto name) noexcept
     {
         int status = 0;
         std::string_view sv{name};
@@ -45,10 +44,8 @@ namespace ctrace_tools
             return false;
         }
 
-        std::unique_ptr<char, void(*)(void*)> demangled(
-            abi::__cxa_demangle(sv.data(), nullptr, nullptr, &status),
-            std::free
-        );
+        std::unique_ptr<char, void (*)(void*)> demangled(
+            abi::__cxa_demangle(sv.data(), nullptr, nullptr, &status), std::free);
         return status == 0;
     }
 
@@ -65,11 +62,9 @@ namespace ctrace_tools
      *
      * @note The implementation of this function is not provided in the current file.
      */
-    [[nodiscard]] std::string mangleFunction(
-        const std::string& namespaceName,
-        const std::string& functionName,
-        const std::vector<std::string>& paramTypes
-    );
+    [[nodiscard]] std::string mangleFunction(const std::string& namespaceName,
+                                             const std::string& functionName,
+                                             const std::vector<std::string>& paramTypes);
 
-    [[nodiscard]] std::string demangle(const char *name);
-};
+    [[nodiscard]] std::string demangle(const char* name);
+}; // namespace ctrace_tools

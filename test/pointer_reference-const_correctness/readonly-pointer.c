@@ -10,12 +10,12 @@
 //     consider 'const int32_t *param4' for API const-correctness
 //     current type: int32_t * const param4
 //     suggested type: const int32_t *param4
-void myfunc(int32_t *out, const int32_t *in, int32_t *param3, int32_t * const param4)
+void myfunc(int32_t* out, const int32_t* in, int32_t* param3, int32_t* const param4)
 {
     *out = *in + *param3 + *param4;
 }
 
-void set_zero(int *p)
+void set_zero(int* p)
 {
     *p = 0;
 }

@@ -6,6 +6,14 @@
 ./build.sh
 ```
 
+### Code style (clang-format)
+
+- Version cible : `clang-format` 17 (utilisée dans la CI).
+- Formater localement : `./scripts/format.sh`
+- Vérifier sans modifier : `./scripts/format-check.sh`
+- CMake : `cmake --build build --target format` ou `--target format-check`
+- CI : le job GitHub Actions `clang-format` échoue si un fichier n’est pas formaté.
+
 #### CORETRACE-STACK-USAGE CLI
 
 ```zsh

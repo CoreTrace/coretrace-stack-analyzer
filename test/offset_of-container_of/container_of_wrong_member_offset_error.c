@@ -12,12 +12,12 @@ struct A
 
 int main(void)
 {
-    struct A obj = { .a = 11, .b = 22, .c = 33, .i = 44 };
+    struct A obj = {.a = 11, .b = 22, .c = 33, .i = 44};
 
-    int32_t *pb = &obj.b;
+    int32_t* pb = &obj.b;
 
     /* Bug: subtract offset of the WRONG member (i instead of b). */
-    // at line 28, column 50
+    // at line 28, column 48
     // [!!] potential UB: invalid base reconstruction via offsetof/container_of
     //     variable: 'obj'
     //     source member: offset +4
@@ -25,7 +25,7 @@ int main(void)
     //     target type: ptr
     //     [ERROR] derived pointer points OUTSIDE the valid object range
     //             (this will cause undefined behavior if dereferenced)
-    struct A *bad_base = (struct A *)((char *)pb - offsetof(struct A, i));
+    struct A* bad_base = (struct A*)((char*)pb - offsetof(struct A, i));
 
     /* UB: bad_base is not guaranteed to point to a valid struct A object. */
     // at line 39, column 30
