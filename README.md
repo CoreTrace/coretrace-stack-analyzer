@@ -8,11 +8,11 @@
 
 ### Code style (clang-format)
 
-- Version cible : `clang-format` 20 (utilisée dans la CI).
-- Formater localement : `./scripts/format.sh`
-- Vérifier sans modifier : `./scripts/format-check.sh`
-- CMake : `cmake --build build --target format` ou `--target format-check`
-- CI : le job GitHub Actions `clang-format` échoue si un fichier n’est pas formaté.
+- Target version: `clang-format` 20 (used in CI).
+- Format locally: `./scripts/format.sh`
+- Check without modifying: `./scripts/format-check.sh`
+- CMake: `cmake --build build --target format` or `--target format-check`
+- CI: the GitHub Actions `clang-format` job fails if a file is not formatted.
 
 #### CORETRACE-STACK-USAGE CLI
 
@@ -25,16 +25,16 @@
 
 ```
 --format=json|sarif|human
---quiet coupe complètement les diagnostics
---warnings-only garde seulement les diagnostics importants
---compile-arg=<arg> passe un argument supplémentaire au compilateur
--I<dir> ou -I <dir> ajoute un include
--D<name>[=value] ou -D <name>[=value] définit un macro
---only-file=<path> ou --only-file <path> filtre par fichier
---only-dir=<path> ou --only-dir <path> filtre par dossier
---only-function=<name> ou --only-function <name> filtre par fonction
---only-func=<name> alias de --only-function
---dump-filter affiche les décisions de filtre (stderr)
+--quiet disables diagnostics entirely
+--warnings-only keeps only important diagnostics
+--compile-arg=<arg> passes an extra argument to the compiler
+-I<dir> or -I <dir> adds an include directory
+-D<name>[=value] or -D <name>[=value] defines a macro
+--only-file=<path> or --only-file <path> filters by file
+--only-dir=<path> or --only-dir <path> filters by directory
+--only-function=<name> or --only-function <name> filters by function
+--only-func=<name> alias for --only-function
+--dump-filter prints filter decisions (stderr)
 ```
 
 ### Example
@@ -136,15 +136,15 @@ Function: main
 
 ---
 
-#### 9. Détection de fuite de stack pointer
+#### 9. Stack pointer leak detection
 
-Exemples :
+Examples:
 ```c
 char buf[10];
 return buf;    // renvoi pointeur vers stack → use-after-return
 ```
 
-Ou stockage :
+Or storing:
 
 ```c
 global = buf; // leaking address of stack variable
