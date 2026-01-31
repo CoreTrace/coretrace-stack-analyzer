@@ -21,6 +21,13 @@ find_package(LLVM REQUIRED CONFIG)
 
 include(FetchContent)
 
+# Optional ASAN enablement at the top-level to match the cc dependency.
+option(ENABLE_DEBUG_ASAN "Enable debug symbols and AddressSanitizer" OFF)
+if(DEFINED DEBUG_ASAN)
+    set(ENABLE_DEBUG_ASAN ${DEBUG_ASAN} CACHE BOOL
+        "Enable debug symbols and AddressSanitizer" FORCE)
+endif()
+
 FetchContent_Declare(
   cc
   GIT_REPOSITORY https://github.com/CoreTrace/coretrace-compiler.git
@@ -57,6 +64,11 @@ add_definitions(${LLVM_DEFINITIONS})
 add_library(stack_usage_analyzer_lib STATIC
     ${STACK_ANALYZER_SOURCES}
 )
+
+if(ENABLE_DEBUG_ASAN)
+    target_compile_options(stack_usage_analyzer_lib PUBLIC -fsanitize=address -fno-omit-frame-pointer -g)
+    target_link_options(stack_usage_analyzer_lib PUBLIC -fsanitize=address)
+endif()
 
 # target_include_directories(stack_usage_analyzer_lib
 #     PUBLIC
@@ -125,6 +137,11 @@ if(BUILD_CLI)
         # pas besoin de relinker cc::compilerlib_static ici,
         # il est déjà dans la lib
     )
+
+    if(ENABLE_DEBUG_ASAN)
+        target_compile_options(stack_usage_analyzer PRIVATE -fsanitize=address -fno-omit-frame-pointer -g)
+        target_link_options(stack_usage_analyzer PRIVATE -fsanitize=address)
+    endif()
 endif()
 
 # ============

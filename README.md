@@ -8,7 +8,7 @@
 
 ### Code style (clang-format)
 
-- Version cible : `clang-format` 17 (utilisée dans la CI).
+- Version cible : `clang-format` 20 (utilisée dans la CI).
 - Formater localement : `./scripts/format.sh`
 - Vérifier sans modifier : `./scripts/format-check.sh`
 - CMake : `cmake --build build --target format` ou `--target format-check`
@@ -17,13 +17,25 @@
 #### CORETRACE-STACK-USAGE CLI
 
 ```zsh
-./stack_usage_analyzer --mode=[abi/ir] test.[ll/c/cpp]
+./stack_usage_analyzer --mode=[abi/ir] test.[ll/c/cpp] other.[ll/c/cpp]
+./stack_usage_analyzer main.cpp -I./include
+./stack_usage_analyzer main.cpp -I./include --compile-arg=-I/opt/homebrew/opt/llvm@20/include
+./stack_usage_analyzer main.cpp -I./include --only-file=./main.cpp --only-function=main
 ```
 
 ```
+--format=json|sarif|human
 --quiet coupe complètement les diagnostics
 --warnings-only garde seulement les diagnostics importants
-````
+--compile-arg=<arg> passe un argument supplémentaire au compilateur
+-I<dir> ou -I <dir> ajoute un include
+-D<name>[=value] ou -D <name>[=value] définit un macro
+--only-file=<path> ou --only-file <path> filtre par fichier
+--only-dir=<path> ou --only-dir <path> filtre par dossier
+--only-function=<name> ou --only-function <name> filtre par fonction
+--only-func=<name> alias de --only-function
+--dump-filter affiche les décisions de filtre (stderr)
+```
 
 ### Example
 
