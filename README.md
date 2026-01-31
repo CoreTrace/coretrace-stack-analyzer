@@ -17,7 +17,8 @@
 #### CORETRACE-STACK-USAGE CLI
 
 ```zsh
-./stack_usage_analyzer --mode=[abi/ir] test.[ll/c/cpp]
+./stack_usage_analyzer --mode=[abi/ir] test.[ll/c/cpp] other.[ll/c/cpp]
+./stack_usage_analyzer main.cpp -I./include
 ```
 
 ```
