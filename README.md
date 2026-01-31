@@ -154,14 +154,18 @@ global = buf; // leaking address of stack variable
 
 Actually done:
 
-- 1. Dynamic alloca / VLA detection, including user-controlled sizes, upper-bound inference, and recursion-aware severity (errors for infinite recursion or oversized allocations, warnings for other dynamic sizes).
-- 2. Deriving human-friendly names for unnamed allocas in diagnostics.
-- 3. Detection of memcpy/memset overflows on stack buffers.
-- 4. Warning when a function performs multiple stores into the same stack buffer.
-- 5. Deeper traversal analysis: constraint propagation.
-- 6. Detection of deep indirection in aliasing.
-- 7. Detection of overflow in a struct containing an internal array.
-- 8. Detection of stack pointer leaks:
+- 1. Multi-file CLI inputs with deterministic ordering and aggregated output.
+- 2. Per-result file attribution in JSON/SARIF and diagnostics.
+- 3. Filters: `--only-file`, `--only-dir`, `--only-function/--only-func`, plus `--dump-filter`.
+- 4. Compile args passthrough: `-I`, `-D`, `--compile-arg`.
+- 5. Dynamic alloca / VLA detection, including user-controlled sizes, upper-bound inference, and recursion-aware severity (errors for infinite recursion or oversized allocations, warnings for other dynamic sizes).
+- 6. Deriving human-friendly names for unnamed allocas in diagnostics.
+- 7. Detection of memcpy/memset overflows on stack buffers.
+- 8. Warning when a function performs multiple stores into the same stack buffer.
+- 9. Deeper traversal analysis: constraint propagation.
+- 10. Detection of deep indirection in aliasing.
+- 11. Detection of overflow in a struct containing an internal array.
+- 12. Detection of stack pointer leaks:
 	- store_unknown -> storing the pointer in a non-local location (typically out-parameter, heap, etc.)
 	- call_callback -> passing it to a callback (indirect call)
 	- call_arg -> passing it as an argument to a direct function, potentially capturable
