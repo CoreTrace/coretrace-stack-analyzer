@@ -1,6 +1,7 @@
 #include "StackUsageAnalyzer.hpp"
 
 #include <cstdint>
+#include <cctype>
 #include <map>
 #include <set>
 #include <string>
@@ -323,6 +324,21 @@ namespace ctrace::stack
                                     calledVal ? calledVal->stripPointerCasts() : nullptr;
                                 const Function* directCallee =
                                     calledStripped ? dyn_cast<Function>(calledStripped) : nullptr;
+                                if (CB->paramHasAttr(argIndex, llvm::Attribute::NoCapture) ||
+                                    CB->paramHasAttr(argIndex, llvm::Attribute::ByVal) ||
+                                    CB->paramHasAttr(argIndex, llvm::Attribute::ByRef))
+                                {
+                                    continue;
+                                }
+                                if (directCallee)
+                                {
+                                    llvm::StringRef calleeName = directCallee->getName();
+                                    if (calleeName.contains("unique_ptr") ||
+                                        calleeName.contains("make_unique"))
+                                    {
+                                        continue;
+                                    }
+                                }
 
                                 StackPointerEscapeIssue issue;
                                 issue.funcName = F.getName().str();
@@ -3315,11 +3331,38 @@ namespace ctrace::stack
     //   char test[10];
     //   char *ptr = test;
     //   ... load ptr ... ; gep -> ptr[i]
-    static const llvm::AllocaInst* resolveArrayAllocaFromPointer(const llvm::Value* V,
-                                                                 llvm::Function& F,
-                                                                 std::vector<std::string>& path)
+    namespace
+    {
+        struct RecursionGuard
+        {
+            llvm::SmallPtrSetImpl<const llvm::Value*>& set;
+            const llvm::Value* value;
+            RecursionGuard(llvm::SmallPtrSetImpl<const llvm::Value*>& s, const llvm::Value* v)
+                : set(s), value(v)
+            {
+                set.insert(value);
+            }
+            ~RecursionGuard()
+            {
+                set.erase(value);
+            }
+        };
+    } // namespace
+
+    static const llvm::AllocaInst* resolveArrayAllocaFromPointerInternal(
+        const llvm::Value* V, llvm::Function& F, std::vector<std::string>& path,
+        llvm::SmallPtrSetImpl<const llvm::Value*>& recursionStack, int depth)
     {
         using namespace llvm;
+
+        if (!V)
+            return nullptr;
+        if (depth > 64)
+            return nullptr;
+        if (recursionStack.contains(V))
+            return nullptr;
+
+        RecursionGuard guard(recursionStack, V);
 
         auto isArrayAlloca = [](const AllocaInst* AI) -> bool
         {
@@ -3379,8 +3422,8 @@ namespace ctrace::stack
 
                         const Value* storedPtr = SI->getValueOperand();
                         std::vector<std::string> subPath;
-                        const AllocaInst* cand =
-                            resolveArrayAllocaFromPointer(storedPtr, F, subPath);
+                        const AllocaInst* cand = resolveArrayAllocaFromPointerInternal(
+                            storedPtr, F, subPath, recursionStack, depth + 1);
                         if (!cand)
                             continue;
 
@@ -3440,7 +3483,8 @@ namespace ctrace::stack
                 {
                     const Value* inV = PN->getIncomingValue(i);
                     std::vector<std::string> subPath;
-                    const AllocaInst* cand = resolveArrayAllocaFromPointer(inV, F, subPath);
+                    const AllocaInst* cand = resolveArrayAllocaFromPointerInternal(
+                        inV, F, subPath, recursionStack, depth + 1);
                     if (!cand)
                         continue;
                     if (!foundAI)
@@ -3463,6 +3507,14 @@ namespace ctrace::stack
         }
 
         return nullptr;
+    }
+
+    static const llvm::AllocaInst* resolveArrayAllocaFromPointer(const llvm::Value* V,
+                                                                 llvm::Function& F,
+                                                                 std::vector<std::string>& path)
+    {
+        llvm::SmallPtrSet<const llvm::Value*, 32> recursionStack;
+        return resolveArrayAllocaFromPointerInternal(V, F, path, recursionStack, 0);
     }
 
     // Analyse intra-fonction pour détecter plusieurs stores dans un même buffer de stack.
@@ -3615,9 +3667,278 @@ namespace ctrace::stack
     //  API publique : analyzeModule / analyzeFile
     // ============================================================================
 
+    namespace
+    {
+        static std::string getFunctionSourcePath(const llvm::Function& F)
+        {
+            if (auto* sp = F.getSubprogram())
+            {
+                if (auto* file = sp->getFile())
+                {
+                    std::string dir = file->getDirectory().str();
+                    std::string name = file->getFilename().str();
+                    if (!dir.empty())
+                        return dir + "/" + name;
+                    return name;
+                }
+            }
+            return {};
+        }
+
+        static std::string normalizePathForMatch(const std::string& input)
+        {
+            std::string out = input;
+            for (char& c : out)
+            {
+                if (c == '\\')
+                    c = '/';
+            }
+            const bool isAbs = !out.empty() && out.front() == '/';
+            std::vector<std::string> parts;
+            std::string cur;
+            for (char c : out)
+            {
+                if (c == '/')
+                {
+                    if (!cur.empty())
+                    {
+                        if (cur == "..")
+                        {
+                            if (!parts.empty())
+                                parts.pop_back();
+                        }
+                        else if (cur != ".")
+                        {
+                            parts.push_back(cur);
+                        }
+                        cur.clear();
+                    }
+                }
+                else
+                {
+                    cur.push_back(c);
+                }
+            }
+            if (!cur.empty())
+            {
+                if (cur == "..")
+                {
+                    if (!parts.empty())
+                        parts.pop_back();
+                }
+                else if (cur != ".")
+                {
+                    parts.push_back(cur);
+                }
+            }
+            std::string norm = isAbs ? "/" : "";
+            for (std::size_t i = 0; i < parts.size(); ++i)
+            {
+                norm += parts[i];
+                if (i + 1 < parts.size())
+                    norm += "/";
+            }
+            while (!norm.empty() && norm.back() == '/')
+                norm.pop_back();
+            return norm;
+        }
+
+        static std::string basenameOf(const std::string& path)
+        {
+            std::size_t pos = path.find_last_of('/');
+            if (pos == std::string::npos)
+                return path;
+            if (pos + 1 >= path.size())
+                return {};
+            return path.substr(pos + 1);
+        }
+
+        static bool pathHasSuffix(const std::string& path, const std::string& suffix)
+        {
+            if (suffix.empty())
+                return false;
+            if (path.size() < suffix.size())
+                return false;
+            if (path.compare(path.size() - suffix.size(), suffix.size(), suffix) != 0)
+                return false;
+            if (path.size() == suffix.size())
+                return true;
+            return path[path.size() - suffix.size() - 1] == '/';
+        }
+
+        static bool pathHasPrefix(const std::string& path, const std::string& prefix)
+        {
+            if (prefix.empty())
+                return false;
+            if (path.size() < prefix.size())
+                return false;
+            if (path.compare(0, prefix.size(), prefix) != 0)
+                return false;
+            if (path.size() == prefix.size())
+                return true;
+            return path[prefix.size()] == '/';
+        }
+
+        static bool shouldIncludePath(const std::string& path, const AnalysisConfig& config)
+        {
+            if (config.onlyFiles.empty() && config.onlyDirs.empty())
+                return true;
+            if (path.empty())
+                return false;
+
+            const std::string normPath = normalizePathForMatch(path);
+
+            for (const auto& file : config.onlyFiles)
+            {
+                const std::string normFile = normalizePathForMatch(file);
+                if (normPath == normFile || pathHasSuffix(normPath, normFile))
+                    return true;
+                const std::string fileBase = basenameOf(normFile);
+                if (!fileBase.empty() && basenameOf(normPath) == fileBase)
+                    return true;
+            }
+
+            for (const auto& dir : config.onlyDirs)
+            {
+                const std::string normDir = normalizePathForMatch(dir);
+                if (pathHasPrefix(normPath, normDir) || pathHasSuffix(normPath, normDir))
+                    return true;
+                const std::string needle = "/" + normDir + "/";
+                if (normPath.find(needle) != std::string::npos)
+                    return true;
+            }
+
+            return false;
+        }
+
+        static bool functionNameMatches(const llvm::Function& F, const AnalysisConfig& config)
+        {
+            if (config.onlyFunctions.empty())
+                return true;
+
+            auto itaniumBaseName = [](const std::string& symbol) -> std::string
+            {
+                if (symbol.rfind("_Z", 0) != 0)
+                    return {};
+                std::size_t i = 2;
+                if (i < symbol.size() && symbol[i] == 'L')
+                    ++i;
+                if (i >= symbol.size() || !std::isdigit(static_cast<unsigned char>(symbol[i])))
+                    return {};
+                std::size_t len = 0;
+                while (i < symbol.size() && std::isdigit(static_cast<unsigned char>(symbol[i])))
+                {
+                    len = len * 10 + static_cast<std::size_t>(symbol[i] - '0');
+                    ++i;
+                }
+                if (len == 0 || i + len > symbol.size())
+                    return {};
+                return symbol.substr(i, len);
+            };
+
+            std::string name = F.getName().str();
+            std::string demangledName;
+            if (ctrace_tools::isMangled(name) || name.rfind("_Z", 0) == 0)
+                demangledName = ctrace_tools::demangle(name.c_str());
+            std::string demangledBase;
+            if (!demangledName.empty())
+            {
+                std::size_t pos = demangledName.find('(');
+                if (pos != std::string::npos && pos > 0)
+                    demangledBase = demangledName.substr(0, pos);
+            }
+            std::string itaniumBase = itaniumBaseName(name);
+
+            for (const auto& filter : config.onlyFunctions)
+            {
+                if (name == filter)
+                    return true;
+                if (!demangledName.empty() && demangledName == filter)
+                    return true;
+                if (!demangledBase.empty() && demangledBase == filter)
+                    return true;
+                if (!itaniumBase.empty() && itaniumBase == filter)
+                    return true;
+                if (ctrace_tools::isMangled(filter))
+                {
+                    std::string demangledFilter = ctrace_tools::demangle(filter.c_str());
+                    if (!demangledName.empty() && demangledName == demangledFilter)
+                        return true;
+                    std::size_t pos = demangledFilter.find('(');
+                    if (pos != std::string::npos && pos > 0)
+                    {
+                        if (demangledBase == demangledFilter.substr(0, pos))
+                            return true;
+                    }
+                }
+            }
+
+            return false;
+        }
+    } // namespace
+
     AnalysisResult analyzeModule(llvm::Module& mod, const AnalysisConfig& config)
     {
         const llvm::DataLayout& DL = mod.getDataLayout();
+        const bool hasPathFilter = !config.onlyFiles.empty() || !config.onlyDirs.empty();
+        const bool hasFuncFilter = !config.onlyFunctions.empty();
+        const bool hasFilter = hasPathFilter || hasFuncFilter;
+        const std::string moduleSourcePath = mod.getSourceFileName();
+
+        auto shouldAnalyzeFunction = [&](const llvm::Function& F) -> bool
+        {
+            if (!hasFilter)
+                return true;
+            if (hasFuncFilter && !functionNameMatches(F, config))
+            {
+                if (config.dumpFilter)
+                {
+                    llvm::errs() << "[filter] func=" << F.getName()
+                                 << " file=<name-filter> keep=no\n";
+                }
+                return false;
+            }
+            if (!hasPathFilter)
+                return true;
+            std::string path = getFunctionSourcePath(F);
+            std::string usedPath;
+            bool decision = false;
+            if (!path.empty())
+            {
+                usedPath = path;
+                decision = shouldIncludePath(usedPath, config);
+            }
+            else
+            {
+                llvm::StringRef name = F.getName();
+                if (name.starts_with("__") || name.starts_with("llvm.") ||
+                    name.starts_with("clang."))
+                {
+                    decision = false;
+                }
+                else if (!moduleSourcePath.empty())
+                {
+                    usedPath = moduleSourcePath;
+                    decision = shouldIncludePath(usedPath, config);
+                }
+                else
+                {
+                    decision = false;
+                }
+            }
+
+            if (config.dumpFilter)
+            {
+                llvm::errs() << "[filter] func=" << F.getName() << " file=";
+                if (usedPath.empty())
+                    llvm::errs() << "<none>";
+                else
+                    llvm::errs() << usedPath;
+                llvm::errs() << " keep=" << (decision ? "yes" : "no") << "\n";
+            }
+
+            return decision;
+        };
 
         // 1) Stack locale par fonction
         std::map<const llvm::Function*, LocalStackInfo> LocalStack;
@@ -3625,12 +3946,51 @@ namespace ctrace::stack
         {
             if (F.isDeclaration())
                 continue;
+            if (!shouldAnalyzeFunction(F))
+                continue;
             LocalStackInfo info = computeLocalStack(F, DL, config.mode);
             LocalStack[&F] = info;
         }
 
         // 2) Graphe d'appels
-        CallGraph CG = buildCallGraph(mod);
+        CallGraph CG;
+        if (!hasFilter)
+        {
+            CG = buildCallGraph(mod);
+        }
+        else
+        {
+            for (llvm::Function& F : mod)
+            {
+                if (F.isDeclaration())
+                    continue;
+                if (!shouldAnalyzeFunction(F))
+                    continue;
+
+                auto& vec = CG[&F];
+
+                for (llvm::BasicBlock& BB : F)
+                {
+                    for (llvm::Instruction& I : BB)
+                    {
+                        const llvm::Function* Callee = nullptr;
+                        if (auto* CI = llvm::dyn_cast<llvm::CallInst>(&I))
+                        {
+                            Callee = CI->getCalledFunction();
+                        }
+                        else if (auto* II = llvm::dyn_cast<llvm::InvokeInst>(&I))
+                        {
+                            Callee = II->getCalledFunction();
+                        }
+
+                        if (Callee && !Callee->isDeclaration() && shouldAnalyzeFunction(*Callee))
+                        {
+                            vec.push_back(Callee);
+                        }
+                    }
+                }
+            }
+        }
 
         // 3) Propagation + détection de récursivité
         InternalAnalysisState state = computeGlobalStackUsage(CG, LocalStack);
@@ -3639,6 +3999,8 @@ namespace ctrace::stack
         for (llvm::Function& F : mod)
         {
             if (F.isDeclaration())
+                continue;
+            if (!shouldAnalyzeFunction(F))
                 continue;
             const llvm::Function* Fn = &F;
             if (!state.RecursiveFuncs.count(Fn))
@@ -3659,6 +4021,8 @@ namespace ctrace::stack
         {
             if (F.isDeclaration())
                 continue;
+            if (!shouldAnalyzeFunction(F))
+                continue;
 
             const llvm::Function* Fn = &F;
 
@@ -3675,6 +4039,9 @@ namespace ctrace::stack
 
             FunctionResult fr;
             fr.name = F.getName().str();
+            fr.filePath = getFunctionSourcePath(F);
+            if (fr.filePath.empty() && !moduleSourcePath.empty())
+                fr.filePath = moduleSourcePath;
             fr.localStack = localInfo.bytes;
             fr.localStackUnknown = localInfo.unknown;
             fr.maxStack = totalInfo.bytes;
@@ -3692,6 +4059,8 @@ namespace ctrace::stack
         for (llvm::Function& F : mod)
         {
             if (F.isDeclaration())
+                continue;
+            if (!shouldAnalyzeFunction(F))
                 continue;
             analyzeStackBufferOverflowsInFunction(F, bufferIssues);
         }
@@ -3894,6 +4263,8 @@ namespace ctrace::stack
         {
             if (F.isDeclaration())
                 continue;
+            if (!shouldAnalyzeFunction(F))
+                continue;
             analyzeDynamicAllocasInFunction(F, dynAllocaIssues);
         }
 
@@ -3936,6 +4307,8 @@ namespace ctrace::stack
         for (llvm::Function& F : mod)
         {
             if (F.isDeclaration())
+                continue;
+            if (!shouldAnalyzeFunction(F))
                 continue;
             bool isRec = state.RecursiveFuncs.count(&F) != 0;
             bool isInf = state.InfiniteRecursionFuncs.count(&F) != 0;
@@ -4055,6 +4428,8 @@ namespace ctrace::stack
         {
             if (F.isDeclaration())
                 continue;
+            if (!shouldAnalyzeFunction(F))
+                continue;
             analyzeMemIntrinsicOverflowsInFunction(F, DL, memIssues);
         }
 
@@ -4102,6 +4477,8 @@ namespace ctrace::stack
         for (llvm::Function& F : mod)
         {
             if (F.isDeclaration())
+                continue;
+            if (!shouldAnalyzeFunction(F))
                 continue;
             analyzeMultipleStoresInFunction(F, multiStoreIssues);
         }
@@ -4158,6 +4535,8 @@ namespace ctrace::stack
         for (llvm::Function& F : mod)
         {
             if (F.isDeclaration())
+                continue;
+            if (!shouldAnalyzeFunction(F))
                 continue;
             analyzeInvalidBaseReconstructionsInFunction(F, DL, baseReconIssues);
         }
@@ -4239,6 +4618,8 @@ namespace ctrace::stack
         for (llvm::Function& F : mod)
         {
             if (F.isDeclaration())
+                continue;
+            if (!shouldAnalyzeFunction(F))
                 continue;
             analyzeStackPointerEscapesInFunction(F, escapeIssues);
         }
@@ -4325,6 +4706,8 @@ namespace ctrace::stack
         for (llvm::Function& F : mod)
         {
             if (F.isDeclaration())
+                continue;
+            if (!shouldAnalyzeFunction(F))
                 continue;
             analyzeConstParamsInFunction(F, constParamIssues);
         }
@@ -4444,6 +4827,12 @@ namespace ctrace::stack
         LanguageType lang = detectLanguageFromFile(filename, ctx);
         std::unique_ptr<llvm::Module> mod;
 
+        if (lang == LanguageType::Unknown)
+        {
+            std::cerr << "Unsupported input file type: " << filename << "\n";
+            return AnalysisResult{config, {}};
+        }
+
         // if (verboseLevel >= 1)
         //     std::cout << "Language: " << ctrace::stack::enumToString(lang) << "\n";
 
@@ -4459,7 +4848,11 @@ namespace ctrace::stack
             {
                 args.push_back("-x");
                 args.push_back("c++");
-                args.push_back("-std=gnu++17");
+                args.push_back("-std=gnu++20");
+            }
+            for (const auto& extraArg : config.extraCompileArgs)
+            {
+                args.push_back(extraArg);
             }
             args.push_back("-fno-discard-value-names");
             args.push_back(filename);
@@ -4502,7 +4895,18 @@ namespace ctrace::stack
                 return AnalysisResult{config, {}};
             }
         }
-        return analyzeModule(*mod, config);
+        AnalysisResult result = analyzeModule(*mod, config);
+        for (auto& f : result.functions)
+        {
+            if (f.filePath.empty())
+                f.filePath = filename;
+        }
+        for (auto& d : result.diagnostics)
+        {
+            if (d.filePath.empty())
+                d.filePath = filename;
+        }
+        return result;
     }
 
     // ---------------------------------------------------------------------------
@@ -4585,13 +4989,30 @@ namespace ctrace::stack
 
     } // anonymous namespace
 
-    std::string toJson(const AnalysisResult& result, const std::string& inputFile)
+    static std::string toJsonImpl(const AnalysisResult& result, const std::string* inputFile,
+                                  const std::vector<std::string>* inputFiles)
     {
         std::ostringstream os;
         os << "{\n";
         os << "  \"meta\": {\n";
-        os << "    \"tool\": \"" << "ctrace-stack-analyzer" << "\",\n";
-        os << "    \"inputFile\": \"" << jsonEscape(inputFile) << "\",\n";
+        os << "    \"tool\": \""
+           << "ctrace-stack-analyzer"
+           << "\",\n";
+        if (inputFiles && !inputFiles->empty())
+        {
+            os << "    \"inputFiles\": [";
+            for (std::size_t i = 0; i < inputFiles->size(); ++i)
+            {
+                os << "\"" << jsonEscape((*inputFiles)[i]) << "\"";
+                if (i + 1 < inputFiles->size())
+                    os << ", ";
+            }
+            os << "],\n";
+        }
+        else if (inputFile)
+        {
+            os << "    \"inputFile\": \"" << jsonEscape(*inputFile) << "\",\n";
+        }
         os << "    \"mode\": \"" << (result.config.mode == AnalysisMode::IR ? "IR" : "ABI")
            << "\",\n";
         os << "    \"stackLimit\": " << result.config.stackLimit << ",\n";
@@ -4604,6 +5025,12 @@ namespace ctrace::stack
         {
             const auto& f = result.functions[i];
             os << "    {\n";
+            std::string filePath = f.filePath;
+            if (filePath.empty() && inputFile)
+            {
+                filePath = *inputFile;
+            }
+            os << "      \"file\": \"" << jsonEscape(filePath) << "\",\n";
             os << "      \"name\": \"" << jsonEscape(f.name) << "\",\n";
             os << "      \"localStack\": ";
             if (f.localStackUnknown)
@@ -4678,7 +5105,13 @@ namespace ctrace::stack
                 d.ruleId.empty() ? std::string(ctrace::stack::enumToString(d.errCode)) : d.ruleId;
             os << "      \"ruleId\": \"" << jsonEscape(ruleId) << "\",\n";
 
+            std::string diagFilePath = d.filePath;
+            if (diagFilePath.empty() && inputFile)
+            {
+                diagFilePath = *inputFile;
+            }
             os << "      \"location\": {\n";
+            os << "        \"file\": \"" << jsonEscape(diagFilePath) << "\",\n";
             os << "        \"function\": \"" << jsonEscape(d.funcName) << "\",\n";
             os << "        \"startLine\": " << d.line << ",\n";
             os << "        \"startColumn\": " << d.column << ",\n";
@@ -4705,6 +5138,16 @@ namespace ctrace::stack
         os << "  ]\n";
         os << "}\n";
         return os.str();
+    }
+
+    std::string toJson(const AnalysisResult& result, const std::string& inputFile)
+    {
+        return toJsonImpl(result, &inputFile, nullptr);
+    }
+
+    std::string toJson(const AnalysisResult& result, const std::vector<std::string>& inputFiles)
+    {
+        return toJsonImpl(result, nullptr, &inputFiles);
     }
 
     std::string toSarif(const AnalysisResult& result, const std::string& inputFile,
@@ -4738,7 +5181,8 @@ namespace ctrace::stack
             os << "          \"locations\": [\n";
             os << "            {\n";
             os << "              \"physicalLocation\": {\n";
-            os << "                \"artifactLocation\": { \"uri\": \"" << jsonEscape(inputFile)
+            std::string diagFilePath = d.filePath.empty() ? inputFile : d.filePath;
+            os << "                \"artifactLocation\": { \"uri\": \"" << jsonEscape(diagFilePath)
                << "\" },\n";
             os << "                \"region\": {\n";
             os << "                  \"startLine\": " << d.line << ",\n";

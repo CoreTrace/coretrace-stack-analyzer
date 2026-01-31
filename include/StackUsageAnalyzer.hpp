@@ -33,11 +33,17 @@ namespace ctrace::stack
         StackSize stackLimit = 8ull * 1024ull * 1024ull; // 8 MiB par défaut
         bool quiet = false;
         bool warningsOnly = false;
+        std::vector<std::string> extraCompileArgs;
+        std::vector<std::string> onlyFiles;
+        std::vector<std::string> onlyDirs;
+        std::vector<std::string> onlyFunctions;
+        bool dumpFilter = false;
     };
 
     // Résultat par fonction
     struct FunctionResult
     {
+        std::string filePath;
         std::string name;
         StackSize localStack = 0;       // taille frame locale (suivant le mode)
         StackSize maxStack = 0;         // max stack incluant les callees
@@ -125,6 +131,7 @@ namespace ctrace::stack
 
     struct Diagnostic
     {
+        std::string filePath;
         std::string funcName;
         unsigned line = 0;
         unsigned column = 0;
@@ -156,6 +163,7 @@ namespace ctrace::stack
     // Serialize an AnalysisResult to a simple JSON format (pour CI / GitHub Actions).
     // `inputFile` : chemin du fichier analysé (celui que tu passes à analyzeFile).
     std::string toJson(const AnalysisResult& result, const std::string& inputFile);
+    std::string toJson(const AnalysisResult& result, const std::vector<std::string>& inputFiles);
 
     // Serialize an AnalysisResult to SARIF 2.1.0 (compatible GitHub Code Scanning).
     // `inputFile` : chemin du fichier analysé.
