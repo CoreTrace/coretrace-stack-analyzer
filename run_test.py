@@ -346,12 +346,15 @@ def check_human_vs_json_parity() -> bool:
 
             if f.get("isRecursive") != hf["isRecursive"]:
                 print(f"  ❌ recursion flag mismatch for: {name}")
+                print(f"     human: {hf['isRecursive']} json: {f.get('isRecursive')}")
                 sample_ok = False
             if f.get("hasInfiniteSelfRecursion") != hf["hasInfiniteSelfRecursion"]:
                 print(f"  ❌ infinite recursion flag mismatch for: {name}")
+                print(f"     human: {hf['hasInfiniteSelfRecursion']} json: {f.get('hasInfiniteSelfRecursion')}")
                 sample_ok = False
             if f.get("exceedsLimit") != hf["exceedsLimit"]:
                 print(f"  ❌ stack limit flag mismatch for: {name}")
+                print(f"     human: {hf['exceedsLimit']} json: {f.get('exceedsLimit')}")
                 sample_ok = False
 
         for d in payload.get("diagnostics", []):
