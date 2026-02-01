@@ -126,14 +126,29 @@ def parse_human_functions(output: str):
     """
     functions = {}
     current = None
-    for line in output.splitlines():
+    lines = output.splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i]
         if line.startswith("Function: "):
             # Skip diagnostic header lines like: "Function: foo (line 12, column 3)"
             if "(line " in line:
+                i += 1
                 continue
+            # If the next non-empty line is not a stack summary, this is likely
+            # a diagnostic header embedded in the output.
+            j = i + 1
+            while j < len(lines) and lines[j].strip() == "":
+                j += 1
+            if j < len(lines):
+                next_stripped = lines[j].strip()
+                if not next_stripped.startswith("local stack:"):
+                    i += 1
+                    continue
             rest = line[len("Function: "):].strip()
             if not rest:
                 current = None
+                i += 1
                 continue
             name = rest.split()[0]
             functions[name] = {
@@ -148,9 +163,11 @@ def parse_human_functions(output: str):
                 "exceedsLimit": False,
             }
             current = name
+            i += 1
             continue
 
         if current is None:
+            i += 1
             continue
 
         stripped = line.strip()
@@ -160,6 +177,7 @@ def parse_human_functions(output: str):
                 functions[current]["localStackUnknown"] = info["unknown"]
                 functions[current]["localStack"] = info["value"]
                 functions[current]["localStackLowerBound"] = info["lower_bound"]
+            i += 1
             continue
         if stripped.startswith("max stack (including callees):"):
             info = parse_stack_line(stripped, "max stack (including callees)")
@@ -167,16 +185,21 @@ def parse_human_functions(output: str):
                 functions[current]["maxStackUnknown"] = info["unknown"]
                 functions[current]["maxStack"] = info["value"]
                 functions[current]["maxStackLowerBound"] = info["lower_bound"]
+            i += 1
             continue
         if "recursive or mutually recursive function detected" in stripped:
             functions[current]["isRecursive"] = True
+            i += 1
             continue
         if "unconditional self recursion detected" in stripped:
             functions[current]["hasInfiniteSelfRecursion"] = True
+            i += 1
             continue
         if "potential stack overflow: exceeds limit of" in stripped:
             functions[current]["exceedsLimit"] = True
+            i += 1
             continue
+        i += 1
     return functions
 
 
