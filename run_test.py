@@ -185,6 +185,28 @@ def parse_human_functions(output: str):
     return functions
 
 
+def extract_human_function_block(output: str, func_name: str):
+    """
+    Return the human-readable block for a given function name, if present.
+    """
+    lines = output.splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if line.startswith("Function: "):
+            rest = line[len("Function: "):].strip()
+            if rest and rest.split()[0] == func_name:
+                # Capture until next Function/Mode/File header.
+                j = i + 1
+                while j < len(lines):
+                    if lines[j].startswith(("Function: ", "Mode: ", "File: ")):
+                        break
+                    j += 1
+                return "\n".join(lines[i:j]).strip()
+        i += 1
+    return ""
+
+
 def parse_human_diagnostic_messages(output: str):
     """
     Extract diagnostic message blocks from human-readable output.
@@ -347,14 +369,35 @@ def check_human_vs_json_parity() -> bool:
             if f.get("isRecursive") != hf["isRecursive"]:
                 print(f"  ❌ recursion flag mismatch for: {name}")
                 print(f"     human: {hf['isRecursive']} json: {f.get('isRecursive')}")
+                block = extract_human_function_block(human_output, name)
+                if block:
+                    print("     human block:")
+                    print(block)
+                else:
+                    print("     human block: <not found>")
+                print(f"     json function: {f}")
                 sample_ok = False
             if f.get("hasInfiniteSelfRecursion") != hf["hasInfiniteSelfRecursion"]:
                 print(f"  ❌ infinite recursion flag mismatch for: {name}")
                 print(f"     human: {hf['hasInfiniteSelfRecursion']} json: {f.get('hasInfiniteSelfRecursion')}")
+                block = extract_human_function_block(human_output, name)
+                if block:
+                    print("     human block:")
+                    print(block)
+                else:
+                    print("     human block: <not found>")
+                print(f"     json function: {f}")
                 sample_ok = False
             if f.get("exceedsLimit") != hf["exceedsLimit"]:
                 print(f"  ❌ stack limit flag mismatch for: {name}")
                 print(f"     human: {hf['exceedsLimit']} json: {f.get('exceedsLimit')}")
+                block = extract_human_function_block(human_output, name)
+                if block:
+                    print("     human block:")
+                    print(block)
+                else:
+                    print("     human block: <not found>")
+                print(f"     json function: {f}")
                 sample_ok = False
 
         for d in payload.get("diagnostics", []):
