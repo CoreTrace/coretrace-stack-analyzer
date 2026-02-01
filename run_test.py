@@ -125,81 +125,63 @@ def parse_human_functions(output: str):
     Parse human-readable output to extract per-function metadata.
     """
     functions = {}
-    current = None
     lines = output.splitlines()
     i = 0
     while i < len(lines):
         line = lines[i]
-        if line.startswith("Function: "):
-            # Skip diagnostic header lines like: "Function: foo (line 12, column 3)"
+        if not line.startswith("Function: "):
+            i += 1
+            continue
+
+        # Detect the end of this function block.
+        j = i + 1
+        while j < len(lines) and not lines[j].startswith("Function: "):
+            if lines[j].startswith("Mode: ") or lines[j].startswith("File: "):
+                break
+            j += 1
+
+        block = lines[i:j]
+        if any(l.strip().startswith("local stack:") for l in block):
             if "(line " in line:
-                i += 1
+                i = j
                 continue
-            # If the next non-empty line is not a stack summary, this is likely
-            # a diagnostic header embedded in the output.
-            j = i + 1
-            while j < len(lines) and lines[j].strip() == "":
-                j += 1
-            if j < len(lines):
-                next_stripped = lines[j].strip()
-                if not next_stripped.startswith("local stack:"):
-                    i += 1
-                    continue
             rest = line[len("Function: "):].strip()
-            if not rest:
-                current = None
-                i += 1
-                continue
-            name = rest.split()[0]
-            functions[name] = {
-                "localStackUnknown": None,
-                "localStack": None,
-                "localStackLowerBound": None,
-                "maxStackUnknown": None,
-                "maxStack": None,
-                "maxStackLowerBound": None,
-                "isRecursive": False,
-                "hasInfiniteSelfRecursion": False,
-                "exceedsLimit": False,
-            }
-            current = name
-            i += 1
-            continue
+            if rest:
+                name = rest.split()[0]
+                functions[name] = {
+                    "localStackUnknown": None,
+                    "localStack": None,
+                    "localStackLowerBound": None,
+                    "maxStackUnknown": None,
+                    "maxStack": None,
+                    "maxStackLowerBound": None,
+                    "isRecursive": False,
+                    "hasInfiniteSelfRecursion": False,
+                    "exceedsLimit": False,
+                }
 
-        if current is None:
-            i += 1
-            continue
+                for block_line in block:
+                    stripped = block_line.strip()
+                    if stripped.startswith("local stack:"):
+                        info = parse_stack_line(stripped, "local stack")
+                        if info:
+                            functions[name]["localStackUnknown"] = info["unknown"]
+                            functions[name]["localStack"] = info["value"]
+                            functions[name]["localStackLowerBound"] = info["lower_bound"]
+                    elif stripped.startswith("max stack (including callees):"):
+                        info = parse_stack_line(stripped, "max stack (including callees)")
+                        if info:
+                            functions[name]["maxStackUnknown"] = info["unknown"]
+                            functions[name]["maxStack"] = info["value"]
+                            functions[name]["maxStackLowerBound"] = info["lower_bound"]
+                    elif "recursive or mutually recursive function detected" in stripped:
+                        functions[name]["isRecursive"] = True
+                    elif "unconditional self recursion detected" in stripped:
+                        functions[name]["hasInfiniteSelfRecursion"] = True
+                    elif "potential stack overflow: exceeds limit of" in stripped:
+                        functions[name]["exceedsLimit"] = True
 
-        stripped = line.strip()
-        if stripped.startswith("local stack:"):
-            info = parse_stack_line(stripped, "local stack")
-            if info:
-                functions[current]["localStackUnknown"] = info["unknown"]
-                functions[current]["localStack"] = info["value"]
-                functions[current]["localStackLowerBound"] = info["lower_bound"]
-            i += 1
-            continue
-        if stripped.startswith("max stack (including callees):"):
-            info = parse_stack_line(stripped, "max stack (including callees)")
-            if info:
-                functions[current]["maxStackUnknown"] = info["unknown"]
-                functions[current]["maxStack"] = info["value"]
-                functions[current]["maxStackLowerBound"] = info["lower_bound"]
-            i += 1
-            continue
-        if "recursive or mutually recursive function detected" in stripped:
-            functions[current]["isRecursive"] = True
-            i += 1
-            continue
-        if "unconditional self recursion detected" in stripped:
-            functions[current]["hasInfiniteSelfRecursion"] = True
-            i += 1
-            continue
-        if "potential stack overflow: exceeds limit of" in stripped:
-            functions[current]["exceedsLimit"] = True
-            i += 1
-            continue
-        i += 1
+        i = j
     return functions
 
 
