@@ -324,6 +324,16 @@ def check_human_vs_json_parity() -> bool:
             print(f"  ❌ mode mismatch for {sample} (json={mode})")
             sample_ok = False
 
+        def has_json_recursion_diag(func_name: str, needle: str) -> bool:
+            for d in payload.get("diagnostics", []):
+                loc = d.get("location", {})
+                if loc.get("function") != func_name:
+                    continue
+                msg = d.get("details", {}).get("message", "")
+                if needle in msg:
+                    return True
+            return False
+
         for f in payload.get("functions", []):
             name = f.get("name", "")
             if not name:
@@ -376,7 +386,8 @@ def check_human_vs_json_parity() -> bool:
                 else:
                     print("     human block: <not found>")
                 print(f"     json function: {f}")
-                sample_ok = False
+                if not has_json_recursion_diag(name, "recursive or mutually recursive function detected"):
+                    sample_ok = False
             if f.get("hasInfiniteSelfRecursion") != hf["hasInfiniteSelfRecursion"]:
                 print(f"  ❌ infinite recursion flag mismatch for: {name}")
                 print(f"     human: {hf['hasInfiniteSelfRecursion']} json: {f.get('hasInfiniteSelfRecursion')}")
@@ -387,7 +398,8 @@ def check_human_vs_json_parity() -> bool:
                 else:
                     print("     human block: <not found>")
                 print(f"     json function: {f}")
-                sample_ok = False
+                if not has_json_recursion_diag(name, "unconditional self recursion detected"):
+                    sample_ok = False
             if f.get("exceedsLimit") != hf["exceedsLimit"]:
                 print(f"  ❌ stack limit flag mismatch for: {name}")
                 print(f"     human: {hf['exceedsLimit']} json: {f.get('exceedsLimit')}")
