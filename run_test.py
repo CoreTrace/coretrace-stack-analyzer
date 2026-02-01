@@ -160,7 +160,14 @@ def parse_human_functions(output: str):
                     "exceedsLimit": False,
                 }
 
-                for block_line in block:
+                summary_lines = []
+                for block_line in block[1:]:
+                    stripped = block_line.strip()
+                    if stripped.startswith("at line "):
+                        break
+                    summary_lines.append(block_line)
+
+                for block_line in summary_lines:
                     stripped = block_line.strip()
                     if stripped.startswith("local stack:"):
                         info = parse_stack_line(stripped, "local stack")
