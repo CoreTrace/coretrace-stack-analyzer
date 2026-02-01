@@ -2,6 +2,7 @@
 import sys
 import subprocess
 import json
+import re
 from pathlib import Path
 
 # Chemin vers ton binaire d'analyse
@@ -90,6 +91,300 @@ def run_analyzer_on_file(c_path: Path) -> str:
     )
     output = (result.stdout or "") + (result.stderr or "")
     return output
+
+
+def run_analyzer(args) -> subprocess.CompletedProcess:
+    """
+    Run analyzer with custom args and return the CompletedProcess.
+    """
+    return subprocess.run([str(ANALYZER)] + args, capture_output=True, text=True)
+
+
+def parse_stack_line(line: str, label: str):
+    """
+    Parse stack lines like:
+      "local stack: 123 bytes"
+      "local stack: unknown (>= 256 bytes)"
+    Returns dict with unknown/value/lower_bound or None if not matched.
+    """
+    label_re = re.escape(label)
+    m_unknown = re.search(
+        rf"{label_re}:\s*unknown(?:\s*\(>=\s*(\d+)\s*bytes\))?", line
+    )
+    if m_unknown:
+        lower_bound = int(m_unknown.group(1)) if m_unknown.group(1) else None
+        return {"unknown": True, "value": None, "lower_bound": lower_bound}
+    m_value = re.search(rf"{label_re}:\s*(\d+)\s*bytes", line)
+    if m_value:
+        return {"unknown": False, "value": int(m_value.group(1)), "lower_bound": None}
+    return None
+
+
+def parse_human_functions(output: str):
+    """
+    Parse human-readable output to extract per-function metadata.
+    """
+    functions = {}
+    current = None
+    for line in output.splitlines():
+        if line.startswith("Function: "):
+            # Skip diagnostic header lines like: "Function: foo (line 12, column 3)"
+            if "(line " in line:
+                continue
+            rest = line[len("Function: "):].strip()
+            if not rest:
+                current = None
+                continue
+            name = rest.split()[0]
+            functions[name] = {
+                "localStackUnknown": None,
+                "localStack": None,
+                "localStackLowerBound": None,
+                "maxStackUnknown": None,
+                "maxStack": None,
+                "maxStackLowerBound": None,
+                "isRecursive": False,
+                "hasInfiniteSelfRecursion": False,
+                "exceedsLimit": False,
+            }
+            current = name
+            continue
+
+        if current is None:
+            continue
+
+        stripped = line.strip()
+        if stripped.startswith("local stack:"):
+            info = parse_stack_line(stripped, "local stack")
+            if info:
+                functions[current]["localStackUnknown"] = info["unknown"]
+                functions[current]["localStack"] = info["value"]
+                functions[current]["localStackLowerBound"] = info["lower_bound"]
+            continue
+        if stripped.startswith("max stack (including callees):"):
+            info = parse_stack_line(stripped, "max stack (including callees)")
+            if info:
+                functions[current]["maxStackUnknown"] = info["unknown"]
+                functions[current]["maxStack"] = info["value"]
+                functions[current]["maxStackLowerBound"] = info["lower_bound"]
+            continue
+        if "recursive or mutually recursive function detected" in stripped:
+            functions[current]["isRecursive"] = True
+            continue
+        if "unconditional self recursion detected" in stripped:
+            functions[current]["hasInfiniteSelfRecursion"] = True
+            continue
+        if "potential stack overflow: exceeds limit of" in stripped:
+            functions[current]["exceedsLimit"] = True
+            continue
+    return functions
+
+
+def parse_human_diagnostic_messages(output: str):
+    """
+    Extract diagnostic message blocks from human-readable output.
+    """
+    blocks = []
+    lines = output.splitlines()
+    i = 0
+    while i < len(lines):
+        stripped = lines[i].strip()
+        if stripped.startswith("Function:") and "(line " in stripped:
+            # Diagnostic blocks that start with a Function: header line.
+            block_lines = [lines[i]]
+            i += 1
+            while i < len(lines):
+                next_line = lines[i]
+                next_stripped = next_line.strip()
+                if next_stripped == "":
+                    break
+                if next_stripped.startswith(("Function:", "Mode:", "File:")):
+                    break
+                if next_stripped.startswith(("local stack:", "max stack (including callees):")):
+                    break
+                if next_stripped.startswith("[") and not next_line[:1].isspace():
+                    break
+                block_lines.append(next_line)
+                i += 1
+
+            blocks.append(normalize("\n".join(block_lines)))
+
+            if i < len(lines) and lines[i].strip() == "":
+                i += 1
+            continue
+
+        if stripped.startswith("at line ") and ", column " in stripped:
+            # Diagnostic blocks that follow a source location line.
+            block_lines = []
+            i += 1
+            while i < len(lines):
+                next_line = lines[i]
+                next_stripped = next_line.strip()
+                if next_stripped == "":
+                    break
+                if next_stripped.startswith(("Function:", "Mode:", "File:")):
+                    break
+                if next_stripped.startswith(("local stack:", "max stack (including callees):")):
+                    break
+                if next_stripped.startswith("[") and not next_line[:1].isspace():
+                    break
+                block_lines.append(next_line)
+                i += 1
+
+            if block_lines:
+                blocks.append(normalize("\n".join(block_lines)))
+
+            if i < len(lines) and lines[i].strip() == "":
+                i += 1
+            continue
+
+        i += 1
+
+    return blocks
+
+
+def check_human_vs_json_parity() -> bool:
+    """
+    Compare human-readable output vs JSON output for the same input.
+    Fails if information present in one view is missing in the other.
+    """
+    print("=== Testing human vs JSON parity ===")
+    samples = []
+    for ext in ("*.c", "*.cpp"):
+        samples.extend(TEST_DIR.glob(f"**/{ext}"))
+    samples = sorted(samples)
+    if not samples:
+        print("  (no .c/.cpp files found, skipping)\n")
+        return True
+
+    ok = True
+    for sample in samples:
+        sample_ok = True
+        human = run_analyzer([str(sample)])
+        if human.returncode != 0:
+            print(f"  ❌ human run failed for {sample} (code {human.returncode})")
+            print(human.stdout)
+            print(human.stderr)
+            sample_ok = False
+            ok = False
+            continue
+
+        structured = run_analyzer([str(sample), "--format=json"])
+        if structured.returncode != 0:
+            print(f"  ❌ json run failed for {sample} (code {structured.returncode})")
+            print(structured.stdout)
+            print(structured.stderr)
+            sample_ok = False
+            ok = False
+            continue
+
+        try:
+            payload = json.loads(structured.stdout)
+        except json.JSONDecodeError as exc:
+            print(f"  ❌ invalid JSON output for {sample}: {exc}")
+            print(structured.stdout)
+            sample_ok = False
+            ok = False
+            continue
+
+        human_output = (human.stdout or "") + (human.stderr or "")
+        norm_human = normalize(human_output)
+        human_functions = parse_human_functions(human_output)
+        human_diag_blocks = parse_human_diagnostic_messages(human_output)
+
+        mode = payload.get("meta", {}).get("mode")
+        if mode and f"Mode: {mode}" not in human_output:
+            print(f"  ❌ mode mismatch for {sample} (json={mode})")
+            sample_ok = False
+
+        for f in payload.get("functions", []):
+            name = f.get("name", "")
+            if not name:
+                continue
+            if name not in human_functions:
+                print(f"  ❌ function missing in human output: {name}")
+                sample_ok = False
+                continue
+            hf = human_functions[name]
+
+            if hf["localStackUnknown"] is None:
+                print(f"  ❌ local stack missing in human output for: {name}")
+                sample_ok = False
+            elif f.get("localStackUnknown") != hf["localStackUnknown"]:
+                print(f"  ❌ local stack unknown flag mismatch for: {name}")
+                sample_ok = False
+            elif not f.get("localStackUnknown"):
+                if f.get("localStack") != hf["localStack"]:
+                    print(f"  ❌ local stack value mismatch for: {name}")
+                    sample_ok = False
+            elif hf["localStackLowerBound"] is not None:
+                json_lb = f.get("localStackLowerBound")
+                if json_lb != hf["localStackLowerBound"]:
+                    print(f"  ❌ local stack lower bound mismatch for: {name}")
+                    sample_ok = False
+
+            if hf["maxStackUnknown"] is None:
+                print(f"  ❌ max stack missing in human output for: {name}")
+                sample_ok = False
+            elif f.get("maxStackUnknown") != hf["maxStackUnknown"]:
+                print(f"  ❌ max stack unknown flag mismatch for: {name}")
+                sample_ok = False
+            elif not f.get("maxStackUnknown"):
+                if f.get("maxStack") != hf["maxStack"]:
+                    print(f"  ❌ max stack value mismatch for: {name}")
+                    sample_ok = False
+            elif hf["maxStackLowerBound"] is not None:
+                json_lb = f.get("maxStackLowerBound")
+                if json_lb != hf["maxStackLowerBound"]:
+                    print(f"  ❌ max stack lower bound mismatch for: {name}")
+                    sample_ok = False
+
+            if f.get("isRecursive") != hf["isRecursive"]:
+                print(f"  ❌ recursion flag mismatch for: {name}")
+                sample_ok = False
+            if f.get("hasInfiniteSelfRecursion") != hf["hasInfiniteSelfRecursion"]:
+                print(f"  ❌ infinite recursion flag mismatch for: {name}")
+                sample_ok = False
+            if f.get("exceedsLimit") != hf["exceedsLimit"]:
+                print(f"  ❌ stack limit flag mismatch for: {name}")
+                sample_ok = False
+
+        for d in payload.get("diagnostics", []):
+            details = d.get("details", {})
+            msg = details.get("message", "")
+            if msg and normalize(msg) not in norm_human:
+                print("  ❌ diagnostic message missing in human output")
+                print(f"     message: {msg}")
+                sample_ok = False
+            loc = d.get("location", {})
+            line = loc.get("startLine", 0)
+            column = loc.get("startColumn", 0)
+            if line and column:
+                needle = normalize(f"at line {line}, column {column}")
+                if needle not in norm_human:
+                    print("  ❌ diagnostic location missing in human output")
+                    print(f"     location: line {line}, column {column}")
+                    sample_ok = False
+
+        json_messages = {
+            normalize(d.get("details", {}).get("message", ""))
+            for d in payload.get("diagnostics", [])
+            if d.get("details", {}).get("message")
+        }
+        for block in human_diag_blocks:
+            if block and block not in json_messages:
+                print("  ❌ diagnostic message missing in JSON output")
+                print(f"     message: {block}")
+                sample_ok = False
+
+        if sample_ok:
+            print(f"  ✅ parity OK for {sample}")
+        else:
+            print(f"  ❌ parity FAIL for {sample}")
+        ok = ok and sample_ok
+
+    print()
+    return ok
 
 
 def check_help_flags() -> bool:
@@ -371,15 +666,25 @@ def check_file(c_path: Path):
 
 
 def main() -> int:
-    global_ok = check_help_flags()
-    if not check_multi_file_json():
-        global_ok = False
-    if not check_multi_file_failure():
-        global_ok = False
-    if not check_cli_parsing_and_filters():
-        global_ok = False
     total_tests = 0
     passed_tests = 0
+
+    def record_ok(ok: bool):
+        nonlocal total_tests, passed_tests
+        total_tests += 1
+        if ok:
+            passed_tests += 1
+        return ok
+
+    global_ok = record_ok(check_help_flags())
+    if not record_ok(check_multi_file_json()):
+        global_ok = False
+    if not record_ok(check_multi_file_failure()):
+        global_ok = False
+    if not record_ok(check_cli_parsing_and_filters()):
+        global_ok = False
+    if not record_ok(check_human_vs_json_parity()):
+        global_ok = False
 
     c_files = sorted(list(TEST_DIR.glob("**/*.c")) + list(TEST_DIR.glob("**/*.cpp")))
     if not c_files:
