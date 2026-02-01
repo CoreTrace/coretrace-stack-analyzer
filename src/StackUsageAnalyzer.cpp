@@ -4054,6 +4054,45 @@ namespace ctrace::stack
             result.functions.push_back(std::move(fr));
         }
 
+        // 5b) Emit summary diagnostics for recursion/overflow flags (for JSON parity)
+        for (const auto& fr : result.functions)
+        {
+            if (fr.isRecursive)
+            {
+                Diagnostic diag;
+                diag.funcName = fr.name;
+                diag.filePath = fr.filePath;
+                diag.severity = DiagnosticSeverity::Warning;
+                diag.errCode = DescriptiveErrorCode::None;
+                diag.message = "  [!] recursive or mutually recursive function detected\n";
+                result.diagnostics.push_back(std::move(diag));
+            }
+
+            if (fr.hasInfiniteSelfRecursion)
+            {
+                Diagnostic diag;
+                diag.funcName = fr.name;
+                diag.filePath = fr.filePath;
+                diag.severity = DiagnosticSeverity::Warning;
+                diag.errCode = DescriptiveErrorCode::None;
+                diag.message = "  [!!!] unconditional self recursion detected (no base case)\n"
+                               "       this will eventually overflow the stack at runtime\n";
+                result.diagnostics.push_back(std::move(diag));
+            }
+
+            if (fr.exceedsLimit)
+            {
+                Diagnostic diag;
+                diag.funcName = fr.name;
+                diag.filePath = fr.filePath;
+                diag.severity = DiagnosticSeverity::Warning;
+                diag.errCode = DescriptiveErrorCode::None;
+                diag.message = "  [!] potential stack overflow: exceeds limit of " +
+                               std::to_string(config.stackLimit) + " bytes\n";
+                result.diagnostics.push_back(std::move(diag));
+            }
+        }
+
         // 6) Détection des dépassements de buffer sur la stack (analyse intra-fonction)
         std::vector<StackBufferOverflow> bufferIssues;
         for (llvm::Function& F : mod)
@@ -5042,30 +5081,15 @@ namespace ctrace::stack
                 os << f.localStack;
             }
             os << ",\n";
-            os << "      \"localStackUnknown\": " << (f.localStackUnknown ? "true" : "false")
-               << ",\n";
-            os << "      \"maxStack\": ";
-            if (f.maxStackUnknown)
-            {
-                os << "null";
-            }
-            else
-            {
-                os << f.maxStack;
-            }
-            os << ",\n";
-            os << "      \"maxStackUnknown\": " << (f.maxStackUnknown ? "true" : "false") << ",\n";
-            os << "      \"hasDynamicAlloca\": " << (f.hasDynamicAlloca ? "true" : "false")
-               << ",\n";
-            os << "      \"localStack\": ";
-            if (f.localStackUnknown)
-            {
-                os << "null";
-            }
-            else
+            os << "      \"localStackLowerBound\": ";
+            if (f.localStackUnknown && f.localStack > 0)
             {
                 os << f.localStack;
             }
+            else
+            {
+                os << "null";
+            }
             os << ",\n";
             os << "      \"localStackUnknown\": " << (f.localStackUnknown ? "true" : "false")
                << ",\n";
@@ -5077,6 +5101,16 @@ namespace ctrace::stack
             else
             {
                 os << f.maxStack;
+            }
+            os << ",\n";
+            os << "      \"maxStackLowerBound\": ";
+            if (f.maxStackUnknown && f.maxStack > 0)
+            {
+                os << f.maxStack;
+            }
+            else
+            {
+                os << "null";
             }
             os << ",\n";
             os << "      \"maxStackUnknown\": " << (f.maxStackUnknown ? "true" : "false") << ",\n";
