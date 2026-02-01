@@ -3,7 +3,12 @@
 
 int rec(size_t n)
 {
-    // at line 12, column 22
+    // at line 17, column 22
+    // [!] dynamic stack allocation detected for variable 'p'
+    //     allocated type: i8
+    //     size of this allocation is not compile-time constant (VLA / variable alloca) and may lead to unbounded stack usage
+
+    // at line 17, column 22
     // [!!] user-controlled alloca size for variable 'p'
     //     allocation performed via alloca/VLA; stack usage grows with runtime value
     //     size is unbounded at compile time
