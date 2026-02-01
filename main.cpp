@@ -310,6 +310,24 @@ static AnalysisResult filterResult(const AnalysisResult& result, const AnalysisC
     return filtered;
 }
 
+static AnalysisResult filterWarningsOnly(const AnalysisResult& result, const AnalysisConfig& cfg)
+{
+    if (!cfg.warningsOnly)
+        return result;
+
+    AnalysisResult filtered;
+    filtered.config = result.config;
+    filtered.functions = result.functions;
+    for (const auto& d : result.diagnostics)
+    {
+        if (d.severity != DiagnosticSeverity::Info)
+        {
+            filtered.diagnostics.push_back(d);
+        }
+    }
+    return filtered;
+}
+
 void toto(void)
 {
     char test[974] = "Hello";
@@ -529,8 +547,9 @@ int main(int argc, char** argv)
             cfg.onlyFiles.empty() && cfg.onlyDirs.empty() && cfg.onlyFunctions.empty();
         if (results.size() == 1)
         {
-            const AnalysisResult filtered =
+            AnalysisResult filtered =
                 applyFilter ? filterResult(results[0].second, cfg) : results[0].second;
+            filtered = filterWarningsOnly(filtered, cfg);
             llvm::outs() << ctrace::stack::toJson(filtered, results[0].first);
         }
         else
@@ -545,7 +564,8 @@ int main(int argc, char** argv)
                 merged.diagnostics.insert(merged.diagnostics.end(), res.diagnostics.begin(),
                                           res.diagnostics.end());
             }
-            const AnalysisResult filtered = applyFilter ? filterResult(merged, cfg) : merged;
+            AnalysisResult filtered = applyFilter ? filterResult(merged, cfg) : merged;
+            filtered = filterWarningsOnly(filtered, cfg);
             llvm::outs() << ctrace::stack::toJson(filtered, inputFilenames);
         }
         return 0;
@@ -557,8 +577,9 @@ int main(int argc, char** argv)
             cfg.onlyFiles.empty() && cfg.onlyDirs.empty() && cfg.onlyFunctions.empty();
         if (results.size() == 1)
         {
-            const AnalysisResult filtered =
+            AnalysisResult filtered =
                 applyFilter ? filterResult(results[0].second, cfg) : results[0].second;
+            filtered = filterWarningsOnly(filtered, cfg);
             llvm::outs() << ctrace::stack::toSarif(filtered, results[0].first,
                                                    "coretrace-stack-analyzer", "0.1.0");
         }
@@ -574,7 +595,8 @@ int main(int argc, char** argv)
                 merged.diagnostics.insert(merged.diagnostics.end(), res.diagnostics.begin(),
                                           res.diagnostics.end());
             }
-            const AnalysisResult filtered = applyFilter ? filterResult(merged, cfg) : merged;
+            AnalysisResult filtered = applyFilter ? filterResult(merged, cfg) : merged;
+            filtered = filterWarningsOnly(filtered, cfg);
             llvm::outs() << ctrace::stack::toSarif(filtered, inputFilenames.front(),
                                                    "coretrace-stack-analyzer", "0.1.0");
         }
@@ -640,23 +662,6 @@ int main(int argc, char** argv)
                 llvm::outs() << "  max stack (including callees): " << f.maxStack << " bytes\n";
             }
 
-            if (f.isRecursive)
-            {
-                llvm::outs() << "  [!] recursive or mutually recursive function detected\n";
-            }
-
-            if (f.hasInfiniteSelfRecursion)
-            {
-                llvm::outs() << "  [!!!] unconditional self recursion detected (no base case)\n";
-                llvm::outs() << "       this will eventually overflow the stack at runtime\n";
-            }
-
-            if (f.exceedsLimit)
-            {
-                llvm::outs() << "  [!] potential stack overflow: exceeds limit of "
-                             << result.config.stackLimit << " bytes\n";
-            }
-
             if (!result.config.quiet)
             {
                 for (const auto& d : result.diagnostics)
@@ -664,11 +669,8 @@ int main(int argc, char** argv)
                     if (d.funcName != f.name)
                         continue;
 
-                    // Si warningsOnly est actif, on ignore les diagnostics Info
                     if (result.config.warningsOnly && d.severity == DiagnosticSeverity::Info)
-                    {
                         continue;
-                    }
 
                     if (d.line != 0)
                     {
