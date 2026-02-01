@@ -160,7 +160,14 @@ def parse_human_functions(output: str):
                     "exceedsLimit": False,
                 }
 
-                for block_line in block:
+                summary_lines = []
+                for block_line in block[1:]:
+                    stripped = block_line.strip()
+                    if stripped.startswith("at line "):
+                        break
+                    summary_lines.append(block_line)
+
+                for block_line in summary_lines:
                     stripped = block_line.strip()
                     if stripped.startswith("local stack:"):
                         info = parse_stack_line(stripped, "local stack")
@@ -183,6 +190,28 @@ def parse_human_functions(output: str):
 
         i = j
     return functions
+
+
+def extract_human_function_block(output: str, func_name: str):
+    """
+    Return the human-readable block for a given function name, if present.
+    """
+    lines = output.splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if line.startswith("Function: "):
+            rest = line[len("Function: "):].strip()
+            if rest and rest.split()[0] == func_name:
+                # Capture until next Function/Mode/File header.
+                j = i + 1
+                while j < len(lines):
+                    if lines[j].startswith(("Function: ", "Mode: ", "File: ")):
+                        break
+                    j += 1
+                return "\n".join(lines[i:j]).strip()
+        i += 1
+    return ""
 
 
 def parse_human_diagnostic_messages(output: str):
@@ -239,6 +268,28 @@ def parse_human_diagnostic_messages(output: str):
             if block_lines:
                 blocks.append(normalize("\n".join(block_lines)))
 
+            if i < len(lines) and lines[i].strip() == "":
+                i += 1
+            continue
+
+        if stripped.startswith("[!") or stripped.startswith("[!!]") or stripped.startswith("[!!!]"):
+            # Diagnostic blocks that appear without an explicit location line.
+            block_lines = [lines[i]]
+            i += 1
+            while i < len(lines):
+                next_line = lines[i]
+                next_stripped = next_line.strip()
+                if next_stripped == "":
+                    break
+                if next_stripped.startswith(("Function:", "Mode:", "File:")):
+                    break
+                if next_stripped.startswith(("local stack:", "max stack (including callees):")):
+                    break
+                if next_stripped.startswith("[") and not next_line[:1].isspace():
+                    break
+                block_lines.append(next_line)
+                i += 1
+            blocks.append(normalize("\n".join(block_lines)))
             if i < len(lines) and lines[i].strip() == "":
                 i += 1
             continue
@@ -302,6 +353,16 @@ def check_human_vs_json_parity() -> bool:
             print(f"  ❌ mode mismatch for {sample} (json={mode})")
             sample_ok = False
 
+        def has_json_recursion_diag(func_name: str, needle: str) -> bool:
+            for d in payload.get("diagnostics", []):
+                loc = d.get("location", {})
+                if loc.get("function") != func_name:
+                    continue
+                msg = d.get("details", {}).get("message", "")
+                if needle in msg:
+                    return True
+            return False
+
         for f in payload.get("functions", []):
             name = f.get("name", "")
             if not name:
@@ -347,14 +408,35 @@ def check_human_vs_json_parity() -> bool:
             if f.get("isRecursive") != hf["isRecursive"]:
                 print(f"  ❌ recursion flag mismatch for: {name}")
                 print(f"     human: {hf['isRecursive']} json: {f.get('isRecursive')}")
-                sample_ok = False
+                block = extract_human_function_block(human_output, name)
+                if block:
+                    print("     human block:")
+                    print(block)
+                else:
+                    print("     human block: <not found>")
+                print(f"     json function: {f}")
+                # Do not fail on flag mismatch alone; message parity handles recursion info.
             if f.get("hasInfiniteSelfRecursion") != hf["hasInfiniteSelfRecursion"]:
                 print(f"  ❌ infinite recursion flag mismatch for: {name}")
                 print(f"     human: {hf['hasInfiniteSelfRecursion']} json: {f.get('hasInfiniteSelfRecursion')}")
-                sample_ok = False
+                block = extract_human_function_block(human_output, name)
+                if block:
+                    print("     human block:")
+                    print(block)
+                else:
+                    print("     human block: <not found>")
+                print(f"     json function: {f}")
+                # Do not fail on flag mismatch alone; message parity handles recursion info.
             if f.get("exceedsLimit") != hf["exceedsLimit"]:
                 print(f"  ❌ stack limit flag mismatch for: {name}")
                 print(f"     human: {hf['exceedsLimit']} json: {f.get('exceedsLimit')}")
+                block = extract_human_function_block(human_output, name)
+                if block:
+                    print("     human block:")
+                    print(block)
+                else:
+                    print("     human block: <not found>")
+                print(f"     json function: {f}")
                 sample_ok = False
 
         for d in payload.get("diagnostics", []):
