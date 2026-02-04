@@ -281,8 +281,8 @@ static bool parseStackLimitValue(const std::string& input, StackSize& out, std::
     std::string suffix = trimCopy(trimmed.substr(digitCount));
 
     unsigned long long base = 0;
-    auto [ptr, ec] = std::from_chars(numberPart.data(),
-                                     numberPart.data() + numberPart.size(), base, 10);
+    auto [ptr, ec] =
+        std::from_chars(numberPart.data(), numberPart.data() + numberPart.size(), base, 10);
     if (ec != std::errc() || ptr != numberPart.data() + numberPart.size())
     {
         error = "invalid numeric value";
@@ -301,8 +301,7 @@ static bool parseStackLimitValue(const std::string& input, StackSize& out, std::
         lowered.reserve(suffix.size());
         for (char c : suffix)
         {
-            lowered.push_back(static_cast<char>(
-                std::tolower(static_cast<unsigned char>(c))));
+            lowered.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
         }
 
         if (lowered == "b")
@@ -527,8 +526,7 @@ int main(int argc, char** argv)
         {
             std::string error;
             StackSize value = 0;
-            if (!parseStackLimitValue(argStr.substr(std::strlen("--stack-limit=")),
-                                      value, error))
+            if (!parseStackLimitValue(argStr.substr(std::strlen("--stack-limit=")), value, error))
             {
                 llvm::errs() << "Invalid --stack-limit value: " << error << "\n";
                 return 1;

@@ -3752,8 +3752,8 @@ namespace ctrace::stack
                 for (const llvm::Function* callee : itCG->second)
                 {
                     auto itTotal = state.TotalStack.find(callee);
-                    StackEstimate est = (itTotal != state.TotalStack.end()) ? itTotal->second
-                                                                            : StackEstimate{};
+                    StackEstimate est =
+                        (itTotal != state.TotalStack.end()) ? itTotal->second : StackEstimate{};
                     if (!bestCallee || est.bytes > bestStack.bytes)
                     {
                         bestCallee = callee;
@@ -4226,13 +4226,12 @@ namespace ctrace::stack
                     }
                     else if (!itLocals->second.empty())
                     {
-                        localsDetails += "        locals: " + std::to_string(itLocals->second.size()) +
-                                         " variables (total " + std::to_string(fr.localStack) +
-                                         " bytes)\n";
+                        localsDetails +=
+                            "        locals: " + std::to_string(itLocals->second.size()) +
+                            " variables (total " + std::to_string(fr.localStack) + " bytes)\n";
 
                         std::vector<std::pair<std::string, StackSize>> named = itLocals->second;
-                        named.erase(std::remove_if(named.begin(), named.end(),
-                                                   [](const auto& v)
+                        named.erase(std::remove_if(named.begin(), named.end(), [](const auto& v)
                                                    { return v.first == "<unnamed>"; }),
                                     named.end());
                         std::sort(named.begin(), named.end(),
