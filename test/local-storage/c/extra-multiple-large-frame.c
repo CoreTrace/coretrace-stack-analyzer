@@ -1,0 +1,117 @@
+#include <stdio.h>
+
+int main(void)
+{
+    // local stack: 832 bytes
+    // max stack (including callees): 832 bytes
+    // locals: 106 variables (total 832 bytes)
+    // locals list: aa(8), ab(8), ac(8), ad(8), ae(8), af(8), ag(8), ah(8), ai(8), aj(8), ak(8), al(8), am(8), an(8), ao(8), ap(8), aq(8), ar(8), as(8), at(8), au(8), av(8), aw(8), ax(8), ay(8), az(8), ba(8), bb(8), bc(8), bd(8), be(8), bf(8), bg(8), bh(8), bi(8), bj(8), bk(8), bl(8), bm(8), bn(8), bo(8), bp(8), bq(8), br(8), bs(8), bt(8), bu(8), bv(8), bw(8), bx(8), by(8), bz(8), ca(8), cb(8), cc(8), cd(8), ce(8), cf(8), cg(8), ch(8), ci(8), cj(8), ck(8), cl(8), cm(8), cn(8), co(8), cp(8), cq(8), cr(8), cs(8), ct(8), cu(8), cv(8), cw(8), cx(8), cy(8), cz(8), f(8), g(8), h(8), i(8), j(8), k(8), l(8), m(8), n(8), o(8), p(8), q(8), r(8), s(8), sum(8), t(8), u(8), v(8), w(8), x(8), y(8), z(8), a(4), b(4), c(4), d(4), e(4), retval(4)
+    // [!] potential stack overflow: exceeds limit of 30 bytes
+    int a;
+    int b;
+    int c;
+    int d;
+    int e;
+    void *f;
+    void *g;
+    void *h;
+    void *i;
+    void *j;
+    void *k;
+    void *l;
+    void *m;
+    void *n;
+    void *o;
+    void *p;
+    void *q;
+    void *r;
+    void *s;
+    void *t;
+    void *u;
+    void *v;
+    void *w;
+    void *x;
+    void *y;
+    void *z;
+    void *aa;
+    void *ab;
+    void *ac;
+    void *ad;
+    void *ae;
+    void *af;
+    void *ag;
+    void *ah;
+    void *ai;
+    void *aj;
+    void *ak;
+    void *al;
+    void *am;
+    void *an;
+    void *ao;
+    void *ap;
+    void *aq;
+    void *ar;
+    void *as;
+    void *at;
+    void *au;
+    void *av;
+    void *aw;
+    void *ax;
+    void *ay;
+    void *az;
+    void *ba;
+    void *bb;
+    void *bc;
+    void *bd;
+    void *be;
+    void *bf;
+    void *bg;
+    void *bh;
+    void *bi;
+    void *bj;
+    void *bk;
+    void *bl;
+    void *bm;
+    void *bn;
+    void *bo;
+    void *bp;
+    void *bq;
+    void *br;
+    void *bs;
+    void *bt;
+    void *bu;
+    void *bv;
+    void *bw;
+    void *bx;
+    void *by;
+    void *bz;
+    void *ca;
+    void *cb;
+    void *cc;
+    void *cd;
+    void *ce;
+    void *cf;
+    void *cg;
+    void *ch;
+    void *ci;
+    void *cj;
+    void *ck;
+    void *cl;
+    void *cm;
+    void *cn;
+    void *co;
+    void *cp;
+    void *cq;
+    void *cr;
+    void *cs;
+    void *ct;
+    void *cu;
+    void *cv;
+    void *cw;
+    void *cx;
+    void *cy;
+    void *cz;
+    void *sum;
+
+    return 0;
+}
