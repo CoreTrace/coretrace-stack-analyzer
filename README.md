@@ -27,6 +27,7 @@
 --format=json|sarif|human
 --quiet disables diagnostics entirely
 --warnings-only keeps only important diagnostics
+--stack-limit=<value> overrides stack limit (bytes, or KiB/MiB/GiB)
 --compile-arg=<arg> passes an extra argument to the compiler
 -I<dir> or -I <dir> adds an include directory
 -D<name>[=value] or -D <name>[=value] defines a macro

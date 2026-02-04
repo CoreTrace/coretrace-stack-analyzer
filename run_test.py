@@ -39,6 +39,7 @@ def extract_expectations(c_path: Path):
     """
     expectations = []
     negative_expectations = []
+    stack_limit = None
     lines = c_path.read_text().splitlines()
     i = 0
     n = len(lines)
@@ -46,6 +47,12 @@ def extract_expectations(c_path: Path):
     while i < n:
         raw = lines[i]
         stripped = raw.lstrip()
+
+        stack_match = re.match(r"//\s*stack-limit\s*[:=]\s*(\S+)", stripped, re.IGNORECASE)
+        if stack_match:
+            stack_limit = stack_match.group(1)
+            i += 1
+            continue
 
         stripped_line = stripped
         if stripped_line.startswith("// not contains:"):
@@ -77,15 +84,18 @@ def extract_expectations(c_path: Path):
         else:
             i += 1
 
-    return expectations, negative_expectations
+    return expectations, negative_expectations, stack_limit
 
 
-def run_analyzer_on_file(c_path: Path) -> str:
+def run_analyzer_on_file(c_path: Path, stack_limit=None) -> str:
     """
     Lance ton analyseur sur un fichier C et récupère stdout+stderr.
     """
+    args = [str(ANALYZER), str(c_path)]
+    if stack_limit:
+        args.append(f"--stack-limit={stack_limit}")
     result = subprocess.run(
-        [str(ANALYZER), str(c_path)],
+        args,
         capture_output=True,
         text=True,
     )
@@ -185,8 +195,12 @@ def parse_human_functions(output: str):
                         functions[name]["isRecursive"] = True
                     elif "unconditional self recursion detected" in stripped:
                         functions[name]["hasInfiniteSelfRecursion"] = True
-                    elif "potential stack overflow: exceeds limit of" in stripped:
+
+                # Stack overflow diagnostics can appear after a location line.
+                for block_line in block[1:]:
+                    if "potential stack overflow: exceeds limit of" in block_line:
                         functions[name]["exceedsLimit"] = True
+                        break
 
         i = j
     return functions
@@ -712,12 +726,12 @@ def check_file(c_path: Path):
     dans la sortie de l'analyseur.
     """
     print(f"=== Testing {c_path} ===")
-    expectations, negative_expectations = extract_expectations(c_path)
+    expectations, negative_expectations, stack_limit = extract_expectations(c_path)
     if not expectations and not negative_expectations:
         print("  (no expectations found, skipping)\n")
         return True, 0, 0
 
-    analyzer_output = run_analyzer_on_file(c_path)
+    analyzer_output = run_analyzer_on_file(c_path, stack_limit=stack_limit)
     norm_output = normalize(analyzer_output)
 
     all_ok = True

@@ -67,6 +67,7 @@ namespace ctrace::stack
         StackSize bytes = 0;
         bool unknown = false;
         bool hasDynamicAlloca = false;
+        std::vector<std::pair<std::string, StackSize>> localAllocas;
     };
 
     // État interne pour la propagation
@@ -3003,6 +3004,8 @@ namespace ctrace::stack
     //  Analyse locale de la stack (deux variantes)
     // ============================================================================
 
+    static std::string deriveAllocaName(const llvm::AllocaInst* AI);
+
     static LocalStackInfo computeLocalStackBase(llvm::Function& F, const llvm::DataLayout& DL)
     {
         LocalStackInfo info;
@@ -3035,6 +3038,7 @@ namespace ctrace::stack
 
                 StackSize size = DL.getTypeAllocSize(ty) * count;
                 info.bytes += size;
+                info.localAllocas.emplace_back(deriveAllocaName(alloca), size);
             }
         }
 
@@ -3685,6 +3689,87 @@ namespace ctrace::stack
             return {};
         }
 
+        static bool getFunctionSourceLocation(const llvm::Function& F, unsigned& line,
+                                              unsigned& column)
+        {
+            line = 0;
+            column = 0;
+
+            for (const llvm::BasicBlock& BB : F)
+            {
+                for (const llvm::Instruction& I : BB)
+                {
+                    llvm::DebugLoc DL = I.getDebugLoc();
+                    if (!DL)
+                        continue;
+                    line = DL.getLine();
+                    column = DL.getCol();
+                    if (line != 0)
+                    {
+                        if (column == 0)
+                            column = 1;
+                        return true;
+                    }
+                }
+            }
+
+            if (auto* sp = F.getSubprogram())
+            {
+                line = sp->getLine();
+                if (line != 0)
+                {
+                    column = 1;
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        static std::string buildMaxStackCallPath(const llvm::Function* F, const CallGraph& CG,
+                                                 const InternalAnalysisState& state)
+        {
+            std::string path;
+            std::set<const llvm::Function*> visited;
+            const llvm::Function* current = F;
+
+            while (current)
+            {
+                if (!visited.insert(current).second)
+                    break;
+
+                if (!path.empty())
+                    path += " -> ";
+                path += current->getName().str();
+
+                const llvm::Function* bestCallee = nullptr;
+                StackEstimate bestStack{};
+
+                auto itCG = CG.find(current);
+                if (itCG == CG.end())
+                    break;
+
+                for (const llvm::Function* callee : itCG->second)
+                {
+                    auto itTotal = state.TotalStack.find(callee);
+                    StackEstimate est =
+                        (itTotal != state.TotalStack.end()) ? itTotal->second : StackEstimate{};
+                    if (!bestCallee || est.bytes > bestStack.bytes)
+                    {
+                        bestCallee = callee;
+                        bestStack = est;
+                    }
+                }
+
+                if (!bestCallee || bestStack.bytes == 0)
+                    break;
+
+                current = bestCallee;
+            }
+
+            return path;
+        }
+
         static std::string normalizePathForMatch(const std::string& input)
         {
             std::string out = input;
@@ -3942,6 +4027,10 @@ namespace ctrace::stack
 
         // 1) Stack locale par fonction
         std::map<const llvm::Function*, LocalStackInfo> LocalStack;
+        std::map<std::string, std::pair<unsigned, unsigned>> functionLocations;
+        std::map<std::string, std::string> functionCallPaths;
+        std::map<std::string, std::vector<std::pair<std::string, StackSize>>> functionLocalAllocas;
+
         for (llvm::Function& F : mod)
         {
             if (F.isDeclaration())
@@ -4051,6 +4140,23 @@ namespace ctrace::stack
             fr.hasInfiniteSelfRecursion = state.InfiniteRecursionFuncs.count(Fn) != 0;
             fr.exceedsLimit = (!fr.maxStackUnknown && totalInfo.bytes > config.stackLimit);
 
+            unsigned line = 0;
+            unsigned column = 0;
+            if (getFunctionSourceLocation(F, line, column))
+            {
+                functionLocations[fr.name] = {line, column};
+            }
+            if (!fr.isRecursive && totalInfo.bytes > localInfo.bytes)
+            {
+                std::string path = buildMaxStackCallPath(Fn, CG, state);
+                if (!path.empty())
+                    functionCallPaths[fr.name] = path;
+            }
+            if (!localInfo.localAllocas.empty())
+            {
+                functionLocalAllocas[fr.name] = localInfo.localAllocas;
+            }
+
             result.functions.push_back(std::move(fr));
         }
 
@@ -4087,8 +4193,88 @@ namespace ctrace::stack
                 diag.filePath = fr.filePath;
                 diag.severity = DiagnosticSeverity::Warning;
                 diag.errCode = DescriptiveErrorCode::None;
-                diag.message = "  [!] potential stack overflow: exceeds limit of " +
-                               std::to_string(config.stackLimit) + " bytes\n";
+                auto it = functionLocations.find(fr.name);
+                if (it != functionLocations.end())
+                {
+                    diag.line = it->second.first;
+                    diag.column = it->second.second;
+                }
+                std::string message;
+                bool suppressLocation = false;
+                StackSize maxCallee =
+                    (fr.maxStack > fr.localStack) ? (fr.maxStack - fr.localStack) : 0;
+                auto itLocals = functionLocalAllocas.find(fr.name);
+                std::string aliasLine;
+                if (fr.localStack >= maxCallee && itLocals != functionLocalAllocas.end())
+                {
+                    std::string localsDetails;
+                    std::string singleName;
+                    StackSize singleSize = 0;
+                    for (const auto& entry : itLocals->second)
+                    {
+                        if (entry.first == "<unnamed>")
+                            continue;
+                        if (entry.second >= config.stackLimit && entry.second > singleSize)
+                        {
+                            singleName = entry.first;
+                            singleSize = entry.second;
+                        }
+                    }
+                    if (!singleName.empty())
+                    {
+                        aliasLine = "       alias path: " + singleName + "\n";
+                    }
+                    else if (!itLocals->second.empty())
+                    {
+                        localsDetails +=
+                            "        locals: " + std::to_string(itLocals->second.size()) +
+                            " variables (total " + std::to_string(fr.localStack) + " bytes)\n";
+
+                        std::vector<std::pair<std::string, StackSize>> named = itLocals->second;
+                        named.erase(std::remove_if(named.begin(), named.end(), [](const auto& v)
+                                                   { return v.first == "<unnamed>"; }),
+                                    named.end());
+                        std::sort(named.begin(), named.end(),
+                                  [](const auto& a, const auto& b)
+                                  {
+                                      if (a.second != b.second)
+                                          return a.second > b.second;
+                                      return a.first < b.first;
+                                  });
+                        if (!named.empty())
+                        {
+                            constexpr std::size_t kMaxLocalsForLocation = 5;
+                            if (named.size() > kMaxLocalsForLocation)
+                                suppressLocation = true;
+                            std::string listLine = "        locals list: ";
+                            for (std::size_t idx = 0; idx < named.size(); ++idx)
+                            {
+                                if (idx > 0)
+                                    listLine += ", ";
+                                listLine += named[idx].first + "(" +
+                                            std::to_string(named[idx].second) + ")";
+                            }
+                            localsDetails += listLine + "\n";
+                        }
+                    }
+                    if (!localsDetails.empty())
+                        message += localsDetails;
+                }
+                auto itPath = functionCallPaths.find(fr.name);
+                std::string suffix;
+                if (itPath != functionCallPaths.end())
+                {
+                    suffix += "    path: " + itPath->second + "\n";
+                }
+                std::string mainLine = "  [!] potential stack overflow: exceeds limit of " +
+                                       std::to_string(config.stackLimit) + " bytes\n";
+                message = mainLine + aliasLine + suffix + message;
+                if (suppressLocation)
+                {
+                    diag.line = 0;
+                    diag.column = 0;
+                }
+                diag.message = std::move(message);
                 result.diagnostics.push_back(std::move(diag));
             }
         }

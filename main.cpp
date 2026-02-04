@@ -1,10 +1,12 @@
 #include "StackUsageAnalyzer.hpp"
 
 #include <algorithm>
+#include <charconv>
 #include <cctype>
 #include <cstring> // strncmp, strcmp
 #include <filesystem>
 #include <iostream>
+#include <limits>
 #include <unordered_set>
 #include <vector>
 #include <llvm/IR/LLVMContext.h>
@@ -39,6 +41,7 @@ static void printHelp()
         << "  --only-file=<path>     Only report functions from this source file\n"
         << "  --only-dir=<path>      Only report functions under this directory\n"
         << "  --only-func=<name>     Only report functions with this name (comma-separated)\n"
+        << "  --stack-limit=<value>  Override stack size limit (bytes, or KiB/MiB/GiB)\n"
         << "  --dump-filter          Print filter decisions to stderr\n"
         << "  --quiet                Suppress per-function diagnostics\n"
         << "  --warnings-only        Show warnings and errors only\n"
@@ -253,6 +256,87 @@ static std::string trimCopy(const std::string& input)
     return input.substr(start, end - start);
 }
 
+static bool parseStackLimitValue(const std::string& input, StackSize& out, std::string& error)
+{
+    std::string trimmed = trimCopy(input);
+    if (trimmed.empty())
+    {
+        error = "stack limit is empty";
+        return false;
+    }
+
+    std::size_t digitCount = 0;
+    while (digitCount < trimmed.size() &&
+           std::isdigit(static_cast<unsigned char>(trimmed[digitCount])))
+    {
+        ++digitCount;
+    }
+    if (digitCount == 0)
+    {
+        error = "stack limit must start with a number";
+        return false;
+    }
+
+    const std::string numberPart = trimmed.substr(0, digitCount);
+    std::string suffix = trimCopy(trimmed.substr(digitCount));
+
+    unsigned long long base = 0;
+    auto [ptr, ec] =
+        std::from_chars(numberPart.data(), numberPart.data() + numberPart.size(), base, 10);
+    if (ec != std::errc() || ptr != numberPart.data() + numberPart.size())
+    {
+        error = "invalid numeric value";
+        return false;
+    }
+    if (base == 0)
+    {
+        error = "stack limit must be greater than zero";
+        return false;
+    }
+
+    StackSize multiplier = 1;
+    if (!suffix.empty())
+    {
+        std::string lowered;
+        lowered.reserve(suffix.size());
+        for (char c : suffix)
+        {
+            lowered.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+        }
+
+        if (lowered == "b")
+        {
+            multiplier = 1;
+        }
+        else if (lowered == "k" || lowered == "kb" || lowered == "kib")
+        {
+            multiplier = 1024ull;
+        }
+        else if (lowered == "m" || lowered == "mb" || lowered == "mib")
+        {
+            multiplier = 1024ull * 1024ull;
+        }
+        else if (lowered == "g" || lowered == "gb" || lowered == "gib")
+        {
+            multiplier = 1024ull * 1024ull * 1024ull;
+        }
+        else
+        {
+            error = "unsupported suffix (use bytes, KiB, MiB, or GiB)";
+            return false;
+        }
+    }
+
+    if (base > std::numeric_limits<StackSize>::max() / multiplier)
+    {
+        error = "stack limit is too large";
+        return false;
+    }
+
+    out = static_cast<StackSize>(base) * multiplier;
+    return true;
+}
+
 static void addFunctionFilters(std::vector<std::string>& dest, const std::string& input)
 {
     std::string current;
@@ -419,6 +503,35 @@ int main(int argc, char** argv)
                 return 1;
             }
             cfg.onlyDirs.emplace_back(argv[++i]);
+            continue;
+        }
+        if (argStr == "--stack-limit")
+        {
+            if (i + 1 >= argc)
+            {
+                llvm::errs() << "Missing argument for --stack-limit\n";
+                return 1;
+            }
+            std::string error;
+            StackSize value = 0;
+            if (!parseStackLimitValue(argv[++i], value, error))
+            {
+                llvm::errs() << "Invalid --stack-limit value: " << error << "\n";
+                return 1;
+            }
+            cfg.stackLimit = value;
+            continue;
+        }
+        if (argStr.rfind("--stack-limit=", 0) == 0)
+        {
+            std::string error;
+            StackSize value = 0;
+            if (!parseStackLimitValue(argStr.substr(std::strlen("--stack-limit=")), value, error))
+            {
+                llvm::errs() << "Invalid --stack-limit value: " << error << "\n";
+                return 1;
+            }
+            cfg.stackLimit = value;
             continue;
         }
         if (argStr == "--dump-filter")
