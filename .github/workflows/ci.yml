@@ -42,6 +42,10 @@ jobs:
         echo "Clang_DIR=$(brew --prefix llvm@20)/lib/cmake/clang" >> $GITHUB_ENV
         echo "$(brew --prefix llvm@20)/bin" >> $GITHUB_PATH
 
+    - name: Configure via build.sh (quick)
+      run: |
+        ./build.sh --build-dir build-script --type Release --configure-only
+
     - name: Configure and Build (Linux/macOS)
       if: runner.os == 'Linux' || runner.os == 'macOS'
       run: |
