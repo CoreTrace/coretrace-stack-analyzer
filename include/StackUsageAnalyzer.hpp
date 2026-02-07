@@ -118,12 +118,13 @@ namespace ctrace::stack
         AllocaUsageWarning = 9,
         InvalidBaseReconstruction = 10,
         ConstParameterNotModified = 11,
-        SizeMinusOneWrite = 12
+        SizeMinusOneWrite = 12,
+        DuplicateIfCondition = 13
     };
 
     template <> struct EnumTraits<DescriptiveErrorCode>
     {
-        static constexpr std::array<std::string_view, 13> names = {"None",
+        static constexpr std::array<std::string_view, 14> names = {"None",
                                                                    "StackBufferOverflow",
                                                                    "NegativeStackIndex",
                                                                    "VLAUsage",
@@ -135,7 +136,8 @@ namespace ctrace::stack
                                                                    "AllocaUsageWarning",
                                                                    "InvalidBaseReconstruction",
                                                                    "ConstParameterNotModified",
-                                                                   "SizeMinusOneWrite"};
+                                                                   "SizeMinusOneWrite",
+                                                                   "DuplicateIfCondition"};
     };
 
     /*

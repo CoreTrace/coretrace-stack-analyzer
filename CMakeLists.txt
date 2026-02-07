@@ -53,6 +53,7 @@ set(STACK_ANALYZER_SOURCES
     src/analysis/AnalyzerUtils.cpp
     src/analysis/CompileCommands.cpp
     src/analysis/ConstParamAnalysis.cpp
+    src/analysis/DuplicateIfCondition.cpp
     src/analysis/DynamicAlloca.cpp
     src/analysis/FunctionFilter.cpp
     src/analysis/IRValueUtils.cpp
