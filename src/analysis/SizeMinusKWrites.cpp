@@ -34,7 +34,7 @@ namespace ctrace::stack::analysis
 
         static std::string canonicalizeSinkName(llvm::StringRef name)
         {
-            if (name.startswith("__") && name.endswith("_chk") && name.size() > 6)
+            if (name.starts_with("__") && name.ends_with("_chk") && name.size() > 6)
             {
                 llvm::StringRef core = name.drop_front(2).drop_back(4);
                 if (!core.empty())
