@@ -32,6 +32,17 @@ namespace ctrace::stack::analysis
             return v;
         }
 
+        static std::string canonicalizeSinkName(llvm::StringRef name)
+        {
+            if (name.startswith("__") && name.endswith("_chk") && name.size() > 6)
+            {
+                llvm::StringRef core = name.drop_front(2).drop_back(4);
+                if (!core.empty())
+                    return core.str();
+            }
+            return name.str();
+        }
+
         struct SizeMinusKMatch
         {
             llvm::Value* base = nullptr;
@@ -406,7 +417,7 @@ namespace ctrace::stack::analysis
                             matchSizeMinusK(CB->getArgOperand(lenIdx), canonical);
                         if (match.base)
                         {
-                            std::string label = sinkName;
+                            std::string label = canonicalizeSinkName(sinkName);
                             if (label == "llvm.mem*" || label == "lib call")
                                 label += " (len = size-k)";
                             emitIssue(&I, canonical(CB->getArgOperand(dstIdx)), match.base, label,

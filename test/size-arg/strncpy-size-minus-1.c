@@ -4,7 +4,7 @@
 void foo(char* dst, const char* src, size_t n)
 {
     // at line 10, column 5
-    // [!] potential unsafe write with length (size - 1) in __strncpy_chk
+    // [!] potential unsafe write with length (size - 1) in strncpy
     //     destination pointer may be null
     //     size operand may be <= 1
     strncpy(dst, src, n - 1);
