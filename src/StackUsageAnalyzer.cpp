@@ -21,6 +21,7 @@
 #include "analysis/AllocaUsage.hpp"
 #include "analysis/AnalyzerUtils.hpp"
 #include "analysis/ConstParamAnalysis.hpp"
+#include "analysis/DuplicateIfCondition.hpp"
 #include "analysis/DynamicAlloca.hpp"
 #include "analysis/FunctionFilter.hpp"
 #include "analysis/InputPipeline.hpp"
@@ -861,6 +862,66 @@ namespace ctrace::stack
             }
         }
 
+        static void appendDuplicateIfConditionDiagnostics(
+            AnalysisResult& result, const std::vector<analysis::DuplicateIfConditionIssue>& issues)
+        {
+            for (const auto& issue : issues)
+            {
+                unsigned line = 0;
+                unsigned column = 0;
+                unsigned startLine = 0;
+                unsigned startColumn = 0;
+                unsigned endLine = 0;
+                unsigned endColumn = 0;
+                bool haveLoc = false;
+
+                if (issue.conditionInst)
+                {
+                    llvm::DebugLoc DL = issue.conditionInst->getDebugLoc();
+                    if (DL)
+                    {
+                        line = DL.getLine();
+                        startLine = DL.getLine();
+                        column = DL.getCol();
+                        startColumn = DL.getCol();
+                        endLine = DL.getLine();
+                        endColumn = DL.getCol();
+                        haveLoc = true;
+
+                        if (auto* loc = DL.get())
+                        {
+                            if (auto* scope = llvm::dyn_cast<llvm::DILocation>(loc))
+                            {
+                                if (scope->getColumn() != 0)
+                                {
+                                    endColumn = scope->getColumn() + 1;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                std::ostringstream body;
+                body << "  [!] unreachable else-if branch: condition is equivalent to a previous "
+                        "'if' condition\n";
+                body << "       else branch implies previous condition is false\n";
+
+                Diagnostic diag;
+                diag.funcName = issue.funcName;
+                diag.line = haveLoc ? line : 0;
+                diag.column = haveLoc ? column : 0;
+                diag.startLine = haveLoc ? startLine : 0;
+                diag.startColumn = haveLoc ? startColumn : 0;
+                diag.endLine = haveLoc ? endLine : 0;
+                diag.endColumn = haveLoc ? endColumn : 0;
+                diag.severity = DiagnosticSeverity::Warning;
+                diag.errCode = DescriptiveErrorCode::DuplicateIfCondition;
+                diag.ruleId = "DuplicateIfCondition";
+                diag.message = body.str();
+                result.diagnostics.push_back(std::move(diag));
+            }
+        }
+
         static void appendInvalidBaseReconstructionDiagnostics(
             AnalysisResult& result,
             const std::vector<analysis::InvalidBaseReconstructionIssue>& issues)
@@ -1200,6 +1261,11 @@ namespace ctrace::stack
         std::vector<analysis::MultipleStoreIssue> multiStoreIssues =
             analysis::analyzeMultipleStores(mod, shouldAnalyzeFunction);
         appendMultipleStoreDiagnostics(result, multiStoreIssues);
+
+        // 12b) Détection de branches else-if inatteignables (condition dupliquée)
+        std::vector<analysis::DuplicateIfConditionIssue> duplicateIfIssues =
+            analysis::analyzeDuplicateIfConditions(mod, shouldAnalyzeFunction);
+        appendDuplicateIfConditionDiagnostics(result, duplicateIfIssues);
         logDuration("Multiple stores", t0);
 
         // 13) Detect invalid base pointer reconstructions (offsetof/container_of)
