@@ -14,6 +14,7 @@ endif()
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 set(LLVM_LINK_LLVM_DYLIB ON)
 
@@ -50,6 +51,7 @@ set(STACK_ANALYZER_SOURCES
     src/StackUsageAnalyzer.cpp
     src/analysis/AllocaUsage.cpp
     src/analysis/AnalyzerUtils.cpp
+    src/analysis/CompileCommands.cpp
     src/analysis/ConstParamAnalysis.cpp
     src/analysis/DynamicAlloca.cpp
     src/analysis/FunctionFilter.cpp
@@ -150,8 +152,8 @@ if(BUILD_CLI)
     target_link_libraries(stack_usage_analyzer
       PRIVATE
         stack_usage_analyzer_lib
-        # pas besoin de relinker cc::compilerlib_static ici,
-        # il est déjà dans la lib
+        # No need to relink cc::compilerlib_static here,
+        # it is already linked into the library.
     )
 
     if(ENABLE_DEBUG_ASAN)
