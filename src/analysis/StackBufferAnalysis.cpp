@@ -232,8 +232,9 @@ namespace ctrace::stack::analysis
             return resolveArrayAllocaFromPointerInternal(V, F, path, recursionStack, 0);
         }
 
-        static void analyzeStackBufferOverflowsInFunction(llvm::Function& F,
-                                                          std::vector<StackBufferOverflowIssue>& out)
+        static void
+        analyzeStackBufferOverflowsInFunction(llvm::Function& F,
+                                              std::vector<StackBufferOverflowIssue>& out)
         {
             using namespace llvm;
 
@@ -293,7 +294,8 @@ namespace ctrace::stack::analysis
 
                             if (idx0 && fieldIdxC)
                             {
-                                unsigned fieldIdx = static_cast<unsigned>(fieldIdxC->getZExtValue());
+                                unsigned fieldIdx =
+                                    static_cast<unsigned>(fieldIdxC->getZExtValue());
                                 if (fieldIdx < ST->getNumElements())
                                 {
                                     Type* fieldTy = ST->getElementType(fieldIdx);
@@ -577,7 +579,8 @@ namespace ctrace::stack::analysis
                     // On remonte à la base pour trouver une alloca de tableau sur la stack.
                     const Value* basePtr = GEP->getPointerOperand();
                     std::vector<std::string> dummyAliasPath;
-                    const AllocaInst* AI = resolveArrayAllocaFromPointer(basePtr, F, dummyAliasPath);
+                    const AllocaInst* AI =
+                        resolveArrayAllocaFromPointer(basePtr, F, dummyAliasPath);
                     if (!AI)
                         continue;
 

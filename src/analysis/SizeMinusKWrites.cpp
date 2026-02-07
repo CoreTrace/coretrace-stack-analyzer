@@ -124,8 +124,7 @@ namespace ctrace::stack::analysis
         }
 
         static bool getKnownSinkCallInfo(llvm::CallBase* CB, llvm::TargetLibraryInfo& TLI,
-                                         unsigned& dstIdx, unsigned& lenIdx,
-                                         std::string& sinkName)
+                                         unsigned& dstIdx, unsigned& lenIdx, std::string& sinkName)
         {
             using namespace llvm;
 
@@ -245,7 +244,8 @@ namespace ctrace::stack::analysis
                     argSlots[slot] = arg;
                 }
 
-                return [argSlots = std::move(argSlots)](Value* v) -> Value* {
+                return [argSlots = std::move(argSlots)](Value* v) -> Value*
+                {
                     v = stripCasts(v);
                     if (auto* load = dyn_cast<LoadInst>(v))
                     {
@@ -334,8 +334,7 @@ namespace ctrace::stack::analysis
             return summaries;
         }
 
-        static void analyzeSizeMinusKWritesInFunction(llvm::Function& F,
-                                                      const llvm::DataLayout& DL,
+        static void analyzeSizeMinusKWritesInFunction(llvm::Function& F, const llvm::DataLayout& DL,
                                                       const SizeMinusKSummaryMap& summaries,
                                                       std::vector<SizeMinusKWriteIssue>& out)
         {
@@ -364,7 +363,8 @@ namespace ctrace::stack::analysis
                 argSlots[slot] = arg;
             }
 
-            auto canonical = [&](Value* v) -> Value* {
+            auto canonical = [&](Value* v) -> Value*
+            {
                 v = stripCasts(v);
                 if (auto* load = dyn_cast<LoadInst>(v))
                 {
@@ -378,8 +378,9 @@ namespace ctrace::stack::analysis
                 return v;
             };
 
-            auto emitIssue = [&](Instruction* at, Value* dest, Value* sizeBase,
-                                 StringRef sinkName, bool hasPtrDest, int64_t k) {
+            auto emitIssue = [&](Instruction* at, Value* dest, Value* sizeBase, StringRef sinkName,
+                                 bool hasPtrDest, int64_t k)
+            {
                 SizeMinusKWriteIssue issue;
                 issue.funcName = F.getName().str();
                 issue.sinkName = sinkName.str();
@@ -421,8 +422,7 @@ namespace ctrace::stack::analysis
                         {
                             for (const auto& sink : it->second)
                             {
-                                if (sink.dstIdx >= CB->arg_size() ||
-                                    sink.lenIdx >= CB->arg_size())
+                                if (sink.dstIdx >= CB->arg_size() || sink.lenIdx >= CB->arg_size())
                                 {
                                     continue;
                                 }

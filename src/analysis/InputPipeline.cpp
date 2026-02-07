@@ -52,8 +52,9 @@ namespace ctrace::stack::analysis
         return detectFromExtension(path);
     }
 
-    ModuleLoadResult loadModuleForAnalysis(const std::string& filename, const AnalysisConfig& config,
-                                           llvm::LLVMContext& ctx, llvm::SMDiagnostic& err)
+    ModuleLoadResult loadModuleForAnalysis(const std::string& filename,
+                                           const AnalysisConfig& config, llvm::LLVMContext& ctx,
+                                           llvm::SMDiagnostic& err)
     {
         ModuleLoadResult result;
         result.language = detectLanguageFromFile(filename, ctx);

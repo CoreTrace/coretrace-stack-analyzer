@@ -47,10 +47,10 @@ namespace ctrace::stack
         llvm::ModulePassManager MPM;
         if (auto Err = PB.parsePassPipeline(MPM, "function-attrs"))
         {
-                llvm::consumeError(std::move(Err));
-                return;
-            }
-            MPM.run(mod, MAM);
+            llvm::consumeError(std::move(Err));
+            return;
+        }
+        MPM.run(mod, MAM);
 
         unsigned added = 0;
         for (const llvm::Function& F : mod)
@@ -61,7 +61,7 @@ namespace ctrace::stack
                 if (A.hasNoCaptureAttr() && !before.contains(&A))
                 {
                     // llvm::errs() << "[stack-analyzer] nocapture added: " << F.getName()
-                                //  << " arg#" << idx;
+                    //  << " arg#" << idx;
                     if (A.hasName())
                         llvm::errs() << " (" << A.getName() << ")";
                     llvm::errs() << "\n";
@@ -75,4 +75,4 @@ namespace ctrace::stack
             // llvm::errs() << "[stack-analyzer] nocapture added: none\n";
         }
     }
-}
+} // namespace ctrace::stack

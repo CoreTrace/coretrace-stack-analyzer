@@ -33,8 +33,7 @@ namespace ctrace::stack::analysis
         {
             if (cfg.dumpFilter)
             {
-                llvm::errs() << "[filter] func=" << F.getName()
-                             << " file=<name-filter> keep=no\n";
+                llvm::errs() << "[filter] func=" << F.getName() << " file=<name-filter> keep=no\n";
             }
             return false;
         }

@@ -33,10 +33,9 @@ namespace ctrace::stack::analysis
         StackSize upperBoundBytes = 0; // upper bound in bytes (if hasUpperBound)
     };
 
-    std::vector<AllocaUsageIssue> analyzeAllocaUsage(
-        llvm::Module& mod,
-        const llvm::DataLayout& DL,
-        const std::set<const llvm::Function*>& recursiveFuncs,
-        const std::set<const llvm::Function*>& infiniteRecursionFuncs,
-        const std::function<bool(const llvm::Function&)>& shouldAnalyze);
+    std::vector<AllocaUsageIssue>
+    analyzeAllocaUsage(llvm::Module& mod, const llvm::DataLayout& DL,
+                       const std::set<const llvm::Function*>& recursiveFuncs,
+                       const std::set<const llvm::Function*>& infiniteRecursionFuncs,
+                       const std::function<bool(const llvm::Function&)>& shouldAnalyze);
 } // namespace ctrace::stack::analysis

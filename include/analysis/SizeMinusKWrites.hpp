@@ -26,8 +26,7 @@ namespace ctrace::stack::analysis
         const llvm::Instruction* inst = nullptr;
     };
 
-    std::vector<SizeMinusKWriteIssue>
-    analyzeSizeMinusKWrites(llvm::Module& mod,
-                            const llvm::DataLayout& DL,
-                            const std::function<bool(const llvm::Function&)>& shouldAnalyzeFunction);
+    std::vector<SizeMinusKWriteIssue> analyzeSizeMinusKWrites(
+        llvm::Module& mod, const llvm::DataLayout& DL,
+        const std::function<bool(const llvm::Function&)>& shouldAnalyzeFunction);
 } // namespace ctrace::stack::analysis

@@ -25,6 +25,7 @@ namespace ctrace::stack::analysis
 
     LanguageType detectLanguageFromFile(const std::string& path, llvm::LLVMContext& ctx);
 
-    ModuleLoadResult loadModuleForAnalysis(const std::string& filename, const AnalysisConfig& config,
-                                           llvm::LLVMContext& ctx, llvm::SMDiagnostic& err);
+    ModuleLoadResult loadModuleForAnalysis(const std::string& filename,
+                                           const AnalysisConfig& config, llvm::LLVMContext& ctx,
+                                           llvm::SMDiagnostic& err);
 } // namespace ctrace::stack::analysis

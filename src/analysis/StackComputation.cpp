@@ -49,8 +49,7 @@ namespace ctrace::stack::analysis
             return false;
         }
 
-        static LocalStackInfo computeLocalStackBase(llvm::Function& F,
-                                                    const llvm::DataLayout& DL)
+        static LocalStackInfo computeLocalStackBase(llvm::Function& F, const llvm::DataLayout& DL)
         {
             LocalStackInfo info;
 

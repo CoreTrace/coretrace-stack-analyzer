@@ -145,9 +145,8 @@ namespace ctrace::stack::analysis
 
                                     StackPointerEscapeIssue issue;
                                     issue.funcName = F.getName().str();
-                                    issue.varName =
-                                        AI->hasName() ? AI->getName().str()
-                                                      : std::string("<unnamed>");
+                                    issue.varName = AI->hasName() ? AI->getName().str()
+                                                                  : std::string("<unnamed>");
                                     issue.inst = cast<Instruction>(CB);
 
                                     if (!directCallee)

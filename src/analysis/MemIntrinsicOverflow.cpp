@@ -158,8 +158,7 @@ namespace ctrace::stack::analysis
     } // namespace
 
     std::vector<MemIntrinsicIssue>
-    analyzeMemIntrinsicOverflows(llvm::Module& mod,
-                                 const llvm::DataLayout& DL,
+    analyzeMemIntrinsicOverflows(llvm::Module& mod, const llvm::DataLayout& DL,
                                  const std::function<bool(const llvm::Function&)>& shouldAnalyze)
     {
         std::vector<MemIntrinsicIssue> issues;

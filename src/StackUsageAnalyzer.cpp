@@ -47,8 +47,7 @@ namespace ctrace::stack
         {
             llvm::DenseMap<const llvm::Function*, SourceLocation> locations;
             llvm::DenseMap<const llvm::Function*, std::string> callPaths;
-            llvm::DenseMap<const llvm::Function*,
-                           std::vector<std::pair<std::string, StackSize>>>
+            llvm::DenseMap<const llvm::Function*, std::vector<std::pair<std::string, StackSize>>>
                 localAllocas;
             llvm::DenseMap<const llvm::Function*, std::size_t> indices;
         };
@@ -77,11 +76,10 @@ namespace ctrace::stack
 
         using LocalStackMap = std::map<const llvm::Function*, analysis::LocalStackInfo>;
 
-        static ModuleAnalysisContext buildContext(llvm::Module& mod,
-                                                  const AnalysisConfig& config)
+        static ModuleAnalysisContext buildContext(llvm::Module& mod, const AnalysisConfig& config)
         {
-            ModuleAnalysisContext ctx{
-                mod, config, &mod.getDataLayout(), analysis::buildFunctionFilter(mod, config)};
+            ModuleAnalysisContext ctx{mod, config, &mod.getDataLayout(),
+                                      analysis::buildFunctionFilter(mod, config)};
 
             for (llvm::Function& F : mod)
             {
@@ -263,9 +261,8 @@ namespace ctrace::stack
                     diag.filePath = fr.filePath;
                     diag.severity = DiagnosticSeverity::Warning;
                     diag.errCode = DescriptiveErrorCode::None;
-                    diag.message =
-                        "  [!!!] unconditional self recursion detected (no base case)\n"
-                        "       this will eventually overflow the stack at runtime\n";
+                    diag.message = "  [!!!] unconditional self recursion detected (no base case)\n"
+                                   "       this will eventually overflow the stack at runtime\n";
                     result.diagnostics.push_back(std::move(diag));
                 }
 
@@ -297,8 +294,7 @@ namespace ctrace::stack
                         {
                             if (entry.first == "<unnamed>")
                                 continue;
-                            if (entry.second >= ctx.config.stackLimit &&
-                                entry.second > singleSize)
+                            if (entry.second >= ctx.config.stackLimit && entry.second > singleSize)
                             {
                                 singleName = entry.first;
                                 singleSize = entry.second;
@@ -310,15 +306,12 @@ namespace ctrace::stack
                         }
                         else if (!itLocals->second.empty())
                         {
-                            localsDetails += "        locals: " +
-                                             std::to_string(itLocals->second.size()) +
-                                             " variables (total " +
-                                             std::to_string(fr.localStack) + " bytes)\n";
+                            localsDetails +=
+                                "        locals: " + std::to_string(itLocals->second.size()) +
+                                " variables (total " + std::to_string(fr.localStack) + " bytes)\n";
 
-                            std::vector<std::pair<std::string, StackSize>> named =
-                                itLocals->second;
-                            named.erase(std::remove_if(named.begin(), named.end(),
-                                                       [](const auto& v)
+                            std::vector<std::pair<std::string, StackSize>> named = itLocals->second;
+                            named.erase(std::remove_if(named.begin(), named.end(), [](const auto& v)
                                                        { return v.first == "<unnamed>"; }),
                                         named.end());
                             std::sort(named.begin(), named.end(),
@@ -563,8 +556,9 @@ namespace ctrace::stack
             }
         }
 
-        static void appendDynamicAllocaDiagnostics(
-            AnalysisResult& result, const std::vector<analysis::DynamicAllocaIssue>& issues)
+        static void
+        appendDynamicAllocaDiagnostics(AnalysisResult& result,
+                                       const std::vector<analysis::DynamicAllocaIssue>& issues)
         {
             for (const auto& d : issues)
             {
@@ -601,9 +595,10 @@ namespace ctrace::stack
             }
         }
 
-        static void appendAllocaUsageDiagnostics(
-            AnalysisResult& result, const AnalysisConfig& config,
-            StackSize allocaLargeThreshold, const std::vector<analysis::AllocaUsageIssue>& issues)
+        static void
+        appendAllocaUsageDiagnostics(AnalysisResult& result, const AnalysisConfig& config,
+                                     StackSize allocaLargeThreshold,
+                                     const std::vector<analysis::AllocaUsageIssue>& issues)
         {
             for (const auto& a : issues)
             {
@@ -657,8 +652,9 @@ namespace ctrace::stack
                          << "'\n";
                 }
 
-                body << "       allocation performed via alloca/VLA; stack usage grows with runtime "
-                        "value\n";
+                body
+                    << "       allocation performed via alloca/VLA; stack usage grows with runtime "
+                       "value\n";
 
                 if (a.sizeIsConst)
                 {
@@ -689,7 +685,8 @@ namespace ctrace::stack
                     {
                         diag.severity = DiagnosticSeverity::Error;
                     }
-                    body << "       function is recursive; this allocation repeats at each recursion "
+                    body << "       function is recursive; this allocation repeats at each "
+                            "recursion "
                             "depth and can exhaust the stack\n";
                 }
 
@@ -719,8 +716,9 @@ namespace ctrace::stack
             }
         }
 
-        static void appendMemIntrinsicDiagnostics(
-            AnalysisResult& result, const std::vector<analysis::MemIntrinsicIssue>& issues)
+        static void
+        appendMemIntrinsicDiagnostics(AnalysisResult& result,
+                                      const std::vector<analysis::MemIntrinsicIssue>& issues)
         {
             for (const auto& m : issues)
             {
@@ -762,8 +760,9 @@ namespace ctrace::stack
             }
         }
 
-        static void appendSizeMinusKDiagnostics(
-            AnalysisResult& result, const std::vector<analysis::SizeMinusKWriteIssue>& issues)
+        static void
+        appendSizeMinusKDiagnostics(AnalysisResult& result,
+                                    const std::vector<analysis::SizeMinusKWriteIssue>& issues)
         {
             for (const auto& s : issues)
             {
@@ -809,8 +808,9 @@ namespace ctrace::stack
             }
         }
 
-        static void appendMultipleStoreDiagnostics(
-            AnalysisResult& result, const std::vector<analysis::MultipleStoreIssue>& issues)
+        static void
+        appendMultipleStoreDiagnostics(AnalysisResult& result,
+                                       const std::vector<analysis::MultipleStoreIssue>& issues)
         {
             for (const auto& ms : issues)
             {
@@ -902,23 +902,27 @@ namespace ctrace::stack
 
                 std::ostringstream body;
 
-                body << "  [!!] potential UB: invalid base reconstruction via offsetof/container_of\n";
+                body << "  [!!] potential UB: invalid base reconstruction via "
+                        "offsetof/container_of\n";
                 body << "       variable: '" << br.varName << "'\n";
                 body << "       source member: " << br.sourceMember << "\n";
-                body << "       offset applied: " << (br.offsetUsed >= 0 ? "+" : "") << br.offsetUsed
-                     << " bytes\n";
+                body << "       offset applied: " << (br.offsetUsed >= 0 ? "+" : "")
+                     << br.offsetUsed << " bytes\n";
                 body << "       target type: " << br.targetType << "\n";
 
                 if (br.isOutOfBounds)
                 {
-                    body << "       [ERROR] derived pointer points OUTSIDE the valid object range\n";
+                    body
+                        << "       [ERROR] derived pointer points OUTSIDE the valid object range\n";
                     body << "               (this will cause undefined behavior if dereferenced)\n";
                 }
                 else
                 {
-                    body << "       [WARNING] unable to verify that derived pointer points to a valid "
+                    body << "       [WARNING] unable to verify that derived pointer points to a "
+                            "valid "
                             "object\n";
-                    body << "                 (potential undefined behavior if offset is incorrect)\n";
+                    body << "                 (potential undefined behavior if offset is "
+                            "incorrect)\n";
                 }
 
                 Diagnostic diag;
@@ -1018,8 +1022,9 @@ namespace ctrace::stack
             }
         }
 
-        static void appendConstParamDiagnostics(
-            AnalysisResult& result, const std::vector<analysis::ConstParamIssue>& issues)
+        static void
+        appendConstParamDiagnostics(AnalysisResult& result,
+                                    const std::vector<analysis::ConstParamIssue>& issues)
         {
             for (const auto& cp : issues)
             {
@@ -1050,7 +1055,8 @@ namespace ctrace::stack
                 {
                     body << "  " << prefix << "ConstParameterNotModified." << subLabel
                          << ": parameter '" << cp.paramName << "' in function '" << displayFuncName
-                         << "' is an rvalue reference and is never used to modify the referred object\n";
+                         << "' is an rvalue reference and is never used to modify the referred "
+                            "object\n";
                     body << "       consider passing by value (" << cp.suggestedType
                          << ") or const reference (" << cp.suggestedTypeAlt << ")\n";
                     body << "       current type: " << cp.currentType << "\n";
@@ -1107,9 +1113,7 @@ namespace ctrace::stack
         ModuleAnalysisContext ctx = buildContext(mod, config);
         const llvm::DataLayout& DL = *ctx.dataLayout;
         auto shouldAnalyzeFunction = [&](const llvm::Function& F) -> bool
-        {
-            return ctx.shouldAnalyze(F);
-        };
+        { return ctx.shouldAnalyze(F); };
 
         // 1) Stack locale par fonction
         LocalStackMap localStack = computeLocalStacks(ctx);
@@ -1140,9 +1144,8 @@ namespace ctrace::stack
         appendDynamicAllocaDiagnostics(result, dynAllocaIssues);
 
         // 10) Analyse des usages d'alloca (tainted / taille excessive)
-        std::vector<analysis::AllocaUsageIssue> allocaUsageIssues =
-            analysis::analyzeAllocaUsage(mod, DL, state.RecursiveFuncs,
-                                         state.InfiniteRecursionFuncs, shouldAnalyzeFunction);
+        std::vector<analysis::AllocaUsageIssue> allocaUsageIssues = analysis::analyzeAllocaUsage(
+            mod, DL, state.RecursiveFuncs, state.InfiniteRecursionFuncs, shouldAnalyzeFunction);
         appendAllocaUsageDiagnostics(result, config, allocaLargeThreshold, allocaUsageIssues);
 
         // 11) Détection des débordements via memcpy/memset sur des buffers de stack

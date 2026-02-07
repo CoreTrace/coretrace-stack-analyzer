@@ -168,8 +168,7 @@ namespace ctrace::stack
                 os << "null";
             }
             os << ",\n";
-            os << "      \"maxStackUnknown\": " << (f.maxStackUnknown ? "true" : "false")
-               << ",\n";
+            os << "      \"maxStackUnknown\": " << (f.maxStackUnknown ? "true" : "false") << ",\n";
             os << "      \"hasDynamicAlloca\": " << (f.hasDynamicAlloca ? "true" : "false")
                << ",\n";
             os << "      \"isRecursive\": " << (f.isRecursive ? "true" : "false") << ",\n";

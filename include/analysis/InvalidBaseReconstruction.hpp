@@ -27,8 +27,7 @@ namespace ctrace::stack::analysis
         const llvm::Instruction* inst = nullptr;
     };
 
-    std::vector<InvalidBaseReconstructionIssue>
-    analyzeInvalidBaseReconstructions(llvm::Module& mod,
-                                      const llvm::DataLayout& DL,
-                                      const std::function<bool(const llvm::Function&)>& shouldAnalyze);
+    std::vector<InvalidBaseReconstructionIssue> analyzeInvalidBaseReconstructions(
+        llvm::Module& mod, const llvm::DataLayout& DL,
+        const std::function<bool(const llvm::Function&)>& shouldAnalyze);
 } // namespace ctrace::stack::analysis

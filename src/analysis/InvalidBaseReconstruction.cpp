@@ -356,10 +356,8 @@ namespace ctrace::stack::analysis
             return setRef.insert(offset).second;
         }
 
-        static bool getGEPConstantOffsetAndBase(const llvm::Value* V,
-                                                const llvm::DataLayout& DL,
-                                                int64_t& outOffset,
-                                                const llvm::Value*& outBase)
+        static bool getGEPConstantOffsetAndBase(const llvm::Value* V, const llvm::DataLayout& DL,
+                                                int64_t& outOffset, const llvm::Value*& outBase)
         {
             using namespace llvm;
 
@@ -547,8 +545,7 @@ namespace ctrace::stack::analysis
                                     {
                                         if (auto* LI = dyn_cast<LoadInst>(AUser))
                                         {
-                                            if (LI->getPointerOperand()->stripPointerCasts() ==
-                                                AI)
+                                            if (LI->getPointerOperand()->stripPointerCasts() == AI)
                                             {
                                                 worklist.push_back(LI);
                                             }
@@ -642,8 +639,7 @@ namespace ctrace::stack::analysis
         }
 
         static void analyzeInvalidBaseReconstructionsInFunction(
-            llvm::Function& F,
-            const llvm::DataLayout& DL,
+            llvm::Function& F, const llvm::DataLayout& DL,
             std::vector<InvalidBaseReconstructionIssue>& out)
         {
             using namespace llvm;
@@ -824,9 +820,9 @@ namespace ctrace::stack::analysis
                             uint64_t allocaSize = it->second.second;
 
                             int64_t resultOffset = origin.offset + gepOffset;
-                            bool isOutOfBounds = (resultOffset < 0) ||
-                                                 (static_cast<uint64_t>(resultOffset) >=
-                                                  allocaSize);
+                            bool isOutOfBounds =
+                                (resultOffset < 0) ||
+                                (static_cast<uint64_t>(resultOffset) >= allocaSize);
 
                             std::string targetType;
                             Type* targetTy = GEP->getType();
@@ -886,10 +882,9 @@ namespace ctrace::stack::analysis
         }
     } // namespace
 
-    std::vector<InvalidBaseReconstructionIssue>
-    analyzeInvalidBaseReconstructions(llvm::Module& mod,
-                                      const llvm::DataLayout& DL,
-                                      const std::function<bool(const llvm::Function&)>& shouldAnalyze)
+    std::vector<InvalidBaseReconstructionIssue> analyzeInvalidBaseReconstructions(
+        llvm::Module& mod, const llvm::DataLayout& DL,
+        const std::function<bool(const llvm::Function&)>& shouldAnalyze)
     {
         std::vector<InvalidBaseReconstructionIssue> issues;
         for (llvm::Function& F : mod)

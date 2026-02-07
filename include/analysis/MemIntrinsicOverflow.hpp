@@ -27,7 +27,6 @@ namespace ctrace::stack::analysis
     };
 
     std::vector<MemIntrinsicIssue>
-    analyzeMemIntrinsicOverflows(llvm::Module& mod,
-                                 const llvm::DataLayout& DL,
+    analyzeMemIntrinsicOverflows(llvm::Module& mod, const llvm::DataLayout& DL,
                                  const std::function<bool(const llvm::Function&)>& shouldAnalyze);
 } // namespace ctrace::stack::analysis

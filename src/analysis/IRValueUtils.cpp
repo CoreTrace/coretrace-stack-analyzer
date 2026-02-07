@@ -87,8 +87,7 @@ namespace ctrace::stack::analysis
         return std::string("<unnamed>");
     }
 
-    const llvm::ConstantInt* tryGetConstFromValue(const llvm::Value* V,
-                                                  const llvm::Function& F)
+    const llvm::ConstantInt* tryGetConstFromValue(const llvm::Value* V, const llvm::Function& F)
     {
         using namespace llvm;
 

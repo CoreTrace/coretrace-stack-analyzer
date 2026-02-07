@@ -53,8 +53,7 @@ namespace ctrace::stack::analysis
                     {
                         if (SI->getPointerOperand()->stripPointerCasts() != ptr)
                             continue;
-                        if (isValueUserControlledImpl(SI->getValueOperand(), F, visited,
-                                                       depth + 1))
+                        if (isValueUserControlledImpl(SI->getValueOperand(), F, visited, depth + 1))
                         {
                             return true;
                         }
@@ -187,8 +186,7 @@ namespace ctrace::stack::analysis
     } // namespace
 
     std::vector<AllocaUsageIssue>
-    analyzeAllocaUsage(llvm::Module& mod,
-                       const llvm::DataLayout& DL,
+    analyzeAllocaUsage(llvm::Module& mod, const llvm::DataLayout& DL,
                        const std::set<const llvm::Function*>& recursiveFuncs,
                        const std::set<const llvm::Function*>& infiniteRecursionFuncs,
                        const std::function<bool(const llvm::Function&)>& shouldAnalyze)
