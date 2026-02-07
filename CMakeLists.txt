@@ -48,7 +48,23 @@ option(BUILD_SHARED_LIB "Build shared library variant" ON)
 # ===========================
 set(STACK_ANALYZER_SOURCES
     src/StackUsageAnalyzer.cpp
+    src/analysis/AllocaUsage.cpp
+    src/analysis/AnalyzerUtils.cpp
+    src/analysis/ConstParamAnalysis.cpp
+    src/analysis/DynamicAlloca.cpp
+    src/analysis/FunctionFilter.cpp
+    src/analysis/IRValueUtils.cpp
+    src/analysis/IntRanges.cpp
+    src/analysis/InputPipeline.cpp
+    src/analysis/InvalidBaseReconstruction.cpp
+    src/analysis/MemIntrinsicOverflow.cpp
+    src/analysis/SizeMinusKWrites.cpp
+    src/analysis/StackBufferAnalysis.cpp
+    src/analysis/StackComputation.cpp
+    src/analysis/StackPointerEscape.cpp
+    src/report/ReportSerialization.cpp
     src/mangle.cpp
+    src/passes/ModulePasses.cpp
 )
 
 include_directories(${LLVM_INCLUDE_DIRS})
