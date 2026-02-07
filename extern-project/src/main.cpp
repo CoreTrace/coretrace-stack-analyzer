@@ -22,7 +22,7 @@ int main(int argc, char **argv)
 
     auto res = ctrace::stack::analyzeFile(filename, cfg, ctx, diag);
 
-    // Exemple : output SARIF sur stdout
+    // Example: SARIF output to stdout
     std::cout << ctrace::stack::toSarif(res, filename) << std::endl;
 
     return 0;

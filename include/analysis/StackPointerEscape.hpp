@@ -19,7 +19,7 @@ namespace ctrace::stack::analysis
         std::string varName;
         std::string
             escapeKind; // "return", "store_global", "store_unknown", "call_arg", "call_callback"
-        std::string targetName; // nom du global, si applicable
+        std::string targetName; // global name, if applicable
         const llvm::Instruction* inst = nullptr;
     };
 

@@ -18,7 +18,7 @@ namespace ctrace::stack::analysis
     struct SizeMinusKWriteIssue
     {
         std::string funcName;
-        std::string sinkName; // nom de l'appel ou "store"
+        std::string sinkName; // call name or "store"
         bool ptrNonNull = false;
         bool sizeAboveK = false;
         bool hasPointerDest = true;

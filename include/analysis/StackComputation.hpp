@@ -33,9 +33,9 @@ namespace ctrace::stack::analysis
 
     struct InternalAnalysisState
     {
-        std::map<const llvm::Function*, StackEstimate> TotalStack; // stack max, callees inclus
-        std::set<const llvm::Function*> RecursiveFuncs;         // fonctions dans au moins un cycle
-        std::set<const llvm::Function*> InfiniteRecursionFuncs; // auto-récursion “infinie”
+        std::map<const llvm::Function*, StackEstimate> TotalStack; // max stack, including callees
+        std::set<const llvm::Function*> RecursiveFuncs;         // functions in at least one cycle
+        std::set<const llvm::Function*> InfiniteRecursionFuncs; // “infinite” self-recursion
     };
 
     CallGraph buildCallGraph(llvm::Module& M);

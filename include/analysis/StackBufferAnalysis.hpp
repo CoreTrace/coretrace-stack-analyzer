@@ -21,14 +21,14 @@ namespace ctrace::stack::analysis
         std::string funcName;
         std::string varName;
         StackSize arraySize = 0;
-        StackSize indexOrUpperBound = 0; // utilisé pour les bornes sup (UB) ou index constant
+        StackSize indexOrUpperBound = 0; // used for upper bounds (UB) or constant index
         bool isWrite = false;
         bool indexIsConstant = false;
         const llvm::Instruction* inst = nullptr;
 
-        // Violation basée sur une borne inférieure (index potentiellement négatif)
+        // Violation based on a lower bound (index potentially negative)
         bool isLowerBoundViolation = false;
-        long long lowerBound = 0; // borne inférieure déduite (signée)
+        long long lowerBound = 0; // deduced lower bound (signed)
 
         std::string aliasPath;                 // ex: "pp -> ptr -> buf"
         std::vector<std::string> aliasPathVec; // {"pp", "ptr", "buf"}
@@ -49,8 +49,8 @@ namespace ctrace::stack::analysis
     {
         std::string funcName;
         std::string varName;
-        std::size_t storeCount = 0;         // nombre total de StoreInst vers ce buffer
-        std::size_t distinctIndexCount = 0; // nombre d'expressions d'index distinctes
+        std::size_t storeCount = 0;         // total number of StoreInsts into this buffer
+        std::size_t distinctIndexCount = 0; // number of distinct index expressions
         const llvm::AllocaInst* allocaInst = nullptr;
     };
 

@@ -5,17 +5,17 @@ import json
 import re
 from pathlib import Path
 
-# Chemin vers ton binaire d'analyse
-ANALYZER = Path("./build/stack_usage_analyzer")   # à adapter si besoin
-TEST_DIR = Path("test")                     # dossier contenant les .c
+# Path to the analyzer binary
+ANALYZER = Path("./build/stack_usage_analyzer")   # adjust if needed
+TEST_DIR = Path("test")                     # folder containing the .c files
 
 
 def normalize(s: str) -> str:
     """
-    Normalise les espaces pour rendre les comparaisons plus robustes :
-    - supprime les espaces inutiles en début/fin de ligne
-    - remplace les séquences d'espaces par un seul espace
-    - garde les sauts de lignes
+    Normalize spacing to make comparisons more robust:
+    - remove unnecessary leading/trailing spaces per line
+    - replace runs of spaces with a single space
+    - keep line breaks
     """
     lines = []
     for line in s.splitlines():
@@ -34,10 +34,9 @@ def normalize(s: str) -> str:
 
 def extract_expectations(c_path: Path):
     """
-    Extrait les blocs de commentaires d'attendus dans un fichier .c.
+    Extract expected comment blocks from a .c file.
 
-    On cherche les commentaires qui commencent par "// at line".
-    On prend toutes les lignes de commentaires qui suivent.
+    Look for comments that start with "// at line" and take all following comment lines.
     """
     expectations = []
     negative_expectations = []
@@ -64,21 +63,21 @@ def extract_expectations(c_path: Path):
             i += 1
             continue
 
-        # Début d'un bloc d'attendu
+        # Start of an expectation block
         if stripped.startswith("// at line"):
             comment_block = [raw]
             i += 1
-            # Récupère toutes les lignes "// ..." qui suivent
+            # Collect all following "// ..." lines
             while i < n and lines[i].lstrip().startswith("//"):
                 comment_block.append(lines[i])
                 i += 1
 
-            # Nettoyage : retirer les "//" et les indentations
+            # Cleanup: remove "//" and indentation
             cleaned_lines = []
             for c in comment_block:
                 s = c.lstrip()
                 if s.startswith("//"):
-                    s = s[2:]  # enlève "//"
+                    s = s[2:]  # remove "//"
                 cleaned_lines.append(s.lstrip())
 
             expectation_text = "\n".join(cleaned_lines)
@@ -91,7 +90,7 @@ def extract_expectations(c_path: Path):
 
 def run_analyzer_on_file(c_path: Path, stack_limit=None) -> str:
     """
-    Lance ton analyseur sur un fichier C et récupère stdout+stderr.
+    Run the analyzer on a C file and capture stdout+stderr.
     """
     args = [str(ANALYZER), str(c_path)]
     if stack_limit:
@@ -495,7 +494,7 @@ def check_human_vs_json_parity() -> bool:
 
 def check_help_flags() -> bool:
     """
-    Vérifie que -h et --help affichent l'aide sur stdout et retournent 0.
+    Check that -h and --help print help to stdout and return 0.
     """
     print("=== Testing help flags ===")
     ok = True
@@ -525,7 +524,7 @@ def check_help_flags() -> bool:
 
 def check_multi_file_json() -> bool:
     """
-    Vérifie que l'analyse accepte plusieurs fichiers et que le JSON agrège correctement.
+    Check that analysis accepts multiple files and JSON aggregates correctly.
     """
     print("=== Testing multi-file JSON ===")
     file_a = TEST_DIR / "test.ll"
@@ -598,7 +597,7 @@ def check_multi_file_json() -> bool:
 
 def check_multi_file_failure() -> bool:
     """
-    Vérifie le comportement fail-fast quand un fichier est invalide.
+    Check fail-fast behavior when a file is invalid.
     """
     print("=== Testing multi-file failure ===")
     valid_file = TEST_DIR / "test.ll"
@@ -628,7 +627,7 @@ def check_multi_file_failure() -> bool:
 
 def check_cli_parsing_and_filters() -> bool:
     """
-    Vérifie parsing CLI (erreurs) + filtres principaux.
+    Check CLI parsing (errors) + main filters.
     """
     print("=== Testing CLI parsing & filters ===")
     ok = True
@@ -724,8 +723,7 @@ def check_cli_parsing_and_filters() -> bool:
 
 def check_file(c_path: Path):
     """
-    Vérifie qu'avec ce fichier, toutes les attentes sont présentes
-    dans la sortie de l'analyseur.
+    Check that, for this file, all expectations are present in the analyzer output.
     """
     print(f"=== Testing {c_path} ===")
     expectations, negative_expectations, stack_limit = extract_expectations(c_path)
