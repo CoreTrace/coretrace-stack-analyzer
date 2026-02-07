@@ -26,6 +26,8 @@ def normalize(s: str) -> str:
         # Normalize spacing around pointer/reference symbols for cross-platform demangler output.
         normalized = normalized.replace(" *", "*").replace("* ", "*")
         normalized = normalized.replace(" &", "&").replace("& ", "&")
+        # Normalize fortified libc function names (e.g., "__strncpy_chk" -> "strncpy").
+        normalized = re.sub(r"__([A-Za-z0-9_]+)_chk\b", r"\1", normalized)
         lines.append(normalized)
     return "\n".join(lines).strip()
 

@@ -1,0 +1,16 @@
+name: Commit conventions
+
+on:
+  push:
+
+jobs:
+  commit_check:
+    name: Check conventional commits
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Validate commit messages
+        run: |
+          python3 scripts/ci/commit_checker.py

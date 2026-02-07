@@ -1,0 +1,9 @@
+repos:
+  - repo: local
+    hooks:
+      - id: conventional-commit-msg
+        name: conventional commit message
+        entry: python3 scripts/git/commit_msg_checker.py
+        language: system
+        stages: [commit-msg]
+        pass_filenames: true
