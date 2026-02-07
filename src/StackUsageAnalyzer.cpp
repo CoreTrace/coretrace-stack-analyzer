@@ -1,5 +1,6 @@
 #include "StackUsageAnalyzer.hpp"
 
+#include <chrono>
 #include <cstdint>
 #include <map>
 #include <string>
@@ -410,8 +411,8 @@ namespace ctrace::stack
                     {
                         auto* BB = issue.inst->getParent();
 
-                        // Parcourt les prédécesseurs du bloc pour voir si certains
-                        // ont une branche conditionnelle avec une condition constante.
+                        // Walk block predecessors to see whether some
+                        // have a conditional branch with a constant condition.
                         for (auto* Pred : predecessors(BB))
                         {
                             auto* BI = dyn_cast<BranchInst>(Pred->getTerminator());
@@ -429,7 +430,7 @@ namespace ctrace::stack
                             if (!C0 || !C1)
                                 continue;
 
-                            // Évalue le résultat de l'ICmp pour ces constantes (implémentation maison).
+                            // Evaluate the ICmp result for these constants (homegrown implementation).
                             bool condTrue = false;
                             auto pred = CI->getPredicate();
                             const auto& v0 = C0->getValue();
@@ -468,22 +469,22 @@ namespace ctrace::stack
                                 condTrue = v0.uge(v1);
                                 break;
                             default:
-                                // On ne traite pas d'autres prédicats exotiques ici
+                                // Do not handle other exotic predicates here.
                                 continue;
                             }
 
-                            // Branchement du type:
+                            // Branch of the form:
                             //   br i1 %cond, label %then, label %else
-                            // Successeur 0 pris si condTrue == true
-                            // Successeur 1 pris si condTrue == false
+                            // Successor 0 taken if condTrue == true
+                            // Successor 1 taken if condTrue == false
                             if (BB == BI->getSuccessor(0) && condTrue == false)
                             {
-                                // Le bloc "then" n'est jamais atteint.
+                                // The "then" block is never reached.
                                 isUnreachable = true;
                             }
                             else if (BB == BI->getSuccessor(1) && condTrue == true)
                             {
-                                // Le bloc "else" n'est jamais atteint.
+                                // The "else" block is never reached.
                                 isUnreachable = true;
                             }
                         }
@@ -1108,75 +1109,119 @@ namespace ctrace::stack
 
     AnalysisResult analyzeModule(llvm::Module& mod, const AnalysisConfig& config)
     {
-        runFunctionAttrsPass(mod);
+        using Clock = std::chrono::steady_clock;
+        auto logDuration = [&](const char* label, Clock::time_point start)
+        {
+            if (!config.timing)
+                return;
+            auto end = Clock::now();
+            auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+            std::cerr << label << " done in " << ms << " ms\n";
+        };
 
+        auto t0 = Clock::now();
+        runFunctionAttrsPass(mod);
+        logDuration("Function attrs pass", t0);
+
+        t0 = Clock::now();
         ModuleAnalysisContext ctx = buildContext(mod, config);
+        logDuration("Build context", t0);
         const llvm::DataLayout& DL = *ctx.dataLayout;
         auto shouldAnalyzeFunction = [&](const llvm::Function& F) -> bool
         { return ctx.shouldAnalyze(F); };
 
-        // 1) Stack locale par fonction
+        // 1) Local stack per function
+        t0 = Clock::now();
         LocalStackMap localStack = computeLocalStacks(ctx);
+        logDuration("Compute local stacks", t0);
 
-        // 2) Graphe d'appels
+        // 2) Call graph
+        t0 = Clock::now();
         analysis::CallGraph CG = buildCallGraphFiltered(ctx);
+        logDuration("Build call graph", t0);
 
-        // 3) Propagation + détection de récursivité
+        // 3) Propagation + recursion detection
+        t0 = Clock::now();
         analysis::InternalAnalysisState state = computeRecursionState(ctx, CG, localStack);
+        logDuration("Compute recursion state", t0);
 
-        // 4) Construction du résultat public
+        // 4) Build public result
         FunctionAuxData aux;
+        t0 = Clock::now();
         AnalysisResult result = buildResults(ctx, localStack, state, CG, aux);
+        logDuration("Build results", t0);
 
         // 4b) Emit summary diagnostics for recursion/overflow flags (for JSON parity)
+        t0 = Clock::now();
         emitSummaryDiagnostics(result, ctx, aux);
+        logDuration("Emit summary diagnostics", t0);
 
+        t0 = Clock::now();
         StackSize allocaLargeThreshold = analysis::computeAllocaLargeThreshold(config);
+        logDuration("Compute alloca threshold", t0);
 
-        // 6) Détection des dépassements de buffer sur la stack (analyse intra-fonction)
+        // 6) Detect stack buffer overflows (intra-function analysis)
+        t0 = Clock::now();
         std::vector<analysis::StackBufferOverflowIssue> bufferIssues =
             analysis::analyzeStackBufferOverflows(mod, shouldAnalyzeFunction);
         appendStackBufferDiagnostics(result, bufferIssues);
+        logDuration("Stack buffer overflows", t0);
 
-        // 8) Détection des allocations dynamiques sur la stack (VLA / alloca variable)
+        // 8) Detect dynamic stack allocations (VLA / variable alloca)
+        t0 = Clock::now();
         std::vector<analysis::DynamicAllocaIssue> dynAllocaIssues =
             analysis::analyzeDynamicAllocas(mod, shouldAnalyzeFunction);
         appendDynamicAllocaDiagnostics(result, dynAllocaIssues);
+        logDuration("Dynamic allocas", t0);
 
-        // 10) Analyse des usages d'alloca (tainted / taille excessive)
+        // 10) Analyze alloca usage (tainted / excessive size)
+        t0 = Clock::now();
         std::vector<analysis::AllocaUsageIssue> allocaUsageIssues = analysis::analyzeAllocaUsage(
             mod, DL, state.RecursiveFuncs, state.InfiniteRecursionFuncs, shouldAnalyzeFunction);
         appendAllocaUsageDiagnostics(result, config, allocaLargeThreshold, allocaUsageIssues);
+        logDuration("Alloca usage", t0);
 
-        // 11) Détection des débordements via memcpy/memset sur des buffers de stack
+        // 11) Detect overflows via memcpy/memset on stack buffers
+        t0 = Clock::now();
         std::vector<analysis::MemIntrinsicIssue> memIssues =
             analysis::analyzeMemIntrinsicOverflows(mod, DL, shouldAnalyzeFunction);
         appendMemIntrinsicDiagnostics(result, memIssues);
+        logDuration("Mem intrinsic overflows", t0);
 
-        // 11b) Détection d'écritures avec longueur "size-k"
+        // 11b) Detect writes with "size-k" length
+        t0 = Clock::now();
         std::vector<analysis::SizeMinusKWriteIssue> sizeMinusKIssues =
             analysis::analyzeSizeMinusKWrites(mod, DL, shouldAnalyzeFunction);
         appendSizeMinusKDiagnostics(result, sizeMinusKIssues);
+        logDuration("Size-minus-k writes", t0);
 
-        // 12) Détection de plusieurs stores dans un même buffer de stack
+        // 12) Detect multiple stores into the same stack buffer
+        t0 = Clock::now();
         std::vector<analysis::MultipleStoreIssue> multiStoreIssues =
             analysis::analyzeMultipleStores(mod, shouldAnalyzeFunction);
         appendMultipleStoreDiagnostics(result, multiStoreIssues);
+        logDuration("Multiple stores", t0);
 
-        // 13) Détection des reconstructions invalides de pointeur de base (offsetof/container_of)
+        // 13) Detect invalid base pointer reconstructions (offsetof/container_of)
+        t0 = Clock::now();
         std::vector<analysis::InvalidBaseReconstructionIssue> baseReconIssues =
             analysis::analyzeInvalidBaseReconstructions(mod, DL, shouldAnalyzeFunction);
         appendInvalidBaseReconstructionDiagnostics(result, baseReconIssues);
+        logDuration("Invalid base reconstructions", t0);
 
-        // 14) Détection de fuite de pointeurs de stack (use-after-return potentiel)
+        // 14) Detect stack pointer escapes (potential use-after-return)
+        t0 = Clock::now();
         std::vector<analysis::StackPointerEscapeIssue> escapeIssues =
             analysis::analyzeStackPointerEscapes(mod, shouldAnalyzeFunction);
         appendStackPointerEscapeDiagnostics(result, escapeIssues);
+        logDuration("Stack pointer escapes", t0);
 
         // 15) Const-correctness: parameters that can be made const
+        t0 = Clock::now();
         std::vector<analysis::ConstParamIssue> constParamIssues =
             analysis::analyzeConstParams(mod, shouldAnalyzeFunction);
         appendConstParamDiagnostics(result, constParamIssues);
+        logDuration("Const params", t0);
 
         return result;
     }
@@ -1193,7 +1238,19 @@ namespace ctrace::stack
             return AnalysisResult{config, {}};
         }
 
+        using Clock = std::chrono::steady_clock;
+        if (config.timing)
+            std::cerr << "Analyzing " << filename << "...\n";
+        auto analyzeStart = Clock::now();
         AnalysisResult result = analyzeModule(*load.module, config);
+        if (config.timing)
+        {
+            auto analyzeEnd = Clock::now();
+            auto ms =
+                std::chrono::duration_cast<std::chrono::milliseconds>(analyzeEnd - analyzeStart)
+                    .count();
+            std::cerr << "Analysis done in " << ms << " ms\n";
+        }
         for (auto& f : result.functions)
         {
             if (f.filePath.empty())

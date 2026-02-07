@@ -29,28 +29,28 @@ namespace ctrace::stack::analysis
                     if (!AI)
                         continue;
 
-                    // Taille d'allocation : on distingue trois cas :
-                    //  - constante immédiate               -> pas une VLA
-                    //  - dérivée d'une constante simple    -> pas une VLA (heuristique)
-                    //  - vraiment dépendante d'une valeur  -> VLA / alloca variable
+                    // Allocation size: we distinguish three cases:
+                    //  - immediate constant               -> not a VLA
+                    //  - derived from a simple constant   -> not a VLA (heuristic)
+                    //  - truly value-dependent            -> VLA / variable alloca
                     Value* arraySizeVal = AI->getArraySize();
 
-                    // 1) Cas taille directement constante dans l'IR
+                    // 1) Size is directly constant in the IR
                     if (llvm::isa<llvm::ConstantInt>(arraySizeVal))
-                        continue; // taille connue à la compilation, OK
+                        continue; // compile-time known size, OK
 
-                    // 2) Heuristique "smart" : essayer de remonter à une constante
-                    //    via les stores dans une variable locale (tryGetConstFromValue).
-                    //    Exemple typique :
+                    // 2) "Smart" heuristic: try to trace back to a constant
+                    //    via stores into a local variable (tryGetConstFromValue).
+                    //    Typical example:
                     //      int n = 6;
-                    //      char buf[n];   // en C : VLA, mais ici n est en fait constant
+                    //      char buf[n];   // in C: VLA, but here n is actually constant
                     //
-                    //    Dans ce cas, on ne veut pas spammer avec un warning VLA :
-                    //    on traite ça comme une taille effectivement constante.
+                    //    In this case we don't want to spam with a VLA warning:
+                    //    treat it as an effectively constant size.
                     if (tryGetConstFromValue(arraySizeVal, F) != nullptr)
                         continue;
 
-                    // 3) Ici, on considère que c'est une vraie VLA / alloca dynamique
+                    // 3) Here we consider it a real VLA / dynamic alloca
                     DynamicAllocaIssue issue;
                     issue.funcName = F.getName().str();
                     issue.varName = deriveAllocaName(AI);

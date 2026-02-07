@@ -10,7 +10,7 @@ namespace ctrace::stack
     namespace
     {
 
-        // Petit helper pour échapper les chaînes JSON.
+        // Small helper to escape JSON strings.
         static std::string jsonEscape(const std::string& s)
         {
             std::string out;
@@ -113,7 +113,7 @@ namespace ctrace::stack
         os << "    \"analysisTimeMs\": " << -1 << "\n";
         os << " },\n";
 
-        // Fonctions
+        // Functions
         os << "  \"functions\": [\n";
         for (std::size_t i = 0; i < result.functions.size(); ++i)
         {
@@ -261,7 +261,7 @@ namespace ctrace::stack
         {
             const auto& d = result.diagnostics[i];
             os << "        {\n";
-            // Pour le moment, un seul ruleId générique; tu pourras le spécialiser plus tard.
+            // For now, use a single generic ruleId; you can specialize it later.
             const std::string ruleId =
                 d.ruleId.empty() ? std::string(ctrace::stack::enumToString(d.errCode)) : d.ruleId;
             os << "          \"ruleId\": \"" << jsonEscape(ruleId) << "\",\n";

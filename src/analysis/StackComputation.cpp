@@ -1,5 +1,8 @@
 #include "analysis/StackComputation.hpp"
 
+#include <algorithm>
+#include <unordered_map>
+#include <unordered_set>
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/Dominators.h>
 #include <llvm/IR/Function.h>
@@ -42,7 +45,7 @@ namespace ctrace::stack::analysis
 
                     if (Callee && !Callee->isDeclaration() && Callee != Self)
                     {
-                        return true; // appel vers une autre fonction
+                        return true; // call to another function
                     }
                 }
             }
@@ -109,7 +112,7 @@ namespace ctrace::stack::analysis
             LocalStackInfo info = computeLocalStackBase(F, DL);
 
             llvm::MaybeAlign MA = DL.getStackAlignment();
-            unsigned stackAlign = MA ? MA->value() : 1u; // 16 sur beaucoup de cibles
+            unsigned stackAlign = MA ? MA->value() : 1u; // 16 on many targets
 
             StackSize frameSize = info.bytes;
 
@@ -141,14 +144,6 @@ namespace ctrace::stack::analysis
             {
                 if (itState->second == Visiting)
                 {
-                    // Cycle détecté : on marque tous les noeuds actuellement en "Visiting"
-                    for (auto& p : State)
-                    {
-                        if (p.second == Visiting)
-                        {
-                            Res.RecursiveFuncs.insert(p.first);
-                        }
-                    }
                     auto itLocal = LocalStack.find(F);
                     if (itLocal != LocalStack.end())
                     {
@@ -193,6 +188,102 @@ namespace ctrace::stack::analysis
             Res.TotalStack[F] = total;
             State[F] = Visited;
             return total;
+        }
+
+        static bool hasSelfCall(const llvm::Function* F, const CallGraph& CG)
+        {
+            auto it = CG.find(F);
+            if (it == CG.end())
+                return false;
+
+            for (const llvm::Function* Callee : it->second)
+            {
+                if (Callee == F)
+                    return true;
+            }
+            return false;
+        }
+
+        struct TarjanState
+        {
+            std::unordered_map<const llvm::Function*, int> index;
+            std::unordered_map<const llvm::Function*, int> lowlink;
+            std::vector<const llvm::Function*> stack;
+            std::unordered_set<const llvm::Function*> onStack;
+            int nextIndex = 0;
+            std::set<const llvm::Function*> recursive;
+        };
+
+        static void strongConnect(const llvm::Function* V, const CallGraph& CG, TarjanState& state)
+        {
+            state.index[V] = state.nextIndex;
+            state.lowlink[V] = state.nextIndex;
+            ++state.nextIndex;
+            state.stack.push_back(V);
+            state.onStack.insert(V);
+
+            auto it = CG.find(V);
+            if (it != CG.end())
+            {
+                for (const llvm::Function* W : it->second)
+                {
+                    if (state.index.find(W) == state.index.end())
+                    {
+                        strongConnect(W, CG, state);
+                        state.lowlink[V] = std::min(state.lowlink[V], state.lowlink[W]);
+                    }
+                    else if (state.onStack.count(W))
+                    {
+                        state.lowlink[V] = std::min(state.lowlink[V], state.index[W]);
+                    }
+                }
+            }
+
+            if (state.lowlink[V] == state.index[V])
+            {
+                std::vector<const llvm::Function*> component;
+                const llvm::Function* W = nullptr;
+                do
+                {
+                    W = state.stack.back();
+                    state.stack.pop_back();
+                    state.onStack.erase(W);
+                    component.push_back(W);
+                } while (W != V);
+
+                if (component.size() > 1)
+                {
+                    for (const llvm::Function* Fn : component)
+                    {
+                        state.recursive.insert(Fn);
+                    }
+                }
+                else if (hasSelfCall(V, CG))
+                {
+                    state.recursive.insert(V);
+                }
+            }
+        }
+
+        static std::set<const llvm::Function*>
+        computeRecursiveFunctions(const CallGraph& CG,
+                                  const std::vector<const llvm::Function*>& nodes)
+        {
+            TarjanState state;
+            state.index.reserve(nodes.size());
+            state.lowlink.reserve(nodes.size());
+            state.stack.reserve(nodes.size());
+            state.onStack.reserve(nodes.size());
+
+            for (const llvm::Function* V : nodes)
+            {
+                if (state.index.find(V) == state.index.end())
+                {
+                    strongConnect(V, CG, state);
+                }
+            }
+
+            return state.recursive;
         }
     } // namespace
 
@@ -253,10 +344,16 @@ namespace ctrace::stack::analysis
         InternalAnalysisState Res;
         std::map<const llvm::Function*, VisitState> State;
 
+        std::vector<const llvm::Function*> nodes;
+        nodes.reserve(LocalStack.size());
+
         for (auto& p : LocalStack)
         {
             State[p.first] = NotVisited;
+            nodes.push_back(p.first);
         }
+
+        Res.RecursiveFuncs = computeRecursiveFunctions(CG, nodes);
 
         for (auto& p : LocalStack)
         {
