@@ -2,7 +2,9 @@
 
 #include <algorithm>
 #include <cctype>
+#include <filesystem>
 #include <set>
+#include <system_error>
 #include <vector>
 
 #include <llvm/IR/Function.h>
@@ -117,60 +119,28 @@ namespace ctrace::stack::analysis
 
     static std::string normalizePathForMatch(const std::string& input)
     {
-        std::string out = input;
-        for (char& c : out)
+        if (input.empty())
+            return {};
+
+        std::string adjusted = input;
+        for (char& c : adjusted)
         {
             if (c == '\\')
                 c = '/';
         }
-        const bool isAbs = !out.empty() && out.front() == '/';
-        std::vector<std::string> parts;
-        std::string cur;
-        for (char c : out)
-        {
-            if (c == '/')
-            {
-                if (!cur.empty())
-                {
-                    if (cur == "..")
-                    {
-                        if (!parts.empty())
-                            parts.pop_back();
-                    }
-                    else if (cur != ".")
-                    {
-                        parts.push_back(cur);
-                    }
-                    cur.clear();
-                }
-            }
-            else
-            {
-                cur.push_back(c);
-            }
-        }
-        if (!cur.empty())
-        {
-            if (cur == "..")
-            {
-                if (!parts.empty())
-                    parts.pop_back();
-            }
-            else if (cur != ".")
-            {
-                parts.push_back(cur);
-            }
-        }
-        std::string norm = isAbs ? "/" : "";
-        for (std::size_t i = 0; i < parts.size(); ++i)
-        {
-            norm += parts[i];
-            if (i + 1 < parts.size())
-                norm += "/";
-        }
-        while (!norm.empty() && norm.back() == '/')
-            norm.pop_back();
-        return norm;
+
+        std::filesystem::path path(adjusted);
+        std::error_code ec;
+        std::filesystem::path absPath = std::filesystem::absolute(path, ec);
+        if (ec)
+            absPath = path;
+
+        std::filesystem::path canonicalPath = std::filesystem::weakly_canonical(absPath, ec);
+        std::filesystem::path norm = ec ? absPath.lexically_normal() : canonicalPath;
+        std::string out = norm.generic_string();
+        while (out.size() > 1 && out.back() == '/')
+            out.pop_back();
+        return out;
     }
 
     static std::string basenameOf(const std::string& path)

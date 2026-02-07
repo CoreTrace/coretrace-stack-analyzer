@@ -15,6 +15,11 @@ namespace llvm
     class SMDiagnostic;
 } // namespace llvm
 
+namespace ctrace::stack::analysis
+{
+    class CompilationDatabase;
+} // namespace ctrace::stack::analysis
+
 namespace ctrace::stack
 {
 
@@ -26,33 +31,39 @@ namespace ctrace::stack
         ABI
     };
 
-    // Configuration de l'analyse (mode + limite de stack)
+    // Analysis configuration (mode + stack limit).
     struct AnalysisConfig
     {
         AnalysisMode mode = AnalysisMode::IR;
-        StackSize stackLimit = 8ull * 1024ull * 1024ull; // 8 MiB par défaut
+        StackSize stackLimit = 8ull * 1024ull * 1024ull; // 8 MiB default
         bool quiet = false;
         bool warningsOnly = false;
         std::vector<std::string> extraCompileArgs;
+        std::shared_ptr<const analysis::CompilationDatabase> compilationDatabase;
+        bool requireCompilationDatabase = false;
+        bool compdbFast = false;
+        bool timing = false;
         std::vector<std::string> onlyFiles;
         std::vector<std::string> onlyDirs;
         std::vector<std::string> onlyFunctions;
         bool dumpFilter = false;
+        std::string dumpIRPath;
+        bool dumpIRIsDir = false;
     };
 
-    // Résultat par fonction
+    // Per-function result
     struct FunctionResult
     {
         std::string filePath;
         std::string name;
-        StackSize localStack = 0;       // taille frame locale (suivant le mode)
-        StackSize maxStack = 0;         // max stack incluant les callees
-        bool localStackUnknown = false; // taille locale inconnue (alloca dynamique)
-        bool maxStackUnknown = false;   // max stack inconnue (propagée via appels)
-        bool hasDynamicAlloca = false;  // alloca dynamique détectée dans la fonction
+        StackSize localStack = 0;       // local frame size (depends on mode)
+        StackSize maxStack = 0;         // max stack including callees
+        bool localStackUnknown = false; // unknown local size (dynamic alloca)
+        bool maxStackUnknown = false;   // unknown max stack (propagated via calls)
+        bool hasDynamicAlloca = false;  // dynamic alloca detected in the function
 
-        bool isRecursive = false;              // dans un cycle F <-> G ...
-        bool hasInfiniteSelfRecursion = false; // heuristique DominatorTree
+        bool isRecursive = false;              // part of a cycle F <-> G ...
+        bool hasInfiniteSelfRecursion = false; // DominatorTree heuristic
         bool exceedsLimit = false;             // maxStack > config.stackLimit
     };
 
@@ -151,7 +162,7 @@ namespace ctrace::stack
         std::string message;
     };
 
-    // Résultat global pour un module
+    // Global result for a module
     struct AnalysisResult
     {
         AnalysisConfig config;
@@ -162,22 +173,22 @@ namespace ctrace::stack
         std::vector<Diagnostic> diagnostics;
     };
 
-    // Serialize an AnalysisResult to a simple JSON format (pour CI / GitHub Actions).
-    // `inputFile` : chemin du fichier analysé (celui que tu passes à analyzeFile).
+    // Serialize an AnalysisResult to a simple JSON format (for CI / GitHub Actions).
+    // `inputFile`: path of the analyzed file (the one you pass to analyzeFile).
     std::string toJson(const AnalysisResult& result, const std::string& inputFile);
     std::string toJson(const AnalysisResult& result, const std::vector<std::string>& inputFiles);
 
     // Serialize an AnalysisResult to SARIF 2.1.0 (compatible GitHub Code Scanning).
-    // `inputFile` : chemin du fichier analysé.
-    // `toolName` / `toolVersion` : metadata du tool dans le SARIF.
+    // `inputFile`: path of the analyzed file.
+    // `toolName` / `toolVersion`: tool metadata in SARIF.
     std::string toSarif(const AnalysisResult& result, const std::string& inputFile,
                         const std::string& toolName = "coretrace-stack-analyzer",
                         const std::string& toolVersion = "0.1.0");
 
-    // Analyse un module déjà chargé (tu peux réutiliser dans d'autres outils)
+    // Analyze an already loaded module (can be reused by other tools).
     AnalysisResult analyzeModule(llvm::Module& mod, const AnalysisConfig& config);
 
-    // Helper pratique : charge un .ll et appelle analyzeModule()
+    // Convenience helper: load a .ll and call analyzeModule()
     AnalysisResult analyzeFile(const std::string& filename, const AnalysisConfig& config,
                                llvm::LLVMContext& ctx, llvm::SMDiagnostic& err);
 

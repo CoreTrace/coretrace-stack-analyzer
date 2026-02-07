@@ -98,7 +98,7 @@ namespace ctrace::stack::analysis
                             ub = c;
                             break;
                         case ICmpInst::ICMP_NE:
-                            // approximation : V != C  => V <= C (très conservateur)
+                            // approximation: V != C  => V <= C (very conservative)
                             hasUB = true;
                             ub = c;
                             break;
@@ -108,7 +108,7 @@ namespace ctrace::stack::analysis
                     }
                     else
                     {
-                        // C ? V  <=>  V ? C (inversé)
+                        // C ? V  <=>  V ? C (reversed)
                         switch (pred)
                         {
                         case ICmpInst::ICMP_SGT: // C > V  => V < C => V <= C-1
@@ -219,7 +219,7 @@ namespace ctrace::stack::analysis
 
                 bool valueIsOp0 = (V == op0);
 
-                // On choisit le groupe de prédicats
+                // Choose the predicate group
                 if (pred == ICmpInst::ICMP_SLT || pred == ICmpInst::ICMP_SLE ||
                     pred == ICmpInst::ICMP_SGT || pred == ICmpInst::ICMP_SGE ||
                     pred == ICmpInst::ICMP_EQ || pred == ICmpInst::ICMP_NE)
@@ -235,10 +235,10 @@ namespace ctrace::stack::analysis
                 if (!(hasLB || hasUB))
                     continue;
 
-                // Applique la contrainte sur V lui-même
+                // Apply the constraint to V itself
                 applyConstraint(V, hasLB, lb, hasUB, ub);
 
-                // Et éventuellement sur le pointeur sous-jacent si V est un load
+                // And possibly to the underlying pointer if V is a load
                 if (auto* LI = dyn_cast<LoadInst>(V))
                 {
                     const Value* ptr = LI->getPointerOperand();

@@ -7,7 +7,7 @@
 //     // at line 10, column 5
 //     // [!!] stack pointer escape: address of variable 'buf' escapes this function
 //     //     address passed as argument to function 'sink' (callee may capture the pointer beyond this function)
-//     sink(buf); // le callee peut capturer le pointeur
+//     sink(buf); // callee may capture the pointer
 // }
 
 void temporary(void)

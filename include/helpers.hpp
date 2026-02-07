@@ -7,8 +7,7 @@
 namespace ctrace::stack
 {
 
-    template <typename E>
-    struct EnumTraits; // pas de définition générique -> erreur si non spécialisé
+    template <typename E> struct EnumTraits; // no generic definition -> error if not specialized
 
     template <typename E> concept EnumWithTraits = std::is_enum_v<E> && requires
     {

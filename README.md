@@ -20,7 +20,10 @@
 ./stack_usage_analyzer --mode=[abi/ir] test.[ll/c/cpp] other.[ll/c/cpp]
 ./stack_usage_analyzer main.cpp -I./include
 ./stack_usage_analyzer main.cpp -I./include --compile-arg=-I/opt/homebrew/opt/llvm@20/include
+./stack_usage_analyzer main.cpp --compile-commands=build/compile_commands.json
 ./stack_usage_analyzer main.cpp -I./include --only-file=./main.cpp --only-function=main
+./stack_usage_analyzer main.cpp --dump-ir=./debug/main.ll
+./stack_usage_analyzer a.c b.c --dump-ir=./debug
 ```
 
 ```
@@ -29,6 +32,11 @@
 --warnings-only keeps only important diagnostics
 --stack-limit=<value> overrides stack limit (bytes, or KiB/MiB/GiB)
 --compile-arg=<arg> passes an extra argument to the compiler
+--compile-commands=<path> uses compile_commands.json (file or directory)
+--compdb=<path> alias for --compile-commands
+--compdb-fast drops heavy build flags for faster analysis
+--timing prints compile/analysis timings to stderr
+--dump-ir=<path> writes LLVM IR to a file (or directory for multiple inputs)
 -I<dir> or -I <dir> adds an include directory
 -D<name>[=value] or -D <name>[=value] defines a macro
 --only-file=<path> or --only-file <path> filters by file
@@ -37,6 +45,13 @@
 --only-func=<name> alias for --only-function
 --dump-filter prints filter decisions (stderr)
 ```
+
+To generate `compile_commands.json` with CMake, configure with
+`-DCMAKE_EXPORT_COMPILE_COMMANDS=ON` and point to the resulting file
+(often under `build/`).
+
+If analysis feels slow, `--compdb-fast` disables heavy flags (optimizations,
+sanitizers, profiling) while keeping include paths and macros.
 
 ### Example
 
@@ -142,7 +157,7 @@ Function: main
 Examples:
 ```c
 char buf[10];
-return buf;    // renvoi pointeur vers stack → use-after-return
+return buf;    // returns pointer to stack -> use-after-return
 ```
 
 Or storing:

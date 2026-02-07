@@ -19,11 +19,11 @@ namespace ctrace::stack::analysis
     struct InvalidBaseReconstructionIssue
     {
         std::string funcName;
-        std::string varName;        // nom de la variable alloca (stack object)
-        std::string sourceMember;   // membre source (ex: "b")
-        int64_t offsetUsed = 0;     // offset utilisé dans le calcul (peut être négatif)
-        std::string targetType;     // type vers lequel on cast (ex: "struct A*")
-        bool isOutOfBounds = false; // true si on peut prouver que c'est hors bornes
+        std::string varName;        // alloca variable name (stack object)
+        std::string sourceMember;   // source member (e.g., "b")
+        int64_t offsetUsed = 0;     // offset used in the calculation (can be negative)
+        std::string targetType;     // target cast type (e.g., "struct A*")
+        bool isOutOfBounds = false; // true if we can prove it is out of bounds
         const llvm::Instruction* inst = nullptr;
     };
 

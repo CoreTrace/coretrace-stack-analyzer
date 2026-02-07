@@ -7,11 +7,13 @@
 #include <filesystem>
 #include <iostream>
 #include <limits>
+#include <system_error>
 #include <unordered_set>
 #include <vector>
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/Support/SourceMgr.h>
 #include <llvm/Support/raw_ostream.h>
+#include "analysis/CompileCommands.hpp"
 #include "mangle.hpp"
 
 using namespace ctrace::stack;
@@ -38,11 +40,16 @@ static void printHelp()
         << "  -D<name>[=value]       Define macro for C/C++ inputs\n"
         << "  -D <name>[=value]      Define macro for C/C++ inputs\n"
         << "  --compile-arg=<arg>    Pass extra compile argument (repeatable)\n"
+        << "  --compile-commands=<path>  Use compile_commands.json (file or directory)\n"
+        << "  --compdb=<path>        Alias for --compile-commands\n"
+        << "  --compdb-fast          Speed up compdb builds (drops heavy flags)\n"
+        << "  --timing               Print compilation/analysis timing to stderr\n"
         << "  --only-file=<path>     Only report functions from this source file\n"
         << "  --only-dir=<path>      Only report functions under this directory\n"
         << "  --only-func=<name>     Only report functions with this name (comma-separated)\n"
         << "  --stack-limit=<value>  Override stack size limit (bytes, or KiB/MiB/GiB)\n"
         << "  --dump-filter          Print filter decisions to stderr\n"
+        << "  --dump-ir=<path>       Write LLVM IR to file (or directory for multiple inputs)\n"
         << "  --quiet                Suppress per-function diagnostics\n"
         << "  --warnings-only        Show warnings and errors only\n"
         << "  -h, --help             Show this help message and exit\n\n"
@@ -51,66 +58,35 @@ static void printHelp()
         << "  stack_usage_analyzer input1.ll input2.ll --format=json\n"
         << "  stack_usage_analyzer main.cpp -I../include --format=json\n"
         << "  stack_usage_analyzer main.cpp -I../include --only-dir=../src\n"
+        << "  stack_usage_analyzer main.cpp --compile-commands=build/compile_commands.json\n"
         << "  stack_usage_analyzer input.ll --mode=abi --format=json\n"
         << "  stack_usage_analyzer input.ll --warnings-only\n";
 }
 
 static std::string normalizePath(const std::string& input)
 {
-    std::string out = input;
-    for (char& c : out)
+    if (input.empty())
+        return {};
+
+    std::string adjusted = input;
+    for (char& c : adjusted)
     {
         if (c == '\\')
             c = '/';
     }
-    const bool isAbs = !out.empty() && out.front() == '/';
-    std::vector<std::string> parts;
-    std::string cur;
-    for (char c : out)
-    {
-        if (c == '/')
-        {
-            if (!cur.empty())
-            {
-                if (cur == "..")
-                {
-                    if (!parts.empty())
-                        parts.pop_back();
-                }
-                else if (cur != ".")
-                {
-                    parts.push_back(cur);
-                }
-                cur.clear();
-            }
-        }
-        else
-        {
-            cur.push_back(c);
-        }
-    }
-    if (!cur.empty())
-    {
-        if (cur == "..")
-        {
-            if (!parts.empty())
-                parts.pop_back();
-        }
-        else if (cur != ".")
-        {
-            parts.push_back(cur);
-        }
-    }
-    std::string norm = isAbs ? "/" : "";
-    for (std::size_t i = 0; i < parts.size(); ++i)
-    {
-        norm += parts[i];
-        if (i + 1 < parts.size())
-            norm += "/";
-    }
-    while (!norm.empty() && norm.back() == '/')
-        norm.pop_back();
-    return norm;
+
+    std::filesystem::path path(adjusted);
+    std::error_code ec;
+    std::filesystem::path absPath = std::filesystem::absolute(path, ec);
+    if (ec)
+        absPath = path;
+
+    std::filesystem::path canonicalPath = std::filesystem::weakly_canonical(absPath, ec);
+    std::filesystem::path norm = ec ? absPath.lexically_normal() : canonicalPath;
+    std::string out = norm.generic_string();
+    while (out.size() > 1 && out.back() == '/')
+        out.pop_back();
+    return out;
 }
 
 static std::string basenameOf(const std::string& path)
@@ -412,22 +388,17 @@ static AnalysisResult filterWarningsOnly(const AnalysisResult& result, const Ana
     return filtered;
 }
 
-void toto(void)
-{
-    char test[974] = "Hello";
-    return;
-}
-
 int main(int argc, char** argv)
 {
-    toto();
     llvm::LLVMContext context;
     std::vector<std::string> inputFilenames;
     OutputFormat outputFormat = OutputFormat::Human;
 
-    AnalysisConfig cfg; // mode = IR, stackLimit = 8MiB par défaut
+    AnalysisConfig cfg; // mode = IR, stackLimit = 8 MiB default
     cfg.quiet = false;
     cfg.warningsOnly = false;
+    std::string compileCommandsPath;
+    bool compileCommandsExplicit = false;
     // cfg.mode = AnalysisMode::IR; -> already set by default constructor
     // cfg.stackLimit = 8ull * 1024ull * 1024ull; // 8 MiB -> already set by default constructor but needed to be set with args
 
@@ -539,6 +510,21 @@ int main(int argc, char** argv)
             cfg.dumpFilter = true;
             continue;
         }
+        if (argStr == "--dump-ir")
+        {
+            if (i + 1 >= argc)
+            {
+                llvm::errs() << "Missing argument for --dump-ir\n";
+                return 1;
+            }
+            cfg.dumpIRPath = argv[++i];
+            continue;
+        }
+        if (argStr.rfind("--dump-ir=", 0) == 0)
+        {
+            cfg.dumpIRPath = argStr.substr(std::strlen("--dump-ir="));
+            continue;
+        }
         if (argStr == "-I")
         {
             if (i + 1 >= argc)
@@ -572,6 +558,39 @@ int main(int argc, char** argv)
         if (argStr.rfind("--compile-arg=", 0) == 0)
         {
             cfg.extraCompileArgs.emplace_back(argStr.substr(std::strlen("--compile-arg=")));
+            continue;
+        }
+        if (argStr == "--compdb-fast")
+        {
+            cfg.compdbFast = true;
+            continue;
+        }
+        if (argStr == "--timing")
+        {
+            cfg.timing = true;
+            continue;
+        }
+        if (argStr == "--compile-commands" || argStr == "--compdb")
+        {
+            if (i + 1 >= argc)
+            {
+                llvm::errs() << "Missing argument for " << argStr << "\n";
+                return 1;
+            }
+            compileCommandsPath = argv[++i];
+            compileCommandsExplicit = true;
+            continue;
+        }
+        if (argStr.rfind("--compile-commands=", 0) == 0)
+        {
+            compileCommandsPath = argStr.substr(std::strlen("--compile-commands="));
+            compileCommandsExplicit = true;
+            continue;
+        }
+        if (argStr.rfind("--compdb=", 0) == 0)
+        {
+            compileCommandsPath = argStr.substr(std::strlen("--compdb="));
+            compileCommandsExplicit = true;
             continue;
         }
         if (argStr == "--warnings-only")
@@ -622,11 +641,87 @@ int main(int argc, char** argv)
         }
     }
 
+    if (compileCommandsExplicit)
+    {
+        if (compileCommandsPath.empty())
+        {
+            llvm::errs() << "compile commands path is empty\n";
+            return 1;
+        }
+
+        std::filesystem::path compdbPath = compileCommandsPath;
+        std::error_code fsErr;
+        if (std::filesystem::is_directory(compdbPath, fsErr))
+        {
+            compdbPath /= "compile_commands.json";
+        }
+        else if (fsErr)
+        {
+            llvm::errs() << "Failed to inspect compile commands path: " << fsErr.message() << "\n";
+            return 1;
+        }
+
+        if (!std::filesystem::exists(compdbPath, fsErr))
+        {
+            if (fsErr)
+            {
+                llvm::errs() << "Failed to inspect compile commands path: " << fsErr.message()
+                             << "\n";
+            }
+            else
+            {
+                llvm::errs() << "compile commands file not found: " << compdbPath.string() << "\n";
+            }
+            return 1;
+        }
+
+        std::string error;
+        auto db =
+            ctrace::stack::analysis::CompilationDatabase::loadFromFile(compdbPath.string(), error);
+        if (!db)
+        {
+            llvm::errs() << "Failed to load compile commands: " << error << "\n";
+            return 1;
+        }
+        cfg.compilationDatabase = std::move(db);
+        cfg.requireCompilationDatabase = true;
+    }
+
     if (inputFilenames.empty())
     {
         llvm::errs() << "Usage: stack_usage_analyzer <file.ll> [file2.ll ...] [options]\n"
                      << "Try --help for more information.\n";
         return 1;
+    }
+
+    if (!cfg.dumpIRPath.empty())
+    {
+        const bool trailingSlash = !cfg.dumpIRPath.empty() &&
+                                   (cfg.dumpIRPath.back() == '/' || cfg.dumpIRPath.back() == '\\');
+        std::error_code fsErr;
+        std::filesystem::path dumpPath(cfg.dumpIRPath);
+        const bool exists = std::filesystem::exists(dumpPath, fsErr);
+        if (fsErr)
+        {
+            llvm::errs() << "Failed to inspect dump IR path: " << fsErr.message() << "\n";
+            return 1;
+        }
+        bool isDir = false;
+        if (exists)
+        {
+            isDir = std::filesystem::is_directory(dumpPath, fsErr);
+            if (fsErr)
+            {
+                llvm::errs() << "Failed to inspect dump IR path: " << fsErr.message() << "\n";
+                return 1;
+            }
+        }
+        if (inputFilenames.size() > 1 && !isDir && !trailingSlash)
+        {
+            llvm::errs() << "--dump-ir must point to a directory when analyzing multiple inputs\n";
+            return 1;
+        }
+        cfg.dumpIRIsDir = isDir || trailingSlash || inputFilenames.size() > 1;
     }
 
     std::sort(inputFilenames.begin(), inputFilenames.end());
@@ -740,7 +835,7 @@ int main(int argc, char** argv)
             std::vector<std::string> param_types;
             // param_types.reserve(issue.inst->getFunction()->arg_size());
             param_types.push_back(
-                "void"); // dummy to avoid empty vector issue // refaire avec les paramèters réels
+                "void"); // dummy to avoid empty vector issue // replace with real parameters
 
             llvm::outs() << "Function: " << f.name << " "
                          << ((ctrace_tools::isMangled(f.name))

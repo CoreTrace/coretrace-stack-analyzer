@@ -1,5 +1,6 @@
 #include "analysis/InvalidBaseReconstruction.hpp"
 
+#include <cstddef>
 #include <map>
 #include <optional>
 #include <set>
@@ -21,6 +22,29 @@ namespace ctrace::stack::analysis
 {
     namespace
     {
+        constexpr std::size_t kMaxInvalidBaseWork = 200000;
+
+        struct WorkBudget
+        {
+            std::size_t remaining = kMaxInvalidBaseWork;
+
+            bool consume(std::size_t amount = 1)
+            {
+                if (remaining < amount)
+                {
+                    remaining = 0;
+                    return false;
+                }
+                remaining -= amount;
+                return true;
+            }
+
+            bool exhausted() const
+            {
+                return remaining == 0;
+            }
+        };
+
         static bool isLoadFromAlloca(const llvm::Value* V, const llvm::AllocaInst* AI)
         {
             if (!V || !AI)
@@ -179,7 +203,8 @@ namespace ctrace::stack::analysis
         }
 
         static void collectPtrToIntMatches(const llvm::Value* V,
-                                           llvm::SmallVectorImpl<PtrIntMatch>& out)
+                                           llvm::SmallVectorImpl<PtrIntMatch>& out,
+                                           WorkBudget& budget)
         {
             using namespace llvm;
 
@@ -208,6 +233,8 @@ namespace ctrace::stack::analysis
 
             while (!worklist.empty())
             {
+                if (!budget.consume())
+                    return;
                 const Value* Cur = stripIntCasts(worklist.back().val);
                 int64_t curOffset = worklist.back().offset;
                 bool curSawOffset = worklist.back().sawOffset;
@@ -395,7 +422,7 @@ namespace ctrace::stack::analysis
         };
 
         static void collectPointerOrigins(const llvm::Value* V, const llvm::DataLayout& DL,
-                                          llvm::SmallVectorImpl<PtrOrigin>& out)
+                                          llvm::SmallVectorImpl<PtrOrigin>& out, WorkBudget& budget)
         {
             using namespace llvm;
 
@@ -407,6 +434,8 @@ namespace ctrace::stack::analysis
 
             while (!worklist.empty())
             {
+                if (!budget.consume())
+                    return;
                 const Value* Cur = worklist.back().first;
                 int64_t currentOffset = worklist.back().second;
                 worklist.pop_back();
@@ -462,11 +491,37 @@ namespace ctrace::stack::analysis
                     continue;
                 }
 
+                if (auto* ITP = dyn_cast<IntToPtrInst>(Cur))
+                {
+                    SmallVector<PtrIntMatch, 8> matches;
+                    collectPtrToIntMatches(ITP->getOperand(0), matches, budget);
+                    for (const auto& match : matches)
+                    {
+                        if (!match.ptrOperand)
+                            continue;
+                        int64_t newOffset = currentOffset + match.offset;
+                        if (recordVisitedOffset(visited, match.ptrOperand, newOffset))
+                            worklist.push_back({match.ptrOperand, newOffset});
+                    }
+                    continue;
+                }
+
                 if (auto* LI = dyn_cast<LoadInst>(Cur))
                 {
-                    const Value* PtrOp = LI->getPointerOperand();
-                    if (recordVisitedOffset(visited, PtrOp, currentOffset))
-                        worklist.push_back({PtrOp, currentOffset});
+                    const Value* PtrOp = LI->getPointerOperand()->stripPointerCasts();
+                    const Value* basePtr = PtrOp;
+                    int64_t baseOffset = 0;
+                    if (getGEPConstantOffsetAndBase(basePtr, DL, baseOffset, basePtr))
+                        basePtr = basePtr->stripPointerCasts();
+                    if (auto* AI = dyn_cast<AllocaInst>(basePtr))
+                    {
+                        Type* allocTy = AI->getAllocatedType();
+                        if (allocTy && allocTy->isPointerTy())
+                        {
+                            if (recordVisitedOffset(visited, PtrOp, currentOffset))
+                                worklist.push_back({PtrOp, currentOffset});
+                        }
+                    }
                     continue;
                 }
 
@@ -500,11 +555,24 @@ namespace ctrace::stack::analysis
                         if (recordVisitedOffset(visited, Src, currentOffset))
                             worklist.push_back({Src, currentOffset});
                     }
+                    else if (CE->getOpcode() == Instruction::IntToPtr)
+                    {
+                        SmallVector<PtrIntMatch, 8> matches;
+                        collectPtrToIntMatches(CE->getOperand(0), matches, budget);
+                        for (const auto& match : matches)
+                        {
+                            if (!match.ptrOperand)
+                                continue;
+                            int64_t newOffset = currentOffset + match.offset;
+                            if (recordVisitedOffset(visited, match.ptrOperand, newOffset))
+                                worklist.push_back({match.ptrOperand, newOffset});
+                        }
+                    }
                 }
             }
         }
 
-        static bool isPointerDereferencedOrUsed(const llvm::Value* V)
+        static bool isPointerDereferencedOrUsed(const llvm::Value* V, WorkBudget& budget)
         {
             using namespace llvm;
 
@@ -514,6 +582,8 @@ namespace ctrace::stack::analysis
 
             while (!worklist.empty())
             {
+                if (!budget.consume())
+                    return false;
                 const Value* Cur = worklist.back();
                 worklist.pop_back();
                 if (!visited.insert(Cur).second)
@@ -638,6 +708,60 @@ namespace ctrace::stack::analysis
             return std::nullopt;
         }
 
+        static const llvm::StructType* getAllocaStructType(const llvm::AllocaInst* AI)
+        {
+            if (!AI)
+                return nullptr;
+            return llvm::dyn_cast<llvm::StructType>(AI->getAllocatedType());
+        }
+
+        static std::optional<unsigned> getStructMemberIndexAtOffset(const llvm::StructType* ST,
+                                                                    const llvm::DataLayout& DL,
+                                                                    uint64_t offset)
+        {
+            if (!ST)
+                return std::nullopt;
+
+            auto* mutableST = const_cast<llvm::StructType*>(ST);
+            const llvm::StructLayout* layout = DL.getStructLayout(mutableST);
+            const unsigned memberCount = ST->getNumElements();
+            for (unsigned i = 0; i < memberCount; ++i)
+            {
+                uint64_t memberOffset = layout->getElementOffset(i);
+                llvm::Type* memberTy = ST->getElementType(i);
+                uint64_t memberSize = DL.getTypeAllocSize(memberTy);
+                if (memberSize == 0)
+                {
+                    if (offset == memberOffset)
+                        return i;
+                    continue;
+                }
+                if (offset >= memberOffset && offset < memberOffset + memberSize)
+                    return i;
+            }
+
+            return std::nullopt;
+        }
+
+        static bool isOffsetWithinSameAllocaMember(int64_t originOffset, int64_t resultOffset,
+                                                   const llvm::StructType* structType,
+                                                   uint64_t allocaSize, const llvm::DataLayout& DL)
+        {
+            if (originOffset < 0 || resultOffset < 0)
+                return false;
+            if (!structType)
+                return false;
+            uint64_t uOrigin = static_cast<uint64_t>(originOffset);
+            uint64_t uResult = static_cast<uint64_t>(resultOffset);
+            if (uOrigin >= allocaSize || uResult >= allocaSize)
+                return false;
+            auto originMember = getStructMemberIndexAtOffset(structType, DL, uOrigin);
+            auto resultMember = getStructMemberIndexAtOffset(structType, DL, uResult);
+            if (!originMember.has_value() || !resultMember.has_value())
+                return false;
+            return originMember.value() == resultMember.value();
+        }
+
         static void analyzeInvalidBaseReconstructionsInFunction(
             llvm::Function& F, const llvm::DataLayout& DL,
             std::vector<InvalidBaseReconstructionIssue>& out)
@@ -647,7 +771,14 @@ namespace ctrace::stack::analysis
             if (F.isDeclaration())
                 return;
 
-            std::map<const AllocaInst*, std::pair<std::string, uint64_t>> allocaInfo;
+            WorkBudget budget;
+            struct AllocaInfo
+            {
+                std::string name;
+                uint64_t size = 0;
+                const StructType* structType = nullptr;
+            };
+            std::map<const AllocaInst*, AllocaInfo> allocaInfo;
 
             for (BasicBlock& BB : F)
             {
@@ -663,7 +794,11 @@ namespace ctrace::stack::analysis
 
                     std::string varName =
                         AI->hasName() ? AI->getName().str() : std::string("<unnamed>");
-                    allocaInfo[AI] = {varName, sizeOpt.value()};
+                    AllocaInfo info;
+                    info.name = std::move(varName);
+                    info.size = sizeOpt.value();
+                    info.structType = getAllocaStructType(AI);
+                    allocaInfo[AI] = std::move(info);
                 }
             }
 
@@ -673,13 +808,13 @@ namespace ctrace::stack::analysis
                 {
                     if (auto* ITP = dyn_cast<IntToPtrInst>(&I))
                     {
-                        if (!isPointerDereferencedOrUsed(ITP))
+                        if (!isPointerDereferencedOrUsed(ITP, budget))
                             continue;
 
                         Value* IntVal = ITP->getOperand(0);
 
                         SmallVector<PtrIntMatch, 8> matches;
-                        collectPtrToIntMatches(IntVal, matches);
+                        collectPtrToIntMatches(IntVal, matches, budget);
                         if (matches.empty())
                             continue;
 
@@ -701,7 +836,7 @@ namespace ctrace::stack::analysis
                                 continue;
 
                             SmallVector<PtrOrigin, 8> origins;
-                            collectPointerOrigins(match.ptrOperand, DL, origins);
+                            collectPointerOrigins(match.ptrOperand, DL, origins, budget);
                             if (origins.empty())
                                 continue;
 
@@ -711,13 +846,17 @@ namespace ctrace::stack::analysis
                                 if (it == allocaInfo.end())
                                     continue;
 
-                                const std::string& varName = it->second.first;
-                                uint64_t allocaSize = it->second.second;
+                                const std::string& varName = it->second.name;
+                                uint64_t allocaSize = it->second.size;
+                                const StructType* structType = it->second.structType;
 
                                 int64_t resultOffset = origin.offset + match.offset;
                                 bool isOutOfBounds =
                                     (resultOffset < 0) ||
                                     (static_cast<uint64_t>(resultOffset) >= allocaSize);
+                                bool isMemberOffset = isOffsetWithinSameAllocaMember(
+                                    origin.offset, resultOffset, structType, allocaSize, DL);
+                                bool allowMemberSuppression = match.offset != 0;
 
                                 std::string targetType;
                                 Type* targetTy = ITP->getType();
@@ -731,7 +870,8 @@ namespace ctrace::stack::analysis
                                 auto& entry = agg[key];
                                 entry.memberOffsets.insert(origin.offset);
                                 entry.anyOutOfBounds |= isOutOfBounds;
-                                if (resultOffset != 0)
+                                if (resultOffset != 0 &&
+                                    !(allowMemberSuppression && isMemberOffset))
                                     entry.anyNonZeroResult = true;
                                 entry.varName = varName;
                                 entry.allocaSize = allocaSize;
@@ -781,7 +921,7 @@ namespace ctrace::stack::analysis
 
                     if (auto* GEP = dyn_cast<GetElementPtrInst>(&I))
                     {
-                        if (!isPointerDereferencedOrUsed(GEP))
+                        if (!isPointerDereferencedOrUsed(GEP, budget))
                             continue;
 
                         int64_t gepOffset = 0;
@@ -789,8 +929,11 @@ namespace ctrace::stack::analysis
                         if (!getGEPConstantOffsetAndBase(GEP, DL, gepOffset, PtrOp))
                             continue;
 
+                        const Value* directBase = PtrOp ? PtrOp->stripPointerCasts() : nullptr;
+                        const bool isDirectAllocaBase = directBase && isa<AllocaInst>(directBase);
+
                         SmallVector<PtrOrigin, 8> origins;
-                        collectPointerOrigins(PtrOp, DL, origins);
+                        collectPointerOrigins(PtrOp, DL, origins, budget);
                         if (origins.empty())
                             continue;
 
@@ -807,7 +950,7 @@ namespace ctrace::stack::analysis
 
                         for (const auto& origin : origins)
                         {
-                            if (origin.offset == 0 && gepOffset >= 0)
+                            if (origin.offset == 0 && gepOffset >= 0 && isDirectAllocaBase)
                             {
                                 continue;
                             }
@@ -816,13 +959,17 @@ namespace ctrace::stack::analysis
                             if (it == allocaInfo.end())
                                 continue;
 
-                            const std::string& varName = it->second.first;
-                            uint64_t allocaSize = it->second.second;
+                            const std::string& varName = it->second.name;
+                            uint64_t allocaSize = it->second.size;
+                            const StructType* structType = it->second.structType;
 
                             int64_t resultOffset = origin.offset + gepOffset;
                             bool isOutOfBounds =
                                 (resultOffset < 0) ||
                                 (static_cast<uint64_t>(resultOffset) >= allocaSize);
+                            bool isMemberOffset = isOffsetWithinSameAllocaMember(
+                                origin.offset, resultOffset, structType, allocaSize, DL);
+                            bool allowMemberSuppression = gepOffset != 0;
 
                             std::string targetType;
                             Type* targetTy = GEP->getType();
@@ -832,7 +979,7 @@ namespace ctrace::stack::analysis
                             auto& entry = agg[origin.alloca];
                             entry.memberOffsets.insert(origin.offset);
                             entry.anyOutOfBounds |= isOutOfBounds;
-                            if (resultOffset != 0)
+                            if (resultOffset != 0 && !(allowMemberSuppression && isMemberOffset))
                                 entry.anyNonZeroResult = true;
                             entry.varName = varName;
                             entry.targetType = targetType;

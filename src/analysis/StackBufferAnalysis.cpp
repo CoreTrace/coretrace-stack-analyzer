@@ -5,8 +5,12 @@
 #include <optional>
 
 #include <llvm/ADT/SmallPtrSet.h>
+#include <llvm/Analysis/ValueTracking.h>
+#include <llvm/BinaryFormat/Dwarf.h>
 #include <llvm/IR/Constants.h>
+#include <llvm/IR/DebugInfoMetadata.h>
 #include <llvm/IR/Function.h>
+#include <llvm/IR/IntrinsicInst.h>
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/Module.h>
 #include <llvm/IR/Type.h>
@@ -32,22 +36,24 @@ namespace ctrace::stack::analysis
             }
         };
 
-        // Taille (en nombre d'éléments) pour une alloca de tableau sur la stack
+        // Size (in elements) for a stack array alloca
         static std::optional<StackSize> getAllocaElementCount(llvm::AllocaInst* AI)
         {
             using namespace llvm;
 
             Type* elemTy = AI->getAllocatedType();
             StackSize count = 1;
+            bool hasArrayType = false;
 
-            // Cas "char test[10];" => alloca [10 x i8]
+            // Case "char test[10];" => alloca [10 x i8]
             if (auto* arrTy = dyn_cast<ArrayType>(elemTy))
             {
+                hasArrayType = true;
                 count *= arrTy->getNumElements();
                 elemTy = arrTy->getElementType();
             }
 
-            // Cas "alloca i8, i64 10" => alloca tableau avec taille constante
+            // Case "alloca i8, i64 10" => array alloca with constant size
             if (AI->isArrayAllocation())
             {
                 if (auto* C = dyn_cast<ConstantInt>(AI->getArraySize()))
@@ -56,9 +62,14 @@ namespace ctrace::stack::analysis
                 }
                 else
                 {
-                    // taille non constante - analyse plus compliquée, on ignore pour l'instant
+                    // non-constant size - more complex analysis, ignore for now
                     return std::nullopt;
                 }
+            }
+            else if (!hasArrayType)
+            {
+                // Scalar alloca (struct/object), not an indexable buffer
+                return std::nullopt;
             }
 
             return count;
@@ -82,10 +93,10 @@ namespace ctrace::stack::analysis
             auto isArrayAlloca = [](const AllocaInst* AI) -> bool
             {
                 Type* T = AI->getAllocatedType();
-                // On considère comme "buffer de stack" :
-                //  - les vrais tableaux,
-                //  - les allocas de type tableau (VLA côté IR),
-                //  - les structs qui contiennent au moins un champ tableau.
+                // Consider a "stack buffer" as:
+                //  - real arrays,
+                //  - array-typed allocas (VLA in IR),
+                //  - structs that contain at least one array field.
                 if (T->isArrayTy() || AI->isArrayAllocation())
                     return true;
 
@@ -100,7 +111,7 @@ namespace ctrace::stack::analysis
                 return false;
             };
 
-            // Pour éviter les boucles d'aliasing bizarres
+            // Avoid weird aliasing loops
             SmallPtrSet<const Value*, 16> visited;
             const Value* cur = V;
 
@@ -110,19 +121,19 @@ namespace ctrace::stack::analysis
                 if (cur->hasName())
                     path.push_back(cur->getName().str());
 
-                // Cas 1 : on tombe sur une alloca.
+                // Case 1: we hit an alloca.
                 if (auto* AI = dyn_cast<AllocaInst>(cur))
                 {
                     if (isArrayAlloca(AI))
                     {
-                        // Alloca d'un buffer de stack (tableau) : cible finale.
+                        // Stack buffer alloca (array): final target.
                         return AI;
                     }
 
-                    // Sinon, c'est très probablement une variable locale de type pointeur
-                    // (char *ptr; char **pp; etc.). On parcourt les stores vers cette
-                    // variable pour voir quelles valeurs lui sont assignées, et on
-                    // tente de remonter jusqu'à une vraie alloca de tableau.
+                    // Otherwise, it's very likely a local pointer variable
+                    // (char *ptr; char **pp; etc.). Walk stores into this variable
+                    // to see what values get assigned, and try to trace back to
+                    // a real array alloca.
                     const AllocaInst* foundAI = nullptr;
 
                     for (BasicBlock& BB : F)
@@ -150,8 +161,8 @@ namespace ctrace::stack::analysis
                             }
                             else if (foundAI != cand)
                             {
-                                // Plusieurs bases différentes : aliasing ambigu,
-                                // on préfère abandonner plutôt que de se tromper.
+                                // Multiple different bases: ambiguous aliasing,
+                                // prefer to stop rather than be wrong.
                                 return nullptr;
                             }
                         }
@@ -159,37 +170,37 @@ namespace ctrace::stack::analysis
                     return foundAI;
                 }
 
-                // Cas 2 : bitcast -> on remonte l'opérande.
+                // Case 2: bitcast -> follow the operand.
                 if (auto* BC = dyn_cast<BitCastInst>(cur))
                 {
                     cur = BC->getOperand(0);
                     continue;
                 }
 
-                // Cas 3 : GEP -> on remonte sur le pointeur de base.
+                // Case 3: GEP -> follow the base pointer.
                 if (auto* GEP = dyn_cast<GetElementPtrInst>(cur))
                 {
                     cur = GEP->getPointerOperand();
                     continue;
                 }
 
-                // Cas 4 : load d'un pointeur. Exemple typique :
+                // Case 4: load of a pointer. Typical example:
                 //    char *ptr = test;
                 //    char *p2  = ptr;
                 //    char **pp = &ptr;
                 //    (*pp)[i] = ...
                 //
-                // On remonte au "container" du pointeur (variable locale, ou autre valeur)
-                // en suivant l'opérande du load.
+                // Walk up to the pointer "container" (local variable, or other value)
+                // by following the load operand.
                 if (auto* LI = dyn_cast<LoadInst>(cur))
                 {
                     cur = LI->getPointerOperand();
                     continue;
                 }
 
-                // Cas 5 : PHI de pointeurs (fusion de plusieurs alias) :
-                // on tente de résoudre chaque incoming et on s'assure qu'ils
-                // pointent tous vers la même alloca de tableau.
+                // Case 5: PHI of pointers (merge of aliases):
+                // try to resolve each incoming and ensure they
+                // all point to the same array alloca.
                 if (auto* PN = dyn_cast<PHINode>(cur))
                 {
                     const AllocaInst* foundAI = nullptr;
@@ -209,7 +220,7 @@ namespace ctrace::stack::analysis
                         }
                         else if (foundAI != cand)
                         {
-                            // PHI mélange plusieurs bases différentes : trop ambigu.
+                            // PHI mixes multiple different bases: too ambiguous.
                             return nullptr;
                         }
                     }
@@ -217,11 +228,80 @@ namespace ctrace::stack::analysis
                     return foundAI;
                 }
 
-                // Autres cas (arguments, globales complexes, etc.) : on arrête l'heuristique.
+                // Other cases (arguments, complex globals, etc.): stop the heuristic.
                 break;
             }
 
             return nullptr;
+        }
+
+        static std::optional<bool> isAllocaArrayByDebugInfo(const llvm::AllocaInst* AI,
+                                                            const llvm::Function& F)
+        {
+            using namespace llvm;
+
+            for (const BasicBlock& BB : F)
+            {
+                for (const Instruction& I : BB)
+                {
+                    auto* DVI = dyn_cast<DbgVariableIntrinsic>(&I);
+                    if (!DVI)
+                        continue;
+
+                    if (DVI->getNumVariableLocationOps() == 0)
+                        continue;
+
+                    const Value* loc = DVI->getVariableLocationOp(0);
+                    if (!loc)
+                        continue;
+
+                    const Value* base = getUnderlyingObject(loc);
+                    if (base != AI)
+                        continue;
+
+                    const DILocalVariable* var = DVI->getVariable();
+                    if (!var)
+                        return false;
+
+                    const DIType* type = var->getType();
+                    if (!type)
+                        return false;
+
+                    if (auto* composite = dyn_cast<DICompositeType>(type))
+                    {
+                        return composite->getTag() == dwarf::DW_TAG_array_type;
+                    }
+
+                    return false;
+                }
+            }
+
+            return std::nullopt;
+        }
+
+        static bool shouldUseAllocaFallback(const llvm::AllocaInst* AI, llvm::Function& F)
+        {
+            if (auto debugArray = isAllocaArrayByDebugInfo(AI, F); debugArray.has_value())
+            {
+                return *debugArray;
+            }
+
+            llvm::Type* allocatedTy = AI->getAllocatedType();
+            if (auto* arrTy = llvm::dyn_cast<llvm::ArrayType>(allocatedTy))
+            {
+                if (arrTy->getNumElements() <= 1 && !arrTy->getElementType()->isArrayTy())
+                    return false;
+                return true;
+            }
+
+            if (AI->isArrayAllocation())
+            {
+                if (auto* C = llvm::dyn_cast<llvm::ConstantInt>(AI->getArraySize()))
+                    return C->getZExtValue() > 1;
+                return true;
+            }
+
+            return false;
         }
 
         static const llvm::AllocaInst* resolveArrayAllocaFromPointer(const llvm::Value* V,
@@ -248,17 +328,17 @@ namespace ctrace::stack::analysis
                     if (!GEP)
                         continue;
 
-                    // 1) Trouver la base du pointeur (test, &test[0], ptr, etc.)
+                    // 1) Find the pointer base (test, &test[0], ptr, etc.)
                     const Value* basePtr = GEP->getPointerOperand();
                     std::vector<std::string> aliasPath;
                     const AllocaInst* AI = resolveArrayAllocaFromPointer(basePtr, F, aliasPath);
                     if (!AI)
                         continue;
 
-                    // 2) Déterminer la taille logique du tableau ciblé et récupérer l'index
-                    //    On essaie d'abord de la déduire du type traversé par la GEP
-                    //    (cas struct S { char buf[10]; }; s.buf[i]) puis on retombe
-                    //    sur la taille de l'alloca pour les cas plus simples (char buf[10]).
+                    // 2) Determine the logical target array size and retrieve the index.
+                    //    First try to infer it from the type traversed by the GEP
+                    //    (case struct S { char buf[10]; }; s.buf[i]), then fall back
+                    //    to the alloca size for simpler cases (char buf[10]).
                     StackSize arraySize = 0;
                     Value* idxVal = nullptr;
 
@@ -266,29 +346,29 @@ namespace ctrace::stack::analysis
 
                     if (auto* arrTy = dyn_cast<ArrayType>(srcElemTy))
                     {
-                        // Cas direct : alloca [N x T]; GEP indices [0, i]
+                        // Direct case: alloca [N x T]; GEP indices [0, i]
                         if (GEP->getNumIndices() < 2)
                             continue;
                         auto idxIt = GEP->idx_begin();
-                        ++idxIt; // saute le premier indice (souvent 0)
+                        ++idxIt; // skip the first index (often 0)
                         idxVal = idxIt->get();
                         arraySize = arrTy->getNumElements();
                     }
                     else if (auto* ST = dyn_cast<StructType>(srcElemTy))
                     {
-                        // Cas struct avec champ tableau:
+                        // Struct case with an array field:
                         //   %ptr = getelementptr inbounds %struct.S, %struct.S* %s,
                         //          i32 0, i32 <field>, i64 %i
                         //
-                        // On attend donc au moins 3 indices: [0, field, i]
+                        // Expect at least 3 indices: [0, field, i]
                         if (GEP->getNumIndices() >= 3)
                         {
                             auto idxIt = GEP->idx_begin();
 
-                            // premier indice (souvent 0)
+                            // first index (often 0)
                             auto* idx0 = dyn_cast<ConstantInt>(idxIt->get());
                             ++idxIt;
-                            // second indice: index de champ dans la struct
+                            // second index: field index in the struct
                             auto* fieldIdxC = dyn_cast<ConstantInt>(idxIt->get());
                             ++idxIt;
 
@@ -302,7 +382,7 @@ namespace ctrace::stack::analysis
                                     if (auto* fieldArrTy = dyn_cast<ArrayType>(fieldTy))
                                     {
                                         arraySize = fieldArrTy->getNumElements();
-                                        // Troisième indice = index dans le tableau interne
+                                        // Third index = index within the inner array
                                         idxVal = idxIt->get();
                                     }
                                 }
@@ -310,10 +390,13 @@ namespace ctrace::stack::analysis
                         }
                     }
 
-                    // Si on n'a pas réussi à déduire une taille via la GEP,
-                    // on retombe sur la taille dérivée de l'alloca (cas char buf[10]; ptr = buf; ptr[i]).
+                    // If we could not infer a size via the GEP,
+                    // fall back to the size derived from the alloca
+                    // (case char buf[10]; ptr = buf; ptr[i]).
                     if (arraySize == 0 || !idxVal)
                     {
+                        if (!shouldUseAllocaFallback(AI, F))
+                            continue;
                         auto maybeCount = getAllocaElementCount(const_cast<AllocaInst*>(AI));
                         if (!maybeCount)
                             continue;
@@ -321,7 +404,7 @@ namespace ctrace::stack::analysis
                         if (arraySize == 0)
                             continue;
 
-                        // Pour ces cas-là, on considère le premier indice comme l'index logique.
+                        // For these cases, treat the first index as the logical index.
                         if (GEP->getNumIndices() < 1)
                             continue;
                         auto idxIt = GEP->idx_begin();
@@ -331,14 +414,14 @@ namespace ctrace::stack::analysis
                     std::string varName =
                         AI->hasName() ? AI->getName().str() : std::string("<unnamed>");
 
-                    // "baseIdxVal" = variable de boucle "i" sans les casts (sext/zext...)
+                    // "baseIdxVal" = loop variable "i" without casts (sext/zext...)
                     Value* baseIdxVal = idxVal;
                     while (auto* cast = dyn_cast<CastInst>(baseIdxVal))
                     {
                         baseIdxVal = cast->getOperand(0);
                     }
 
-                    // 4) Cas index constant : test[11]
+                    // 4) Constant index case: test[11]
                     if (auto* CIdx = dyn_cast<ConstantInt>(idxVal))
                     {
                         auto idxValue = CIdx->getSExtValue();
@@ -401,12 +484,12 @@ namespace ctrace::stack::analysis
                         continue;
                     }
 
-                    // 5) Cas index variable : test[i] / ptr[i]
-                    // On regarde si on a un intervalle pour la valeur de base (i, pas le cast)
+                    // 5) Variable index case: test[i] / ptr[i]
+                    // Check whether we have a range for the base value (i, not the cast)
                     const Value* key = baseIdxVal;
 
-                    // Si l'index vient d'un load (pattern -O0 : load i, icmp, load i, gep),
-                    // on utilise le pointeur sous-jacent comme clé (l'alloca de i).
+                    // If the index comes from a load (O0 pattern: load i, icmp, load i, gep),
+                    // use the underlying pointer as the key (alloca of i).
                     if (auto* LI = dyn_cast<LoadInst>(baseIdxVal))
                     {
                         key = LI->getPointerOperand();
@@ -415,13 +498,13 @@ namespace ctrace::stack::analysis
                     auto itRange = ranges.find(key);
                     if (itRange == ranges.end())
                     {
-                        // pas de borne connue => on ne dit rien ici
+                        // no known bound => say nothing here
                         continue;
                     }
 
                     const IntRange& R = itRange->second;
 
-                    // 5.a) Borne supérieure hors bornes: UB >= arraySize
+                    // 5.a) Upper bound out of range: UB >= arraySize
                     if (R.hasUpper && R.upper >= 0 && static_cast<StackSize>(R.upper) >= arraySize)
                     {
                         StackSize ub = static_cast<StackSize>(R.upper);
@@ -481,7 +564,7 @@ namespace ctrace::stack::analysis
                         }
                     }
 
-                    // 5.b) Borne inférieure négative: LB < 0  => index potentiellement négatif
+                    // 5.b) Negative lower bound: LB < 0  => potentially negative index
                     if (R.hasLower && R.lower < 0)
                     {
                         for (User* GU : GEP->users())
@@ -540,8 +623,8 @@ namespace ctrace::stack::analysis
                             }
                         }
                     }
-                    // Si R.hasUpper && R.upper < arraySize et (pas de LB problématique),
-                    // on considère l'accès comme probablement sûr.
+                    // If R.hasUpper && R.upper < arraySize and (no problematic LB),
+                    // treat the access as probably safe.
                 }
             }
         }
@@ -576,7 +659,7 @@ namespace ctrace::stack::analysis
                     if (!GEP)
                         continue;
 
-                    // On remonte à la base pour trouver une alloca de tableau sur la stack.
+                    // Walk back to the base to find a stack array alloca.
                     const Value* basePtr = GEP->getPointerOperand();
                     std::vector<std::string> dummyAliasPath;
                     const AllocaInst* AI =
@@ -584,22 +667,29 @@ namespace ctrace::stack::analysis
                     if (!AI)
                         continue;
 
-                    // On récupère l'expression d'index utilisée dans le GEP.
+                    // Retrieve the index expression used in the GEP.
                     Value* idxVal = nullptr;
                     Type* srcElemTy = GEP->getSourceElementType();
+                    bool isDirectArray = false;
 
                     if (auto* arrTy = dyn_cast<ArrayType>(srcElemTy))
                     {
+                        isDirectArray = true;
                         // Pattern [N x T]* -> indices [0, i]
                         if (GEP->getNumIndices() < 2)
                             continue;
                         auto idxIt = GEP->idx_begin();
-                        ++idxIt; // saute le premier indice (souvent 0)
+                        ++idxIt; // skip the first index (often 0)
                         idxVal = idxIt->get();
                     }
                     else
                     {
-                        // Pattern T* -> indice unique [i] (cas char *ptr = test; ptr[i])
+                        if (!shouldUseAllocaFallback(AI, F))
+                            continue;
+                        auto maybeCount = getAllocaElementCount(const_cast<AllocaInst*>(AI));
+                        if (!maybeCount || *maybeCount <= 1)
+                            continue;
+                        // Pattern T* -> single index [i] (case char *ptr = test; ptr[i])
                         if (GEP->getNumIndices() < 1)
                             continue;
                         auto idxIt = GEP->idx_begin();
@@ -609,7 +699,7 @@ namespace ctrace::stack::analysis
                     if (!idxVal)
                         continue;
 
-                    // On normalise un peu la clé d'index en enlevant les casts SSA.
+                    // Normalize the index key by stripping SSA casts.
                     const Value* idxKey = idxVal;
                     while (auto* cast = dyn_cast<CastInst>(const_cast<Value*>(idxKey)))
                     {
@@ -623,14 +713,14 @@ namespace ctrace::stack::analysis
                 }
             }
 
-            // Construction des warnings pour chaque buffer qui reçoit plusieurs stores.
+            // Build warnings for each buffer that receives multiple stores.
             for (auto& entry : infoMap)
             {
                 const AllocaInst* AI = entry.first;
                 const Info& info = entry.second;
 
                 if (info.storeCount <= 1)
-                    continue; // un seul store -> pas de warning
+                    continue; // single store -> no warning
 
                 MultipleStoreIssue issue;
                 issue.funcName = F.getName().str();

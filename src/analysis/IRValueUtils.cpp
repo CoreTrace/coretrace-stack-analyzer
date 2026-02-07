@@ -91,19 +91,18 @@ namespace ctrace::stack::analysis
     {
         using namespace llvm;
 
-        // On enlève d'abord les cast (sext/zext/trunc, etc.) pour arriver
-        // à la vraie valeur “de base”.
+        // First remove casts (sext/zext/trunc, etc.) to reach the real base value.
         const Value* cur = V;
         while (auto* cast = dyn_cast<const CastInst>(cur))
         {
             cur = cast->getOperand(0);
         }
 
-        // Cas trivial : c'est déjà une constante entière.
+        // Trivial case: already an integer constant.
         if (auto* C = dyn_cast<const ConstantInt>(cur))
             return C;
 
-        // Cas -O0 typique : on compare un load d'une variable locale.
+        // Typical -O0 case: comparing a load from a local variable.
         auto* LI = dyn_cast<const LoadInst>(cur);
         if (!LI)
             return nullptr;
@@ -111,7 +110,7 @@ namespace ctrace::stack::analysis
         const Value* ptr = LI->getPointerOperand();
         const ConstantInt* found = nullptr;
 
-        // Version ultra-simple : on cherche un store de constante dans la fonction.
+        // Ultra-simple version: look for a constant store in the function.
         for (const BasicBlock& BB : F)
         {
             for (const Instruction& I : BB)
@@ -123,7 +122,7 @@ namespace ctrace::stack::analysis
                     continue;
                 if (auto* C = dyn_cast<const ConstantInt>(SI->getValueOperand()))
                 {
-                    // On garde la dernière constante trouvée (si plusieurs stores, c'est naïf).
+                    // Keep the last constant found (if multiple stores, this is naive).
                     found = C;
                 }
             }
