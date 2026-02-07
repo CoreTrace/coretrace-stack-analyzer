@@ -1,9 +1,28 @@
 # coretrace-stack-analyzer
 
-#### BUILD
+#### BUILD (macOS/Linux)
 
 ```zsh
 ./build.sh
+```
+
+The build script auto-detects LLVM/Clang using Homebrew (macOS) or
+`llvm-config` (Linux). If detection fails, set `LLVM_DIR` and `Clang_DIR`.
+
+Options:
+- `--build-dir <dir>` (default: `build`)
+- `--type <Release|Debug|RelWithDebInfo>` (default: `Release`)
+- `--generator <Ninja|Unix Makefiles>`
+- `--jobs <n>`
+- `--llvm-dir <path>` / `--clang-dir <path>`
+- `--clean`
+- `--configure-only`
+
+Examples:
+```zsh
+./build.sh --type Release
+./build.sh --type Debug --build-dir out/build
+LLVM_DIR=/opt/llvm/lib/cmake/llvm Clang_DIR=/opt/llvm/lib/cmake/clang ./build.sh --generator Ninja
 ```
 
 ### Code style (clang-format)
