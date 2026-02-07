@@ -19,6 +19,7 @@ namespace ctrace::stack::analysis
         const llvm::Instruction* conditionInst = nullptr;
     };
 
-    std::vector<DuplicateIfConditionIssue> analyzeDuplicateIfConditions(
-        llvm::Module& mod, const std::function<bool(const llvm::Function&)>& shouldAnalyze);
+    std::vector<DuplicateIfConditionIssue>
+    analyzeDuplicateIfConditions(llvm::Module& mod,
+                                 const std::function<bool(const llvm::Function&)>& shouldAnalyze);
 } // namespace ctrace::stack::analysis

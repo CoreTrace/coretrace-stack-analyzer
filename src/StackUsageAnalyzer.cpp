@@ -862,10 +862,8 @@ namespace ctrace::stack
             }
         }
 
-        static void
-        appendDuplicateIfConditionDiagnostics(
-            AnalysisResult& result,
-            const std::vector<analysis::DuplicateIfConditionIssue>& issues)
+        static void appendDuplicateIfConditionDiagnostics(
+            AnalysisResult& result, const std::vector<analysis::DuplicateIfConditionIssue>& issues)
         {
             for (const auto& issue : issues)
             {
