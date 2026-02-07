@@ -1,10 +1,10 @@
 #include <stdio.h>
 
 /*
- * 1) Cas simples : borne sup OK / pas OK
+ * 1) Simple cases: upper bound OK / not OK
  */
 
-// AUCUN WARNING attendu (UB = 9, taille = 10)
+// NO WARNING expected (UB = 9, size = 10)
 void ub_ok(int i)
 {
     char buf[10];
@@ -13,7 +13,7 @@ void ub_ok(int i)
         buf[i] = 'A';
 }
 
-// WARNING UB attendu (UB = 10, taille = 10)
+// WARNING UB expected (UB = 10, size = 10)
 void ub_overflow(int i)
 {
     char buf[10];
@@ -28,10 +28,10 @@ void ub_overflow(int i)
 }
 
 /*
- * 2) Borne inf négative : index potentiellement < 0
+ * 2) Negative lower bound: index potentially < 0
  */
 
-// WARNING LB négatif attendu (i >= -3 && i < 5)
+// WARNING negative LB expected (i >= -3 && i < 5)
 void lb_negative(int i)
 {
     char buf[10];
@@ -45,7 +45,7 @@ void lb_negative(int i)
         buf[i] = 'C';
 }
 
-// WARNING LB négatif + UB hors borne (i >= -3 && i <= 15)
+// WARNING negative LB + UB out of bounds (i >= -3 && i <= 15)
 void lb_and_ub(int i)
 {
     char buf[10];
@@ -66,18 +66,18 @@ void lb_and_ub(int i)
 }
 
 /*
- * 3) if imbriqués : affiner l’intervalle (LB & UB)
+ * 3) Nested ifs: refine the range (LB & UB)
  *
  *   if (i <= 10) {
  *       if (i > 5)
  *           buf[i] = 'E';
  *   }
  *
- * Ici, on sait que 6 <= i <= 10
- * avec buf[8] → UB hors borne
+ * Here we know that 6 <= i <= 10
+ * with buf[8] -> UB out of bounds
  */
 
-// ATTENDU : UB hors borne (taille 8,  i ∈ [6,10])
+// EXPECTED: UB out of bounds (size 8, i in [6,10])
 void nested_if_overflow(int i)
 {
     char buf[8];
@@ -96,7 +96,7 @@ void nested_if_overflow(int i)
     }
 }
 
-// Variante “safe” pour comparaison (taille 16,  i ∈ [6,10]) → idéalement aucun warning
+// “Safe” variant for comparison (size 16, i in [6,10]) -> ideally no warnings
 void nested_if_ok(int i)
 {
     char buf[16];
@@ -111,10 +111,10 @@ void nested_if_ok(int i)
 }
 
 /*
- * 4) Boucles : patterns classiques de for
+ * 4) Loops: classic for patterns
  */
 
-// AUCUN WARNING attendu (0 <= i < 10, taille 10)
+// NO WARNING expected (0 <= i < 10, size 10)
 void loop_ok(void)
 {
     char buf[10];
@@ -123,7 +123,7 @@ void loop_ok(void)
         buf[i] = 'G';
 }
 
-// WARNING UB attendu (0 <= i <= 10, taille = 10)
+// WARNING UB expected (0 <= i <= 10, size = 10)
 void loop_ub_overflow(void)
 {
     char buf[10];
@@ -137,7 +137,7 @@ void loop_ub_overflow(void)
         buf[i] = 'H';
 }
 
-// WARNING LB négatif attendu (-3 <= i < 5, taille = 10)
+// WARNING negative LB expected (-3 <= i < 5, size = 10)
 void loop_lb_negative(void)
 {
     char buf[10];
@@ -147,11 +147,11 @@ void loop_lb_negative(void)
 }
 
 /*
- * 5) Cas unreachable mais avec accès hors borne
- *    (tu as déjà ce genre de logique, mais ça teste qu’on garde bien l’info)
+ * 5) Unreachable case with out-of-bounds access
+ *    (you already have this logic, but this checks we keep the info)
  */
 
-// ATTENDU : warning overflow + [info] unreachable
+// EXPECTED: overflow warning + [info] unreachable
 void unreachable_example(void)
 {
     int i = 1;
@@ -164,16 +164,16 @@ void unreachable_example(void)
     //     (this is a write access)
     //     [info] this access appears unreachable at runtime (condition is always false for this branch)
     if (i > 10)
-    { // condition fausse à l’exécution
+    { // condition false at runtime
         buf[11] = 'J';
     }
 }
 
 /*
- * 6) Aliasing de pointeur + intervalle (LB & UB)
+ * 6) Pointer aliasing + range (LB & UB)
  */
 
-// ATTENDU : UB + LB négatif (p = buf)
+// EXPECTED: UB + negative LB (p = buf)
 void alias_lb_ub(int i)
 {
     char buf[10];
@@ -194,7 +194,7 @@ void alias_lb_ub(int i)
         p[i] = 'K';
 }
 
-// ATTENDU : aucun warning (0 <= i < 10)
+// EXPECTED: no warning (0 <= i < 10)
 void alias_ok(int i)
 {
     char buf[10];
@@ -205,8 +205,8 @@ void alias_ok(int i)
 }
 
 /*
- * 7) Combinaison bizarre : bornes serrées, mais toujours safe
- *    i ∈ [2,7], buf[8] → normalement OK
+ * 7) Weird combination: tight bounds, but still safe
+ *    i in [2,7], buf[8] -> normally OK
  */
 
 void tight_range_ok(int i)
@@ -218,8 +218,8 @@ void tight_range_ok(int i)
 }
 
 /*
- * 8) Cas extrême : bornes très larges
- *    i >= -100 && i <= 100, buf[10] → LB négatif + UB hors borne
+ * 8) Extreme case: very wide bounds
+ *    i >= -100 && i <= 100, buf[10] -> negative LB + UB out of bounds
  */
 
 void huge_range(int i)
@@ -242,7 +242,7 @@ void huge_range(int i)
 }
 
 /*
- * main : juste pour que le compilateur ne vire pas tout si optimisation
+ * main: just to prevent the compiler from optimizing everything away
  */
 
 int main(void)
