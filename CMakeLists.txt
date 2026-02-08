@@ -30,9 +30,9 @@ if(DEFINED DEBUG_ASAN)
 endif()
 
 FetchContent_Declare(
-  cc
-  GIT_REPOSITORY https://github.com/CoreTrace/coretrace-compiler.git
-  GIT_TAG main
+    cc
+    GIT_REPOSITORY https://github.com/CoreTrace/coretrace-compiler.git
+    GIT_TAG main
 )
 
 FetchContent_MakeAvailable(cc)
