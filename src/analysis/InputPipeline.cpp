@@ -323,6 +323,14 @@ namespace ctrace::stack::analysis
                 result.error = "Compilation failed:\n" + res.diagnostics + '\n';
                 return result;
             }
+            if (!res.diagnostics.empty() && !config.quiet)
+            {
+                llvm::errs() << res.diagnostics;
+                if (res.diagnostics.back() != '\n')
+                {
+                    llvm::errs() << '\n';
+                }
+            }
 
             if (res.llvmIR.empty())
             {

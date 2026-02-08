@@ -30,9 +30,9 @@ if(DEFINED DEBUG_ASAN)
 endif()
 
 FetchContent_Declare(
-  cc
-  GIT_REPOSITORY https://github.com/CoreTrace/coretrace-compiler.git
-  GIT_TAG main
+    cc
+    GIT_REPOSITORY https://github.com/CoreTrace/coretrace-compiler.git
+    GIT_TAG main
 )
 
 FetchContent_MakeAvailable(cc)
@@ -43,6 +43,7 @@ message(STATUS "Using LLVMConfig.cmake in: ${LLVM_DIR}")
 # Options de build
 option(BUILD_CLI "Build stack_usage_analyzer CLI tool" ON)
 option(BUILD_SHARED_LIB "Build shared library variant" ON)
+option(ENABLE_STACK_USAGE "Emit per-function stack usage (.su) files" OFF)
 
 # ===========================
 #  Communs Sources
@@ -83,6 +84,10 @@ add_definitions(${LLVM_DEFINITIONS})
 add_library(stack_usage_analyzer_lib STATIC
     ${STACK_ANALYZER_SOURCES}
 )
+
+if(ENABLE_STACK_USAGE)
+    target_compile_options(stack_usage_analyzer_lib PRIVATE -fstack-usage)
+endif()
 
 if(ENABLE_DEBUG_ASAN)
     target_compile_options(stack_usage_analyzer_lib PUBLIC -fsanitize=address -fno-omit-frame-pointer -g)
@@ -156,6 +161,10 @@ if(BUILD_CLI)
         # No need to relink cc::compilerlib_static here,
         # it is already linked into the library.
     )
+
+    if(ENABLE_STACK_USAGE)
+        target_compile_options(stack_usage_analyzer PRIVATE -fstack-usage)
+    endif()
 
     if(ENABLE_DEBUG_ASAN)
         target_compile_options(stack_usage_analyzer PRIVATE -fsanitize=address -fno-omit-frame-pointer -g)
