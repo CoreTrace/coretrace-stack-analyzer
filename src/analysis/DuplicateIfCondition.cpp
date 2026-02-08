@@ -11,10 +11,12 @@
 #include <llvm/Analysis/CaptureTracking.h>
 #include <llvm/IR/BasicBlock.h>
 #include <llvm/IR/CFG.h>
+#include <llvm/IR/Constants.h>
 #include <llvm/IR/Function.h>
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/IntrinsicInst.h>
 #include <llvm/IR/Module.h>
+#include <llvm/IR/Operator.h>
 #include <llvm/IR/Value.h>
 #include <llvm/IR/Dominators.h>
 
@@ -205,6 +207,68 @@ namespace ctrace::stack::analysis
             return v;
         }
 
+        static bool valuesEquivalent(const llvm::Value* a, const llvm::Value* b, int depth = 0)
+        {
+            if (a == b)
+                return true;
+            if (!a || !b)
+                return false;
+            if (depth > 6)
+                return false;
+
+            if (auto* la = llvm::dyn_cast<llvm::LoadInst>(a))
+            {
+                auto* lb = llvm::dyn_cast<llvm::LoadInst>(b);
+                if (!lb)
+                    return false;
+                return valuesEquivalent(la->getPointerOperand()->stripPointerCasts(),
+                                        lb->getPointerOperand()->stripPointerCasts(), depth + 1);
+            }
+
+            if (auto* ga = llvm::dyn_cast<llvm::GEPOperator>(a))
+            {
+                auto* gb = llvm::dyn_cast<llvm::GEPOperator>(b);
+                if (!gb)
+                    return false;
+                if (ga->getNumIndices() != gb->getNumIndices())
+                    return false;
+                if (!valuesEquivalent(ga->getPointerOperand()->stripPointerCasts(),
+                                      gb->getPointerOperand()->stripPointerCasts(), depth + 1))
+                    return false;
+
+                auto itA = ga->idx_begin();
+                auto itB = gb->idx_begin();
+                for (; itA != ga->idx_end(); ++itA, ++itB)
+                {
+                    auto* ca = llvm::dyn_cast<llvm::ConstantInt>(itA->get());
+                    auto* cb = llvm::dyn_cast<llvm::ConstantInt>(itB->get());
+                    if (!ca || !cb)
+                        return false;
+                    if (ca->getValue() != cb->getValue())
+                        return false;
+                }
+
+                return true;
+            }
+
+            if (auto* opA = llvm::dyn_cast<llvm::Operator>(a))
+            {
+                auto* opB = llvm::dyn_cast<llvm::Operator>(b);
+                if (!opB || opA->getOpcode() != opB->getOpcode())
+                    return false;
+                switch (opA->getOpcode())
+                {
+                    case llvm::Instruction::BitCast:
+                    case llvm::Instruction::AddrSpaceCast:
+                        return valuesEquivalent(opA->getOperand(0), opB->getOperand(0), depth + 1);
+                    default:
+                        break;
+                }
+            }
+
+            return false;
+        }
+
         static bool isPrecisePointer(const llvm::Value* ptr)
         {
             using namespace llvm;
@@ -286,9 +350,17 @@ namespace ctrace::stack::analysis
             if (a.kind != b.kind)
                 return false;
             if (a.kind == ConditionKind::ICmp)
-                return a.pred == b.pred && a.lhs == b.lhs && a.rhs == b.rhs;
+            {
+                if (a.pred == b.pred && valuesEquivalent(a.lhs, b.lhs) &&
+                    valuesEquivalent(a.rhs, b.rhs))
+                    return true;
+                if (llvm::CmpInst::getSwappedPredicate(a.pred) == b.pred &&
+                    valuesEquivalent(a.lhs, b.rhs) && valuesEquivalent(a.rhs, b.lhs))
+                    return true;
+                return false;
+            }
             if (a.kind == ConditionKind::BoolValue)
-                return a.boolValue == b.boolValue;
+                return valuesEquivalent(a.boolValue, b.boolValue);
             return false;
         }
 
@@ -301,25 +373,25 @@ namespace ctrace::stack::analysis
             if (auto* store = dyn_cast<StoreInst>(&I))
             {
                 const Value* ptr = store->getPointerOperand()->stripPointerCasts();
-                return ptr == mem.ptr;
+                return valuesEquivalent(ptr, mem.ptr);
             }
 
             if (auto* rmw = dyn_cast<AtomicRMWInst>(&I))
             {
                 const Value* ptr = rmw->getPointerOperand()->stripPointerCasts();
-                return ptr == mem.ptr;
+                return valuesEquivalent(ptr, mem.ptr);
             }
 
             if (auto* cmpxchg = dyn_cast<AtomicCmpXchgInst>(&I))
             {
                 const Value* ptr = cmpxchg->getPointerOperand()->stripPointerCasts();
-                return ptr == mem.ptr;
+                return valuesEquivalent(ptr, mem.ptr);
             }
 
             if (auto* memIntrinsic = dyn_cast<MemIntrinsic>(&I))
             {
                 const Value* ptr = memIntrinsic->getRawDest()->stripPointerCasts();
-                return ptr == mem.ptr;
+                return valuesEquivalent(ptr, mem.ptr);
             }
 
             if (auto* call = dyn_cast<CallBase>(&I))
@@ -333,7 +405,7 @@ namespace ctrace::stack::analysis
                     const Value* argVal = arg.get();
                     if (!argVal || !argVal->getType()->isPointerTy())
                         continue;
-                    if (argVal->stripPointerCasts() == mem.ptr)
+                    if (valuesEquivalent(argVal->stripPointerCasts(), mem.ptr))
                         return true;
                 }
                 return false;
@@ -355,6 +427,8 @@ namespace ctrace::stack::analysis
             for (const llvm::BasicBlock& BB : F)
             {
                 if (!DT.dominates(pathBlock, &BB))
+                    continue;
+                if (&BB != atBlock && !DT.dominates(&BB, atBlock))
                     continue;
 
                 for (const llvm::Instruction& I : BB)
