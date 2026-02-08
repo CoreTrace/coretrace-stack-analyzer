@@ -178,11 +178,20 @@ namespace ctrace::stack::analysis
             bool precise = false; // true if we can reason about direct stores only
         };
 
+        enum class ConditionKind
+        {
+            Invalid,
+            ICmp,
+            BoolValue
+        };
+
         struct ConditionKey
         {
+            ConditionKind kind = ConditionKind::Invalid;
             llvm::CmpInst::Predicate pred = llvm::CmpInst::BAD_ICMP_PREDICATE;
             llvm::Value* lhs = nullptr;
             llvm::Value* rhs = nullptr;
+            llvm::Value* boolValue = nullptr;
             bool valid = false;
             llvm::SmallVector<MemoryOperand, 2> memoryOperands;
         };
@@ -242,9 +251,20 @@ namespace ctrace::stack::analysis
             ConditionKey key;
             auto* cmp = llvm::dyn_cast<llvm::ICmpInst>(cond);
             if (!cmp)
+            {
+                llvm::Value* raw = stripCasts(cond);
+                if (raw && raw->getType()->isIntegerTy())
+                {
+                    key.valid = true;
+                    key.kind = ConditionKind::BoolValue;
+                    key.boolValue = canonicalizeOperand(raw, key);
+                    dedupeMemoryOperands(key);
+                }
                 return key;
+            }
 
             key.valid = true;
+            key.kind = ConditionKind::ICmp;
             key.pred = cmp->getPredicate();
             key.lhs = canonicalizeOperand(cmp->getOperand(0), key);
             key.rhs = canonicalizeOperand(cmp->getOperand(1), key);
@@ -263,7 +283,13 @@ namespace ctrace::stack::analysis
         {
             if (!a.valid || !b.valid)
                 return false;
-            return a.pred == b.pred && a.lhs == b.lhs && a.rhs == b.rhs;
+            if (a.kind != b.kind)
+                return false;
+            if (a.kind == ConditionKind::ICmp)
+                return a.pred == b.pred && a.lhs == b.lhs && a.rhs == b.rhs;
+            if (a.kind == ConditionKind::BoolValue)
+                return a.boolValue == b.boolValue;
+            return false;
         }
 
         static bool isInterferingWrite(const llvm::Instruction& I, const MemoryOperand& mem)
