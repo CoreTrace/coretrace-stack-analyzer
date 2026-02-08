@@ -402,6 +402,9 @@ int main(int argc, char** argv)
     // cfg.mode = AnalysisMode::IR; -> already set by default constructor
     // cfg.stackLimit = 8ull * 1024ull * 1024ull; // 8 MiB -> already set by default constructor but needed to be set with args
 
+    cfg.extraCompileArgs.emplace_back("-O0");
+    cfg.extraCompileArgs.emplace_back("--ct-optnone");
+
     for (int i = 1; i < argc; ++i)
     {
         const char* arg = argv[i];
