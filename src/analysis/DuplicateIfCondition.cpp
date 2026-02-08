@@ -258,11 +258,11 @@ namespace ctrace::stack::analysis
                     return false;
                 switch (opA->getOpcode())
                 {
-                    case llvm::Instruction::BitCast:
-                    case llvm::Instruction::AddrSpaceCast:
-                        return valuesEquivalent(opA->getOperand(0), opB->getOperand(0), depth + 1);
-                    default:
-                        break;
+                case llvm::Instruction::BitCast:
+                case llvm::Instruction::AddrSpaceCast:
+                    return valuesEquivalent(opA->getOperand(0), opB->getOperand(0), depth + 1);
+                default:
+                    break;
                 }
             }
 
