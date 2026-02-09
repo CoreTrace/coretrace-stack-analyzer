@@ -1,9 +1,11 @@
 #include "StackUsageAnalyzer.hpp"
 
+#include <algorithm>
 #include <cstdio> // std::snprintf
-#include <unordered_map>
+#include <iomanip>
 #include <sstream>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace ctrace::stack
@@ -87,6 +89,13 @@ namespace ctrace::stack
             if (!d.ruleId.empty())
                 return d.ruleId;
             return std::string(ctrace::stack::enumToString(d.errCode));
+        }
+
+        static std::string formatConfidence(double confidence)
+        {
+            std::ostringstream os;
+            os << std::fixed << std::setprecision(2) << confidence;
+            return os.str();
         }
 
     } // anonymous namespace
@@ -202,7 +211,7 @@ namespace ctrace::stack
             os << "      \"ruleId\": \"" << jsonEscape(ruleId) << "\",\n";
             os << "      \"confidence\": ";
             if (d.confidence >= 0.0)
-                os << d.confidence;
+                os << formatConfidence(d.confidence);
             else
                 os << "null";
             os << ",\n";
@@ -283,6 +292,11 @@ namespace ctrace::stack
                 rules[it->second].cweId = d.cweId;
             }
         }
+        std::sort(rules.begin(), rules.end(),
+                  [](const SarifRuleEntry& lhs, const SarifRuleEntry& rhs)
+                  {
+                      return lhs.id < rhs.id;
+                  });
 
         std::ostringstream os;
         os << "{\n";
@@ -340,7 +354,7 @@ namespace ctrace::stack
                 bool needComma = false;
                 if (hasConfidence)
                 {
-                    os << "            \"confidence\": " << d.confidence;
+                    os << "            \"confidence\": " << formatConfidence(d.confidence);
                     needComma = true;
                 }
                 if (hasCwe)
