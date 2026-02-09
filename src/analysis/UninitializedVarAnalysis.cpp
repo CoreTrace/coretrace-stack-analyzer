@@ -156,12 +156,9 @@ namespace ctrace::stack::analysis
             if (begin >= end)
                 return;
 
-            auto it = std::lower_bound(
-                ranges.begin(), ranges.end(), begin,
-                [](const ByteRange& r, std::uint64_t value)
-                {
-                    return r.end < value;
-                });
+            auto it = std::lower_bound(ranges.begin(), ranges.end(), begin,
+                                       [](const ByteRange& r, std::uint64_t value)
+                                       { return r.end < value; });
 
             if (it == ranges.end())
             {
@@ -842,7 +839,7 @@ namespace ctrace::stack::analysis
                         {
                             addRange(
                                 getParamEffect(*currentSummary, *obj.param).readBeforeWriteRanges,
-                                     access.begin, access.end);
+                                access.begin, access.end);
                         }
                     }
                     return;
@@ -955,7 +952,8 @@ namespace ctrace::stack::analysis
                         if (resolveAccessFromPointer(MTI->getSource(), readSize, tracked, DL,
                                                      srcAccess))
                         {
-                            const TrackedMemoryObject& srcObj = tracked.objects[srcAccess.objectIdx];
+                            const TrackedMemoryObject& srcObj =
+                                tracked.objects[srcAccess.objectIdx];
                             bool srcDefInit = isRangeCovered(initialized[srcAccess.objectIdx],
                                                              srcAccess.begin, srcAccess.end);
                             if (!srcDefInit)

@@ -294,9 +294,7 @@ namespace ctrace::stack
         }
         std::sort(rules.begin(), rules.end(),
                   [](const SarifRuleEntry& lhs, const SarifRuleEntry& rhs)
-                  {
-                      return lhs.id < rhs.id;
-                  });
+                  { return lhs.id < rhs.id; });
 
         std::ostringstream os;
         os << "{\n";
