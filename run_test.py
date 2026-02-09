@@ -717,6 +717,18 @@ def check_cli_parsing_and_filters() -> bool:
         else:
             print(f"  ✅ macro case OK: {' '.join(opt)}")
 
+    # STL toggle
+    for opt in [["--STL"], ["--stl"]]:
+        cmd = [str(ANALYZER), str(sample)] + opt + ["--only-function=transition"]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        output = (result.stdout or "") + (result.stderr or "")
+        if result.returncode != 0 or "Function:" not in output:
+            print(f"  ❌ STL flag case failed: {' '.join(opt)}")
+            print(output)
+            ok = False
+        else:
+            print(f"  ✅ STL flag case OK: {' '.join(opt)}")
+
     print()
     return ok
 
