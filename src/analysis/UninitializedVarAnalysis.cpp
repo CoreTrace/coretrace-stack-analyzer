@@ -1,6 +1,7 @@
 #include "analysis/UninitializedVarAnalysis.hpp"
 
 #include <algorithm>
+#include <cassert>
 #include <cstdint>
 #include <limits>
 #include <optional>
@@ -150,49 +151,40 @@ namespace ctrace::stack::analysis
             return size.getFixedValue();
         }
 
-        static void normalizeRanges(RangeSet& ranges)
-        {
-            if (ranges.empty())
-                return;
-
-            std::sort(ranges.begin(), ranges.end(),
-                      [](const ByteRange& lhs, const ByteRange& rhs)
-                      {
-                          if (lhs.begin != rhs.begin)
-                              return lhs.begin < rhs.begin;
-                          return lhs.end < rhs.end;
-                      });
-
-            std::size_t outIdx = 0;
-            for (std::size_t i = 0; i < ranges.size(); ++i)
-            {
-                ByteRange current = ranges[i];
-                if (current.begin >= current.end)
-                    continue;
-                if (outIdx == 0)
-                {
-                    ranges[outIdx++] = current;
-                    continue;
-                }
-                ByteRange& prev = ranges[outIdx - 1];
-                if (current.begin <= prev.end)
-                {
-                    prev.end = std::max(prev.end, current.end);
-                }
-                else
-                {
-                    ranges[outIdx++] = current;
-                }
-            }
-            ranges.resize(outIdx);
-        }
-
         static void addRange(RangeSet& ranges, std::uint64_t begin, std::uint64_t end)
         {
             if (begin >= end)
                 return;
-            ranges.push_back({begin, end});
-            normalizeRanges(ranges);
+
+            auto it = std::lower_bound(
+                ranges.begin(), ranges.end(), begin,
+                [](const ByteRange& r, std::uint64_t value)
+                {
+                    return r.end < value;
+                });
+
+            if (it == ranges.end())
+            {
+                ranges.push_back({begin, end});
+                return;
+            }
+
+            if (end < it->begin)
+            {
+                ranges.insert(it, {begin, end});
+                return;
+            }
+
+            it->begin = std::min(it->begin, begin);
+            it->end = std::max(it->end, end);
+
+            auto next = it + 1;
+            while (next != ranges.end() && next->begin <= it->end)
+            {
+                it->end = std::max(it->end, next->end);
+                ++next;
+            }
+            ranges.erase(it + 1, next);
         }
 
         static RangeSet intersectRanges(const RangeSet& lhs, const RangeSet& rhs)
@@ -334,22 +326,52 @@ namespace ctrace::stack::analysis
                     break;
 
                 const llvm::StoreInst* uniqueStore = nullptr;
+                bool unsafeUse = false;
                 for (const llvm::Use& U : slot->uses())
                 {
-                    const auto* SI = llvm::dyn_cast<llvm::StoreInst>(U.getUser());
-                    if (!SI)
-                        continue;
-                    if (SI->getPointerOperand()->stripPointerCasts() != slot)
-                        continue;
-                    if (uniqueStore && uniqueStore != SI)
+                    const auto* user = U.getUser();
+                    if (const auto* SI = llvm::dyn_cast<llvm::StoreInst>(user))
                     {
-                        uniqueStore = nullptr;
+                        if (SI->getPointerOperand()->stripPointerCasts() != slot)
+                        {
+                            unsafeUse = true;
+                            break;
+                        }
+                        if (uniqueStore && uniqueStore != SI)
+                        {
+                            uniqueStore = nullptr;
+                            break;
+                        }
+                        uniqueStore = SI;
+                        continue;
+                    }
+
+                    if (const auto* LI = llvm::dyn_cast<llvm::LoadInst>(user))
+                    {
+                        if (LI->getPointerOperand()->stripPointerCasts() != slot)
+                        {
+                            unsafeUse = true;
+                            break;
+                        }
+                        continue;
+                    }
+
+                    if (const auto* II = llvm::dyn_cast<llvm::IntrinsicInst>(user))
+                    {
+                        if (llvm::isa<llvm::DbgInfoIntrinsic>(II) ||
+                            llvm::isa<llvm::LifetimeIntrinsic>(II))
+                        {
+                            continue;
+                        }
+                        unsafeUse = true;
                         break;
                     }
-                    uniqueStore = SI;
+
+                    unsafeUse = true;
+                    break;
                 }
 
-                if (!uniqueStore)
+                if (unsafeUse || !uniqueStore)
                     break;
 
                 const llvm::Value* storedPtr = uniqueStore->getValueOperand()->stripPointerCasts();
@@ -610,6 +632,15 @@ namespace ctrace::stack::analysis
             return summary;
         }
 
+        static PointerParamEffectSummary& getParamEffect(FunctionSummary& summary,
+                                                         const llvm::Argument& arg)
+        {
+            const unsigned argNo = arg.getArgNo();
+            assert(argNo < summary.paramEffects.size() &&
+                   "pointer parameter index must fit in summary vector");
+            return summary.paramEffects[argNo];
+        }
+
         static void applyCalleeSummaryAtCall(
             const llvm::CallBase& CB, const llvm::Function& callee,
             const FunctionSummary& calleeSummary, const TrackedObjectContext& tracked,
@@ -708,7 +739,7 @@ namespace ctrace::stack::analysis
                     else if (currentSummary && obj.param)
                     {
                         PointerParamEffectSummary& current =
-                            currentSummary->paramEffects[obj.param->getArgNo()];
+                            getParamEffect(*currentSummary, *obj.param);
                         for (const ByteRange& rr : uncoveredReadRanges)
                         {
                             addRange(current.readBeforeWriteRanges, rr.begin, rr.end);
@@ -743,7 +774,7 @@ namespace ctrace::stack::analysis
                         if (currentSummary && isParamObject(obj) && obj.param)
                         {
                             PointerParamEffectSummary& current =
-                                currentSummary->paramEffects[obj.param->getArgNo()];
+                                getParamEffect(*currentSummary, *obj.param);
                             addRange(current.writeRanges, clippedBegin, clippedEnd);
                         }
                     }
@@ -765,7 +796,7 @@ namespace ctrace::stack::analysis
 
                 if (writeWasUnknown && currentSummary && isParamObject(obj) && obj.param)
                 {
-                    currentSummary->paramEffects[obj.param->getArgNo()].hasUnknownWrite = true;
+                    getParamEffect(*currentSummary, *obj.param).hasUnknownWrite = true;
                 }
 
                 if (wroteSomething && writeSeen && isAllocaObject(obj) &&
@@ -809,8 +840,8 @@ namespace ctrace::stack::analysis
                         }
                         else if (currentSummary && obj.param)
                         {
-                            addRange(currentSummary->paramEffects[obj.param->getArgNo()]
-                                         .readBeforeWriteRanges,
+                            addRange(
+                                getParamEffect(*currentSummary, *obj.param).readBeforeWriteRanges,
                                      access.begin, access.end);
                         }
                     }
@@ -845,8 +876,8 @@ namespace ctrace::stack::analysis
                     }
                     else if (currentSummary && obj.param)
                     {
-                        currentSummary->paramEffects[obj.param->getArgNo()]
-                            .hasUnknownReadBeforeWrite = true;
+                        getParamEffect(*currentSummary, *obj.param).hasUnknownReadBeforeWrite =
+                            true;
                     }
                 }
                 return;
@@ -875,7 +906,7 @@ namespace ctrace::stack::analysis
                     }
                     else if (currentSummary && obj.param)
                     {
-                        addRange(currentSummary->paramEffects[obj.param->getArgNo()].writeRanges,
+                        addRange(getParamEffect(*currentSummary, *obj.param).writeRanges,
                                  access.begin, access.end);
                     }
                     return;
@@ -898,7 +929,7 @@ namespace ctrace::stack::analysis
                 }
                 else if (currentSummary && obj.param)
                 {
-                    currentSummary->paramEffects[obj.param->getArgNo()].hasUnknownWrite = true;
+                    getParamEffect(*currentSummary, *obj.param).hasUnknownWrite = true;
                 }
                 return;
             }
@@ -915,6 +946,120 @@ namespace ctrace::stack::analysis
                 if (!isInitWrite)
                     return;
 
+                if (auto* MTI = llvm::dyn_cast<llvm::MemTransferInst>(MI))
+                {
+                    if (len)
+                    {
+                        std::uint64_t readSize = len->getZExtValue();
+                        MemoryAccess srcAccess;
+                        if (resolveAccessFromPointer(MTI->getSource(), readSize, tracked, DL,
+                                                     srcAccess))
+                        {
+                            const TrackedMemoryObject& srcObj = tracked.objects[srcAccess.objectIdx];
+                            bool srcDefInit = isRangeCovered(initialized[srcAccess.objectIdx],
+                                                             srcAccess.begin, srcAccess.end);
+                            if (!srcDefInit)
+                            {
+                                if (isAllocaObject(srcObj))
+                                {
+                                    if (emittedIssues)
+                                    {
+                                        emittedIssues->push_back(
+                                            {I.getFunction()->getName().str(),
+                                             getTrackedObjectName(srcObj), MI, 0, 0, "",
+                                             UninitializedLocalIssueKind::ReadBeforeDefiniteInit});
+                                    }
+                                    if (readBeforeInitSeen &&
+                                        srcAccess.objectIdx < readBeforeInitSeen->size())
+                                    {
+                                        readBeforeInitSeen->set(srcAccess.objectIdx);
+                                    }
+                                }
+                                else if (currentSummary && srcObj.param)
+                                {
+                                    addRange(getParamEffect(*currentSummary, *srcObj.param)
+                                                 .readBeforeWriteRanges,
+                                             srcAccess.begin, srcAccess.end);
+                                }
+                            }
+                        }
+                        else
+                        {
+                            unsigned srcObjectIdx = 0;
+                            std::uint64_t srcOffset = 0;
+                            bool srcHasConstOffset = false;
+                            if (resolveTrackedObjectBase(MTI->getSource(), tracked, DL,
+                                                         srcObjectIdx, srcOffset,
+                                                         srcHasConstOffset))
+                            {
+                                const TrackedMemoryObject& srcObj = tracked.objects[srcObjectIdx];
+                                InitLatticeState stateKind = classifyInitState(
+                                    initialized[srcObjectIdx], getObjectFullRangeEnd(srcObj));
+                                if (stateKind != InitLatticeState::Init)
+                                {
+                                    if (isAllocaObject(srcObj))
+                                    {
+                                        if (emittedIssues)
+                                        {
+                                            emittedIssues->push_back(
+                                                {I.getFunction()->getName().str(),
+                                                 getTrackedObjectName(srcObj), MI, 0, 0, "",
+                                                 UninitializedLocalIssueKind::
+                                                     ReadBeforeDefiniteInit});
+                                        }
+                                        if (readBeforeInitSeen &&
+                                            srcObjectIdx < readBeforeInitSeen->size())
+                                        {
+                                            readBeforeInitSeen->set(srcObjectIdx);
+                                        }
+                                    }
+                                    else if (currentSummary && srcObj.param)
+                                    {
+                                        getParamEffect(*currentSummary, *srcObj.param)
+                                            .hasUnknownReadBeforeWrite = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    else
+                    {
+                        unsigned srcObjectIdx = 0;
+                        std::uint64_t srcOffset = 0;
+                        bool srcHasConstOffset = false;
+                        if (resolveTrackedObjectBase(MTI->getSource(), tracked, DL, srcObjectIdx,
+                                                     srcOffset, srcHasConstOffset))
+                        {
+                            const TrackedMemoryObject& srcObj = tracked.objects[srcObjectIdx];
+                            InitLatticeState stateKind = classifyInitState(
+                                initialized[srcObjectIdx], getObjectFullRangeEnd(srcObj));
+                            if (stateKind != InitLatticeState::Init)
+                            {
+                                if (isAllocaObject(srcObj))
+                                {
+                                    if (emittedIssues)
+                                    {
+                                        emittedIssues->push_back(
+                                            {I.getFunction()->getName().str(),
+                                             getTrackedObjectName(srcObj), MI, 0, 0, "",
+                                             UninitializedLocalIssueKind::ReadBeforeDefiniteInit});
+                                    }
+                                    if (readBeforeInitSeen &&
+                                        srcObjectIdx < readBeforeInitSeen->size())
+                                    {
+                                        readBeforeInitSeen->set(srcObjectIdx);
+                                    }
+                                }
+                                else if (currentSummary && srcObj.param)
+                                {
+                                    getParamEffect(*currentSummary, *srcObj.param)
+                                        .hasUnknownReadBeforeWrite = true;
+                                }
+                            }
+                        }
+                    }
+                }
+
                 if (len)
                 {
                     std::uint64_t writeSize = len->getZExtValue();
@@ -930,9 +1075,8 @@ namespace ctrace::stack::analysis
                         }
                         else if (currentSummary && obj.param)
                         {
-                            addRange(
-                                currentSummary->paramEffects[obj.param->getArgNo()].writeRanges,
-                                access.begin, access.end);
+                            addRange(getParamEffect(*currentSummary, *obj.param).writeRanges,
+                                     access.begin, access.end);
                         }
                         return;
                     }
@@ -955,7 +1099,7 @@ namespace ctrace::stack::analysis
                 }
                 else if (currentSummary && obj.param)
                 {
-                    currentSummary->paramEffects[obj.param->getArgNo()].hasUnknownWrite = true;
+                    getParamEffect(*currentSummary, *obj.param).hasUnknownWrite = true;
                 }
                 return;
             }
@@ -1003,9 +1147,13 @@ namespace ctrace::stack::analysis
                 outState[&BB] = isEntry ? makeBottomState(trackedCount) : makeTopState(tracked);
             }
 
+            const unsigned reachableBlocks = static_cast<unsigned>(outState.size());
+            const unsigned maxIterations = std::max(64u, reachableBlocks * 16u);
             bool changed = true;
-            while (changed)
+            unsigned iteration = 0;
+            while (changed && iteration < maxIterations)
             {
+                ++iteration;
                 changed = false;
 
                 for (const llvm::BasicBlock& BB : F)
@@ -1020,7 +1168,7 @@ namespace ctrace::stack::analysis
                     for (const llvm::Instruction& I : BB)
                     {
                         transferInstruction(I, tracked, DL, summaries, state, nullptr, nullptr,
-                                            outSummary, nullptr);
+                                            nullptr, nullptr);
                     }
 
                     InitRangeState& oldIn = inState[&BB];
@@ -1040,6 +1188,18 @@ namespace ctrace::stack::analysis
 
             if (outSummary)
             {
+                for (const llvm::BasicBlock& BB : F)
+                {
+                    if (!reachable.lookup(&BB))
+                        continue;
+
+                    InitRangeState state = inState[&BB];
+                    for (const llvm::Instruction& I : BB)
+                    {
+                        transferInstruction(I, tracked, DL, summaries, state, nullptr, nullptr,
+                                            outSummary, nullptr);
+                    }
+                }
                 return;
             }
 
