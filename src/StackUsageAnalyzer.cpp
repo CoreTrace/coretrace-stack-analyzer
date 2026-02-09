@@ -32,6 +32,7 @@
 #include "analysis/StackBufferAnalysis.hpp"
 #include "analysis/StackComputation.hpp"
 #include "analysis/StackPointerEscape.hpp"
+#include "analysis/UninitializedVarAnalysis.hpp"
 #include "passes/ModulePasses.hpp"
 
 namespace ctrace::stack
@@ -922,6 +923,75 @@ namespace ctrace::stack
             }
         }
 
+        static void appendUninitializedLocalReadDiagnostics(
+            AnalysisResult& result,
+            const std::vector<analysis::UninitializedLocalReadIssue>& issues)
+        {
+            for (const auto& issue : issues)
+            {
+                unsigned line = issue.line;
+                unsigned column = issue.column;
+                bool haveLoc = (line != 0);
+                if (issue.inst)
+                {
+                    llvm::DebugLoc DL = issue.inst->getDebugLoc();
+                    if (DL)
+                    {
+                        line = DL.getLine();
+                        column = DL.getCol();
+                        haveLoc = true;
+                    }
+                }
+
+                std::ostringstream body;
+                if (issue.kind == analysis::UninitializedLocalIssueKind::ReadBeforeDefiniteInit)
+                {
+                    body << "  [!!] potential read of uninitialized local variable '"
+                         << issue.varName << "'\n";
+                    body << "       this load may execute before any definite initialization on "
+                            "all control-flow paths\n";
+                }
+                else if (issue.kind ==
+                         analysis::UninitializedLocalIssueKind::ReadBeforeDefiniteInitViaCall)
+                {
+                    body << "  [!!] potential read of uninitialized local variable '"
+                         << issue.varName << "'\n";
+                    body
+                        << "       this call may read the value before any definite initialization";
+                    if (!issue.calleeName.empty())
+                    {
+                        body << " in '" << issue.calleeName << "'";
+                    }
+                    body << "\n";
+                }
+                else
+                {
+                    body << "  [!] local variable '" << issue.varName << "' is never initialized\n";
+                    body << "      declared without initializer and no definite write was found "
+                            "in this function\n";
+                }
+
+                Diagnostic diag;
+                diag.funcName = issue.funcName;
+                diag.line = haveLoc ? line : 0;
+                diag.column = haveLoc ? column : 0;
+                diag.severity = DiagnosticSeverity::Warning;
+                diag.errCode = DescriptiveErrorCode::UninitializedLocalRead;
+                diag.ruleId =
+                    (issue.kind == analysis::UninitializedLocalIssueKind::ReadBeforeDefiniteInit ||
+                     issue.kind ==
+                         analysis::UninitializedLocalIssueKind::ReadBeforeDefiniteInitViaCall)
+                        ? "UninitializedLocalRead"
+                        : "UninitializedLocalVariable";
+                diag.confidence =
+                    (issue.kind == analysis::UninitializedLocalIssueKind::NeverInitialized) ? 0.75
+                                                                                            : 0.90;
+                diag.cweId = "CWE-457";
+                diag.message = body.str();
+                result.diagnostics.push_back(std::move(diag));
+            }
+        }
+
         static void appendInvalidBaseReconstructionDiagnostics(
             AnalysisResult& result,
             const std::vector<analysis::InvalidBaseReconstructionIssue>& issues)
@@ -1267,6 +1337,13 @@ namespace ctrace::stack
             analysis::analyzeDuplicateIfConditions(mod, shouldAnalyzeFunction);
         appendDuplicateIfConditionDiagnostics(result, duplicateIfIssues);
         logDuration("Multiple stores", t0);
+
+        // 12c) Detect potential reads from uninitialized local stack variables
+        t0 = Clock::now();
+        std::vector<analysis::UninitializedLocalReadIssue> uninitializedReadIssues =
+            analysis::analyzeUninitializedLocalReads(mod, shouldAnalyzeFunction);
+        appendUninitializedLocalReadDiagnostics(result, uninitializedReadIssues);
+        logDuration("Uninitialized local reads", t0);
 
         // 13) Detect invalid base pointer reconstructions (offsetof/container_of)
         t0 = Clock::now();

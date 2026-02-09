@@ -1,8 +1,11 @@
 #include "StackUsageAnalyzer.hpp"
 
+#include <algorithm>
 #include <cstdio> // std::snprintf
+#include <iomanip>
 #include <sstream>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace ctrace::stack
@@ -79,6 +82,20 @@ namespace ctrace::stack
                 return "error";
             }
             return "note";
+        }
+
+        static std::string resolveRuleId(const Diagnostic& d)
+        {
+            if (!d.ruleId.empty())
+                return d.ruleId;
+            return std::string(ctrace::stack::enumToString(d.errCode));
+        }
+
+        static std::string formatConfidence(double confidence)
+        {
+            std::ostringstream os;
+            os << std::fixed << std::setprecision(2) << confidence;
+            return os.str();
         }
 
     } // anonymous namespace
@@ -190,9 +207,20 @@ namespace ctrace::stack
             os << "    {\n";
             os << "      \"id\": \"diag-" << (i + 1) << "\",\n";
             os << "      \"severity\": \"" << ctrace::stack::enumToString(d.severity) << "\",\n";
-            const std::string ruleId =
-                d.ruleId.empty() ? std::string(ctrace::stack::enumToString(d.errCode)) : d.ruleId;
+            const std::string ruleId = resolveRuleId(d);
             os << "      \"ruleId\": \"" << jsonEscape(ruleId) << "\",\n";
+            os << "      \"confidence\": ";
+            if (d.confidence >= 0.0)
+                os << formatConfidence(d.confidence);
+            else
+                os << "null";
+            os << ",\n";
+            os << "      \"cwe\": ";
+            if (!d.cweId.empty())
+                os << "\"" << jsonEscape(d.cweId) << "\"";
+            else
+                os << "null";
+            os << ",\n";
 
             std::string diagFilePath = d.filePath;
             if (diagFilePath.empty() && inputFile)
@@ -242,6 +270,32 @@ namespace ctrace::stack
     std::string toSarif(const AnalysisResult& result, const std::string& inputFile,
                         const std::string& toolName, const std::string& toolVersion)
     {
+        struct SarifRuleEntry
+        {
+            std::string id;
+            std::string cweId;
+        };
+
+        std::vector<SarifRuleEntry> rules;
+        std::unordered_map<std::string, std::size_t> ruleIndices;
+        for (const auto& d : result.diagnostics)
+        {
+            const std::string rid = resolveRuleId(d);
+            auto it = ruleIndices.find(rid);
+            if (it == ruleIndices.end())
+            {
+                ruleIndices.emplace(rid, rules.size());
+                rules.push_back({rid, d.cweId});
+            }
+            else if (rules[it->second].cweId.empty() && !d.cweId.empty())
+            {
+                rules[it->second].cweId = d.cweId;
+            }
+        }
+        std::sort(rules.begin(), rules.end(),
+                  [](const SarifRuleEntry& lhs, const SarifRuleEntry& rhs)
+                  { return lhs.id < rhs.id; });
+
         std::ostringstream os;
         os << "{\n";
         os << "  \"version\": \"2.1.0\",\n";
@@ -252,7 +306,32 @@ namespace ctrace::stack
         os << "      \"tool\": {\n";
         os << "        \"driver\": {\n";
         os << "          \"name\": \"" << jsonEscape(toolName) << "\",\n";
-        os << "          \"version\": \"" << jsonEscape(toolVersion) << "\"\n";
+        os << "          \"version\": \"" << jsonEscape(toolVersion) << "\",\n";
+        os << "          \"rules\": [\n";
+        for (std::size_t i = 0; i < rules.size(); ++i)
+        {
+            const auto& rule = rules[i];
+            os << "            {\n";
+            os << "              \"id\": \"" << jsonEscape(rule.id) << "\",\n";
+            os << "              \"shortDescription\": { \"text\": \"" << jsonEscape(rule.id)
+               << "\" }";
+            if (!rule.cweId.empty())
+            {
+                os << ",\n";
+                os << "              \"properties\": {\n";
+                os << "                \"tags\": [\"" << jsonEscape(rule.cweId) << "\"]\n";
+                os << "              }\n";
+            }
+            else
+            {
+                os << "\n";
+            }
+            os << "            }";
+            if (i + 1 < rules.size())
+                os << ",";
+            os << "\n";
+        }
+        os << "          ]\n";
         os << "        }\n";
         os << "      },\n";
         os << "      \"results\": [\n";
@@ -261,12 +340,30 @@ namespace ctrace::stack
         {
             const auto& d = result.diagnostics[i];
             os << "        {\n";
-            // For now, use a single generic ruleId; you can specialize it later.
-            const std::string ruleId =
-                d.ruleId.empty() ? std::string(ctrace::stack::enumToString(d.errCode)) : d.ruleId;
+            const std::string ruleId = resolveRuleId(d);
             os << "          \"ruleId\": \"" << jsonEscape(ruleId) << "\",\n";
             os << "          \"level\": \"" << severityToSarifLevel(d.severity) << "\",\n";
             os << "          \"message\": { \"text\": \"" << jsonEscape(d.message) << "\" },\n";
+            bool hasConfidence = d.confidence >= 0.0;
+            bool hasCwe = !d.cweId.empty();
+            if (hasConfidence || hasCwe)
+            {
+                os << "          \"properties\": {\n";
+                bool needComma = false;
+                if (hasConfidence)
+                {
+                    os << "            \"confidence\": " << formatConfidence(d.confidence);
+                    needComma = true;
+                }
+                if (hasCwe)
+                {
+                    if (needComma)
+                        os << ",\n";
+                    os << "            \"cwe\": \"" << jsonEscape(d.cweId) << "\"";
+                }
+                os << "\n";
+                os << "          },\n";
+            }
             os << "          \"locations\": [\n";
             os << "            {\n";
             os << "              \"physicalLocation\": {\n";

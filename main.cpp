@@ -47,6 +47,7 @@ static void printHelp()
         << "  --only-file=<path>     Only report functions from this source file\n"
         << "  --only-dir=<path>      Only report functions under this directory\n"
         << "  --only-func=<name>     Only report functions with this name (comma-separated)\n"
+        << "  --STL                  Include STL/system library functions in analysis\n"
         << "  --stack-limit=<value>  Override stack size limit (bytes, or KiB/MiB/GiB)\n"
         << "  --dump-filter          Print filter decisions to stderr\n"
         << "  --dump-ir=<path>       Write LLVM IR to file (or directory for multiple inputs)\n"
@@ -417,6 +418,11 @@ int main(int argc, char** argv)
         if (argStr == "--quiet")
         {
             cfg.quiet = true;
+            continue;
+        }
+        if (argStr == "--STL" || argStr == "--stl")
+        {
+            cfg.includeSTL = true;
             continue;
         }
         if (argStr == "--only-file")

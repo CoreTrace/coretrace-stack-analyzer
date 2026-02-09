@@ -62,6 +62,7 @@ LLVM_DIR=/opt/llvm/lib/cmake/llvm Clang_DIR=/opt/llvm/lib/cmake/clang ./build.sh
 --only-dir=<path> or --only-dir <path> filters by directory
 --only-function=<name> or --only-function <name> filters by function
 --only-func=<name> alias for --only-function
+--STL includes STL/system library functions (default excludes them)
 --dump-filter prints filter decisions (stderr)
 ```
 
