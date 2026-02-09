@@ -46,6 +46,7 @@ namespace ctrace::stack
         std::vector<std::string> onlyFiles;
         std::vector<std::string> onlyDirs;
         std::vector<std::string> onlyFunctions;
+        bool includeSTL = false;
         bool dumpFilter = false;
         std::string dumpIRPath;
         bool dumpIRIsDir = false;
@@ -119,12 +120,13 @@ namespace ctrace::stack
         InvalidBaseReconstruction = 10,
         ConstParameterNotModified = 11,
         SizeMinusOneWrite = 12,
-        DuplicateIfCondition = 13
+        DuplicateIfCondition = 13,
+        UninitializedLocalRead = 14
     };
 
     template <> struct EnumTraits<DescriptiveErrorCode>
     {
-        static constexpr std::array<std::string_view, 14> names = {"None",
+        static constexpr std::array<std::string_view, 15> names = {"None",
                                                                    "StackBufferOverflow",
                                                                    "NegativeStackIndex",
                                                                    "VLAUsage",
@@ -137,7 +139,8 @@ namespace ctrace::stack
                                                                    "InvalidBaseReconstruction",
                                                                    "ConstParameterNotModified",
                                                                    "SizeMinusOneWrite",
-                                                                   "DuplicateIfCondition"};
+                                                                   "DuplicateIfCondition",
+                                                                   "UninitializedLocalRead"};
     };
 
     /*
@@ -160,6 +163,8 @@ namespace ctrace::stack
         DiagnosticSeverity severity = DiagnosticSeverity::Warning;
         DescriptiveErrorCode errCode = DescriptiveErrorCode::None;
         std::string ruleId;
+        double confidence = -1.0; // [0,1], negative means unset
+        std::string cweId;
         std::vector<std::string> variableAliasingVec;
         std::string message;
     };
