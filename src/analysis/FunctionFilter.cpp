@@ -30,12 +30,13 @@ namespace ctrace::stack::analysis
 
             std::filesystem::path path(adjusted);
             std::error_code ec;
-            std::filesystem::path absPath = std::filesystem::absolute(path, ec);
-            if (ec)
-                absPath = path;
-
-            std::filesystem::path canonicalPath = std::filesystem::weakly_canonical(absPath, ec);
-            std::filesystem::path norm = ec ? absPath.lexically_normal() : canonicalPath;
+            std::filesystem::path norm = path.lexically_normal();
+            if (norm.is_absolute())
+            {
+                std::filesystem::path canonicalPath = std::filesystem::weakly_canonical(norm, ec);
+                if (!ec)
+                    norm = canonicalPath;
+            }
             std::string out = norm.generic_string();
             while (out.size() > 1 && out.back() == '/')
                 out.pop_back();
