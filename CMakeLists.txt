@@ -66,6 +66,7 @@ set(STACK_ANALYZER_SOURCES
     src/analysis/StackBufferAnalysis.cpp
     src/analysis/StackComputation.cpp
     src/analysis/StackPointerEscape.cpp
+    src/analysis/UninitializedVarAnalysis.cpp
     src/report/ReportSerialization.cpp
     src/mangle.cpp
     src/passes/ModulePasses.cpp
