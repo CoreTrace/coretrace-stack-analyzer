@@ -395,7 +395,7 @@ int main(int argc, char** argv)
     std::vector<std::string> inputFilenames;
     OutputFormat outputFormat = OutputFormat::Human;
 
-    AnalysisConfig cfg; // mode = IR, stackLimit = 8 MiB default
+    AnalysisConfig cfg{}; // mode = IR, stackLimit = 8 MiB default
     cfg.quiet = false;
     cfg.warningsOnly = false;
     std::string compileCommandsPath;
@@ -771,7 +771,7 @@ int main(int argc, char** argv)
         }
         else
         {
-            AnalysisResult merged;
+            AnalysisResult merged{};
             merged.config = cfg;
             for (const auto& entry : results)
             {
