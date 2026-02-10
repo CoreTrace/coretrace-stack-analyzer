@@ -1,7 +1,9 @@
 #include "analysis/UninitializedVarAnalysis.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cassert>
+#include <cctype>
 #include <cstdint>
 #include <limits>
 #include <optional>
@@ -10,7 +12,9 @@
 
 #include <llvm/ADT/BitVector.h>
 #include <llvm/ADT/DenseMap.h>
+#include <llvm/ADT/DenseSet.h>
 #include <llvm/ADT/SmallVector.h>
+#include <llvm/ADT/StringRef.h>
 #include <llvm/Analysis/ValueTracking.h>
 #include <llvm/IR/Argument.h>
 #include <llvm/IR/CFG.h>
@@ -23,6 +27,7 @@
 #include <llvm/IR/Module.h>
 #include <llvm/IR/Value.h>
 
+#include "analysis/AnalyzerUtils.hpp"
 #include "analysis/IRValueUtils.hpp"
 
 namespace ctrace::stack::analysis
@@ -219,6 +224,48 @@ namespace ctrace::stack::analysis
             return false;
         }
 
+        static bool isRangeCoveredAllowingSmallInteriorGaps(const RangeSet& initialized,
+                                                            std::uint64_t begin, std::uint64_t end,
+                                                            std::uint64_t maxInteriorGapBytes = 7)
+        {
+            if (begin >= end)
+                return true;
+
+            std::uint64_t cursor = begin;
+            for (const ByteRange& r : initialized)
+            {
+                if (r.end <= cursor)
+                    continue;
+                if (r.begin >= end)
+                    break;
+
+                const std::uint64_t gapBegin = cursor;
+                const std::uint64_t gapEnd = std::min(r.begin, end);
+                if (gapBegin < gapEnd)
+                {
+                    const bool isInterior = (gapBegin > begin) && (gapEnd < end);
+                    const std::uint64_t gapSize = gapEnd - gapBegin;
+                    if (!isInterior || gapSize > maxInteriorGapBytes)
+                        return false;
+                }
+
+                if (r.begin <= cursor)
+                    cursor = std::max(cursor, std::min(r.end, end));
+                if (cursor >= end)
+                    return true;
+            }
+
+            if (cursor < end)
+            {
+                const bool isInterior = (cursor > begin);
+                const std::uint64_t gapSize = end - cursor;
+                if (!isInterior || gapSize > maxInteriorGapBytes)
+                    return false;
+            }
+
+            return true;
+        }
+
         static InitLatticeState classifyInitState(const RangeSet& initialized,
                                                   std::uint64_t totalSize)
         {
@@ -258,6 +305,117 @@ namespace ctrace::stack::analysis
                 return "arg" + std::to_string(obj.param->getArgNo());
             }
             return "<unnamed>";
+        }
+
+        static bool isLikelyCompilerTemporaryName(llvm::StringRef name)
+        {
+            if (name.empty() || name == "<unnamed>")
+                return true;
+
+            if (name.starts_with("ref.tmp") || name.starts_with("agg.tmp") ||
+                name.starts_with("coerce") || name.starts_with("__range") ||
+                name.starts_with("__begin") || name.starts_with("__end") ||
+                name.starts_with("retval") || name.starts_with("exn.slot") ||
+                name.starts_with("ehselector.slot"))
+            {
+                return true;
+            }
+
+            if (name.ends_with(".addr"))
+                return true;
+
+            return name.contains(".tmp");
+        }
+
+        static std::string toLowerPathForMatch(const std::string& input)
+        {
+            std::string out;
+            out.reserve(input.size());
+            for (char c : input)
+            {
+                if (c == '\\')
+                    c = '/';
+                out.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+            }
+            return out;
+        }
+
+        static bool pathHasPrefix(const std::string& path, const char* prefix)
+        {
+            const std::size_t n = std::strlen(prefix);
+            if (path.size() < n)
+                return false;
+            if (path.compare(0, n, prefix) != 0)
+                return false;
+            return path.size() == n || path[n] == '/';
+        }
+
+        static bool isLikelySystemPath(const std::string& path)
+        {
+            if (path.empty())
+                return false;
+
+            const std::string normalized = toLowerPathForMatch(path);
+            static constexpr std::array<const char*, 15> systemPrefixes = {
+                "/usr/include",
+                "/usr/lib",
+                "/usr/local/include",
+                "/usr/local/lib",
+                "/opt/homebrew/include",
+                "/opt/homebrew/lib",
+                "/opt/homebrew/cellar",
+                "/opt/local/include",
+                "/opt/local/lib",
+                "/library/developer/commandlinetools/usr/include",
+                "/library/developer/commandlinetools/usr/lib",
+                "/applications/xcode.app/contents/developer/toolchains",
+                "/applications/xcode.app/contents/developer/platforms",
+                "/nix/store",
+                "c:/program files"};
+            for (const char* prefix : systemPrefixes)
+            {
+                if (pathHasPrefix(normalized, prefix))
+                    return true;
+            }
+
+            static constexpr std::array<const char*, 5> systemFragments = {
+                "/include/c++/", "/c++/v1/", "/lib/clang/", "/x86_64-linux-gnu/c++/",
+                "/aarch64-linux-gnu/c++/"};
+            for (const char* fragment : systemFragments)
+            {
+                if (normalized.find(fragment) != std::string::npos)
+                    return true;
+            }
+
+            return false;
+        }
+
+        static bool isCompilerRuntimeLikeName(llvm::StringRef name)
+        {
+            return name.starts_with("llvm.") || name.starts_with("clang.") ||
+                   name.starts_with("__asan_") || name.starts_with("__ubsan_") ||
+                   name.starts_with("__tsan_") || name.starts_with("__msan_");
+        }
+
+        static bool
+        shouldIncludeInSummaryScope(const llvm::Function& F,
+                                    const std::function<bool(const llvm::Function&)>& shouldAnalyze)
+        {
+            if (shouldAnalyze(F))
+                return true;
+
+            const std::string src = getFunctionSourcePath(F);
+            if (!src.empty())
+                return !isLikelySystemPath(src);
+
+            return !isCompilerRuntimeLikeName(F.getName());
+        }
+
+        static bool shouldEmitAllocaIssue(const TrackedMemoryObject& obj)
+        {
+            if (!isAllocaObject(obj))
+                return false;
+            return !isLikelyCompilerTemporaryName(getTrackedObjectName(obj));
         }
 
         static bool clipRangeToObject(const TrackedMemoryObject& obj, std::uint64_t begin,
@@ -390,26 +548,33 @@ namespace ctrace::stack::analysis
                 return false;
 
             const llvm::Value* canonicalPtr = peelPointerFromSingleStoreSlot(ptr);
+            const llvm::Value* strippedPtr = canonicalPtr->stripPointerCasts();
 
             int64_t signedOffset = 0;
-            const llvm::Value* base = llvm::GetPointerBaseWithConstantOffset(
-                canonicalPtr->stripPointerCasts(), signedOffset, DL, true);
-            if (base && signedOffset >= 0 && lookupTrackedObjectIndex(base, tracked, outObjectIdx))
+            const llvm::Value* base =
+                llvm::GetPointerBaseWithConstantOffset(strippedPtr, signedOffset, DL, true);
+            if (base && signedOffset >= 0)
             {
-                outOffset = static_cast<std::uint64_t>(signedOffset);
-                outHasConstOffset = true;
-                return true;
+                const llvm::Value* canonicalBase =
+                    peelPointerFromSingleStoreSlot(base)->stripPointerCasts();
+                if (lookupTrackedObjectIndex(canonicalBase, tracked, outObjectIdx))
+                {
+                    outOffset = static_cast<std::uint64_t>(signedOffset);
+                    outHasConstOffset = true;
+                    return true;
+                }
             }
 
-            const llvm::Value* underlying =
-                llvm::getUnderlyingObject(canonicalPtr->stripPointerCasts(), 16);
+            const llvm::Value* underlying = llvm::getUnderlyingObject(strippedPtr, 16);
             if (!underlying)
                 return false;
-            if (!lookupTrackedObjectIndex(underlying, tracked, outObjectIdx))
+            const llvm::Value* canonicalUnderlying =
+                peelPointerFromSingleStoreSlot(underlying)->stripPointerCasts();
+            if (!lookupTrackedObjectIndex(canonicalUnderlying, tracked, outObjectIdx))
                 return false;
 
             outOffset = 0;
-            outHasConstOffset = false;
+            outHasConstOffset = (canonicalUnderlying == strippedPtr);
             return true;
         }
 
@@ -638,6 +803,217 @@ namespace ctrace::stack::analysis
             return summary.paramEffects[argNo];
         }
 
+        static bool hasCtorToken(llvm::StringRef symbol, llvm::StringRef token)
+        {
+            std::size_t pos = symbol.find(token);
+            while (pos != llvm::StringRef::npos)
+            {
+                const std::size_t nextPos = pos + token.size();
+                if (nextPos >= symbol.size())
+                    return true;
+
+                const char next = symbol[nextPos];
+                if (next == 'E' || next == 'B' || next == 'v' || next == 'I')
+                    return true;
+
+                pos = symbol.find(token, pos + 1);
+            }
+            return false;
+        }
+
+        static bool isLikelyCppConstructorSymbol(llvm::StringRef symbol)
+        {
+            if (!symbol.starts_with("_Z"))
+                return false;
+            return hasCtorToken(symbol, "C1") || hasCtorToken(symbol, "C2") ||
+                   hasCtorToken(symbol, "C3");
+        }
+
+        static bool isLikelyCppAssignmentOperatorSymbol(llvm::StringRef symbol)
+        {
+            if (!symbol.starts_with("_Z"))
+                return false;
+            return symbol.contains("aSE");
+        }
+
+        static void markKnownWriteOnPointerOperand(
+            const llvm::Value* ptrOperand, const TrackedObjectContext& tracked,
+            const llvm::DataLayout& DL, InitRangeState& initialized, llvm::BitVector* writeSeen,
+            FunctionSummary* currentSummary, std::uint64_t writeSizeBytes = 0)
+        {
+            if (!ptrOperand || !ptrOperand->getType()->isPointerTy())
+                return;
+
+            unsigned objectIdx = 0;
+            std::uint64_t baseOffset = 0;
+            bool hasConstOffset = false;
+            if (!resolveTrackedObjectBase(ptrOperand, tracked, DL, objectIdx, baseOffset,
+                                          hasConstOffset))
+            {
+                return;
+            }
+
+            const TrackedMemoryObject& obj = tracked.objects[objectIdx];
+            if (hasConstOffset)
+            {
+                std::uint64_t mappedBegin = baseOffset;
+                std::uint64_t mappedEnd =
+                    writeSizeBytes > 0 ? saturatingAdd(baseOffset, writeSizeBytes)
+                                       : saturatingAdd(baseOffset, getObjectFullRangeEnd(obj));
+                std::uint64_t clippedBegin = 0;
+                std::uint64_t clippedEnd = 0;
+                if (clipRangeToObject(obj, mappedBegin, mappedEnd, clippedBegin, clippedEnd))
+                {
+                    addRange(initialized[objectIdx], clippedBegin, clippedEnd);
+                }
+            }
+
+            if (isAllocaObject(obj))
+            {
+                if (writeSeen && objectIdx < writeSeen->size())
+                    writeSeen->set(objectIdx);
+                return;
+            }
+
+            if (!currentSummary || !isParamObject(obj) || !obj.param)
+                return;
+
+            if (hasConstOffset)
+            {
+                std::uint64_t mappedBegin = baseOffset;
+                std::uint64_t mappedEnd =
+                    writeSizeBytes > 0 ? saturatingAdd(baseOffset, writeSizeBytes)
+                                       : saturatingAdd(baseOffset, getObjectFullRangeEnd(obj));
+                std::uint64_t clippedBegin = 0;
+                std::uint64_t clippedEnd = 0;
+                if (clipRangeToObject(obj, mappedBegin, mappedEnd, clippedBegin, clippedEnd))
+                {
+                    addRange(getParamEffect(*currentSummary, *obj.param).writeRanges, clippedBegin,
+                             clippedEnd);
+                }
+            }
+            else
+            {
+                getParamEffect(*currentSummary, *obj.param).hasUnknownWrite = true;
+            }
+        }
+
+        static void markPotentialWriteOnPointerOperand(const llvm::Value* ptrOperand,
+                                                       const TrackedObjectContext& tracked,
+                                                       const llvm::DataLayout& DL,
+                                                       llvm::BitVector* writeSeen,
+                                                       FunctionSummary* currentSummary)
+        {
+            if (!ptrOperand || !ptrOperand->getType()->isPointerTy())
+                return;
+
+            unsigned objectIdx = 0;
+            std::uint64_t baseOffset = 0;
+            bool hasConstOffset = false;
+            if (!resolveTrackedObjectBase(ptrOperand, tracked, DL, objectIdx, baseOffset,
+                                          hasConstOffset))
+            {
+                return;
+            }
+
+            const TrackedMemoryObject& obj = tracked.objects[objectIdx];
+            if (isAllocaObject(obj))
+            {
+                if (writeSeen && objectIdx < writeSeen->size())
+                    writeSeen->set(objectIdx);
+                return;
+            }
+
+            if (currentSummary && isParamObject(obj) && obj.param)
+                getParamEffect(*currentSummary, *obj.param).hasUnknownWrite = true;
+        }
+
+        static std::uint64_t inferWriteSizeFromPointerOperand(const llvm::Value* ptrOperand,
+                                                              const llvm::DataLayout& DL)
+        {
+            if (!ptrOperand || !ptrOperand->getType()->isPointerTy())
+                return 0;
+
+            const llvm::Value* base = ptrOperand->stripPointerCasts();
+            if (const auto* GEP = llvm::dyn_cast<llvm::GEPOperator>(base))
+                return getTypeStoreSizeBytes(GEP->getResultElementType(), DL);
+
+            return 0;
+        }
+
+        static void
+        applyKnownCallWriteEffects(const llvm::CallBase& CB, const llvm::Function* callee,
+                                   const TrackedObjectContext& tracked, const llvm::DataLayout& DL,
+                                   InitRangeState& initialized, llvm::BitVector* writeSeen,
+                                   FunctionSummary* currentSummary)
+        {
+            const bool isCtor = callee && isLikelyCppConstructorSymbol(callee->getName());
+
+            for (unsigned argIdx = 0; argIdx < CB.arg_size(); ++argIdx)
+            {
+                bool shouldWrite = CB.paramHasAttr(argIdx, llvm::Attribute::StructRet);
+                if (!shouldWrite && isCtor && argIdx == 0)
+                    shouldWrite = true;
+                if (!shouldWrite)
+                    continue;
+
+                const llvm::Value* ptrOperand = CB.getArgOperand(argIdx);
+                const bool isSRet = CB.paramHasAttr(argIdx, llvm::Attribute::StructRet);
+                const bool isCtorThis = isCtor && argIdx == 0;
+                const std::uint64_t inferredSize = inferWriteSizeFromPointerOperand(ptrOperand, DL);
+
+                if (isSRet)
+                {
+                    markKnownWriteOnPointerOperand(ptrOperand, tracked, DL, initialized, writeSeen,
+                                                   currentSummary, inferredSize);
+                    continue;
+                }
+
+                if (isCtorThis)
+                {
+                    // For constructor "this", treat the object as initialized even if
+                    // size inference from the pointer operand is not available.
+                    markKnownWriteOnPointerOperand(ptrOperand, tracked, DL, initialized, writeSeen,
+                                                   currentSummary, inferredSize);
+                }
+            }
+        }
+
+        static void applySummaryGapCallWriteFallbacks(
+            const llvm::CallBase& CB, const llvm::Function* callee,
+            const FunctionSummary& calleeSummary, const TrackedObjectContext& tracked,
+            const llvm::DataLayout& DL, InitRangeState& initialized, llvm::BitVector* writeSeen,
+            FunctionSummary* currentSummary)
+        {
+            const bool isCtor = callee && isLikelyCppConstructorSymbol(callee->getName());
+
+            for (unsigned argIdx = 0; argIdx < CB.arg_size(); ++argIdx)
+            {
+                const bool isSRet = CB.paramHasAttr(argIdx, llvm::Attribute::StructRet);
+                const bool isCtorThis = isCtor && argIdx == 0;
+                if (!isSRet && !isCtorThis)
+                    continue;
+
+                const bool hasCalleeEffect = argIdx < calleeSummary.paramEffects.size() &&
+                                             calleeSummary.paramEffects[argIdx].hasAnyEffect();
+                if (hasCalleeEffect)
+                    continue;
+
+                const llvm::Value* actual = CB.getArgOperand(argIdx);
+                if (isSRet)
+                {
+                    markKnownWriteOnPointerOperand(actual, tracked, DL, initialized, writeSeen,
+                                                   currentSummary);
+                }
+                else
+                {
+                    const std::uint64_t inferredSize = inferWriteSizeFromPointerOperand(actual, DL);
+                    markKnownWriteOnPointerOperand(actual, tracked, DL, initialized, writeSeen,
+                                                   currentSummary, inferredSize);
+                }
+            }
+        }
+
         static void applyCalleeSummaryAtCall(
             const llvm::CallBase& CB, const llvm::Function& callee,
             const FunctionSummary& calleeSummary, const TrackedObjectContext& tracked,
@@ -686,7 +1062,8 @@ namespace ctrace::stack::analysis
                         {
                             continue;
                         }
-                        if (!isRangeCovered(initialized[objectIdx], clippedBegin, clippedEnd))
+                        if (!isRangeCoveredAllowingSmallInteriorGaps(initialized[objectIdx],
+                                                                     clippedBegin, clippedEnd))
                         {
                             hasReadBeforeWrite = true;
                             uncoveredReadRanges.push_back({clippedBegin, clippedEnd});
@@ -697,7 +1074,7 @@ namespace ctrace::stack::analysis
                     {
                         InitLatticeState objectState =
                             classifyInitState(initialized[objectIdx], getObjectFullRangeEnd(obj));
-                        if (objectState != InitLatticeState::Init)
+                        if (objectState == InitLatticeState::Uninit)
                         {
                             hasReadBeforeWrite = true;
                             readWasUnknown = true;
@@ -710,7 +1087,7 @@ namespace ctrace::stack::analysis
                     {
                         InitLatticeState objectState =
                             classifyInitState(initialized[objectIdx], getObjectFullRangeEnd(obj));
-                        if (objectState != InitLatticeState::Init)
+                        if (objectState == InitLatticeState::Uninit)
                         {
                             hasReadBeforeWrite = true;
                             readWasUnknown = true;
@@ -720,12 +1097,20 @@ namespace ctrace::stack::analysis
 
                 if (hasReadBeforeWrite)
                 {
+                    const InitLatticeState objectState =
+                        classifyInitState(initialized[objectIdx], getObjectFullRangeEnd(obj));
+                    const bool suppressForAssignmentPadding =
+                        isLikelyCppAssignmentOperatorSymbol(callee.getName()) &&
+                        objectState == InitLatticeState::Partial;
+                    if (suppressForAssignmentPadding)
+                        continue;
+
                     if (isAllocaObject(obj))
                     {
                         if (readBeforeInitSeen && objectIdx < readBeforeInitSeen->size())
                             readBeforeInitSeen->set(objectIdx);
 
-                        if (emittedIssues)
+                        if (emittedIssues && shouldEmitAllocaIssue(obj))
                         {
                             emittedIssues->push_back(
                                 {CB.getFunction()->getName().str(), getTrackedObjectName(obj), &CB,
@@ -825,7 +1210,7 @@ namespace ctrace::stack::analysis
                     {
                         if (isAllocaObject(obj))
                         {
-                            if (emittedIssues)
+                            if (emittedIssues && shouldEmitAllocaIssue(obj))
                             {
                                 emittedIssues->push_back(
                                     {I.getFunction()->getName().str(), getTrackedObjectName(obj),
@@ -862,7 +1247,7 @@ namespace ctrace::stack::analysis
                 {
                     if (isAllocaObject(obj))
                     {
-                        if (emittedIssues)
+                        if (emittedIssues && shouldEmitAllocaIssue(obj))
                         {
                             emittedIssues->push_back(
                                 {I.getFunction()->getName().str(), getTrackedObjectName(obj), LI, 0,
@@ -960,7 +1345,7 @@ namespace ctrace::stack::analysis
                             {
                                 if (isAllocaObject(srcObj))
                                 {
-                                    if (emittedIssues)
+                                    if (emittedIssues && shouldEmitAllocaIssue(srcObj))
                                     {
                                         emittedIssues->push_back(
                                             {I.getFunction()->getName().str(),
@@ -997,7 +1382,7 @@ namespace ctrace::stack::analysis
                                 {
                                     if (isAllocaObject(srcObj))
                                     {
-                                        if (emittedIssues)
+                                        if (emittedIssues && shouldEmitAllocaIssue(srcObj))
                                         {
                                             emittedIssues->push_back(
                                                 {I.getFunction()->getName().str(),
@@ -1035,7 +1420,7 @@ namespace ctrace::stack::analysis
                             {
                                 if (isAllocaObject(srcObj))
                                 {
-                                    if (emittedIssues)
+                                    if (emittedIssues && shouldEmitAllocaIssue(srcObj))
                                     {
                                         emittedIssues->push_back(
                                             {I.getFunction()->getName().str(),
@@ -1107,15 +1492,27 @@ namespace ctrace::stack::analysis
                 return;
 
             const llvm::Function* callee = CB->getCalledFunction();
+            auto itSummary = callee ? summaries.find(callee) : summaries.end();
+            const bool hasSummary = callee && (itSummary != summaries.end());
+            if (!hasSummary)
+            {
+                applyKnownCallWriteEffects(*CB, callee, tracked, DL, initialized, writeSeen,
+                                           currentSummary);
+            }
             if (!callee || callee->isDeclaration())
                 return;
 
-            auto itSummary = summaries.find(callee);
-            if (itSummary == summaries.end())
+            if (!hasSummary)
                 return;
 
             applyCalleeSummaryAtCall(*CB, *callee, itSummary->second, tracked, DL, initialized,
                                      writeSeen, readBeforeInitSeen, currentSummary, emittedIssues);
+
+            if (!currentSummary)
+            {
+                applySummaryGapCallWriteFallbacks(*CB, callee, itSummary->second, tracked, DL,
+                                                  initialized, writeSeen, currentSummary);
+            }
         }
 
         static void analyzeFunction(const llvm::Function& F, const llvm::DataLayout& DL,
@@ -1234,6 +1631,8 @@ namespace ctrace::stack::analysis
                 const std::string varName = deriveAllocaName(AI);
                 if (varName.empty() || varName == "<unnamed>")
                     continue;
+                if (isLikelyCompilerTemporaryName(varName))
+                    continue;
 
                 unsigned line = 0;
                 unsigned column = 0;
@@ -1288,6 +1687,48 @@ namespace ctrace::stack::analysis
 
             return summaries;
         }
+
+        static llvm::DenseSet<const llvm::Function*>
+        collectSummaryScope(llvm::Module& mod,
+                            const std::function<bool(const llvm::Function&)>& shouldAnalyze)
+        {
+            llvm::DenseSet<const llvm::Function*> inScope;
+            llvm::SmallVector<const llvm::Function*, 64> worklist;
+
+            for (const llvm::Function& F : mod)
+            {
+                if (F.isDeclaration())
+                    continue;
+                if (!shouldAnalyze(F))
+                    continue;
+                if (inScope.insert(&F).second)
+                    worklist.push_back(&F);
+            }
+
+            while (!worklist.empty())
+            {
+                const llvm::Function* current = worklist.pop_back_val();
+                for (const llvm::BasicBlock& BB : *current)
+                {
+                    for (const llvm::Instruction& I : BB)
+                    {
+                        const auto* CB = llvm::dyn_cast<llvm::CallBase>(&I);
+                        if (!CB)
+                            continue;
+                        const llvm::Function* callee = CB->getCalledFunction();
+                        if (!callee || callee->isDeclaration())
+                            continue;
+                        if (!shouldIncludeInSummaryScope(*callee, shouldAnalyze))
+                            continue;
+                        if (!inScope.insert(callee).second)
+                            continue;
+                        worklist.push_back(callee);
+                    }
+                }
+            }
+
+            return inScope;
+        }
     } // namespace
 
     std::vector<UninitializedLocalReadIssue>
@@ -1296,7 +1737,11 @@ namespace ctrace::stack::analysis
     {
         std::vector<UninitializedLocalReadIssue> issues;
 
-        FunctionSummaryMap summaries = computeFunctionSummaries(mod, shouldAnalyze);
+        const llvm::DenseSet<const llvm::Function*> summaryScope =
+            collectSummaryScope(mod, shouldAnalyze);
+        auto shouldSummarize = [&](const llvm::Function& F) -> bool
+        { return summaryScope.find(&F) != summaryScope.end(); };
+        FunctionSummaryMap summaries = computeFunctionSummaries(mod, shouldSummarize);
 
         for (const llvm::Function& F : mod)
         {
