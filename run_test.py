@@ -733,6 +733,36 @@ def check_cli_parsing_and_filters() -> bool:
     return ok
 
 
+def check_only_func_uninitialized() -> bool:
+    """
+    Regression: --only-func must keep interprocedural uninitialized warnings.
+    """
+    print("=== Testing --only-func for uninitialized analysis ===")
+    sample = TEST_DIR / "uninitialized-variable/uninitialized-local-interproc-struct-partial.cpp"
+    result = run_analyzer([str(sample), "--only-func=main", "--warnings-only"])
+    output = (result.stdout or "") + (result.stderr or "")
+
+    if result.returncode != 0:
+        print(f"  ❌ analyzer failed (code {result.returncode})")
+        print(output)
+        print()
+        return False
+
+    must_contain = [
+        "Function: main",
+        "potential read of uninitialized local variable 'cfg'",
+    ]
+    for needle in must_contain:
+        if needle not in output:
+            print(f"  ❌ missing expected output: {needle}")
+            print(output)
+            print()
+            return False
+
+    print("  ✅ --only-func preserves warning\n")
+    return True
+
+
 def check_file(c_path: Path):
     """
     Check that, for this file, all expectations are present in the analyzer output.
@@ -798,6 +828,8 @@ def main() -> int:
     if not record_ok(check_multi_file_failure()):
         global_ok = False
     if not record_ok(check_cli_parsing_and_filters()):
+        global_ok = False
+    if not record_ok(check_only_func_uninitialized()):
         global_ok = False
     if not record_ok(check_human_vs_json_parity()):
         global_ok = False
