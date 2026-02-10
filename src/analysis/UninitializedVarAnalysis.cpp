@@ -224,9 +224,9 @@ namespace ctrace::stack::analysis
             return false;
         }
 
-        static bool isRangeCoveredAllowingSmallInteriorGaps(
-            const RangeSet& initialized, std::uint64_t begin, std::uint64_t end,
-            std::uint64_t maxInteriorGapBytes = 7)
+        static bool isRangeCoveredAllowingSmallInteriorGaps(const RangeSet& initialized,
+                                                            std::uint64_t begin, std::uint64_t end,
+                                                            std::uint64_t maxInteriorGapBytes = 7)
         {
             if (begin >= end)
                 return true;
@@ -397,9 +397,9 @@ namespace ctrace::stack::analysis
                    name.starts_with("__tsan_") || name.starts_with("__msan_");
         }
 
-        static bool shouldIncludeInSummaryScope(const llvm::Function& F,
-                                                const std::function<bool(const llvm::Function&)>&
-                                                    shouldAnalyze)
+        static bool
+        shouldIncludeInSummaryScope(const llvm::Function& F,
+                                    const std::function<bool(const llvm::Function&)>& shouldAnalyze)
         {
             if (shouldAnalyze(F))
                 return true;
@@ -551,8 +551,8 @@ namespace ctrace::stack::analysis
             const llvm::Value* strippedPtr = canonicalPtr->stripPointerCasts();
 
             int64_t signedOffset = 0;
-            const llvm::Value* base = llvm::GetPointerBaseWithConstantOffset(
-                strippedPtr, signedOffset, DL, true);
+            const llvm::Value* base =
+                llvm::GetPointerBaseWithConstantOffset(strippedPtr, signedOffset, DL, true);
             if (base && signedOffset >= 0)
             {
                 const llvm::Value* canonicalBase =
@@ -857,9 +857,9 @@ namespace ctrace::stack::analysis
             if (hasConstOffset)
             {
                 std::uint64_t mappedBegin = baseOffset;
-                std::uint64_t mappedEnd = writeSizeBytes > 0
-                                              ? saturatingAdd(baseOffset, writeSizeBytes)
-                                              : saturatingAdd(baseOffset, getObjectFullRangeEnd(obj));
+                std::uint64_t mappedEnd =
+                    writeSizeBytes > 0 ? saturatingAdd(baseOffset, writeSizeBytes)
+                                       : saturatingAdd(baseOffset, getObjectFullRangeEnd(obj));
                 std::uint64_t clippedBegin = 0;
                 std::uint64_t clippedEnd = 0;
                 if (clipRangeToObject(obj, mappedBegin, mappedEnd, clippedBegin, clippedEnd))
@@ -881,9 +881,9 @@ namespace ctrace::stack::analysis
             if (hasConstOffset)
             {
                 std::uint64_t mappedBegin = baseOffset;
-                std::uint64_t mappedEnd = writeSizeBytes > 0
-                                              ? saturatingAdd(baseOffset, writeSizeBytes)
-                                              : saturatingAdd(baseOffset, getObjectFullRangeEnd(obj));
+                std::uint64_t mappedEnd =
+                    writeSizeBytes > 0 ? saturatingAdd(baseOffset, writeSizeBytes)
+                                       : saturatingAdd(baseOffset, getObjectFullRangeEnd(obj));
                 std::uint64_t clippedBegin = 0;
                 std::uint64_t clippedEnd = 0;
                 if (clipRangeToObject(obj, mappedBegin, mappedEnd, clippedBegin, clippedEnd))
@@ -898,10 +898,11 @@ namespace ctrace::stack::analysis
             }
         }
 
-        static void markPotentialWriteOnPointerOperand(
-            const llvm::Value* ptrOperand, const TrackedObjectContext& tracked,
-            const llvm::DataLayout& DL, llvm::BitVector* writeSeen,
-            FunctionSummary* currentSummary)
+        static void markPotentialWriteOnPointerOperand(const llvm::Value* ptrOperand,
+                                                       const TrackedObjectContext& tracked,
+                                                       const llvm::DataLayout& DL,
+                                                       llvm::BitVector* writeSeen,
+                                                       FunctionSummary* currentSummary)
         {
             if (!ptrOperand || !ptrOperand->getType()->isPointerTy())
                 return;
@@ -940,13 +941,11 @@ namespace ctrace::stack::analysis
             return 0;
         }
 
-        static void applyKnownCallWriteEffects(const llvm::CallBase& CB,
-                                               const llvm::Function* callee,
-                                               const TrackedObjectContext& tracked,
-                                               const llvm::DataLayout& DL,
-                                               InitRangeState& initialized,
-                                               llvm::BitVector* writeSeen,
-                                               FunctionSummary* currentSummary)
+        static void
+        applyKnownCallWriteEffects(const llvm::CallBase& CB, const llvm::Function* callee,
+                                   const TrackedObjectContext& tracked, const llvm::DataLayout& DL,
+                                   InitRangeState& initialized, llvm::BitVector* writeSeen,
+                                   FunctionSummary* currentSummary)
         {
             const bool isCtor = callee && isLikelyCppConstructorSymbol(callee->getName());
 
@@ -995,9 +994,8 @@ namespace ctrace::stack::analysis
                 if (!isSRet && !isCtorThis)
                     continue;
 
-                const bool hasCalleeEffect =
-                    argIdx < calleeSummary.paramEffects.size() &&
-                    calleeSummary.paramEffects[argIdx].hasAnyEffect();
+                const bool hasCalleeEffect = argIdx < calleeSummary.paramEffects.size() &&
+                                             calleeSummary.paramEffects[argIdx].hasAnyEffect();
                 if (hasCalleeEffect)
                     continue;
 
@@ -1064,8 +1062,8 @@ namespace ctrace::stack::analysis
                         {
                             continue;
                         }
-                        if (!isRangeCoveredAllowingSmallInteriorGaps(
-                                initialized[objectIdx], clippedBegin, clippedEnd))
+                        if (!isRangeCoveredAllowingSmallInteriorGaps(initialized[objectIdx],
+                                                                     clippedBegin, clippedEnd))
                         {
                             hasReadBeforeWrite = true;
                             uncoveredReadRanges.push_back({clippedBegin, clippedEnd});
@@ -1690,8 +1688,9 @@ namespace ctrace::stack::analysis
             return summaries;
         }
 
-        static llvm::DenseSet<const llvm::Function*> collectSummaryScope(
-            llvm::Module& mod, const std::function<bool(const llvm::Function&)>& shouldAnalyze)
+        static llvm::DenseSet<const llvm::Function*>
+        collectSummaryScope(llvm::Module& mod,
+                            const std::function<bool(const llvm::Function&)>& shouldAnalyze)
         {
             llvm::DenseSet<const llvm::Function*> inScope;
             llvm::SmallVector<const llvm::Function*, 64> worklist;
