@@ -768,7 +768,7 @@ namespace ctrace::stack
                 // }
                 // body << "\n";
 
-                body << "\t\t[ !!Warn ] potential stack buffer overflow in " << m.intrinsicName
+                body << "\t[ !!Warn ] potential stack buffer overflow in " << m.intrinsicName
                      << " on variable '" << m.varName << "'\n";
                 body << "\t\t ↳ destination stack buffer size: " << m.destSizeBytes << " bytes\n";
                 body << "\t\t ↳ requested " << m.lengthBytes << " bytes to be copied/initialized\n";
