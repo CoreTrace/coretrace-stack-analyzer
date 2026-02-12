@@ -263,8 +263,8 @@ namespace ctrace::stack::analysis
         {
             const llvm::StringRef name = F.getName();
             return name == "strcmp" || name == "strncmp" || name == "memcmp" || name == "strlen" ||
-                   name == "strnlen" || name == "memchr" || name == "wcslen" ||
-                   name == "wcscmp" || name == "wcsncmp";
+                   name == "strnlen" || name == "memchr" || name == "wcslen" || name == "wcscmp" ||
+                   name == "wcsncmp";
         }
 
         static bool isFunctionDeterministic(const llvm::Function& F)
@@ -692,12 +692,11 @@ namespace ctrace::stack::analysis
             return !mem.precise;
         }
 
-        static bool hasInterveningWrites(const llvm::Function& F, const llvm::DominatorTree& DT,
-                                         const llvm::BasicBlock* pathBlock,
-                                         const llvm::Instruction* at,
-                                         const llvm::SmallVector<MemoryOperand, 2>& memoryOps,
-                                         const llvm::SmallPtrSet<const llvm::Instruction*, 8>&
-                                             ignoredWrites)
+        static bool
+        hasInterveningWrites(const llvm::Function& F, const llvm::DominatorTree& DT,
+                             const llvm::BasicBlock* pathBlock, const llvm::Instruction* at,
+                             const llvm::SmallVector<MemoryOperand, 2>& memoryOps,
+                             const llvm::SmallPtrSet<const llvm::Instruction*, 8>& ignoredWrites)
         {
             if (memoryOps.empty() || !pathBlock || !at)
                 return false;

@@ -829,8 +829,9 @@ namespace ctrace::stack::analysis
             return false;
         }
 
-        static void getAllocaDeclarationLocation(const llvm::AllocaInst* AI, llvm::StringRef varName,
-                                                 unsigned& line, unsigned& column)
+        static void getAllocaDeclarationLocation(const llvm::AllocaInst* AI,
+                                                 llvm::StringRef varName, unsigned& line,
+                                                 unsigned& column)
         {
             line = 0;
             column = 0;

@@ -142,8 +142,7 @@ namespace ctrace::stack
                                                                    "SizeMinusOneWrite",
                                                                    "DuplicateIfCondition",
                                                                    "UninitializedLocalRead",
-                                                                   "StackFrameTooLarge"
-                                                                };
+                                                                   "StackFrameTooLarge"};
     };
 
     /*

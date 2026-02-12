@@ -418,7 +418,8 @@ int main(int argc, char** argv)
     {
         printHelp();
         return 1;
-    } else if (argc < 2)
+    }
+    else if (argc < 2)
     {
         printHelp();
         return 1;
@@ -525,7 +526,8 @@ int main(int argc, char** argv)
             }
             cfg.stackLimit = value;
             continue;
-        } else if (argStr == "--stack-limit")
+        }
+        else if (argStr == "--stack-limit")
         {
             std::string error;
             StackSize value = 0;
@@ -702,7 +704,8 @@ int main(int argc, char** argv)
         }
         else if (fsErr)
         {
-            coretrace::log(coretrace::Level::Error, "Failed to inspect compile commands path: {}\n", fsErr.message());
+            coretrace::log(coretrace::Level::Error, "Failed to inspect compile commands path: {}\n",
+                           fsErr.message());
             return 1;
         }
 
@@ -711,13 +714,15 @@ int main(int argc, char** argv)
             if (fsErr)
             {
                 // llvm::errs() << "Failed to inspect compile commands path: " << fsErr.message()
-                            //  << "\n";
-                coretrace::log(coretrace::Level::Error, "Failed to inspect compile commands path: {}\n", fsErr.message());
+                //  << "\n";
+                coretrace::log(coretrace::Level::Error,
+                               "Failed to inspect compile commands path: {}\n", fsErr.message());
             }
             else
             {
                 // llvm::errs() << "compile commands file not found: " << compdbPath.string() << "\n";
-                coretrace::log(coretrace::Level::Error, "Compile commands file not found: {}\n", compdbPath.string());
+                coretrace::log(coretrace::Level::Error, "Compile commands file not found: {}\n",
+                               compdbPath.string());
             }
             return 1;
         }
@@ -738,8 +743,9 @@ int main(int argc, char** argv)
     if (inputFilenames.empty())
     {
         // llvm::errs() << "Usage: stack_usage_analyzer <file.ll> [file2.ll ...] [options]\n"
-                    //  << "Try --help for more information.\n";
-        coretrace::log(coretrace::Level::Error, "Usage: stack_usage_analyzer <file.ll> [file2.ll ...] [options]\n");
+        //  << "Try --help for more information.\n";
+        coretrace::log(coretrace::Level::Error,
+                       "Usage: stack_usage_analyzer <file.ll> [file2.ll ...] [options]\n");
         coretrace::log(coretrace::Level::Error, "Try --help for more information.\n");
         return 1;
     }
@@ -792,7 +798,8 @@ int main(int argc, char** argv)
             else
             {
                 llvm::errs() << "Failed to analyze: " << inputFilename << "\n";
-                coretrace::log(coretrace::Level::Error, coretrace::Module("cli"), "Failed to analyze:{}\n", inputFilename);
+                coretrace::log(coretrace::Level::Error, coretrace::Module("cli"),
+                               "Failed to analyze:{}\n", inputFilename);
                 localErr.print("stack_usage_analyzer", llvm::errs());
                 return 1;
             }

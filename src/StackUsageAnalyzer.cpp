@@ -266,7 +266,8 @@ namespace ctrace::stack
                         diag.line = functionLoc.line;
                         diag.column = functionLoc.column;
                     }
-                    diag.message = "\t[ !!Warn ] recursive or mutually recursive function detected\n";
+                    diag.message =
+                        "\t[ !!Warn ] recursive or mutually recursive function detected\n";
                     result.diagnostics.push_back(std::move(diag));
                 }
 
@@ -282,8 +283,9 @@ namespace ctrace::stack
                         diag.line = functionLoc.line;
                         diag.column = functionLoc.column;
                     }
-                    diag.message = "\t[!!!Error] unconditional self recursion detected (no base case)\n"
-                                   "\t\t ↳ this will eventually overflow the stack at runtime\n";
+                    diag.message =
+                        "\t[!!!Error] unconditional self recursion detected (no base case)\n"
+                        "\t\t ↳ this will eventually overflow the stack at runtime\n";
                     result.diagnostics.push_back(std::move(diag));
                 }
 
@@ -528,8 +530,8 @@ namespace ctrace::stack
                 else
                 {
                     diag.errCode = DescriptiveErrorCode::StackBufferOverflow;
-                    body << "\t[ !!Warn ] potential stack buffer overflow on variable '" << issue.varName
-                         << "' (size " << issue.arraySize << ")\n";
+                    body << "\t[ !!Warn ] potential stack buffer overflow on variable '"
+                         << issue.varName << "' (size " << issue.arraySize << ")\n";
                     if (!issue.aliasPath.empty())
                     {
                         body << "\t\t ↳ alias path: " << issue.aliasPath << "\n";
@@ -655,7 +657,8 @@ namespace ctrace::stack
                 {
                     diag.severity = DiagnosticSeverity::Error;
                     diag.errCode = DescriptiveErrorCode::AllocaTooLarge;
-                    body << "\t[!!!Error] large alloca on the stack for variable '" << a.varName << "'\n";
+                    body << "\t[!!!Error] large alloca on the stack for variable '" << a.varName
+                         << "'\n";
                 }
                 else if (a.userControlled)
                 {
@@ -803,7 +806,8 @@ namespace ctrace::stack
                 std::ostringstream body;
                 if (s.hasPointerDest)
                 {
-                    body << "\t[ !!Warn ] potential unsafe write with length (size - " << s.k << ")";
+                    body << "\t[ !!Warn ] potential unsafe write with length (size - " << s.k
+                         << ")";
                 }
                 else
                 {
@@ -867,7 +871,8 @@ namespace ctrace::stack
                 }
                 else if (ms.distinctIndexCount > 1)
                 {
-                    body << "\t[!Info!] stores use different index expressions; verify indices are correct and non-overlapping\n";
+                    body << "\t[!Info!] stores use different index expressions; verify indices are "
+                            "correct and non-overlapping\n";
                 }
 
                 diag.funcName = ms.funcName;
@@ -919,7 +924,8 @@ namespace ctrace::stack
                 }
 
                 std::ostringstream body;
-                body << "\t[ !!Warn ] unreachable else-if branch: condition is equivalent to a previous "
+                body << "\t[ !!Warn ] unreachable else-if branch: condition is equivalent to a "
+                        "previous "
                         "'if' condition\n";
                 body << "\t\t ↳ else branch implies previous condition is false\n";
 
@@ -982,7 +988,8 @@ namespace ctrace::stack
                 }
                 else
                 {
-                    body << "\t[ !!Warn ] local variable '" << issue.varName << "' is never initialized\n";
+                    body << "\t[ !!Warn ] local variable '" << issue.varName
+                         << "' is never initialized\n";
                     body << "\t\t ↳ declared without initializer and no definite write was found "
                             "in this function\n";
                 }
@@ -1060,8 +1067,7 @@ namespace ctrace::stack
 
                 if (br.isOutOfBounds)
                 {
-                    body
-                        << "\t[!!!Error] derived pointer points OUTSIDE the valid object range\n";
+                    body << "\t[!!!Error] derived pointer points OUTSIDE the valid object range\n";
                     body << "\t\t ↳ (this will cause undefined behavior if dereferenced)\n";
                 }
                 else
