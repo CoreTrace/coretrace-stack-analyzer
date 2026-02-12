@@ -895,7 +895,7 @@ int main(int argc, char** argv)
                          << "\n";
             if (f.localStackUnknown)
             {
-                llvm::outs() << "  local stack: unknown";
+                llvm::outs() << "\tlocal stack: unknown";
                 if (f.localStack > 0)
                 {
                     llvm::outs() << " (>= " << f.localStack << " bytes)";
@@ -904,12 +904,12 @@ int main(int argc, char** argv)
             }
             else
             {
-                llvm::outs() << "  local stack: " << f.localStack << " bytes\n";
+                llvm::outs() << "\tlocal stack: " << f.localStack << " bytes\n";
             }
 
             if (f.maxStackUnknown)
             {
-                llvm::outs() << "  max stack (including callees): unknown";
+                llvm::outs() << "\tmax stack (including callees): unknown";
                 if (f.maxStack > 0)
                 {
                     llvm::outs() << " (>= " << f.maxStack << " bytes)";
@@ -918,7 +918,7 @@ int main(int argc, char** argv)
             }
             else
             {
-                llvm::outs() << "  max stack (including callees): " << f.maxStack << " bytes\n";
+                llvm::outs() << "\tmax stack (including callees): " << f.maxStack << " bytes\n";
             }
 
             if (!result.config.quiet)
@@ -933,7 +933,7 @@ int main(int argc, char** argv)
 
                     if (d.line != 0)
                     {
-                        llvm::outs() << "  at line " << d.line << ", column " << d.column << "\n";
+                        llvm::outs() << "\tat line " << d.line << ", column " << d.column << "\n";
                     }
                     llvm::outs() << d.message << "\n";
                 }
