@@ -1,12 +1,12 @@
 #include <stdint.h>
 
 // at line 13, column 0
-// [!Info!] ConstParameterNotModified.Pointer: parameter 'param3' in function 'myfunc' is never used to modify the pointed object
+// [ !Info! ] ConstParameterNotModified.Pointer: parameter 'param3' in function 'myfunc' is never used to modify the pointed object
 //          ↳ current type: int32_t *param3
 //          ↳ suggested type: const int32_t *param3
 
 // at line 13, column 0
-// [!Info!] ConstParameterNotModified.PointerConstOnly: parameter 'param4' in function 'myfunc' is declared 'int32_t * const param4' but the pointed object is never modified
+// [ !Info! ] ConstParameterNotModified.PointerConstOnly: parameter 'param4' in function 'myfunc' is declared 'int32_t * const param4' but the pointed object is never modified
 //          ↳ consider 'const int32_t *param4' for API const-correctness
 //          ↳ current type: int32_t * const param4
 //          ↳ suggested type: const int32_t *param4

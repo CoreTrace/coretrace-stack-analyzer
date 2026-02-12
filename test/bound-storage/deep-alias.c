@@ -1,5 +1,5 @@
 // at line 5, column 0
-// [!Info!] ConstParameterNotModified.Pointer: parameter 'src' in function 'deep_alias' is never used to modify the pointed object
+// [ !Info! ] ConstParameterNotModified.Pointer: parameter 'src' in function 'deep_alias' is never used to modify the pointed object
 //          ↳ current type: char *src
 //          ↳ suggested type: const char *src
 void deep_alias(char* src)

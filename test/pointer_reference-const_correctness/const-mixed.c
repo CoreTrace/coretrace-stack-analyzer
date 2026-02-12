@@ -4,7 +4,7 @@
 #include <stdlib.h>
 
 // at line 10, column 0
-// [!Info!] ConstParameterNotModified.Pointer: parameter 'values' in function 'print_sum' is never used to modify the pointed object
+// [ !Info! ] ConstParameterNotModified.Pointer: parameter 'values' in function 'print_sum' is never used to modify the pointed object
 //          ↳ current type: int *values
 //          ↳ suggested type: const int *values
 void print_sum(int* values, size_t count)
@@ -28,12 +28,12 @@ void read_data(char* const buffer)
 }
 
 // at line 39, column 0
-// [!Info!] ConstParameterNotModified.Pointer: parameter 'a' in function 'get_max' is never used to modify the pointed object
+// [ !Info! ] ConstParameterNotModified.Pointer: parameter 'a' in function 'get_max' is never used to modify the pointed object
 //          ↳ current type: int *a
 //          ↳ suggested type: const int *a
 
 // at line 39, column 0
-// [!Info!] ConstParameterNotModified.Pointer: parameter 'b' in function 'get_max' is never used to modify the pointed object
+// [ !Info! ] ConstParameterNotModified.Pointer: parameter 'b' in function 'get_max' is never used to modify the pointed object
 //          ↳ current type: int *b
 //          ↳ suggested type: const int *b
 int get_max(int* a, int* b)
@@ -47,12 +47,12 @@ struct Point
 };
 
 // at line 58, column 0
-// [!Info!] ConstParameterNotModified.Pointer: parameter 'p1' in function 'distance' is never used to modify the pointed object
+// [ !Info! ] ConstParameterNotModified.Pointer: parameter 'p1' in function 'distance' is never used to modify the pointed object
 //          ↳ current type: Point *p1
 //          ↳ suggested type: const Point *p1
 
 // at line 58, column 0
-// [!Info!] ConstParameterNotModified.Pointer: parameter 'p2' in function 'distance' is never used to modify the pointed object
+// [ !Info! ] ConstParameterNotModified.Pointer: parameter 'p2' in function 'distance' is never used to modify the pointed object
 //          ↳ current type: Point *p2
 //          ↳ suggested type: const Point *p2
 int distance(struct Point* p1, struct Point* p2)

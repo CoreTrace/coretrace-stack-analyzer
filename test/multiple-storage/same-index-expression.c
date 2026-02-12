@@ -12,5 +12,5 @@ int main(void)
 }
 
 // at line 3, column 1
-// [!Info!] multiple stores to stack buffer 'buf' in this function (2 store instruction(s), 1 distinct index expression(s))
-// [!Info!] all stores use the same index expression (possible redundant or unintended overwrite)
+// [ !Info! ] multiple stores to stack buffer 'buf' in this function (2 store instruction(s), 1 distinct index expression(s))
+// [ !Info! ] all stores use the same index expression (possible redundant or unintended overwrite)

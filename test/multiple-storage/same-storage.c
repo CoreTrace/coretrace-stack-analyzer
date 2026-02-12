@@ -17,5 +17,5 @@ int main(void)
 }
 
 // at line 5, column 1
-// [!Info!] multiple stores to stack buffer 'buf' in this function (4 store instruction(s), 3 distinct index expression(s))
-// [!Info!] stores use different index expressions; verify indices are correct and non-overlapping
+// [ !Info! ] multiple stores to stack buffer 'buf' in this function (4 store instruction(s), 3 distinct index expression(s))
+// [ !Info! ] stores use different index expressions; verify indices are correct and non-overlapping
