@@ -5,6 +5,7 @@
 #include <cassert>
 #include <cctype>
 #include <cstdint>
+#include <fstream>
 #include <limits>
 #include <optional>
 #include <string>
@@ -755,36 +756,142 @@ namespace ctrace::stack::analysis
             return AI;
         }
 
-        static void getAllocaDeclarationLocation(const llvm::AllocaInst* AI, unsigned& line,
-                                                 unsigned& column)
+        static bool isIdentifierChar(char c)
+        {
+            return std::isalnum(static_cast<unsigned char>(c)) != 0 || c == '_';
+        }
+
+        static bool findVariableDeclarationInSource(const llvm::AllocaInst* AI,
+                                                    llvm::StringRef varName, unsigned& line,
+                                                    unsigned& column)
+        {
+            if (!AI || varName.empty())
+                return false;
+            const std::string needle = varName.str();
+
+            const llvm::Function* F = AI->getFunction();
+            if (!F)
+                return false;
+            const std::string path = getFunctionSourcePath(*F);
+            if (path.empty())
+                return false;
+
+            std::ifstream in(path);
+            if (!in)
+                return false;
+
+            unsigned startLine = 1;
+            if (const llvm::DISubprogram* SP = F->getSubprogram())
+            {
+                if (SP->getLine() != 0)
+                    startLine = SP->getLine();
+            }
+
+            std::string current;
+            unsigned lineNo = 0;
+            while (std::getline(in, current))
+            {
+                ++lineNo;
+                if (lineNo < startLine)
+                    continue;
+
+                std::size_t commentPos = current.find("//");
+                if (commentPos != std::string::npos)
+                    current.resize(commentPos);
+
+                std::size_t searchPos = 0;
+                while ((searchPos = current.find(needle, searchPos)) != std::string::npos)
+                {
+                    const bool leftOk =
+                        (searchPos == 0) || !isIdentifierChar(current[searchPos - 1]);
+                    const std::size_t rightPos = searchPos + needle.size();
+                    const bool rightOk =
+                        (rightPos >= current.size()) || !isIdentifierChar(current[rightPos]);
+                    if (!leftOk || !rightOk)
+                    {
+                        ++searchPos;
+                        continue;
+                    }
+
+                    std::size_t semicolonPos = current.find(';', rightPos);
+                    if (semicolonPos == std::string::npos)
+                    {
+                        ++searchPos;
+                        continue;
+                    }
+
+                    line = lineNo;
+                    column = static_cast<unsigned>(searchPos + 1);
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        static void getAllocaDeclarationLocation(const llvm::AllocaInst* AI, llvm::StringRef varName,
+                                                 unsigned& line, unsigned& column)
         {
             line = 0;
             column = 0;
             if (!AI)
                 return;
 
+            auto tryUseDebugLoc = [&](llvm::DebugLoc DL) -> bool
+            {
+                if (!DL)
+                    return false;
+                line = DL.getLine();
+                column = DL.getCol();
+                return line != 0;
+            };
+
+            auto tryUseVariableLine = [&](const llvm::DILocalVariable* var) -> bool
+            {
+                if (!var || var->getLine() == 0)
+                    return false;
+                line = var->getLine();
+                // DILocalVariable stores declaration line, but not declaration column.
+                column = 1;
+                return true;
+            };
+
             auto* nonConstAI = const_cast<llvm::AllocaInst*>(AI);
             for (llvm::DbgDeclareInst* ddi : llvm::findDbgDeclares(nonConstAI))
             {
-                llvm::DebugLoc DL = llvm::getDebugValueLoc(ddi);
-                if (DL)
-                {
-                    line = DL.getLine();
-                    column = DL.getCol();
+                if (tryUseDebugLoc(llvm::getDebugValueLoc(ddi)) ||
+                    tryUseVariableLine(ddi->getVariable()))
                     return;
-                }
             }
 
             for (llvm::DbgVariableRecord* dvr : llvm::findDVRDeclares(nonConstAI))
             {
-                llvm::DebugLoc DL = llvm::getDebugValueLoc(dvr);
-                if (DL)
-                {
-                    line = DL.getLine();
-                    column = DL.getCol();
+                if (tryUseDebugLoc(llvm::getDebugValueLoc(dvr)) ||
+                    tryUseVariableLine(dvr->getVariable()))
                     return;
-                }
             }
+
+            // Some pipelines lower declaration info to dbg.value records/users.
+            // Fallback to any debug user attached to this alloca.
+            llvm::SmallVector<llvm::DbgVariableIntrinsic*, 4> dbgUsers;
+            llvm::SmallVector<llvm::DbgVariableRecord*, 4> dbgRecords;
+            llvm::findDbgUsers(dbgUsers, nonConstAI, &dbgRecords);
+            for (llvm::DbgVariableIntrinsic* dvi : dbgUsers)
+            {
+                if (tryUseDebugLoc(llvm::getDebugValueLoc(dvi)) ||
+                    tryUseVariableLine(dvi->getVariable()))
+                    return;
+            }
+            for (llvm::DbgVariableRecord* dvr : dbgRecords)
+            {
+                if (tryUseDebugLoc(llvm::getDebugValueLoc(dvr)) ||
+                    tryUseVariableLine(dvr->getVariable()))
+                    return;
+            }
+
+            // Final fallback for new debug-record pipelines where debug users are
+            // unavailable through Value-use APIs: resolve declaration from source text.
+            (void)findVariableDeclarationInSource(AI, varName, line, column);
         }
 
         static FunctionSummary makeEmptySummary(const llvm::Function& F)
@@ -1636,7 +1743,7 @@ namespace ctrace::stack::analysis
 
                 unsigned line = 0;
                 unsigned column = 0;
-                getAllocaDeclarationLocation(AI, line, column);
+                getAllocaDeclarationLocation(AI, varName, line, column);
                 if (outIssues)
                 {
                     outIssues->push_back({F.getName().str(), varName, getAllocaDebugAnchor(AI),
