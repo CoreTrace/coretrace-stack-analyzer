@@ -115,3 +115,423 @@ int main(void)
 
     return 0;
 }
+
+// at line 10, column 1
+// [ !!Warn ] local variable 'a' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 11, column 1
+// [ !!Warn ] local variable 'b' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 12, column 1
+// [ !!Warn ] local variable 'c' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 13, column 1
+// [ !!Warn ] local variable 'd' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 14, column 1
+// [ !!Warn ] local variable 'e' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 15, column 1
+// [ !!Warn ] local variable 'f' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 16, column 1
+// [ !!Warn ] local variable 'g' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 17, column 1
+// [ !!Warn ] local variable 'h' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 18, column 1
+// [ !!Warn ] local variable 'i' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 19, column 1
+// [ !!Warn ] local variable 'j' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 20, column 1
+// [ !!Warn ] local variable 'k' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 21, column 1
+// [ !!Warn ] local variable 'l' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 22, column 1
+// [ !!Warn ] local variable 'm' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 23, column 1
+// [ !!Warn ] local variable 'n' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 24, column 1
+// [ !!Warn ] local variable 'o' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 25, column 1
+// [ !!Warn ] local variable 'p' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 26, column 1
+// [ !!Warn ] local variable 'q' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 27, column 1
+// [ !!Warn ] local variable 'r' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 28, column 1
+// [ !!Warn ] local variable 's' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 29, column 1
+// [ !!Warn ] local variable 't' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 30, column 1
+// [ !!Warn ] local variable 'u' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 31, column 1
+// [ !!Warn ] local variable 'v' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 32, column 1
+// [ !!Warn ] local variable 'w' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 33, column 1
+// [ !!Warn ] local variable 'x' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 34, column 1
+// [ !!Warn ] local variable 'y' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 35, column 1
+// [ !!Warn ] local variable 'z' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 36, column 1
+// [ !!Warn ] local variable 'aa' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 37, column 1
+// [ !!Warn ] local variable 'ab' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 38, column 1
+// [ !!Warn ] local variable 'ac' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 39, column 1
+// [ !!Warn ] local variable 'ad' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 40, column 1
+// [ !!Warn ] local variable 'ae' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 41, column 1
+// [ !!Warn ] local variable 'af' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 42, column 1
+// [ !!Warn ] local variable 'ag' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 43, column 1
+// [ !!Warn ] local variable 'ah' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 44, column 1
+// [ !!Warn ] local variable 'ai' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 45, column 1
+// [ !!Warn ] local variable 'aj' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 46, column 1
+// [ !!Warn ] local variable 'ak' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 47, column 1
+// [ !!Warn ] local variable 'al' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 48, column 1
+// [ !!Warn ] local variable 'am' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 49, column 1
+// [ !!Warn ] local variable 'an' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 50, column 1
+// [ !!Warn ] local variable 'ao' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 51, column 1
+// [ !!Warn ] local variable 'ap' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 52, column 1
+// [ !!Warn ] local variable 'aq' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 53, column 1
+// [ !!Warn ] local variable 'ar' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 54, column 1
+// [ !!Warn ] local variable 'as' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 55, column 1
+// [ !!Warn ] local variable 'at' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 56, column 1
+// [ !!Warn ] local variable 'au' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 57, column 1
+// [ !!Warn ] local variable 'av' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 58, column 1
+// [ !!Warn ] local variable 'aw' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 59, column 1
+// [ !!Warn ] local variable 'ax' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 60, column 1
+// [ !!Warn ] local variable 'ay' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 61, column 1
+// [ !!Warn ] local variable 'az' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 62, column 1
+// [ !!Warn ] local variable 'ba' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 63, column 1
+// [ !!Warn ] local variable 'bb' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 64, column 1
+// [ !!Warn ] local variable 'bc' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 65, column 1
+// [ !!Warn ] local variable 'bd' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 66, column 1
+// [ !!Warn ] local variable 'be' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 67, column 1
+// [ !!Warn ] local variable 'bf' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 68, column 1
+// [ !!Warn ] local variable 'bg' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 69, column 1
+// [ !!Warn ] local variable 'bh' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 70, column 1
+// [ !!Warn ] local variable 'bi' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 71, column 1
+// [ !!Warn ] local variable 'bj' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 72, column 1
+// [ !!Warn ] local variable 'bk' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 73, column 1
+// [ !!Warn ] local variable 'bl' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 74, column 1
+// [ !!Warn ] local variable 'bm' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 75, column 1
+// [ !!Warn ] local variable 'bn' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 76, column 1
+// [ !!Warn ] local variable 'bo' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 77, column 1
+// [ !!Warn ] local variable 'bp' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 78, column 1
+// [ !!Warn ] local variable 'bq' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 79, column 1
+// [ !!Warn ] local variable 'br' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 80, column 1
+// [ !!Warn ] local variable 'bs' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 81, column 1
+// [ !!Warn ] local variable 'bt' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 82, column 1
+// [ !!Warn ] local variable 'bu' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 83, column 1
+// [ !!Warn ] local variable 'bv' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 84, column 1
+// [ !!Warn ] local variable 'bw' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 85, column 1
+// [ !!Warn ] local variable 'bx' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 86, column 1
+// [ !!Warn ] local variable 'by' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 87, column 1
+// [ !!Warn ] local variable 'bz' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 88, column 1
+// [ !!Warn ] local variable 'ca' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 89, column 1
+// [ !!Warn ] local variable 'cb' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 90, column 1
+// [ !!Warn ] local variable 'cc' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 91, column 1
+// [ !!Warn ] local variable 'cd' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 92, column 1
+// [ !!Warn ] local variable 'ce' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 93, column 1
+// [ !!Warn ] local variable 'cf' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 94, column 1
+// [ !!Warn ] local variable 'cg' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 95, column 1
+// [ !!Warn ] local variable 'ch' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 96, column 1
+// [ !!Warn ] local variable 'ci' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 97, column 1
+// [ !!Warn ] local variable 'cj' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 98, column 1
+// [ !!Warn ] local variable 'ck' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 99, column 1
+// [ !!Warn ] local variable 'cl' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 100, column 1
+// [ !!Warn ] local variable 'cm' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 101, column 1
+// [ !!Warn ] local variable 'cn' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 102, column 1
+// [ !!Warn ] local variable 'co' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 103, column 1
+// [ !!Warn ] local variable 'cp' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 104, column 1
+// [ !!Warn ] local variable 'cq' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 105, column 1
+// [ !!Warn ] local variable 'cr' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 106, column 1
+// [ !!Warn ] local variable 'cs' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 107, column 1
+// [ !!Warn ] local variable 'ct' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 108, column 1
+// [ !!Warn ] local variable 'cu' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 109, column 1
+// [ !!Warn ] local variable 'cv' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 110, column 1
+// [ !!Warn ] local variable 'cw' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 111, column 1
+// [ !!Warn ] local variable 'cx' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 112, column 1
+// [ !!Warn ] local variable 'cy' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 113, column 1
+// [ !!Warn ] local variable 'cz' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 114, column 1
+// [ !!Warn ] local variable 'sum' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function

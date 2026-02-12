@@ -7,5 +7,5 @@ int memcpy_reads_uninitialized_source(void)
 }
 
 // at line 5, column 5
-// [!!] potential read of uninitialized local variable 'src'
-//      this load may execute before any definite initialization on all control-flow paths
+// [ !!Warn ] potential read of uninitialized local variable 'src'
+// ↳ this load may execute before any definite initialization on all control-flow paths

@@ -26,9 +26,9 @@ void fill_array(int* arr, size_t n, bool condition)
 }
 
 // at line 32, column 0
-// [!]ConstParameterNotModified.Pointer: parameter 'reg' in function 'read_volatile' is never used to modify the pointed object
-//     current type: volatile int *reg
-//     suggested type: const volatile int *reg
+// [ !Info! ] ConstParameterNotModified.Pointer: parameter 'reg' in function 'read_volatile' is never used to modify the pointed object
+//          ↳ current type: volatile int *reg
+//          ↳ suggested type: const volatile int *reg
 void read_volatile(volatile int* reg)
 {
     int val = *reg;
@@ -36,9 +36,9 @@ void read_volatile(volatile int* reg)
 }
 
 // at line 42, column 0
-// [!]ConstParameterNotModified.Pointer: parameter 'value' in function 'log' is never used to modify the pointed object
-//     current type: int *value
-//     suggested type: const int *value
+// [ !Info! ] ConstParameterNotModified.Pointer: parameter 'value' in function 'log' is never used to modify the pointed object
+//          ↳ current type: int *value
+//          ↳ suggested type: const int *value
 void log(int* value)
 {
     printf("%d\n", *value); // read

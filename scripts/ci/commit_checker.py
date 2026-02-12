@@ -23,7 +23,7 @@ ALLOWED_TYPES = (
     "test",
 )
 
-MAX_SUBJECT_LEN = 72
+MAX_SUBJECT_LEN = 84
 
 CONVENTIONAL_RE = re.compile(
     r"^(?P<type>" + "|".join(ALLOWED_TYPES) + r")"

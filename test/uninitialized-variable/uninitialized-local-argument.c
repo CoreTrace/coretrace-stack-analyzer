@@ -14,8 +14,8 @@ int main(int argc, char** argv)
 }
 
 // at line 12, column 20
-// [!!] potential read of uninitialized local variable 'value'
-//      this load may execute before any definite initialization on all control-flow paths
+// [ !!Warn ] potential read of uninitialized local variable 'value'
+// ↳ this load may execute before any definite initialization on all control-flow paths
 
 // not contains: potential read of uninitialized local variable 'argc.addr'
 // not contains: potential read of uninitialized local variable 'argv.addr'

@@ -10,5 +10,5 @@ int read_cpp_ref(int cond, int& out)
 }
 
 // at line 8, column 11
-// [!!] potential read of uninitialized local variable 'value'
-//      this load may execute before any definite initialization on all control-flow paths
+// [ !!Warn ] potential read of uninitialized local variable 'value'
+// ↳ this load may execute before any definite initialization on all control-flow paths

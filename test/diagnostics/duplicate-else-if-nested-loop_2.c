@@ -16,8 +16,8 @@ int main(void)
                     printf("Num is zero\n");
                 }
                 // at line 21, column 26
-                // [!] unreachable else-if branch: condition is equivalent to a previous 'if' condition
-                //     else branch implies previous condition is false
+                // [ !!Warn ] unreachable else-if branch: condition is equivalent to a previous 'if' condition
+                //          ↳ else branch implies previous condition is false
                 else if ((num))
                 {
                     printf("No functions matched filters for: %d\n", num);

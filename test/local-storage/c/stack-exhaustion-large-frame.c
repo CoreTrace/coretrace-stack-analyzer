@@ -6,8 +6,8 @@ int main(void)
     // local stack: 4096000016 bytes
     // max stack (including callees): 4096000016 bytes
     // at line 13, column 5
-    // [!] potential stack overflow: exceeds limit of 8388608 bytes
-    //     alias path: test
+    // [!!!Error] potential stack overflow: exceeds limit of 8388608 bytes
+    //          ↳ alias variable: test
     char test[SIZE_LARGE];
 
     return 0;

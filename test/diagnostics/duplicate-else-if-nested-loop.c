@@ -13,8 +13,8 @@ int main(int argc, char* argv[])
         else
         {
             // at line 18, column 17
-            // [!] unreachable else-if branch: condition is equivalent to a previous 'if' condition
-            //     else branch implies previous condition is false
+            // [ !!Warn ] unreachable else-if branch: condition is equivalent to a previous 'if' condition
+            //          ↳ else branch implies previous condition is false
             if (IS_ZERO(num))
             {
                 return 1;

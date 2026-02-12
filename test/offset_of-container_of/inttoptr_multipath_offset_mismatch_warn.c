@@ -20,14 +20,7 @@ int test_multipath_select(int cond)
 
     uintptr_t addr = (uintptr_t)p;
     addr -= offsetof(struct A, b); // uses offset of b
-    // at line 31, column 22
-    // [!!] potential UB: invalid base reconstruction via offsetof/container_of
-    //     variable: 'obj'
-    //     source member: offsets +4, +8
-    //     offset applied: -4 bytes
-    //     target type: ptr
-    //     [WARNING] unable to verify that derived pointer points to a valid object
-    //                 (potential undefined behavior if offset is incorrect)
+
     struct A* base = (struct A*)addr;
 
     // Expected: invalid base reconstruction diagnostic.
@@ -40,3 +33,21 @@ int main(void)
     test_multipath_select(1);
     return 0;
 }
+
+// at line 24, column 22
+// [ !!Warn ] potential UB: invalid base reconstruction via offsetof/container_of
+//          ↳ variable: 'obj'
+//          ↳ source member: offsets +4, +8
+//          ↳ offset applied: -4 bytes
+//          ↳ target type: ptr
+// [ !!Warn ] unable to verify that derived pointer points to a valid object
+//          ↳ (potential undefined behavior if offset is incorrect)
+
+// at line 27, column 18
+// [ !!Warn ] potential UB: invalid base reconstruction via offsetof/container_of
+//          ↳ variable: 'obj'
+//          ↳ source member: offsets base, +4, +8
+//          ↳ offset applied: +0 bytes
+//          ↳ target type: ptr
+// [ !!Warn ] unable to verify that derived pointer points to a valid object
+//          ↳ (potential undefined behavior if offset is incorrect)

@@ -6,33 +6,33 @@ int main(void)
     char* ptr = test;
     char** pp = &ptr;
     // at line 13, column 15
-    // [!!] potential stack buffer overflow on variable 'test' (size 10)
-    //     alias path: test -> arraydecay -> ptr
-    //     constant index 14 is out of bounds (0..9)
-    //     (this is a write access)
+    // [ !!Warn ] potential stack buffer overflow on variable 'test' (size 10)
+    // ↳ alias path: test -> arraydecay -> ptr
+    // ↳ constant index 14 is out of bounds (0..9)
+    // ↳ (this is a write access)
     (ptr)[14] = 'a';
     // at line 19, column 15
-    // [!!] potential stack buffer overflow on variable 'test' (size 10)
-    //     alias path: test -> arraydecay -> ptr -> pp
-    //     constant index 15 is out of bounds (0..9)
-    //     (this is a write access)
+    // [ !!Warn ] potential stack buffer overflow on variable 'test' (size 10)
+    // ↳ alias path: test -> arraydecay -> ptr -> pp
+    // ↳ constant index 15 is out of bounds (0..9)
+    // ↳ (this is a write access)
     (*pp)[15] = 'a';
 
     // at line 28, column 17
-    // [!!] potential stack buffer overflow on variable 'test' (size 10)
-    //     alias path: test
-    //     index variable may go up to 19 (array last valid index: 9)
-    //     (this is a write access)
+    // [ !!Warn ] potential stack buffer overflow on variable 'test' (size 10)
+    // ↳ alias path: test
+    // ↳ index variable may go up to 19 (array last valid index: 9)
+    // ↳ (this is a write access)
     for (int i = 0; i < 20; i++)
     {
         test[i] = 'a';
     }
 
     // at line 37, column 17
-    // [!!] potential stack buffer overflow on variable 'test' (size 10)
-    //     alias path: test
-    //     index variable may go up to 11 (array last valid index: 9)
-    //     (this is a write access)
+    // [ !!Warn ] potential stack buffer overflow on variable 'test' (size 10)
+    // ↳ alias path: test
+    // ↳ index variable may go up to 11 (array last valid index: 9)
+    // ↳ (this is a write access)
     for (int i = 0; i != 11; ++i)
         test[i] = 'a';
 
@@ -43,10 +43,10 @@ int main(void)
     }
 
     // at line 52, column 16
-    // [!!] potential stack buffer overflow on variable 'test' (size 10)
-    //     alias path: test -> arraydecay -> ptr
-    //     index variable may go up to 19 (array last valid index: 9)
-    //     (this is a write access)
+    // [ !!Warn ] potential stack buffer overflow on variable 'test' (size 10)
+    // ↳ alias path: test -> arraydecay -> ptr
+    // ↳ index variable may go up to 19 (array last valid index: 9)
+    // ↳ (this is a write access)
     for (int i = 0; i < 20; i++)
     {
         ptr[i] = 'a';

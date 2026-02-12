@@ -24,8 +24,8 @@ int main(int argc, char** argv)
             return 1;
         }
         // at line 29, column 27
-        // [!] unreachable else-if branch: condition is equivalent to a previous 'if' condition
-        //     else branch implies previous condition is false
+        // [ !!Warn ] unreachable else-if branch: condition is equivalent to a previous 'if' condition
+        //          ↳ else branch implies previous condition is false
         else if (severity != DiagnosticSeverity::Info)
         {
             return 1;

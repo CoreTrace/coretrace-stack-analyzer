@@ -34,8 +34,16 @@ FetchContent_Declare(
     GIT_REPOSITORY https://github.com/CoreTrace/coretrace-compiler.git
     GIT_TAG main
 )
-
 FetchContent_MakeAvailable(cc)
+
+set(CORETRACE_LOGGER_BUILD_EXAMPLES OFF CACHE BOOL "Disable logger examples" FORCE)
+set(CORETRACE_LOGGER_BUILD_TESTS OFF CACHE BOOL "Disable logger tests" FORCE)
+include(FetchContent)
+FetchContent_Declare(coretrace-logger
+  GIT_REPOSITORY https://github.com/CoreTrace/coretrace-log.git
+  GIT_TAG        main
+)
+FetchContent_MakeAvailable(coretrace-logger)
 
 message(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION}")
 message(STATUS "Using LLVMConfig.cmake in: ${LLVM_DIR}")
@@ -117,6 +125,7 @@ target_link_libraries(stack_usage_analyzer_lib
     PUBLIC
         ${llvm_libs}
         cc::compilerlib_static
+        coretrace::logger
 )
 # by this one :
 if(LLVM_LINK_LLVM_DYLIB)
@@ -124,6 +133,7 @@ if(LLVM_LINK_LLVM_DYLIB)
         PUBLIC
             LLVM
             cc::compilerlib_static
+            coretrace::logger
     )
 else()
     llvm_map_components_to_libnames(llvm_libs
@@ -135,6 +145,7 @@ else()
         PUBLIC
             ${llvm_libs}
             cc::compilerlib_static
+            coretrace::logger
     )
 endif()
 

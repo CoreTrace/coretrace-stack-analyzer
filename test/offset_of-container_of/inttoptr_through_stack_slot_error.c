@@ -19,15 +19,26 @@ int test_inttoptr_load_store(void)
 
     uintptr_t addr = (uintptr_t)p;
     addr -= offsetof(struct A, i); // wrong offset (12 instead of 4)
-    // at line 30, column 26
-    // [!!] potential UB: invalid base reconstruction via offsetof/container_of
-    //     variable: 'obj'
-    //     source member: offset +4
-    //     offset applied: -12 bytes
-    //     target type: ptr
-    //     [ERROR] derived pointer points OUTSIDE the valid object range
-    //             (this will cause undefined behavior if dereferenced)
+
     struct A* bad_base = (struct A*)addr;
 
     return bad_base->a;
 }
+
+// at line 23, column 26
+// [ !!Warn ] potential UB: invalid base reconstruction via offsetof/container_of
+//          ↳ variable: 'obj'
+//          ↳ source member: offset +4
+//          ↳ offset applied: -12 bytes
+//          ↳ target type: ptr
+// [!!!Error] derived pointer points OUTSIDE the valid object range
+//          ↳ (this will cause undefined behavior if dereferenced)
+
+// at line 25, column 22
+// [ !!Warn ] potential UB: invalid base reconstruction via offsetof/container_of
+//          ↳ variable: 'obj'
+//          ↳ source member: offsets +-8, +4
+//          ↳ offset applied: +0 bytes
+//          ↳ target type: ptr
+// [!!!Error] derived pointer points OUTSIDE the valid object range
+//          ↳ (this will cause undefined behavior if dereferenced)

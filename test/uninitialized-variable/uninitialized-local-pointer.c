@@ -8,5 +8,5 @@ int read_pointer_target(int cond)
 }
 
 // at line 7, column 13
-// [!!] potential read of uninitialized local variable 'ptr'
-//      this load may execute before any definite initialization on all control-flow paths
+// [ !!Warn ] potential read of uninitialized local variable 'ptr'
+// ↳ this load may execute before any definite initialization on all control-flow paths

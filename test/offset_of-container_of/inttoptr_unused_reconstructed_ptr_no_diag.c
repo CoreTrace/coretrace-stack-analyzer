@@ -31,3 +31,5 @@ int main(void)
 {
     return test_inttoptr_unused_pointer_noise();
 }
+
+// not contains: potential read of uninitialized local variable 'input'
