@@ -1,4 +1,5 @@
 #include "analysis/InputPipeline.hpp"
+#include "analysis/CompileCommands.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -16,8 +17,7 @@
 #include <llvm/Support/SourceMgr.h>
 #include <llvm/Support/raw_ostream.h>
 
-#include "analysis/CompileCommands.hpp"
-#include "compilerlib/compiler.h"
+#include <compilerlib/compiler.h>
 
 namespace ctrace::stack::analysis
 {
