@@ -121,12 +121,13 @@ namespace ctrace::stack
         ConstParameterNotModified = 11,
         SizeMinusOneWrite = 12,
         DuplicateIfCondition = 13,
-        UninitializedLocalRead = 14
+        UninitializedLocalRead = 14,
+        StackFrameTooLarge = 15
     };
 
     template <> struct EnumTraits<DescriptiveErrorCode>
     {
-        static constexpr std::array<std::string_view, 15> names = {"None",
+        static constexpr std::array<std::string_view, 16> names = {"None",
                                                                    "StackBufferOverflow",
                                                                    "NegativeStackIndex",
                                                                    "VLAUsage",
@@ -140,7 +141,9 @@ namespace ctrace::stack
                                                                    "ConstParameterNotModified",
                                                                    "SizeMinusOneWrite",
                                                                    "DuplicateIfCondition",
-                                                                   "UninitializedLocalRead"};
+                                                                   "UninitializedLocalRead",
+                                                                   "StackFrameTooLarge"
+                                                                };
     };
 
     /*

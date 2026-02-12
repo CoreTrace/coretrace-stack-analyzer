@@ -266,7 +266,7 @@ namespace ctrace::stack
                         diag.line = functionLoc.line;
                         diag.column = functionLoc.column;
                     }
-                    diag.message = "  [!] recursive or mutually recursive function detected\n";
+                    diag.message = "\t[ !!Warn ] recursive or mutually recursive function detected\n";
                     result.diagnostics.push_back(std::move(diag));
                 }
 
@@ -275,15 +275,15 @@ namespace ctrace::stack
                     Diagnostic diag;
                     diag.funcName = fr.name;
                     diag.filePath = fr.filePath;
-                    diag.severity = DiagnosticSeverity::Warning;
+                    diag.severity = DiagnosticSeverity::Error;
                     diag.errCode = DescriptiveErrorCode::None;
                     if (hasFunctionLoc)
                     {
                         diag.line = functionLoc.line;
                         diag.column = functionLoc.column;
                     }
-                    diag.message = "  [!!!] unconditional self recursion detected (no base case)\n"
-                                   "       this will eventually overflow the stack at runtime\n";
+                    diag.message = "\t[!!!Error] unconditional self recursion detected (no base case)\n"
+                                   "\t\t ↳ this will eventually overflow the stack at runtime\n";
                     result.diagnostics.push_back(std::move(diag));
                 }
 
@@ -292,8 +292,8 @@ namespace ctrace::stack
                     Diagnostic diag;
                     diag.funcName = fr.name;
                     diag.filePath = fr.filePath;
-                    diag.severity = DiagnosticSeverity::Warning;
-                    diag.errCode = DescriptiveErrorCode::None;
+                    diag.severity = DiagnosticSeverity::Error;
+                    diag.errCode = DescriptiveErrorCode::StackFrameTooLarge;
                     if (hasFunctionLoc)
                     {
                         diag.line = functionLoc.line;
@@ -322,12 +322,12 @@ namespace ctrace::stack
                         }
                         if (!singleName.empty())
                         {
-                            aliasLine = "       alias path: " + singleName + "\n";
+                            aliasLine = "\t\t ↳ alias variable: " + singleName + "\n";
                         }
                         else if (!itLocals->second.empty())
                         {
                             localsDetails +=
-                                "        locals: " + std::to_string(itLocals->second.size()) +
+                                "\t\t ↳ locals: " + std::to_string(itLocals->second.size()) +
                                 " variables (total " + std::to_string(fr.localStack) + " bytes)\n";
 
                             std::vector<std::pair<std::string, StackSize>> named = itLocals->second;
@@ -364,11 +364,11 @@ namespace ctrace::stack
                     std::string suffix;
                     if (itPath != aux.callPaths.end())
                     {
-                        suffix += "    path: " + itPath->second + "\n";
+                        suffix += "\t\t ↳ path: " + itPath->second + "\n";
                     }
-                    std::string mainLine = "  [!] potential stack overflow: exceeds limit of " +
+                    std::string mainLine = " potential stack overflow: exceeds limit of " +
                                            std::to_string(ctx.config.stackLimit) + " bytes\n";
-                    message = mainLine + aliasLine + suffix + message;
+                    message = "\t[!!!Error]" + mainLine + aliasLine + suffix + message;
                     if (suppressLocation)
                     {
                         diag.line = 0;
@@ -520,29 +520,29 @@ namespace ctrace::stack
                          << "' (size " << issue.arraySize << ")\n";
                     if (!issue.aliasPath.empty())
                     {
-                        body << "       alias path: " << issue.aliasPath << "\n";
+                        body << "\t\t ↳ alias path: " << issue.aliasPath << "\n";
                     }
-                    body << "       inferred lower bound for index expression: " << issue.lowerBound
+                    body << "\t\t ↳ inferred lower bound for index expression: " << issue.lowerBound
                          << " (index may be < 0)\n";
                 }
                 else
                 {
                     diag.errCode = DescriptiveErrorCode::StackBufferOverflow;
-                    body << "  [!!] potential stack buffer overflow on variable '" << issue.varName
+                    body << "\t[ !!Warn ] potential stack buffer overflow on variable '" << issue.varName
                          << "' (size " << issue.arraySize << ")\n";
                     if (!issue.aliasPath.empty())
                     {
-                        body << "       alias path: " << issue.aliasPath << "\n";
+                        body << "\t\t ↳ alias path: " << issue.aliasPath << "\n";
                     }
                     if (issue.indexIsConstant)
                     {
-                        body << "       constant index " << issue.indexOrUpperBound
+                        body << "\t\t ↳ constant index " << issue.indexOrUpperBound
                              << " is out of bounds (0.."
                              << (issue.arraySize ? issue.arraySize - 1 : 0) << ")\n";
                     }
                     else
                     {
-                        body << "       index variable may go up to " << issue.indexOrUpperBound
+                        body << "\t\t ↳ index variable may go up to " << issue.indexOrUpperBound
                              << " (array last valid index: "
                              << (issue.arraySize ? issue.arraySize - 1 : 0) << ")\n";
                     }
@@ -550,15 +550,15 @@ namespace ctrace::stack
 
                 if (issue.isWrite)
                 {
-                    body << "       (this is a write access)\n";
+                    body << "\t\t ↳ (this is a write access)\n";
                 }
                 else
                 {
-                    body << "       (this is a read access)\n";
+                    body << "\t\t ↳ (this is a read access)\n";
                 }
                 if (isUnreachable)
                 {
-                    body << "       [info] this access appears unreachable at runtime "
+                    body << "\t\t ↳ [info] this access appears unreachable at runtime "
                             "(condition is always false for this branch)\n";
                 }
 
@@ -598,10 +598,10 @@ namespace ctrace::stack
 
                 std::ostringstream body;
 
-                body << "  [!] dynamic stack allocation detected for variable '" << d.varName
+                body << "\t[ !!Warn ] dynamic stack allocation detected for variable '" << d.varName
                      << "'\n";
-                body << "       allocated type: " << d.typeName << "\n";
-                body << "       size of this allocation is not compile-time constant "
+                body << "\t\t ↳ allocated type: " << d.typeName << "\n";
+                body << "\t\t ↳ size of this allocation is not compile-time constant "
                         "(VLA / variable alloca) and may lead to unbounded stack usage\n";
 
                 Diagnostic diag;
@@ -655,46 +655,46 @@ namespace ctrace::stack
                 {
                     diag.severity = DiagnosticSeverity::Error;
                     diag.errCode = DescriptiveErrorCode::AllocaTooLarge;
-                    body << "  [!!] large alloca on the stack for variable '" << a.varName << "'\n";
+                    body << "\t[!!!Error] large alloca on the stack for variable '" << a.varName << "'\n";
                 }
                 else if (a.userControlled)
                 {
                     diag.severity = DiagnosticSeverity::Warning;
                     diag.errCode = DescriptiveErrorCode::AllocaUserControlled;
-                    body << "  [!!] user-controlled alloca size for variable '" << a.varName
+                    body << "\t[ !!Warn ] user-controlled alloca size for variable '" << a.varName
                          << "'\n";
                 }
                 else
                 {
                     diag.severity = DiagnosticSeverity::Warning;
                     diag.errCode = DescriptiveErrorCode::AllocaUsageWarning;
-                    body << "  [!] dynamic alloca on the stack for variable '" << a.varName
+                    body << "\t[ !!Warn ] dynamic alloca on the stack for variable '" << a.varName
                          << "'\n";
                 }
 
                 body
-                    << "       allocation performed via alloca/VLA; stack usage grows with runtime "
+                    << "\t\t ↳ allocation performed via alloca/VLA; stack usage grows with runtime "
                        "value\n";
 
                 if (a.sizeIsConst)
                 {
-                    body << "       requested stack size: " << a.sizeBytes << " bytes\n";
+                    body << "\t\t ↳ requested stack size: " << a.sizeBytes << " bytes\n";
                 }
                 else if (a.hasUpperBound)
                 {
-                    body << "       inferred upper bound for size: " << a.upperBoundBytes
+                    body << "\t\t ↳ inferred upper bound for size: " << a.upperBoundBytes
                          << " bytes\n";
                 }
                 else
                 {
-                    body << "       size is unbounded at compile time\n";
+                    body << "\t\t ↳ size is unbounded at compile time\n";
                 }
 
                 if (a.isInfiniteRecursive)
                 {
                     // Any alloca inside infinite recursion will blow the stack.
                     diag.severity = DiagnosticSeverity::Error;
-                    body << "       function is infinitely recursive; this alloca runs at every "
+                    body << "\t\t ↳ function is infinitely recursive; this alloca runs at every "
                             "frame and guarantees stack overflow\n";
                 }
                 else if (a.isRecursive)
@@ -705,14 +705,14 @@ namespace ctrace::stack
                     {
                         diag.severity = DiagnosticSeverity::Error;
                     }
-                    body << "       function is recursive; this allocation repeats at each "
+                    body << "\t\t ↳ function is recursive; this allocation repeats at each "
                             "recursion "
                             "depth and can exhaust the stack\n";
                 }
 
                 if (isOversized)
                 {
-                    body << "       exceeds safety threshold of " << allocaLargeThreshold
+                    body << "\t\t ↳ exceeds safety threshold of " << allocaLargeThreshold
                          << " bytes";
                     if (config.stackLimit != 0)
                     {
@@ -722,12 +722,12 @@ namespace ctrace::stack
                 }
                 else if (a.userControlled)
                 {
-                    body << "       size depends on user-controlled input "
+                    body << "\t\t ↳ size depends on user-controlled input "
                             "(function argument or non-local value)\n";
                 }
                 else
                 {
-                    body << "       size does not appear user-controlled but remains "
+                    body << "\t\t ↳ size does not appear user-controlled but remains "
                             "runtime-dependent\n";
                 }
 
@@ -758,17 +758,17 @@ namespace ctrace::stack
 
                 std::ostringstream body;
 
-                body << "Function: " << m.funcName;
-                if (haveLoc)
-                {
-                    body << " (line " << line << ", column " << column << ")";
-                }
-                body << "\n";
+                // body << "Function: " << m.funcName;
+                // if (haveLoc)
+                // {
+                //     body << " (line " << line << ", column " << column << ")";
+                // }
+                // body << "\n";
 
-                body << "  [!!] potential stack buffer overflow in " << m.intrinsicName
+                body << "\t\t[ !!Warn ] potential stack buffer overflow in " << m.intrinsicName
                      << " on variable '" << m.varName << "'\n";
-                body << "       destination stack buffer size: " << m.destSizeBytes << " bytes\n";
-                body << "       requested " << m.lengthBytes << " bytes to be copied/initialized\n";
+                body << "\t\t ↳ destination stack buffer size: " << m.destSizeBytes << " bytes\n";
+                body << "\t\t ↳ requested " << m.lengthBytes << " bytes to be copied/initialized\n";
 
                 Diagnostic diag;
                 diag.funcName = m.funcName;
@@ -803,19 +803,19 @@ namespace ctrace::stack
                 std::ostringstream body;
                 if (s.hasPointerDest)
                 {
-                    body << "  [!] potential unsafe write with length (size - " << s.k << ")";
+                    body << "\t[ !!Warn ] potential unsafe write with length (size - " << s.k << ")";
                 }
                 else
                 {
-                    body << "  [!] potential unsafe size-" << s.k << " argument passed";
+                    body << "\t[ !!Warn ] potential unsafe size-" << s.k << " argument passed";
                 }
                 if (!s.sinkName.empty())
                     body << " in " << s.sinkName;
                 body << "\n";
                 if (s.hasPointerDest && !s.ptrNonNull)
-                    body << "       destination pointer may be null\n";
+                    body << "\t\t ↳ destination pointer may be null\n";
                 if (!s.sizeAboveK)
-                    body << "       size operand may be <= " << s.k << "\n";
+                    body << "\t\t ↳ size operand may be <= " << s.k << "\n";
 
                 Diagnostic diag;
                 diag.funcName = s.funcName;
@@ -851,7 +851,7 @@ namespace ctrace::stack
                 std::ostringstream body;
                 Diagnostic diag;
 
-                body << "  [!Info] multiple stores to stack buffer '" << ms.varName
+                body << "\t[!Info!] multiple stores to stack buffer '" << ms.varName
                      << "' in this function (" << ms.storeCount << " store instruction(s)";
                 diag.errCode = DescriptiveErrorCode::MultipleStoresToStackBuffer;
                 if (ms.distinctIndexCount > 0)
@@ -862,13 +862,12 @@ namespace ctrace::stack
 
                 if (ms.distinctIndexCount == 1)
                 {
-                    body << "       all stores use the same index expression "
+                    body << "\t\t[!Info!] all stores use the same index expression "
                             "(possible redundant or unintended overwrite)\n";
                 }
                 else if (ms.distinctIndexCount > 1)
                 {
-                    body << "       stores use different index expressions; "
-                            "verify indices are correct and non-overlapping\n";
+                    body << "\t[!Info!] stores use different index expressions; verify indices are correct and non-overlapping\n";
                 }
 
                 diag.funcName = ms.funcName;
@@ -920,9 +919,9 @@ namespace ctrace::stack
                 }
 
                 std::ostringstream body;
-                body << "  [!] unreachable else-if branch: condition is equivalent to a previous "
+                body << "\t[ !!Warn ] unreachable else-if branch: condition is equivalent to a previous "
                         "'if' condition\n";
-                body << "       else branch implies previous condition is false\n";
+                body << "\t\t ↳ else branch implies previous condition is false\n";
 
                 Diagnostic diag;
                 diag.funcName = issue.funcName;
@@ -963,18 +962,18 @@ namespace ctrace::stack
                 std::ostringstream body;
                 if (issue.kind == analysis::UninitializedLocalIssueKind::ReadBeforeDefiniteInit)
                 {
-                    body << "  [!!] potential read of uninitialized local variable '"
+                    body << "\t[ !!Warn ] potential read of uninitialized local variable '"
                          << issue.varName << "'\n";
-                    body << "       this load may execute before any definite initialization on "
+                    body << "\t\t ↳ this load may execute before any definite initialization on "
                             "all control-flow paths\n";
                 }
                 else if (issue.kind ==
                          analysis::UninitializedLocalIssueKind::ReadBeforeDefiniteInitViaCall)
                 {
-                    body << "  [!!] potential read of uninitialized local variable '"
+                    body << "\t[ !!Warn ] potential read of uninitialized local variable '"
                          << issue.varName << "'\n";
                     body
-                        << "       this call may read the value before any definite initialization";
+                        << "\t\t ↳ this call may read the value before any definite initialization";
                     if (!issue.calleeName.empty())
                     {
                         body << " in '" << issue.calleeName << "'";
@@ -983,8 +982,8 @@ namespace ctrace::stack
                 }
                 else
                 {
-                    body << "  [!] local variable '" << issue.varName << "' is never initialized\n";
-                    body << "      declared without initializer and no definite write was found "
+                    body << "\t[ !!Warn ] local variable '" << issue.varName << "' is never initialized\n";
+                    body << "\t\t ↳ declared without initializer and no definite write was found "
                             "in this function\n";
                 }
 
@@ -1051,26 +1050,26 @@ namespace ctrace::stack
 
                 std::ostringstream body;
 
-                body << "  [!!] potential UB: invalid base reconstruction via "
+                body << "\t[ !!Warn ] potential UB: invalid base reconstruction via "
                         "offsetof/container_of\n";
-                body << "       variable: '" << br.varName << "'\n";
-                body << "       source member: " << br.sourceMember << "\n";
-                body << "       offset applied: " << (br.offsetUsed >= 0 ? "+" : "")
+                body << "\t\t ↳ variable: '" << br.varName << "'\n";
+                body << "\t\t ↳ source member: " << br.sourceMember << "\n";
+                body << "\t\t ↳ offset applied: " << (br.offsetUsed >= 0 ? "+" : "")
                      << br.offsetUsed << " bytes\n";
-                body << "       target type: " << br.targetType << "\n";
+                body << "\t\t ↳ target type: " << br.targetType << "\n";
 
                 if (br.isOutOfBounds)
                 {
                     body
-                        << "       [ERROR] derived pointer points OUTSIDE the valid object range\n";
-                    body << "               (this will cause undefined behavior if dereferenced)\n";
+                        << "\t[!!!Error] derived pointer points OUTSIDE the valid object range\n";
+                    body << "\t\t ↳ (this will cause undefined behavior if dereferenced)\n";
                 }
                 else
                 {
-                    body << "       [WARNING] unable to verify that derived pointer points to a "
+                    body << "\t[ !!Warn ] unable to verify that derived pointer points to a "
                             "valid "
                             "object\n";
-                    body << "                 (potential undefined behavior if offset is "
+                    body << "\t\t ↳ (potential undefined behavior if offset is "
                             "incorrect)\n";
                 }
 
@@ -1111,51 +1110,51 @@ namespace ctrace::stack
 
                 std::ostringstream body;
 
-                body << "  [!!] stack pointer escape: address of variable '" << e.varName
+                body << "\t[ !!Warn ] stack pointer escape: address of variable '" << e.varName
                      << "' escapes this function\n";
 
                 if (e.escapeKind == "return")
                 {
-                    body << "       escape via return statement "
+                    body << "\t\t ↳ escape via return statement "
                             "(pointer to stack returned to caller)\n";
                 }
                 else if (e.escapeKind == "store_global")
                 {
                     if (!e.targetName.empty())
                     {
-                        body << "       stored into global variable '" << e.targetName
+                        body << "\t\t ↳ stored into global variable '" << e.targetName
                              << "' (pointer may be used after the function returns)\n";
                     }
                     else
                     {
-                        body << "       stored into a global variable "
+                        body << "\t\t ↳ stored into a global variable "
                                 "(pointer may be used after the function returns)\n";
                     }
                 }
                 else if (e.escapeKind == "store_unknown")
                 {
-                    body << "       stored through a non-local pointer "
+                    body << "\t\t ↳ stored through a non-local pointer "
                             "(e.g. via an out-parameter; pointer may outlive this function)\n";
                     if (!e.targetName.empty())
                     {
-                        body << "       destination pointer/value name: '" << e.targetName << "'\n";
+                        body << "\t\t ↳ destination pointer/value name: '" << e.targetName << "'\n";
                     }
                 }
                 else if (e.escapeKind == "call_callback")
                 {
-                    body << "       address passed as argument to an indirect call "
+                    body << "\t\t ↳ address passed as argument to an indirect call "
                             "(callback may capture the pointer beyond this function)\n";
                 }
                 else if (e.escapeKind == "call_arg")
                 {
                     if (!e.targetName.empty())
                     {
-                        body << "       address passed as argument to function '" << e.targetName
+                        body << "\t\t ↳ address passed as argument to function '" << e.targetName
                              << "' (callee may capture the pointer beyond this function)\n";
                     }
                     else
                     {
-                        body << "       address passed as argument to a function "
+                        body << "\t\t ↳ address passed as argument to a function "
                                 "(callee may capture the pointer beyond this function)\n";
                     }
                 }
