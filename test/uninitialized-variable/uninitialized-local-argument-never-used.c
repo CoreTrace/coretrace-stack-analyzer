@@ -8,3 +8,7 @@ int main(int argc, char** argv)
 
     return 0;
 }
+
+// at line 5, column 1
+// [!] local variable 'value_int' is never initialized
+//     declared without initializer and no definite write was found in this function
