@@ -19,9 +19,9 @@ void consume_mut(int* p)
 }
 
 // at line 25, column 0
-// [!]ConstParameterNotModified.Pointer: parameter 'p' in function 'caller_const' is never used to modify the pointed object
-// current type: int *p
-// suggested type: const int *p
+// [!Info!] ConstParameterNotModified.Pointer: parameter 'p' in function 'caller_const' is never used to modify the pointed object
+//          ↳ current type: int *p
+//          ↳ suggested type: const int *p
 void caller_const(int* p)
 {
     consume_const(p);
@@ -33,9 +33,9 @@ void caller_mut(int* p)
 }
 
 // at line 39, column 0
-// [!]ConstParameterNotModified.Pointer: parameter 'p' in function 'read_only' is never used to modify the pointed object
-// current type: int *p
-// suggested type: const int *p
+// [!Info!] ConstParameterNotModified.Pointer: parameter 'p' in function 'read_only' is never used to modify the pointed object
+//          ↳ current type: int *p
+//          ↳ suggested type: const int *p
 void read_only(int* p)
 {
     int v = *p;
@@ -48,9 +48,9 @@ void variadic_use(int* p)
 }
 
 // at line 54, column 0
-// [!]ConstParameterNotModified.Pointer: parameter 'reg' in function 'read_mmio' is never used to modify the pointed object
-// current type: volatile int *reg
-// suggested type: const volatile int *reg
+// [!Info!] ConstParameterNotModified.Pointer: parameter 'reg' in function 'read_mmio' is never used to modify the pointed object
+//          ↳ current type: volatile int *reg
+//          ↳ suggested type: const volatile int *reg
 void read_mmio(volatile int* reg)
 {
     int v = *reg;
@@ -69,3 +69,8 @@ void takes_void(void* p)
 {
     (void)p;
 }
+
+// at line 68, column 0
+// [!Info!] ConstParameterNotModified.Pointer: parameter 'p' in function 'takes_void' is never used to modify the pointed object
+//          ↳ current type: <unknown type> *p
+//          ↳ suggested type: const <unknown type> *p
