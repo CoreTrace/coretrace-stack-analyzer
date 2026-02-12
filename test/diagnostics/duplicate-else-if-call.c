@@ -16,8 +16,8 @@ int main(int argc, char** argv)
         return 1;
     }
     // at line 21, column 14
-    // [!] unreachable else-if branch: condition is equivalent to a previous 'if' condition
-    //     else branch implies previous condition is false
+    // [ !!Warn ] unreachable else-if branch: condition is equivalent to a previous 'if' condition
+    //          ↳ else branch implies previous condition is false
     else if (same_flag(arg))
     {
         return 2;

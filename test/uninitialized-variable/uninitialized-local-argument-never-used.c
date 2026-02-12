@@ -10,5 +10,5 @@ int main(int argc, char** argv)
 }
 
 // at line 5, column 1
-// [!] local variable 'value_int' is never initialized
-//     declared without initializer and no definite write was found in this function
+// [ !!Warn ] local variable 'value_int' is never initialized
+// ↳ declared without initializer and no definite write was found in this function

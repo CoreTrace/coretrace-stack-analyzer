@@ -15,23 +15,23 @@ void test_invalid_container_of(void)
 
     // BUG: using wrong offset (8 instead of 4)
     // at line 25, column 67
-    // [!!] potential UB: invalid base reconstruction via offsetof/container_of
-    //     variable: 'obj'
-    //     source member: offset +4
-    //     offset applied: -8 bytes
-    //     target type: ptr
-    //     [ERROR] derived pointer points OUTSIDE the valid object range
-    //             (this will cause undefined behavior if dereferenced)
+    // [ !!Warn ] potential UB: invalid base reconstruction via offsetof/container_of
+    //          ↳ variable: 'obj'
+    //          ↳ source member: offset +4
+    //          ↳ offset applied: -8 bytes
+    //          ↳ target type: ptr
+    // [!!!Error] derived pointer points OUTSIDE the valid object range
+    //          ↳ (this will cause undefined behavior if dereferenced)
     struct MyStruct* wrong_base = (struct MyStruct*)((char*)ptr_b - 8);
 
     // at line 35, column 17
-    // [!!] potential UB: invalid base reconstruction via offsetof/container_of
-    //     variable: 'obj'
-    //     source member: offset +-4
-    //     offset applied: +0 bytes
-    //     target type: ptr
-    //     [ERROR] derived pointer points OUTSIDE the valid object range
-    //             (this will cause undefined behavior if dereferenced)
+    // [ !!Warn ] potential UB: invalid base reconstruction via offsetof/container_of
+    //          ↳ variable: 'obj'
+    //          ↳ source member: offset +-4
+    //          ↳ offset applied: +0 bytes
+    //          ↳ target type: ptr
+    // [!!!Error] derived pointer points OUTSIDE the valid object range
+    //          ↳ (this will cause undefined behavior if dereferenced)
     wrong_base->field_a = 42; // UB: out of bounds access
 }
 
@@ -52,3 +52,11 @@ int main(void)
     test_valid_container_of();
     return 0;
 }
+
+// at line 13, column 1
+// [ !!Warn ] local variable 'obj' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 40, column 1
+// [ !!Warn ] local variable 'obj' is never initialized
+//             ↳ declared without initializer and no definite write was found in this function

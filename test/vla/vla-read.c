@@ -11,10 +11,7 @@ int main(void)
 
     // char *buf = malloc(n);
     int len = (int)n;
-    // at line 18, column 5
-    // [!] dynamic stack allocation detected for variable 'vla'
-    //     allocated type: i8
-    //     size of this allocation is not compile-time constant (VLA / variable alloca) and may lead to unbounded stack usage
+
     char buf[len];
     if (!buf)
         return 1;
@@ -25,3 +22,18 @@ int main(void)
     free(buf);
     return 0;
 }
+
+// at line 15, column 5
+// [ !!Warn ] dynamic stack allocation detected for variable 'vla'
+// ↳ allocated type: i8
+// ↳ size of this allocation is not compile-time constant (VLA / variable alloca) and may lead to unbounded stack usage
+
+// at line 15, column 5
+// [ !!Warn ] user-controlled alloca size for variable 'vla'
+// ↳ allocation performed via alloca/VLA; stack usage grows with runtime value
+// ↳ size is unbounded at compile time
+// ↳ size depends on user-controlled input (function argument or non-local value)
+
+// at line 20, column 18
+// [ !!Warn ] potential read of uninitialized local variable 'tmp'
+// ↳ this load may execute before any definite initialization on all control-flow paths

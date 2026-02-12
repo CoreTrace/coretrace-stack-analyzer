@@ -10,5 +10,5 @@ int read_via_call_before_init(void)
 }
 
 // at line 9, column 12
-// [!!] potential read of uninitialized local variable 'value'
-//      this call may read the value before any definite initialization in 'read_value'
+// [ !!Warn ] potential read of uninitialized local variable 'value'
+// ↳ this call may read the value before any definite initialization in 'read_value'

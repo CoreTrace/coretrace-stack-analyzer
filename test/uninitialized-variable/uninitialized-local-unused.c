@@ -5,5 +5,5 @@ int main(void)
 }
 
 // at line 3, column 1
-// [!] local variable 'value' is never initialized
-//     declared without initializer and no definite write was found in this function
+// [ !!Warn ] local variable 'value' is never initialized
+// ↳ declared without initializer and no definite write was found in this function

@@ -1,9 +1,5 @@
 #include <string.h>
 
-// Function: foo
-//   [!!] potential stack buffer overflow in memcpy on variable '<unnamed>'
-//        destination stack buffer size: 10 bytes
-//        requested 20 bytes to be copied/initialized
 void foo(char* src)
 {
     char buf[10];
@@ -16,3 +12,12 @@ int main(void)
     foo(src);
     return 0;
 }
+
+// at line 6, column 5
+//         [ !!Warn ] potential stack buffer overflow in memcpy on variable 'buf'
+//          ↳ destination stack buffer size: 10 bytes
+//          ↳ requested 20 bytes to be copied/initialized
+
+// at line 5, column 1
+// [ !!Warn ] local variable 'buf' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function

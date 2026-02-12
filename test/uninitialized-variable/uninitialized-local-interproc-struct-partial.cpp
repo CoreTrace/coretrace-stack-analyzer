@@ -44,5 +44,5 @@ int main(void)
 }
 
 // at line 43, column 16
-// [!!] potential read of uninitialized local variable 'cfg'
-//      this load may execute before any definite initialization on all control-flow paths
+// [ !!Warn ] potential read of uninitialized local variable 'cfg'
+// ↳ this load may execute before any definite initialization on all control-flow paths

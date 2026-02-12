@@ -1,7 +1,7 @@
 #include <stdio.h>
 
 // at line 8, column 12
-// [!] recursive or mutually recursive function detected
+// [ !!Warn ] recursive or mutually recursive function detected
 void tutu(void)
 {
     static int counter = 0;

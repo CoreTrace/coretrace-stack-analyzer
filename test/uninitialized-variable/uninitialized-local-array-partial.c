@@ -6,5 +6,5 @@ int read_array_partial(void)
 }
 
 // at line 5, column 12
-// [!!] potential read of uninitialized local variable 'arr'
-//      this load may execute before any definite initialization on all control-flow paths
+// [ !!Warn ] potential read of uninitialized local variable 'arr'
+// ↳ this load may execute before any definite initialization on all control-flow paths

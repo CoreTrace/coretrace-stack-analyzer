@@ -17,24 +17,24 @@ int test_gep_positive_offset_missed(void)
     // Wrong reconstruction with a positive offset (+4).
     // Correct behavior: diagnostic (base points inside the object, not at the base).
     // at line 27, column 48
-    // [!!] potential UB: invalid base reconstruction via offsetof/container_of
-    //     variable: 'obj'
-    //     source member: offset +4
-    //     offset applied: +4 bytes
-    //     target type: ptr
-    //     [WARNING] unable to verify that derived pointer points to a valid object
-    //                 (potential undefined behavior if offset is incorrect)
+    // [ !!Warn ] potential UB: invalid base reconstruction via offsetof/container_of
+    //          ↳ variable: 'obj'
+    //          ↳ source member: offset +4
+    //          ↳ offset applied: +4 bytes
+    //          ↳ target type: ptr
+    // [ !!Warn ] unable to verify that derived pointer points to a valid object
+    //          ↳ (potential undefined behavior if offset is incorrect)
     struct A* bad_base = (struct A*)((char*)pb + 4);
 
     // Expected: invalid base reconstruction diagnostic.
     // at line 38, column 22
-    // [!!] potential UB: invalid base reconstruction via offsetof/container_of
-    //     variable: 'obj'
-    //     source member: offset +8
-    //     offset applied: +0 bytes
-    //     target type: ptr
-    //     [WARNING] unable to verify that derived pointer points to a valid object
-    //                 (potential undefined behavior if offset is incorrect)
+    // [ !!Warn ] potential UB: invalid base reconstruction via offsetof/container_of
+    //          ↳ variable: 'obj'
+    //          ↳ source member: offset +8
+    //          ↳ offset applied: +0 bytes
+    //          ↳ target type: ptr
+    // [ !!Warn ] unable to verify that derived pointer points to a valid object
+    //          ↳ (potential undefined behavior if offset is incorrect)
     return bad_base->a;
 }
 

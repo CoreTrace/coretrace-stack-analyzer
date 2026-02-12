@@ -11,7 +11,7 @@ int main(int ac, char** av)
 }
 
 // at line 4, column 5
-// [!] dynamic alloca on the stack for variable 'vla'
-//     allocation performed via alloca/VLA; stack usage grows with runtime value
-//     requested stack size: 6 bytes
-//     size does not appear user-controlled but remains runtime-dependent
+// [ !!Warn ] dynamic alloca on the stack for variable 'vla'
+// ↳ allocation performed via alloca/VLA; stack usage grows with runtime value
+// ↳ requested stack size: 6 bytes
+// ↳ size does not appear user-controlled but remains runtime-dependent
