@@ -9,6 +9,7 @@
 #include <iostream>
 #include <algorithm>
 #include <sstream>
+#include <string_view>
 
 #include <llvm/ADT/DenseMap.h>
 #include <llvm/ADT/SmallVector.h>
@@ -37,10 +38,27 @@
 #include "analysis/UninitializedVarAnalysis.hpp"
 #include "passes/ModulePasses.hpp"
 
-#define INFO_OUTPUT "[!Info!]"
-#define WARN_OUTPUT "[ !!Warn ]"
-#define ERROR_OUTPUT "[!!!Error]"
-#define TAB_OUTPUT "\t\t ↳ "
+namespace
+{
+    constexpr std::string_view kInfoPrefix = "[ !Info! ]";
+    constexpr std::string_view kWarnPrefix = "[ !!Warn ]";
+    constexpr std::string_view kErrorPrefix = "[!!!Error]";
+    constexpr std::string_view kDiagIndentArrow = "\t\t ↳ ";
+
+    constexpr std::string_view prefixForSeverity(ctrace::stack::DiagnosticSeverity sev) noexcept
+    {
+        switch (sev)
+        {
+        case ctrace::stack::DiagnosticSeverity::Info:
+            return kInfoPrefix;
+        case ctrace::stack::DiagnosticSeverity::Warning:
+            return kWarnPrefix;
+        case ctrace::stack::DiagnosticSeverity::Error:
+            return kErrorPrefix;
+        }
+        return kWarnPrefix;
+    }
+} // namespace
 
 namespace ctrace::stack
 {
@@ -374,9 +392,9 @@ namespace ctrace::stack
                         diag.line = functionLoc.line;
                         diag.column = functionLoc.column;
                     }
-                    diag.message =
-                        "\t[!!!Error] unconditional self recursion detected (no base case)\n"
-                        "\t\t ↳ this will eventually overflow the stack at runtime\n";
+                    diag.message = "\t" + std::string(prefixForSeverity(diag.severity)) +
+                                   " unconditional self recursion detected (no base case)\n"
+                                   "\t\t ↳ this will eventually overflow the stack at runtime\n";
                     result.diagnostics.push_back(std::move(diag));
                 }
 
@@ -461,7 +479,8 @@ namespace ctrace::stack
                     }
                     std::string mainLine = " potential stack overflow: exceeds limit of " +
                                            std::to_string(ctx.config.stackLimit) + " bytes\n";
-                    message = "\t[!!!Error]" + mainLine + aliasLine + suffix + message;
+                    message = "\t" + std::string(prefixForSeverity(diag.severity)) + mainLine +
+                              aliasLine + suffix + message;
                     if (suppressLocation)
                     {
                         diag.line = 0;
@@ -748,22 +767,22 @@ namespace ctrace::stack
                 {
                     diag.severity = DiagnosticSeverity::Error;
                     diag.errCode = DescriptiveErrorCode::AllocaTooLarge;
-                    body << "\t[!!!Error] large alloca on the stack for variable '" << a.varName
-                         << "'\n";
+                    body << "\t" << prefixForSeverity(diag.severity)
+                         << " large alloca on the stack for variable '" << a.varName << "'\n";
                 }
                 else if (a.userControlled)
                 {
                     diag.severity = DiagnosticSeverity::Warning;
                     diag.errCode = DescriptiveErrorCode::AllocaUserControlled;
-                    body << "\t[ !!Warn ] user-controlled alloca size for variable '" << a.varName
-                         << "'\n";
+                    body << "\t" << prefixForSeverity(diag.severity)
+                         << " user-controlled alloca size for variable '" << a.varName << "'\n";
                 }
                 else
                 {
                     diag.severity = DiagnosticSeverity::Warning;
                     diag.errCode = DescriptiveErrorCode::AllocaUsageWarning;
-                    body << "\t[ !!Warn ] dynamic alloca on the stack for variable '" << a.varName
-                         << "'\n";
+                    body << "\t" << prefixForSeverity(diag.severity)
+                         << " dynamic alloca on the stack for variable '" << a.varName << "'\n";
                 }
 
                 body
@@ -859,7 +878,8 @@ namespace ctrace::stack
                 // }
                 // body << "\n";
 
-                body << "\t[ !!Warn ] potential stack buffer overflow in " << m.intrinsicName
+                body << "\t" << prefixForSeverity(DiagnosticSeverity::Warning)
+                     << " potential stack buffer overflow in " << m.intrinsicName
                      << " on variable '" << m.varName << "'\n";
                 body << "\t\t ↳ destination stack buffer size: " << m.destSizeBytes << " bytes\n";
                 body << "\t\t ↳ requested " << m.lengthBytes << " bytes to be copied/initialized\n";
@@ -897,12 +917,13 @@ namespace ctrace::stack
                 std::ostringstream body;
                 if (s.hasPointerDest)
                 {
-                    body << "\t[ !!Warn ] potential unsafe write with length (size - " << s.k
-                         << ")";
+                    body << "\t" << prefixForSeverity(DiagnosticSeverity::Warning)
+                         << " potential unsafe write with length (size - " << s.k << ")";
                 }
                 else
                 {
-                    body << "\t[ !!Warn ] potential unsafe size-" << s.k << " argument passed";
+                    body << "\t" << prefixForSeverity(DiagnosticSeverity::Warning)
+                         << " potential unsafe size-" << s.k << " argument passed";
                 }
                 if (!s.sinkName.empty())
                     body << " in " << s.sinkName;
@@ -936,8 +957,9 @@ namespace ctrace::stack
                 std::ostringstream body;
                 Diagnostic diag;
 
-                body << "\t" << INFO_OUTPUT << " multiple stores to stack buffer '" << ms.varName
-                     << "' in this function (" << ms.storeCount << " store instruction(s)";
+                body << "\t" << prefixForSeverity(DiagnosticSeverity::Info)
+                     << " multiple stores to stack buffer '" << ms.varName << "' in this function ("
+                     << ms.storeCount << " store instruction(s)";
                 diag.errCode = DescriptiveErrorCode::MultipleStoresToStackBuffer;
                 if (ms.distinctIndexCount > 0)
                 {
@@ -947,13 +969,13 @@ namespace ctrace::stack
 
                 if (ms.distinctIndexCount == 1)
                 {
-                    body << "\t" << INFO_OUTPUT
+                    body << "\t" << prefixForSeverity(DiagnosticSeverity::Info)
                          << " all stores use the same index expression "
                             "(possible redundant or unintended overwrite)\n";
                 }
                 else if (ms.distinctIndexCount > 1)
                 {
-                    body << "\t" << INFO_OUTPUT
+                    body << "\t" << prefixForSeverity(DiagnosticSeverity::Info)
                          << " stores use different index expressions; verify indices are "
                             "correct and non-overlapping\n";
                 }
@@ -1007,7 +1029,8 @@ namespace ctrace::stack
                 }
 
                 std::ostringstream body;
-                body << "\t[ !!Warn ] unreachable else-if branch: condition is equivalent to a "
+                body << "\t" << prefixForSeverity(DiagnosticSeverity::Warning)
+                     << " unreachable else-if branch: condition is equivalent to a "
                         "previous "
                         "'if' condition\n";
                 body << "\t\t ↳ else branch implies previous condition is false\n";
@@ -1199,8 +1222,9 @@ namespace ctrace::stack
 
                 std::ostringstream body;
 
-                body << "\t" << WARN_OUTPUT << " stack pointer escape: address of variable '"
-                     << e.varName << "' escapes this function\n";
+                body << "\t" << prefixForSeverity(DiagnosticSeverity::Warning)
+                     << " stack pointer escape: address of variable '" << e.varName
+                     << "' escapes this function\n";
 
                 if (e.escapeKind == "return")
                 {
@@ -1272,11 +1296,7 @@ namespace ctrace::stack
                 diag.severity = DiagnosticSeverity::Info;
                 diag.errCode = DescriptiveErrorCode::ConstParameterNotModified;
 
-                const char* prefix = INFO_OUTPUT;
-                if (diag.severity == DiagnosticSeverity::Warning)
-                    prefix = WARN_OUTPUT;
-                else if (diag.severity == DiagnosticSeverity::Error)
-                    prefix = ERROR_OUTPUT;
+                const std::string_view prefix = prefixForSeverity(diag.severity);
 
                 const char* subLabel = "Pointer";
                 if (cp.pointerConstOnly)
@@ -1294,9 +1314,9 @@ namespace ctrace::stack
                          << ": parameter '" << cp.paramName << "' in function '" << displayFuncName
                          << "' is an rvalue reference and is never used to modify the referred "
                             "object\n";
-                    body << TAB_OUTPUT << "consider passing by value (" << cp.suggestedType
+                    body << kDiagIndentArrow << "consider passing by value (" << cp.suggestedType
                          << ") or const reference (" << cp.suggestedTypeAlt << ")\n";
-                    body << TAB_OUTPUT << "current type: " << cp.currentType << "\n";
+                    body << kDiagIndentArrow << "current type: " << cp.currentType << "\n";
                 }
                 else if (cp.pointerConstOnly)
                 {
@@ -1304,7 +1324,7 @@ namespace ctrace::stack
                          << ": parameter '" << cp.paramName << "' in function '" << displayFuncName
                          << "' is declared '" << cp.currentType
                          << "' but the pointed object is never modified\n";
-                    body << TAB_OUTPUT << "consider '" << cp.suggestedType
+                    body << kDiagIndentArrow << "consider '" << cp.suggestedType
                          << "' for API const-correctness\n";
                 }
                 else
@@ -1317,8 +1337,8 @@ namespace ctrace::stack
 
                 if (!cp.isRvalueRef)
                 {
-                    body << TAB_OUTPUT << "current type: " << cp.currentType << "\n";
-                    body << TAB_OUTPUT << "suggested type: " << cp.suggestedType << "\n";
+                    body << kDiagIndentArrow << "current type: " << cp.currentType << "\n";
+                    body << kDiagIndentArrow << "suggested type: " << cp.suggestedType << "\n";
                 }
 
                 diag.funcName = cp.funcName;
