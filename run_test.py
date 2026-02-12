@@ -192,7 +192,12 @@ def parse_human_functions(output: str):
                             functions[name]["maxStackUnknown"] = info["unknown"]
                             functions[name]["maxStack"] = info["value"]
                             functions[name]["maxStackLowerBound"] = info["lower_bound"]
-                    elif "recursive or mutually recursive function detected" in stripped:
+
+                # Recursion diagnostics may appear either directly in the summary
+                # or below an "at line ..." location line.
+                for block_line in block[1:]:
+                    stripped = block_line.strip()
+                    if "recursive or mutually recursive function detected" in stripped:
                         functions[name]["isRecursive"] = True
                     elif "unconditional self recursion detected" in stripped:
                         functions[name]["hasInfiniteSelfRecursion"] = True
