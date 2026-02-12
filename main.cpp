@@ -16,6 +16,8 @@
 #include "analysis/CompileCommands.hpp"
 #include "mangle.hpp"
 
+#include <coretrace/logger.hpp>
+
 using namespace ctrace::stack;
 
 enum class OutputFormat
@@ -391,6 +393,14 @@ static AnalysisResult filterWarningsOnly(const AnalysisResult& result, const Ana
 
 int main(int argc, char** argv)
 {
+    coretrace::enable_logging();
+    coretrace::set_prefix("==stack-analyzer==");
+    coretrace::set_min_level(coretrace::Level::Info);
+    coretrace::set_source_location(true);
+
+    coretrace::log(coretrace::Level::Debug, coretrace::Module("cli"),
+                   "Starting analysis for {} input(s)\n", argc - 1);
+
     llvm::LLVMContext context;
     std::vector<std::string> inputFilenames;
     OutputFormat outputFormat = OutputFormat::Human;
@@ -400,11 +410,19 @@ int main(int argc, char** argv)
     cfg.warningsOnly = false;
     std::string compileCommandsPath;
     bool compileCommandsExplicit = false;
-    // cfg.mode = AnalysisMode::IR; -> already set by default constructor
-    // cfg.stackLimit = 8ull * 1024ull * 1024ull; // 8 MiB -> already set by default constructor but needed to be set with args
 
     cfg.extraCompileArgs.emplace_back("-O0");
     cfg.extraCompileArgs.emplace_back("--ct-optnone");
+
+    if (argc < 2)
+    {
+        printHelp();
+        return 1;
+    } else if (argc < 2)
+    {
+        printHelp();
+        return 1;
+    }
 
     for (int i = 1; i < argc; ++i)
     {
@@ -418,6 +436,12 @@ int main(int argc, char** argv)
         if (argStr == "--quiet")
         {
             cfg.quiet = true;
+            continue;
+        }
+        if (argStr == "--verbose")
+        {
+            cfg.quiet = false;
+            coretrace::set_min_level(coretrace::Level::Debug);
             continue;
         }
         if (argStr == "--STL" || argStr == "--stl")
@@ -495,6 +519,17 @@ int main(int argc, char** argv)
             std::string error;
             StackSize value = 0;
             if (!parseStackLimitValue(argv[++i], value, error))
+            {
+                llvm::errs() << "Invalid --stack-limit value: " << error << "\n";
+                return 1;
+            }
+            cfg.stackLimit = value;
+            continue;
+        } else if (argStr == "--stack-limit")
+        {
+            std::string error;
+            StackSize value = 0;
+            if (!parseStackLimitValue(argStr.substr(std::strlen("--stack-limit=")), value, error))
             {
                 llvm::errs() << "Invalid --stack-limit value: " << error << "\n";
                 return 1;
@@ -654,7 +689,8 @@ int main(int argc, char** argv)
     {
         if (compileCommandsPath.empty())
         {
-            llvm::errs() << "compile commands path is empty\n";
+            // llvm::errs() << "compile commands path is empty\n";
+            coretrace::log(coretrace::Level::Error, "Compile commands path is empty\n");
             return 1;
         }
 
@@ -666,7 +702,7 @@ int main(int argc, char** argv)
         }
         else if (fsErr)
         {
-            llvm::errs() << "Failed to inspect compile commands path: " << fsErr.message() << "\n";
+            coretrace::log(coretrace::Level::Error, "Failed to inspect compile commands path: {}\n", fsErr.message());
             return 1;
         }
 
@@ -674,12 +710,14 @@ int main(int argc, char** argv)
         {
             if (fsErr)
             {
-                llvm::errs() << "Failed to inspect compile commands path: " << fsErr.message()
-                             << "\n";
+                // llvm::errs() << "Failed to inspect compile commands path: " << fsErr.message()
+                            //  << "\n";
+                coretrace::log(coretrace::Level::Error, "Failed to inspect compile commands path: {}\n", fsErr.message());
             }
             else
             {
-                llvm::errs() << "compile commands file not found: " << compdbPath.string() << "\n";
+                // llvm::errs() << "compile commands file not found: " << compdbPath.string() << "\n";
+                coretrace::log(coretrace::Level::Error, "Compile commands file not found: {}\n", compdbPath.string());
             }
             return 1;
         }
@@ -689,7 +727,8 @@ int main(int argc, char** argv)
             ctrace::stack::analysis::CompilationDatabase::loadFromFile(compdbPath.string(), error);
         if (!db)
         {
-            llvm::errs() << "Failed to load compile commands: " << error << "\n";
+            // llvm::errs() << "Failed to load compile commands: " << error << "\n";
+            coretrace::log(coretrace::Level::Error, "Failed to load compile commands: {}\n", error);
             return 1;
         }
         cfg.compilationDatabase = std::move(db);
@@ -698,8 +737,10 @@ int main(int argc, char** argv)
 
     if (inputFilenames.empty())
     {
-        llvm::errs() << "Usage: stack_usage_analyzer <file.ll> [file2.ll ...] [options]\n"
-                     << "Try --help for more information.\n";
+        // llvm::errs() << "Usage: stack_usage_analyzer <file.ll> [file2.ll ...] [options]\n"
+                    //  << "Try --help for more information.\n";
+        coretrace::log(coretrace::Level::Error, "Usage: stack_usage_analyzer <file.ll> [file2.ll ...] [options]\n");
+        coretrace::log(coretrace::Level::Error, "Try --help for more information.\n");
         return 1;
     }
 
@@ -751,6 +792,7 @@ int main(int argc, char** argv)
             else
             {
                 llvm::errs() << "Failed to analyze: " << inputFilename << "\n";
+                coretrace::log(coretrace::Level::Error, coretrace::Module("cli"), "Failed to analyze:{}\n", inputFilename);
                 localErr.print("stack_usage_analyzer", llvm::errs());
                 return 1;
             }
