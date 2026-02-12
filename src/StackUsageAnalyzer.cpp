@@ -11,7 +11,9 @@
 #include <sstream>
 
 #include <llvm/ADT/DenseMap.h>
+#include <llvm/ADT/SmallVector.h>
 #include <llvm/IR/LLVMContext.h>
+#include <llvm/IR/DebugInfo.h>
 #include <llvm/IR/Module.h>
 #include <llvm/IR/Function.h>
 #include <llvm/IR/Instructions.h>
@@ -34,6 +36,10 @@
 #include "analysis/StackPointerEscape.hpp"
 #include "analysis/UninitializedVarAnalysis.hpp"
 #include "passes/ModulePasses.hpp"
+
+#define INFO_OUTPUT "[!Info!]"
+#define WARN_OUTPUT "[ !!Warn ]"
+#define ERROR_OUTPUT "[!!!Error]"
 
 namespace ctrace::stack
 {
@@ -116,6 +122,90 @@ namespace ctrace::stack
                 localStack[F] = info;
             }
             return localStack;
+        }
+
+        static bool fillFromDebugLoc(llvm::DebugLoc DL, unsigned& line, unsigned& column)
+        {
+            if (!DL)
+                return false;
+            line = DL.getLine();
+            if (line == 0)
+                return false;
+            column = DL.getCol();
+            if (column == 0)
+                column = 1;
+            return true;
+        }
+
+        static bool fillFromVariableLine(const llvm::DILocalVariable* var, unsigned& line,
+                                         unsigned& column)
+        {
+            if (!var || var->getLine() == 0)
+                return false;
+            line = var->getLine();
+            column = 1;
+            return true;
+        }
+
+        static bool getAllocaSourceLocation(const llvm::AllocaInst* AI, unsigned& line,
+                                            unsigned& column)
+        {
+            line = 0;
+            column = 0;
+            if (!AI)
+                return false;
+
+            if (fillFromDebugLoc(AI->getDebugLoc(), line, column))
+                return true;
+
+            auto* nonConstAI = const_cast<llvm::AllocaInst*>(AI);
+            for (llvm::DbgDeclareInst* ddi : llvm::findDbgDeclares(nonConstAI))
+            {
+                if (fillFromDebugLoc(llvm::getDebugValueLoc(ddi), line, column) ||
+                    fillFromVariableLine(ddi->getVariable(), line, column))
+                {
+                    return true;
+                }
+            }
+
+            for (llvm::DbgVariableRecord* dvr : llvm::findDVRDeclares(nonConstAI))
+            {
+                if (fillFromDebugLoc(llvm::getDebugValueLoc(dvr), line, column) ||
+                    fillFromVariableLine(dvr->getVariable(), line, column))
+                {
+                    return true;
+                }
+            }
+
+            llvm::SmallVector<llvm::DbgVariableIntrinsic*, 4> dbgUsers;
+            llvm::SmallVector<llvm::DbgVariableRecord*, 4> dbgRecords;
+            llvm::findDbgUsers(dbgUsers, nonConstAI, &dbgRecords);
+
+            for (llvm::DbgVariableIntrinsic* dvi : dbgUsers)
+            {
+                if (fillFromDebugLoc(llvm::getDebugValueLoc(dvi), line, column) ||
+                    fillFromVariableLine(dvi->getVariable(), line, column))
+                {
+                    return true;
+                }
+            }
+
+            for (llvm::DbgVariableRecord* dvr : dbgRecords)
+            {
+                if (fillFromDebugLoc(llvm::getDebugValueLoc(dvr), line, column) ||
+                    fillFromVariableLine(dvr->getVariable(), line, column))
+                {
+                    return true;
+                }
+            }
+
+            if (const llvm::Function* F = AI->getFunction())
+            {
+                if (analysis::getFunctionSourceLocation(*F, line, column))
+                    return true;
+            }
+
+            return false;
         }
 
         static analysis::CallGraph buildCallGraphFiltered(const ModuleAnalysisContext& ctx)
@@ -840,22 +930,12 @@ namespace ctrace::stack
             {
                 unsigned line = 0;
                 unsigned column = 0;
-                bool haveLoc = false;
-                if (ms.allocaInst)
-                {
-                    llvm::DebugLoc DL = ms.allocaInst->getDebugLoc();
-                    if (DL)
-                    {
-                        line = DL.getLine();
-                        column = DL.getCol();
-                        haveLoc = true;
-                    }
-                }
+                bool haveLoc = getAllocaSourceLocation(ms.allocaInst, line, column);
 
                 std::ostringstream body;
                 Diagnostic diag;
 
-                body << "\t[!Info!] multiple stores to stack buffer '" << ms.varName
+                body << "\t" << INFO_OUTPUT << " multiple stores to stack buffer '" << ms.varName
                      << "' in this function (" << ms.storeCount << " store instruction(s)";
                 diag.errCode = DescriptiveErrorCode::MultipleStoresToStackBuffer;
                 if (ms.distinctIndexCount > 0)
@@ -866,12 +946,14 @@ namespace ctrace::stack
 
                 if (ms.distinctIndexCount == 1)
                 {
-                    body << "\t\t[!Info!] all stores use the same index expression "
+                    body << "\t" << INFO_OUTPUT
+                         << " all stores use the same index expression "
                             "(possible redundant or unintended overwrite)\n";
                 }
                 else if (ms.distinctIndexCount > 1)
                 {
-                    body << "\t[!Info!] stores use different index expressions; verify indices are "
+                    body << "\t" << INFO_OUTPUT
+                         << " stores use different index expressions; verify indices are "
                             "correct and non-overlapping\n";
                 }
 
@@ -1191,7 +1273,7 @@ namespace ctrace::stack
 
                 const char* prefix = "[!]";
                 if (diag.severity == DiagnosticSeverity::Warning)
-                    prefix = "[!!]";
+                    prefix = "[ !!Warn ]";
                 else if (diag.severity == DiagnosticSeverity::Error)
                     prefix = "[!!!]";
 
