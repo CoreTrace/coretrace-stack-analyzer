@@ -5,20 +5,23 @@
 #include <fstream>
 #include <unordered_map>
 
+#include <llvm/ADT/StringRef.h>
 #include <llvm/ADT/SmallPtrSet.h>
 #include <llvm/ADT/SmallVector.h>
 #include <llvm/Analysis/CFG.h>
 #include <llvm/Analysis/CaptureTracking.h>
+#include <llvm/Analysis/ValueTracking.h>
 #include <llvm/IR/BasicBlock.h>
 #include <llvm/IR/CFG.h>
 #include <llvm/IR/Constants.h>
+#include <llvm/IR/Dominators.h>
 #include <llvm/IR/Function.h>
+#include <llvm/IR/GlobalVariable.h>
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/IntrinsicInst.h>
 #include <llvm/IR/Module.h>
 #include <llvm/IR/Operator.h>
 #include <llvm/IR/Value.h>
-#include <llvm/IR/Dominators.h>
 
 #include "analysis/AnalyzerUtils.hpp"
 
@@ -198,6 +201,18 @@ namespace ctrace::stack::analysis
             llvm::SmallVector<MemoryOperand, 2> memoryOperands;
         };
 
+        struct DeterminismCache
+        {
+            std::unordered_map<const llvm::Function*, bool> memo;
+            llvm::SmallPtrSet<const llvm::Function*, 16> visiting;
+        };
+
+        static DeterminismCache& getDeterminismCache()
+        {
+            static DeterminismCache cache;
+            return cache;
+        }
+
         static llvm::Value* stripCasts(llvm::Value* v)
         {
             while (auto* cast = llvm::dyn_cast<llvm::CastInst>(v))
@@ -207,7 +222,251 @@ namespace ctrace::stack::analysis
             return v;
         }
 
-        static bool valuesEquivalent(const llvm::Value* a, const llvm::Value* b, int depth = 0)
+        static const llvm::Value* stripCasts(const llvm::Value* v)
+        {
+            while (auto* cast = llvm::dyn_cast<llvm::CastInst>(v))
+            {
+                v = cast->getOperand(0);
+            }
+            return v;
+        }
+
+        static const llvm::Value* getUnderlyingTrackedObject(const llvm::Value* ptr)
+        {
+            if (!ptr)
+                return nullptr;
+            return llvm::getUnderlyingObject(ptr->stripPointerCasts());
+        }
+
+        static bool isLocalWritableObject(const llvm::Value* ptr, const llvm::Function& F)
+        {
+            const llvm::Value* base = getUnderlyingTrackedObject(ptr);
+            auto* allocaInst = llvm::dyn_cast_or_null<llvm::AllocaInst>(base);
+            return allocaInst && allocaInst->getFunction() == &F;
+        }
+
+        static bool isAllowedReadObject(const llvm::Value* ptr, const llvm::Function& F)
+        {
+            const llvm::Value* base = getUnderlyingTrackedObject(ptr);
+            if (!base)
+                return false;
+            if (auto* allocaInst = llvm::dyn_cast<llvm::AllocaInst>(base))
+                return allocaInst->getFunction() == &F;
+            if (auto* arg = llvm::dyn_cast<llvm::Argument>(base))
+                return arg->getParent() == &F;
+            if (auto* gv = llvm::dyn_cast<llvm::GlobalVariable>(base))
+                return gv->isConstant();
+            return llvm::isa<llvm::Constant>(base);
+        }
+
+        static bool isKnownDeterministicDeclaration(const llvm::Function& F)
+        {
+            const llvm::StringRef name = F.getName();
+            return name == "strcmp" || name == "strncmp" || name == "memcmp" || name == "strlen" ||
+                   name == "strnlen" || name == "memchr" || name == "wcslen" ||
+                   name == "wcscmp" || name == "wcsncmp";
+        }
+
+        static bool isFunctionDeterministic(const llvm::Function& F)
+        {
+            auto& cache = getDeterminismCache();
+            auto it = cache.memo.find(&F);
+            if (it != cache.memo.end())
+                return it->second;
+            if (!cache.visiting.insert(&F).second)
+                return false;
+
+            bool deterministic = true;
+            if (F.isDeclaration())
+            {
+                deterministic = isKnownDeterministicDeclaration(F);
+            }
+            else
+            {
+                for (const llvm::BasicBlock& BB : F)
+                {
+                    for (const llvm::Instruction& I : BB)
+                    {
+                        if (llvm::isa<llvm::DbgInfoIntrinsic>(&I))
+                            continue;
+
+                        if (auto* load = llvm::dyn_cast<llvm::LoadInst>(&I))
+                        {
+                            if (load->isVolatile() ||
+                                !isAllowedReadObject(load->getPointerOperand(), F))
+                            {
+                                deterministic = false;
+                                break;
+                            }
+                            continue;
+                        }
+
+                        if (auto* store = llvm::dyn_cast<llvm::StoreInst>(&I))
+                        {
+                            if (store->isVolatile() ||
+                                !isLocalWritableObject(store->getPointerOperand(), F))
+                            {
+                                deterministic = false;
+                                break;
+                            }
+                            continue;
+                        }
+
+                        if (auto* rmw = llvm::dyn_cast<llvm::AtomicRMWInst>(&I))
+                        {
+                            if (!isLocalWritableObject(rmw->getPointerOperand(), F))
+                            {
+                                deterministic = false;
+                                break;
+                            }
+                            continue;
+                        }
+
+                        if (auto* cmpxchg = llvm::dyn_cast<llvm::AtomicCmpXchgInst>(&I))
+                        {
+                            if (!isLocalWritableObject(cmpxchg->getPointerOperand(), F))
+                            {
+                                deterministic = false;
+                                break;
+                            }
+                            continue;
+                        }
+
+                        if (auto* memTransfer = llvm::dyn_cast<llvm::MemTransferInst>(&I))
+                        {
+                            if (!isLocalWritableObject(memTransfer->getRawDest(), F) ||
+                                !isAllowedReadObject(memTransfer->getRawSource(), F))
+                            {
+                                deterministic = false;
+                                break;
+                            }
+                            continue;
+                        }
+
+                        if (auto* memSet = llvm::dyn_cast<llvm::MemSetInst>(&I))
+                        {
+                            if (!isLocalWritableObject(memSet->getRawDest(), F))
+                            {
+                                deterministic = false;
+                                break;
+                            }
+                            continue;
+                        }
+
+                        if (auto* call = llvm::dyn_cast<llvm::CallBase>(&I))
+                        {
+                            if (call->isInlineAsm())
+                            {
+                                deterministic = false;
+                                break;
+                            }
+
+                            const llvm::Function* callee = call->getCalledFunction();
+                            if (!callee)
+                            {
+                                deterministic = false;
+                                break;
+                            }
+
+                            if (callee->isIntrinsic())
+                            {
+                                const auto id = callee->getIntrinsicID();
+                                if (id == llvm::Intrinsic::dbg_declare ||
+                                    id == llvm::Intrinsic::dbg_value ||
+                                    id == llvm::Intrinsic::dbg_label)
+                                {
+                                    continue;
+                                }
+                                if (id == llvm::Intrinsic::lifetime_start ||
+                                    id == llvm::Intrinsic::lifetime_end ||
+                                    id == llvm::Intrinsic::assume)
+                                {
+                                    continue;
+                                }
+                                if (!call->mayWriteToMemory())
+                                    continue;
+                                deterministic = false;
+                                break;
+                            }
+
+                            if (callee->isDeclaration())
+                            {
+                                if (!(callee->doesNotReturn() ||
+                                      isKnownDeterministicDeclaration(*callee)))
+                                {
+                                    deterministic = false;
+                                    break;
+                                }
+                            }
+                            else if (!isFunctionDeterministic(*callee))
+                            {
+                                deterministic = false;
+                                break;
+                            }
+
+                            continue;
+                        }
+
+                        if (I.mayWriteToMemory())
+                        {
+                            deterministic = false;
+                            break;
+                        }
+                    }
+
+                    if (!deterministic)
+                        break;
+                }
+            }
+
+            cache.visiting.erase(&F);
+            cache.memo[&F] = deterministic;
+            return deterministic;
+        }
+
+        static bool isDeterministicConditionCall(const llvm::CallBase* call)
+        {
+            if (!call)
+                return false;
+            const llvm::Function* callee = call->getCalledFunction();
+            if (!callee)
+                return false;
+            const llvm::StringRef name = callee->getName();
+            if (name.starts_with("_ZNSt3__1eq"))
+                return true;
+            return isFunctionDeterministic(*callee);
+        }
+
+        static bool valuesEquivalent(const llvm::Value* a, const llvm::Value* b, int depth = 0);
+
+        static bool callsEquivalent(const llvm::CallBase* a, const llvm::CallBase* b, int depth)
+        {
+            if (!a || !b)
+                return false;
+            if (a->arg_size() != b->arg_size())
+                return false;
+
+            const llvm::Function* calleeA = a->getCalledFunction();
+            const llvm::Function* calleeB = b->getCalledFunction();
+            if (!calleeA || !calleeB || calleeA != calleeB)
+                return false;
+            if (!isDeterministicConditionCall(a) || !isDeterministicConditionCall(b))
+                return false;
+
+            auto itA = a->arg_begin();
+            auto itB = b->arg_begin();
+            for (; itA != a->arg_end(); ++itA, ++itB)
+            {
+                const llvm::Value* argA = stripCasts(itA->get());
+                const llvm::Value* argB = stripCasts(itB->get());
+                if (!valuesEquivalent(argA, argB, depth + 1))
+                    return false;
+            }
+
+            return true;
+        }
+
+        static bool valuesEquivalent(const llvm::Value* a, const llvm::Value* b, int depth)
         {
             if (a == b)
                 return true;
@@ -215,6 +474,14 @@ namespace ctrace::stack::analysis
                 return false;
             if (depth > 6)
                 return false;
+
+            if (auto* ca = llvm::dyn_cast<llvm::CallBase>(a))
+            {
+                auto* cb = llvm::dyn_cast<llvm::CallBase>(b);
+                if (!cb)
+                    return false;
+                return callsEquivalent(ca, cb, depth + 1);
+            }
 
             if (auto* la = llvm::dyn_cast<llvm::LoadInst>(a))
             {
@@ -289,6 +556,17 @@ namespace ctrace::stack::analysis
                 llvm::Value* ptr = load->getPointerOperand()->stripPointerCasts();
                 key.memoryOperands.push_back({ptr, isPrecisePointer(ptr)});
                 return ptr;
+            }
+            if (auto* call = llvm::dyn_cast<llvm::CallBase>(v))
+            {
+                for (const llvm::Use& arg : call->args())
+                {
+                    llvm::Value* argVal = stripCasts(arg.get());
+                    if (!argVal || !argVal->getType()->isPointerTy())
+                        continue;
+                    llvm::Value* ptr = argVal->stripPointerCasts();
+                    key.memoryOperands.push_back({ptr, isPrecisePointer(ptr)});
+                }
             }
             return v;
         }
@@ -417,7 +695,9 @@ namespace ctrace::stack::analysis
         static bool hasInterveningWrites(const llvm::Function& F, const llvm::DominatorTree& DT,
                                          const llvm::BasicBlock* pathBlock,
                                          const llvm::Instruction* at,
-                                         const llvm::SmallVector<MemoryOperand, 2>& memoryOps)
+                                         const llvm::SmallVector<MemoryOperand, 2>& memoryOps,
+                                         const llvm::SmallPtrSet<const llvm::Instruction*, 8>&
+                                             ignoredWrites)
         {
             if (memoryOps.empty() || !pathBlock || !at)
                 return false;
@@ -435,6 +715,8 @@ namespace ctrace::stack::analysis
                 {
                     if (&BB == atBlock && &I == at)
                         break;
+                    if (ignoredWrites.count(&I))
+                        continue;
                     if (llvm::isa<llvm::DbgInfoIntrinsic>(&I))
                         continue;
                     if (!I.mayWriteToMemory())
@@ -451,6 +733,34 @@ namespace ctrace::stack::analysis
             }
 
             return false;
+        }
+
+        static llvm::SmallPtrSet<const llvm::Instruction*, 8>
+        collectConditionInstructions(const llvm::BranchInst* branch)
+        {
+            llvm::SmallPtrSet<const llvm::Instruction*, 8> visited;
+            if (!branch || !branch->isConditional())
+                return visited;
+
+            llvm::SmallVector<const llvm::Value*, 8> worklist;
+            worklist.push_back(branch->getCondition());
+
+            while (!worklist.empty())
+            {
+                const llvm::Value* value = worklist.pop_back_val();
+                auto* inst = llvm::dyn_cast<llvm::Instruction>(value);
+                if (!inst || inst->getParent() != branch->getParent())
+                    continue;
+                if (!visited.insert(inst).second)
+                    continue;
+
+                for (const llvm::Use& operand : inst->operands())
+                {
+                    worklist.push_back(operand.get());
+                }
+            }
+
+            return visited;
         }
 
         static bool findDuplicateElseCondition(const llvm::BranchInst* branch,
@@ -471,6 +781,8 @@ namespace ctrace::stack::analysis
 
             SourceLocation currentLoc;
             getSourceLocation(branch, currentLoc);
+            llvm::SmallPtrSet<const llvm::Instruction*, 8> currentConditionInsts =
+                collectConditionInstructions(branch);
 
             for (auto* dom = node->getIDom(); dom; dom = dom->getIDom())
             {
@@ -502,7 +814,7 @@ namespace ctrace::stack::analysis
                     continue;
 
                 if (hasInterveningWrites(*curBlock->getParent(), DT, falseSucc, branch,
-                                         curKey.memoryOperands))
+                                         curKey.memoryOperands, currentConditionInsts))
                     continue;
 
                 out.funcName = branch->getFunction()->getName().str();
@@ -520,6 +832,9 @@ namespace ctrace::stack::analysis
                                  const std::function<bool(const llvm::Function&)>& shouldAnalyze)
     {
         std::vector<DuplicateIfConditionIssue> issues;
+        auto& cache = getDeterminismCache();
+        cache.memo.clear();
+        cache.visiting.clear();
 
         for (llvm::Function& F : mod)
         {
