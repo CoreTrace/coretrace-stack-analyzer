@@ -245,6 +245,14 @@ namespace ctrace::stack
                 if (index >= result.functions.size())
                     continue;
                 const FunctionResult& fr = result.functions[index];
+                SourceLocation functionLoc{};
+                bool hasFunctionLoc = false;
+                auto itLoc = aux.locations.find(Fn);
+                if (itLoc != aux.locations.end())
+                {
+                    functionLoc = itLoc->second;
+                    hasFunctionLoc = (functionLoc.line != 0);
+                }
 
                 if (fr.isRecursive)
                 {
@@ -253,6 +261,11 @@ namespace ctrace::stack
                     diag.filePath = fr.filePath;
                     diag.severity = DiagnosticSeverity::Warning;
                     diag.errCode = DescriptiveErrorCode::None;
+                    if (hasFunctionLoc)
+                    {
+                        diag.line = functionLoc.line;
+                        diag.column = functionLoc.column;
+                    }
                     diag.message = "  [!] recursive or mutually recursive function detected\n";
                     result.diagnostics.push_back(std::move(diag));
                 }
@@ -264,6 +277,11 @@ namespace ctrace::stack
                     diag.filePath = fr.filePath;
                     diag.severity = DiagnosticSeverity::Warning;
                     diag.errCode = DescriptiveErrorCode::None;
+                    if (hasFunctionLoc)
+                    {
+                        diag.line = functionLoc.line;
+                        diag.column = functionLoc.column;
+                    }
                     diag.message = "  [!!!] unconditional self recursion detected (no base case)\n"
                                    "       this will eventually overflow the stack at runtime\n";
                     result.diagnostics.push_back(std::move(diag));
@@ -276,11 +294,10 @@ namespace ctrace::stack
                     diag.filePath = fr.filePath;
                     diag.severity = DiagnosticSeverity::Warning;
                     diag.errCode = DescriptiveErrorCode::None;
-                    auto itLoc = aux.locations.find(Fn);
-                    if (itLoc != aux.locations.end())
+                    if (hasFunctionLoc)
                     {
-                        diag.line = itLoc->second.line;
-                        diag.column = itLoc->second.column;
+                        diag.line = functionLoc.line;
+                        diag.column = functionLoc.column;
                     }
                     std::string message;
                     bool suppressLocation = false;
