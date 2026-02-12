@@ -1199,8 +1199,8 @@ namespace ctrace::stack
 
                 std::ostringstream body;
 
-                body << "\t" << WARN_OUTPUT << " stack pointer escape: address of variable '" << e.varName
-                     << "' escapes this function\n";
+                body << "\t" << WARN_OUTPUT << " stack pointer escape: address of variable '"
+                     << e.varName << "' escapes this function\n";
 
                 if (e.escapeKind == "return")
                 {
