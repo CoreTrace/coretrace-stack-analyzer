@@ -1,5 +1,6 @@
 #include <stdio.h>
 
+// at line 8, column 12
 // [!] recursive or mutually recursive function detected
 void tutu(void)
 {
