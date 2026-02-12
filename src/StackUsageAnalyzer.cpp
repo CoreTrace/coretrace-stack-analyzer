@@ -40,6 +40,7 @@
 #define INFO_OUTPUT "[!Info!]"
 #define WARN_OUTPUT "[ !!Warn ]"
 #define ERROR_OUTPUT "[!!!Error]"
+#define TAB_OUTPUT "\t\t ↳ "
 
 namespace ctrace::stack
 {
@@ -1198,7 +1199,7 @@ namespace ctrace::stack
 
                 std::ostringstream body;
 
-                body << "\t[ !!Warn ] stack pointer escape: address of variable '" << e.varName
+                body << "\t" << WARN_OUTPUT << " stack pointer escape: address of variable '" << e.varName
                      << "' escapes this function\n";
 
                 if (e.escapeKind == "return")
@@ -1271,11 +1272,11 @@ namespace ctrace::stack
                 diag.severity = DiagnosticSeverity::Info;
                 diag.errCode = DescriptiveErrorCode::ConstParameterNotModified;
 
-                const char* prefix = "[!]";
+                const char* prefix = INFO_OUTPUT;
                 if (diag.severity == DiagnosticSeverity::Warning)
-                    prefix = "[ !!Warn ]";
+                    prefix = WARN_OUTPUT;
                 else if (diag.severity == DiagnosticSeverity::Error)
-                    prefix = "[!!!]";
+                    prefix = ERROR_OUTPUT;
 
                 const char* subLabel = "Pointer";
                 if (cp.pointerConstOnly)
@@ -1289,26 +1290,26 @@ namespace ctrace::stack
 
                 if (cp.isRvalueRef)
                 {
-                    body << "  " << prefix << "ConstParameterNotModified." << subLabel
+                    body << "\t" << prefix << " ConstParameterNotModified." << subLabel
                          << ": parameter '" << cp.paramName << "' in function '" << displayFuncName
                          << "' is an rvalue reference and is never used to modify the referred "
                             "object\n";
-                    body << "       consider passing by value (" << cp.suggestedType
+                    body << TAB_OUTPUT << "consider passing by value (" << cp.suggestedType
                          << ") or const reference (" << cp.suggestedTypeAlt << ")\n";
-                    body << "       current type: " << cp.currentType << "\n";
+                    body << TAB_OUTPUT << "current type: " << cp.currentType << "\n";
                 }
                 else if (cp.pointerConstOnly)
                 {
-                    body << "  " << prefix << "ConstParameterNotModified." << subLabel
+                    body << "\t" << prefix << " ConstParameterNotModified." << subLabel
                          << ": parameter '" << cp.paramName << "' in function '" << displayFuncName
                          << "' is declared '" << cp.currentType
                          << "' but the pointed object is never modified\n";
-                    body << "       consider '" << cp.suggestedType
+                    body << TAB_OUTPUT << "consider '" << cp.suggestedType
                          << "' for API const-correctness\n";
                 }
                 else
                 {
-                    body << "  " << prefix << "ConstParameterNotModified." << subLabel
+                    body << "\t" << prefix << " ConstParameterNotModified." << subLabel
                          << ": parameter '" << cp.paramName << "' in function '" << displayFuncName
                          << "' is never used to modify the "
                          << (cp.isReference ? "referred" : "pointed") << " object\n";
@@ -1316,8 +1317,8 @@ namespace ctrace::stack
 
                 if (!cp.isRvalueRef)
                 {
-                    body << "       current type: " << cp.currentType << "\n";
-                    body << "       suggested type: " << cp.suggestedType << "\n";
+                    body << TAB_OUTPUT << "current type: " << cp.currentType << "\n";
+                    body << TAB_OUTPUT << "suggested type: " << cp.suggestedType << "\n";
                 }
 
                 diag.funcName = cp.funcName;
