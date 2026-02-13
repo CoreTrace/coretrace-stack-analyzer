@@ -1,0 +1,162 @@
+name: Test CI Integration
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "Dockerfile"
+      - "action.yml"
+      - "scripts/ci/**"
+      - ".github/workflows/test-ci-integration.yml"
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  # =================================================================
+  # Job 1: Test the GitHub Action (composite action, local reference)
+  # =================================================================
+  test-github-action:
+    name: Test GitHub Action
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run CoreTrace Stack Analyzer (action)
+        uses: ./
+        id: analysis
+        with:
+          sources: test/alloca/oversized-constant.c
+          fail-on: none
+          base-dir: ${{ github.workspace }}
+          sarif-file: action-results.sarif
+          json-file: action-results.json
+          upload-sarif: false
+
+      - name: Validate SARIF output
+        run: |
+          echo "=== Checking SARIF file exists ==="
+          test -f action-results.sarif || { echo "SARIF file missing!"; exit 1; }
+
+          echo "=== Validating JSON structure ==="
+          python3 -c "
+          import json, sys
+          with open('action-results.sarif') as f:
+              d = json.load(f)
+          assert d['version'] == '2.1.0', 'Wrong SARIF version'
+          assert len(d['runs']) > 0, 'No runs in SARIF'
+
+          run = d['runs'][0]
+          assert run['tool']['driver']['name'] == 'coretrace-stack-analyzer', 'Wrong tool name'
+
+          # Check that URIs are relative (no leading /)
+          for result in run.get('results', []):
+              for loc in result.get('locations', []):
+                  uri = loc['physicalLocation']['artifactLocation']['uri']
+                  assert not uri.startswith('/'), f'URI is absolute: {uri}'
+                  print(f'  OK: {uri}')
+
+          print('SARIF validation passed!')
+          "
+
+      - name: Validate JSON output
+        run: |
+          test -f action-results.json || { echo "JSON file missing!"; exit 1; }
+          python3 -c "
+          import json
+          with open('action-results.json') as f:
+              d = json.load(f)
+          assert 'diagnostics' in d, 'Missing diagnostics key'
+          assert len(d['diagnostics']) > 0, 'No diagnostics found'
+          print(f'JSON validation passed! Found {len(d[\"diagnostics\"])} diagnostic(s).')
+          "
+
+  # =================================================================
+  # Job 2: Test the Docker image
+  # =================================================================
+  test-docker:
+    name: Test Docker Image
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker build -t coretrace-stack-analyzer:test .
+
+      - name: Run analyzer via Docker (SARIF)
+        run: |
+          docker run --rm -v "${{ github.workspace }}:/workspace" \
+            coretrace-stack-analyzer:test \
+            /workspace/test/alloca/oversized-constant.c \
+            --format=sarif \
+            --base-dir=/workspace \
+            > docker-results.sarif
+
+      - name: Validate Docker SARIF output
+        run: |
+          echo "=== Checking SARIF file ==="
+          test -s docker-results.sarif || { echo "SARIF file empty!"; exit 1; }
+
+          python3 -c "
+          import json, sys
+          with open('docker-results.sarif') as f:
+              d = json.load(f)
+          assert d['version'] == '2.1.0', 'Wrong SARIF version'
+
+          run = d['runs'][0]
+          assert run['tool']['driver']['name'] == 'coretrace-stack-analyzer'
+
+          for result in run.get('results', []):
+              for loc in result.get('locations', []):
+                  uri = loc['physicalLocation']['artifactLocation']['uri']
+                  assert not uri.startswith('/'), f'URI is absolute: {uri}'
+                  print(f'  OK: {uri}')
+
+          print('Docker SARIF validation passed!')
+          "
+
+      - name: Run analyzer via Docker (JSON)
+        run: |
+          docker run --rm -v "${{ github.workspace }}:/workspace" \
+            coretrace-stack-analyzer:test \
+            /workspace/test/alloca/oversized-constant.c \
+            --format=json \
+            > docker-results.json
+
+      - name: Validate Docker JSON output
+        run: |
+          python3 -c "
+          import json
+          with open('docker-results.json') as f:
+              d = json.load(f)
+          assert 'diagnostics' in d
+          assert len(d['diagnostics']) > 0
+          print(f'Docker JSON validation passed! Found {len(d[\"diagnostics\"])} diagnostic(s).')
+          "
+
+      - name: Run CI helper script via Docker
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}:/workspace" \
+            --entrypoint python3 \
+            coretrace-stack-analyzer:test \
+            /usr/local/bin/run_code_analysis.py \
+            /workspace/test/alloca/oversized-constant.c \
+            --analyzer /usr/local/bin/stack_usage_analyzer \
+            --json-out /workspace/docker-ci-results.json \
+            --sarif-out /workspace/docker-ci-results.sarif \
+            --base-dir /workspace \
+            --fail-on none
+
+      - name: Validate CI script output
+        run: |
+          test -f docker-ci-results.sarif || { echo "CI SARIF missing!"; exit 1; }
+          test -f docker-ci-results.json || { echo "CI JSON missing!"; exit 1; }
+          echo "CI script Docker test passed!"
