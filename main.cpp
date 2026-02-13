@@ -421,11 +421,6 @@ int main(int argc, char** argv)
         printHelp();
         return 1;
     }
-    else if (argc < 2)
-    {
-        printHelp();
-        return 1;
-    }
 
     for (int i = 1; i < argc; ++i)
     {
