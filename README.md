@@ -25,6 +25,30 @@ Examples:
 LLVM_DIR=/opt/llvm/lib/cmake/llvm Clang_DIR=/opt/llvm/lib/cmake/clang ./build.sh --generator Ninja
 ```
 
+### CI/CD integration (GitHub Actions)
+
+For CI usage as a code analyzer, use a two-layer setup:
+- `stack_usage_analyzer` remains the analysis engine.
+- `scripts/ci/run_code_analysis.py` is the CI adapter (report export + policy gate).
+
+Why this architecture:
+- The analyzer stays CI-agnostic and reusable everywhere (CLI, local scripts, CI).
+- CI policy (`fail-on=error|warning|none`) is isolated in one place.
+- It provides stable artifacts for platforms (`JSON` + `SARIF`) without changing analyzer core logic.
+
+Quick example (same repository):
+```zsh
+python3 scripts/ci/run_code_analysis.py \
+  --analyzer ./build/stack_usage_analyzer \
+  --compdb ./build/compile_commands.json \
+  --fail-on error \
+  --json-out artifacts/stack-usage.json \
+  --sarif-out artifacts/stack-usage.sarif
+```
+
+GitHub Actions consumer example is available at:
+- `docs/ci/github-actions-consumer.yml`
+
 ### Code style (clang-format)
 
 - Target version: `clang-format` 20 (used in CI).
