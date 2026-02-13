@@ -68,35 +68,35 @@ namespace ctrace::stack::analysis
                         MemSet,
                         MemMove
                     };
-                    MemKind kind = MemKind::None;
-
-                    if (auto* II = dyn_cast<IntrinsicInst>(CB))
+                    auto classifyByName = [&](StringRef calleeName) -> MemKind
                     {
-                        switch (II->getIntrinsicID())
+                        if (calleeName == "memcpy" || calleeName.contains("memcpy"))
+                            return MemKind::MemCpy;
+                        if (calleeName == "memset" || calleeName.contains("memset"))
+                            return MemKind::MemSet;
+                        if (calleeName == "memmove" || calleeName.contains("memmove"))
+                            return MemKind::MemMove;
+                        return MemKind::None;
+                    };
+
+                    MemKind kind = [&]() -> MemKind
+                    {
+                        if (auto* II = dyn_cast<IntrinsicInst>(CB))
                         {
-                        case Intrinsic::memcpy:
-                            kind = MemKind::MemCpy;
-                            break;
-                        case Intrinsic::memset:
-                            kind = MemKind::MemSet;
-                            break;
-                        case Intrinsic::memmove:
-                            kind = MemKind::MemMove;
-                            break;
-                        default:
-                            break;
+                            switch (II->getIntrinsicID())
+                            {
+                            case Intrinsic::memcpy:
+                                return MemKind::MemCpy;
+                            case Intrinsic::memset:
+                                return MemKind::MemSet;
+                            case Intrinsic::memmove:
+                                return MemKind::MemMove;
+                            default:
+                                break;
+                            }
                         }
-                    }
-
-                    if (kind == MemKind::None)
-                    {
-                        if (name == "memcpy" || name.contains("memcpy"))
-                            kind = MemKind::MemCpy;
-                        else if (name == "memset" || name.contains("memset"))
-                            kind = MemKind::MemSet;
-                        else if (name == "memmove" || name.contains("memmove"))
-                            kind = MemKind::MemMove;
-                    }
+                        return classifyByName(name);
+                    }();
 
                     if (kind == MemKind::None)
                         continue;
