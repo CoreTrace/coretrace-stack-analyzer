@@ -5,6 +5,7 @@
 #include <fstream>
 #include <unordered_map>
 
+#include <llvm/ADT/ArrayRef.h>
 #include <llvm/ADT/StringRef.h>
 #include <llvm/ADT/SmallPtrSet.h>
 #include <llvm/ADT/SmallVector.h>
@@ -200,6 +201,14 @@ namespace ctrace::stack::analysis
             bool valid = false;
             llvm::SmallVector<MemoryOperand, 2> memoryOperands;
         };
+
+        struct ConditionAtom
+        {
+            ConditionKey key;
+            bool polarity = true;
+        };
+
+        using ConditionSignature = llvm::SmallVector<ConditionAtom, 4>;
 
         struct DeterminismCache
         {
@@ -621,6 +630,145 @@ namespace ctrace::stack::analysis
             return key;
         }
 
+        static ConditionKey buildConditionKey(const llvm::Value* cond)
+        {
+            return buildConditionKey(const_cast<llvm::Value*>(cond));
+        }
+
+        static bool conditionKeysEquivalent(const ConditionKey& a, const ConditionKey& b);
+
+        static const llvm::MDNode* getInstructionDebugScope(const llvm::Instruction* I)
+        {
+            if (!I)
+                return nullptr;
+            llvm::DebugLoc DL = I->getDebugLoc();
+            if (!DL)
+                return nullptr;
+            return DL.getScope();
+        }
+
+        static bool haveCompatibleConditionScope(const llvm::Instruction* first,
+                                                 const llvm::Instruction* second)
+        {
+            const llvm::MDNode* a = getInstructionDebugScope(first);
+            const llvm::MDNode* b = getInstructionDebugScope(second);
+            if (!a || !b)
+                return false;
+            return a == b;
+        }
+
+        static bool isShortCircuitContinuation(const llvm::BranchInst* branch, unsigned succIndex,
+                                               const llvm::BranchInst*& nextBranch)
+        {
+            nextBranch = nullptr;
+            if (!branch || !branch->isConditional() || succIndex > 1)
+                return false;
+
+            const llvm::BasicBlock* succ = branch->getSuccessor(succIndex);
+            if (!succ || succ->getSinglePredecessor() != branch->getParent())
+                return false;
+
+            auto* succTerm = llvm::dyn_cast<llvm::BranchInst>(succ->getTerminator());
+            if (!succTerm || !succTerm->isConditional())
+                return false;
+
+            if (!haveCompatibleConditionScope(branch, succTerm))
+                return false;
+
+            nextBranch = succTerm;
+            return true;
+        }
+
+        static ConditionSignature buildConditionSignature(const llvm::BranchInst* branch)
+        {
+            ConditionSignature sig;
+            if (!branch || !branch->isConditional())
+                return sig;
+
+            llvm::SmallPtrSet<const llvm::BasicBlock*, 8> seen;
+            const llvm::BranchInst* cur = branch;
+            for (unsigned depth = 0; cur && depth < 16; ++depth)
+            {
+                if (!seen.insert(cur->getParent()).second)
+                    break;
+
+                ConditionAtom atom;
+                atom.key = buildConditionKey(cur->getCondition());
+                if (!atom.key.valid)
+                {
+                    sig.clear();
+                    return sig;
+                }
+
+                const llvm::BranchInst* nextOnTrue = nullptr;
+                const llvm::BranchInst* nextOnFalse = nullptr;
+                bool continueOnTrue = isShortCircuitContinuation(cur, 0, nextOnTrue);
+                bool continueOnFalse = isShortCircuitContinuation(cur, 1, nextOnFalse);
+
+                if (continueOnTrue && continueOnFalse)
+                {
+                    atom.polarity = true;
+                    sig.push_back(std::move(atom));
+                    break;
+                }
+
+                if (continueOnTrue)
+                {
+                    atom.polarity = true;
+                    sig.push_back(std::move(atom));
+                    cur = nextOnTrue;
+                    continue;
+                }
+
+                if (continueOnFalse)
+                {
+                    atom.polarity = false;
+                    sig.push_back(std::move(atom));
+                    cur = nextOnFalse;
+                    continue;
+                }
+
+                atom.polarity = true;
+                sig.push_back(std::move(atom));
+                break;
+            }
+
+            return sig;
+        }
+
+        static bool conditionSignaturesEquivalent(const ConditionSignature& a,
+                                                  const ConditionSignature& b)
+        {
+            if (a.size() != b.size())
+                return false;
+            for (std::size_t i = 0; i < a.size(); ++i)
+            {
+                if (a[i].polarity != b[i].polarity)
+                    return false;
+                if (!conditionKeysEquivalent(a[i].key, b[i].key))
+                    return false;
+            }
+            return true;
+        }
+
+        static llvm::SmallVector<MemoryOperand, 4>
+        collectSignatureMemoryOperands(const ConditionSignature& sig)
+        {
+            llvm::SmallPtrSet<const llvm::Value*, 8> seen;
+            llvm::SmallVector<MemoryOperand, 4> out;
+            for (const auto& atom : sig)
+            {
+                for (const auto& mem : atom.key.memoryOperands)
+                {
+                    if (!mem.ptr)
+                        continue;
+                    if (seen.insert(mem.ptr).second)
+                        out.push_back(mem);
+                }
+            }
+            return out;
+        }
+
         static bool conditionKeysEquivalent(const ConditionKey& a, const ConditionKey& b)
         {
             if (!a.valid || !b.valid)
@@ -695,7 +843,7 @@ namespace ctrace::stack::analysis
         static bool
         hasInterveningWrites(const llvm::Function& F, const llvm::DominatorTree& DT,
                              const llvm::BasicBlock* pathBlock, const llvm::Instruction* at,
-                             const llvm::SmallVector<MemoryOperand, 2>& memoryOps,
+                             llvm::ArrayRef<MemoryOperand> memoryOps,
                              const llvm::SmallPtrSet<const llvm::Instruction*, 8>& ignoredWrites)
         {
             if (memoryOps.empty() || !pathBlock || !at)
@@ -774,9 +922,10 @@ namespace ctrace::stack::analysis
             if (!node)
                 return false;
 
-            ConditionKey curKey = buildConditionKey(branch->getCondition());
-            if (!curKey.valid)
+            ConditionSignature curSig = buildConditionSignature(branch);
+            if (curSig.empty())
                 return false;
+            llvm::SmallVector<MemoryOperand, 4> curMemoryOps = collectSignatureMemoryOperands(curSig);
 
             SourceLocation currentLoc;
             getSourceLocation(branch, currentLoc);
@@ -796,8 +945,8 @@ namespace ctrace::stack::analysis
                 if (!falseSucc || !DT.dominates(falseSucc, curBlock))
                     continue;
 
-                ConditionKey domKey = buildConditionKey(domTerm->getCondition());
-                if (!conditionKeysEquivalent(domKey, curKey))
+                ConditionSignature domSig = buildConditionSignature(domTerm);
+                if (domSig.empty() || !conditionSignaturesEquivalent(domSig, curSig))
                     continue;
 
                 SourceLocation domLoc;
@@ -813,7 +962,7 @@ namespace ctrace::stack::analysis
                     continue;
 
                 if (hasInterveningWrites(*curBlock->getParent(), DT, falseSucc, branch,
-                                         curKey.memoryOperands, currentConditionInsts))
+                                         curMemoryOps, currentConditionInsts))
                     continue;
 
                 out.funcName = branch->getFunction()->getName().str();
