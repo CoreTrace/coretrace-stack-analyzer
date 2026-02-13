@@ -1,0 +1,178 @@
+name: "CoreTrace Stack Analyzer"
+description: "Static stack usage analysis for C/C++ code — detects stack overflows, VLAs, recursion, and more."
+author: "CoreTrace"
+
+branding:
+  icon: "shield"
+  color: "blue"
+
+inputs:
+  sources:
+    description: "Source files to analyze (space-separated). If omitted, discovered from compile-commands."
+    required: false
+    default: ""
+  compile-commands:
+    description: "Path to compile_commands.json (file or directory)."
+    required: false
+    default: ""
+  fail-on:
+    description: "CI gate policy: none (never fail), error (fail on errors), warning (fail on errors+warnings)."
+    required: false
+    default: "error"
+  base-dir:
+    description: "Base directory stripped from SARIF URIs to produce relative paths."
+    required: false
+    default: "${{ github.workspace }}"
+  stack-limit:
+    description: "Override stack size limit (e.g. 8KiB, 1MiB)."
+    required: false
+    default: ""
+  sarif-file:
+    description: "Output path for the SARIF report."
+    required: false
+    default: "coretrace-stack-analysis.sarif"
+  json-file:
+    description: "Output path for the JSON report."
+    required: false
+    default: "coretrace-stack-analysis.json"
+  upload-sarif:
+    description: "Upload SARIF to GitHub Code Scanning (true/false)."
+    required: false
+    default: "true"
+  extra-args:
+    description: "Extra arguments forwarded to the analyzer (space-separated)."
+    required: false
+    default: ""
+  llvm-version:
+    description: "LLVM version to install."
+    required: false
+    default: "20"
+
+outputs:
+  sarif-file:
+    description: "Path to the generated SARIF report."
+    value: ${{ steps.run-analysis.outputs.sarif-file }}
+  json-file:
+    description: "Path to the generated JSON report."
+    value: ${{ steps.run-analysis.outputs.json-file }}
+  errors:
+    description: "Number of errors found."
+    value: ${{ steps.run-analysis.outputs.errors }}
+  warnings:
+    description: "Number of warnings found."
+    value: ${{ steps.run-analysis.outputs.warnings }}
+
+runs:
+  using: "composite"
+  steps:
+    # ---------------------------------------------------------------
+    # 1. Install LLVM
+    # ---------------------------------------------------------------
+    - name: Install LLVM ${{ inputs.llvm-version }}
+      shell: bash
+      run: |
+        sudo apt-get update
+        wget -qO - https://apt.llvm.org/llvm-snapshot.gpg.key | sudo apt-key add -
+        CODENAME=$(lsb_release -cs)
+        sudo apt-add-repository "deb http://apt.llvm.org/${CODENAME}/ llvm-toolchain-${CODENAME}-${{ inputs.llvm-version }} main"
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends \
+          cmake ninja-build python3 build-essential \
+          llvm-${{ inputs.llvm-version }} \
+          llvm-${{ inputs.llvm-version }}-dev \
+          clang-${{ inputs.llvm-version }} \
+          libclang-${{ inputs.llvm-version }}-dev
+
+    # ---------------------------------------------------------------
+    # 2. Cache + Build the analyzer
+    # ---------------------------------------------------------------
+    - name: Cache analyzer build
+      id: cache-analyzer
+      uses: actions/cache@v4
+      with:
+        path: ${{ github.action_path }}/build
+        key: coretrace-analyzer-${{ runner.os }}-llvm${{ inputs.llvm-version }}-${{ hashFiles(format('{0}/CMakeLists.txt', github.action_path)) }}
+
+    - name: Build analyzer
+      if: steps.cache-analyzer.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        LLVM_DIR: /usr/lib/llvm-${{ inputs.llvm-version }}/lib/cmake/llvm
+        Clang_DIR: /usr/lib/llvm-${{ inputs.llvm-version }}/lib/cmake/clang
+      run: |
+        cd "${{ github.action_path }}"
+        cmake -S . -B build -G Ninja \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DLLVM_DIR="${LLVM_DIR}" \
+          -DClang_DIR="${Clang_DIR}" \
+          -DLLVM_LINK_LLVM_DYLIB=ON \
+          -DUSE_SHARED_LIB=OFF
+        cmake --build build -j"$(nproc)"
+
+    # ---------------------------------------------------------------
+    # 3. Run analysis
+    # ---------------------------------------------------------------
+    - name: Run stack analysis
+      id: run-analysis
+      shell: bash
+      run: |
+        ANALYZER="${{ github.action_path }}/build/stack_usage_analyzer"
+        SCRIPT="${{ github.action_path }}/scripts/ci/run_code_analysis.py"
+
+        ARGS=""
+        if [ -n "${{ inputs.stack-limit }}" ]; then
+          ARGS="${ARGS} --analyzer-arg --stack-limit=${{ inputs.stack-limit }}"
+        fi
+        if [ -n "${{ inputs.base-dir }}" ]; then
+          ARGS="${ARGS} --base-dir ${{ inputs.base-dir }}"
+        fi
+        if [ -n "${{ inputs.extra-args }}" ]; then
+          for arg in ${{ inputs.extra-args }}; do
+            ARGS="${ARGS} --analyzer-arg ${arg}"
+          done
+        fi
+
+        INPUTS=""
+        if [ -n "${{ inputs.sources }}" ]; then
+          INPUTS="${{ inputs.sources }}"
+        fi
+
+        COMPDB=""
+        if [ -n "${{ inputs.compile-commands }}" ]; then
+          COMPDB="--compdb ${{ inputs.compile-commands }}"
+        fi
+
+        set +e
+        python3 "${SCRIPT}" \
+          --analyzer "${ANALYZER}" \
+          ${COMPDB} \
+          --json-out "${{ inputs.json-file }}" \
+          --sarif-out "${{ inputs.sarif-file }}" \
+          --fail-on "${{ inputs.fail-on }}" \
+          ${ARGS} \
+          ${INPUTS}
+        EXIT_CODE=$?
+        set -e
+
+        echo "sarif-file=${{ inputs.sarif-file }}" >> "$GITHUB_OUTPUT"
+        echo "json-file=${{ inputs.json-file }}" >> "$GITHUB_OUTPUT"
+
+        # Extract counts from the script output
+        if [ -f "${{ inputs.json-file }}" ]; then
+          ERRORS=$(python3 -c "import json; d=json.load(open('${{ inputs.json-file }}')); print(sum(1 for x in d.get('diagnostics',[]) if x.get('severity','').lower()=='error'))" 2>/dev/null || echo "0")
+          WARNINGS=$(python3 -c "import json; d=json.load(open('${{ inputs.json-file }}')); print(sum(1 for x in d.get('diagnostics',[]) if x.get('severity','').lower()=='warning'))" 2>/dev/null || echo "0")
+          echo "errors=${ERRORS}" >> "$GITHUB_OUTPUT"
+          echo "warnings=${WARNINGS}" >> "$GITHUB_OUTPUT"
+        fi
+
+        exit ${EXIT_CODE}
+
+    # ---------------------------------------------------------------
+    # 4. Upload SARIF to GitHub Code Scanning
+    # ---------------------------------------------------------------
+    - name: Upload SARIF to GitHub Code Scanning
+      if: inputs.upload-sarif == 'true' && always()
+      uses: github/codeql-action/upload-sarif@v3
+      with:
+        sarif_file: ${{ inputs.sarif-file }}
+        category: coretrace-stack-analyzer

@@ -1,0 +1,11 @@
+build/
+build-*/
+.git/
+.github/
+.vscode/
+*.o
+*.a
+*.so
+*.dylib
+.venv/
+__pycache__/
