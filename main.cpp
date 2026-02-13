@@ -51,6 +51,7 @@ static void printHelp()
         << "  --only-func=<name>     Only report functions with this name (comma-separated)\n"
         << "  --STL                  Include STL/system library functions in analysis\n"
         << "  --stack-limit=<value>  Override stack size limit (bytes, or KiB/MiB/GiB)\n"
+        << "  --base-dir=<path>      Strip base directory from SARIF URIs (relative paths)\n"
         << "  --dump-filter          Print filter decisions to stderr\n"
         << "  --dump-ir=<path>       Write LLVM IR to file (or directory for multiple inputs)\n"
         << "  --quiet                Suppress per-function diagnostics\n"
@@ -404,6 +405,7 @@ int main(int argc, char** argv)
     llvm::LLVMContext context;
     std::vector<std::string> inputFilenames;
     OutputFormat outputFormat = OutputFormat::Human;
+    std::string sarifBaseDir;
 
     AnalysisConfig cfg{}; // mode = IR, stackLimit = 8 MiB default
     cfg.quiet = false;
@@ -659,6 +661,21 @@ int main(int argc, char** argv)
             outputFormat = OutputFormat::Human;
             continue;
         }
+        if (argStr.rfind("--base-dir=", 0) == 0)
+        {
+            sarifBaseDir = argStr.substr(std::strlen("--base-dir="));
+            continue;
+        }
+        if (argStr == "--base-dir")
+        {
+            if (i + 1 >= argc)
+            {
+                llvm::errs() << "Missing argument for --base-dir\n";
+                return 1;
+            }
+            sarifBaseDir = argv[++i];
+            continue;
+        }
         if (std::strncmp(arg, "--mode=", 7) == 0)
         {
             const char* modeStr = arg + 7;
@@ -846,8 +863,8 @@ int main(int argc, char** argv)
             AnalysisResult filtered =
                 applyFilter ? filterResult(results[0].second, cfg) : results[0].second;
             filtered = filterWarningsOnly(filtered, cfg);
-            llvm::outs() << ctrace::stack::toSarif(filtered, results[0].first,
-                                                   "coretrace-stack-analyzer", "0.1.0");
+            llvm::outs() << ctrace::stack::toSarif(
+                filtered, results[0].first, "coretrace-stack-analyzer", "0.1.0", sarifBaseDir);
         }
         else
         {
@@ -864,7 +881,8 @@ int main(int argc, char** argv)
             AnalysisResult filtered = applyFilter ? filterResult(merged, cfg) : merged;
             filtered = filterWarningsOnly(filtered, cfg);
             llvm::outs() << ctrace::stack::toSarif(filtered, inputFilenames.front(),
-                                                   "coretrace-stack-analyzer", "0.1.0");
+                                                   "coretrace-stack-analyzer", "0.1.0",
+                                                   sarifBaseDir);
         }
         return 0;
     }

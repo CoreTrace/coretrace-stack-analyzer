@@ -192,7 +192,7 @@ namespace ctrace::stack
     // `toolName` / `toolVersion`: tool metadata in SARIF.
     std::string toSarif(const AnalysisResult& result, const std::string& inputFile,
                         const std::string& toolName = "coretrace-stack-analyzer",
-                        const std::string& toolVersion = "0.1.0");
+                        const std::string& toolVersion = "0.1.0", const std::string& baseDir = "");
 
     // Analyze an already loaded module (can be reused by other tools).
     AnalysisResult analyzeModule(llvm::Module& mod, const AnalysisConfig& config);
