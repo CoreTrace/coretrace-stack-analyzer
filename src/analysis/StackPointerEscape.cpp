@@ -1,5 +1,6 @@
 #include "analysis/StackPointerEscape.hpp"
 
+#include <llvm/Analysis/ValueTracking.h>
 #include <llvm/ADT/SmallPtrSet.h>
 #include <llvm/ADT/SmallVector.h>
 #include <llvm/IR/Function.h>
@@ -22,6 +23,18 @@ namespace ctrace::stack::analysis
             if (!F)
                 return false;
             return isStdLibCalleeName(F->getName());
+        }
+
+        static const llvm::Value* getUnderlyingPointerObject(const llvm::Value* ptr)
+        {
+            if (!ptr)
+                return nullptr;
+            return llvm::getUnderlyingObject(ptr->stripPointerCasts(), 32);
+        }
+
+        static const llvm::AllocaInst* getUnderlyingAlloca(const llvm::Value* ptr)
+        {
+            return llvm::dyn_cast_or_null<llvm::AllocaInst>(getUnderlyingPointerObject(ptr));
         }
 
         static void analyzeStackPointerEscapesInFunction(llvm::Function& F,
@@ -74,9 +87,9 @@ namespace ctrace::stack::analysis
                                 if (SI->getValueOperand() == V)
                                 {
                                     const Value* dstRaw = SI->getPointerOperand();
-                                    const Value* dst = dstRaw->stripPointerCasts();
+                                    const Value* dstObj = getUnderlyingPointerObject(dstRaw);
 
-                                    if (auto* GV = dyn_cast<GlobalVariable>(dst))
+                                    if (auto* GV = dyn_cast_or_null<GlobalVariable>(dstObj))
                                     {
                                         StackPointerEscapeIssue issue;
                                         issue.funcName = F.getName().str();
@@ -90,22 +103,25 @@ namespace ctrace::stack::analysis
                                         continue;
                                     }
 
-                                    if (!isa<AllocaInst>(dst))
+                                    if (const AllocaInst* dstAI = getUnderlyingAlloca(dstRaw))
                                     {
-                                        StackPointerEscapeIssue issue;
-                                        issue.funcName = F.getName().str();
-                                        issue.varName = AI->hasName() ? AI->getName().str()
-                                                                      : std::string("<unnamed>");
-                                        issue.escapeKind = "store_unknown";
-                                        issue.targetName =
-                                            dst->hasName() ? dst->getName().str() : std::string{};
-                                        issue.inst = SI;
-                                        out.push_back(std::move(issue));
-                                        continue;
+                                        if (dstAI->getFunction() == &F)
+                                        {
+                                            worklist.push_back(dstAI);
+                                            continue;
+                                        }
                                     }
 
-                                    const AllocaInst* dstAI = cast<AllocaInst>(dst);
-                                    worklist.push_back(dstAI);
+                                    StackPointerEscapeIssue issue;
+                                    issue.funcName = F.getName().str();
+                                    issue.varName =
+                                        AI->hasName() ? AI->getName().str() : std::string("<unnamed>");
+                                    issue.escapeKind = "store_unknown";
+                                    issue.targetName = dstObj && dstObj->hasName()
+                                                           ? dstObj->getName().str()
+                                                           : std::string{};
+                                    issue.inst = SI;
+                                    out.push_back(std::move(issue));
                                 }
                                 continue;
                             }
