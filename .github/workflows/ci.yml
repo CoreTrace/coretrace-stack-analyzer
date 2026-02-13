@@ -11,6 +11,9 @@ jobs:
   build:
     name: Build on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+      security-events: write
     strategy:
       fail-fast: false
       matrix:
@@ -62,3 +65,21 @@ jobs:
       if: runner.os == 'Linux' || runner.os == 'macOS'
       run: |
         python3 run_test.py
+
+    - name: Self-analysis (analyze own source code)
+      if: runner.os == 'Linux'
+      run: |
+        python3 scripts/ci/run_code_analysis.py \
+          --analyzer build/stack_usage_analyzer \
+          --compdb build/compile_commands.json \
+          --base-dir ${{ github.workspace }} \
+          --sarif-out artifacts/self-analysis.sarif \
+          --json-out artifacts/self-analysis.json \
+          --fail-on error
+
+    - name: Upload SARIF to Code Scanning
+      if: runner.os == 'Linux' && always()
+      uses: github/codeql-action/upload-sarif@v3
+      with:
+        sarif_file: artifacts/self-analysis.sarif
+        category: coretrace-self-analysis
