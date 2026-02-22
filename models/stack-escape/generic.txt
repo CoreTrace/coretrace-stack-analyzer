@@ -1,0 +1,11 @@
+# Generic stack escape suppression rules for APIs that consume pointers
+# synchronously during the call.
+#
+# Syntax:
+#   noescape_arg <function-pattern> <arg-index>
+#
+# function-pattern supports exact names and simple globs (*, ?, [ ... ]).
+
+# Vulkan descriptor updates consume descriptor arrays immediately.
+noescape_arg vkUpdateDescriptorSets 2
+noescape_arg vkUpdateDescriptorSets 4
