@@ -1,0 +1,37 @@
+# =============================================================================
+# CoreTrace Stack Analyzer — CI Registry Image (factorized)
+# =============================================================================
+# This image reuses the runtime analyzer image and only overrides the entrypoint
+# for CI policy/report orchestration.
+#
+# Build from published runtime:
+#   docker build -f Dockerfile.ci \
+#     --build-arg CORETRACE_RUNTIME_IMAGE=ghcr.io/<org>/coretrace-stack-analyzer:latest \
+#     -t ghcr.io/<org>/coretrace-stack-analyzer-ci:latest .
+#
+# Build from local runtime image:
+#   docker build -f Dockerfile -t coretrace-stack-analyzer:local .
+#   docker build -f Dockerfile.ci \
+#     --build-arg CORETRACE_RUNTIME_IMAGE=coretrace-stack-analyzer:local \
+#     -t coretrace-stack-analyzer-ci:local .
+# =============================================================================
+
+ARG CORETRACE_RUNTIME_IMAGE=ghcr.io/coretrace/coretrace-stack-analyzer:latest
+FROM ${CORETRACE_RUNTIME_IMAGE}
+
+ARG VERSION=dev
+ARG VCS_REF=unknown
+
+LABEL org.opencontainers.image.title="coretrace-stack-analyzer-ci" \
+      org.opencontainers.image.description="CoreTrace stack analyzer CI runtime image" \
+      org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.revision="${VCS_REF}"
+
+# Fast fail if runtime base image does not contain expected CI tooling.
+RUN test -x /usr/local/bin/stack_usage_analyzer \
+    && test -f /usr/local/bin/run_code_analysis.py
+
+WORKDIR /workspace
+
+ENTRYPOINT ["python3", "/usr/local/bin/run_code_analysis.py", "--analyzer", "/usr/local/bin/stack_usage_analyzer"]
+CMD ["--help"]
