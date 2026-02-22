@@ -101,6 +101,7 @@ jobs:
         run: |
           docker run --rm -v "${{ github.workspace }}:/workspace" \
             "${CORETRACE_IMAGE}" \
+            --raw \
             /workspace/test/alloca/oversized-constant.c \
             --format=sarif \
             --base-dir=/workspace \
@@ -133,6 +134,7 @@ jobs:
         run: |
           docker run --rm -v "${{ github.workspace }}:/workspace" \
             "${CORETRACE_IMAGE}" \
+            --raw \
             /workspace/test/alloca/oversized-constant.c \
             --format=json \
             > docker-results.json
