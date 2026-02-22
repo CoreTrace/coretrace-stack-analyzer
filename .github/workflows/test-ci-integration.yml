@@ -84,12 +84,15 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-    env:
-      CORETRACE_IMAGE: ghcr.io/${{ github.repository_owner }}/coretrace-stack-analyzer:latest
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Resolve image reference
+        run: |
+          owner_lower="$(echo "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
+          echo "CORETRACE_IMAGE=ghcr.io/${owner_lower}/coretrace-stack-analyzer:latest" >> "$GITHUB_ENV"
 
       - name: Pull Docker image
         run: docker pull "${CORETRACE_IMAGE}"

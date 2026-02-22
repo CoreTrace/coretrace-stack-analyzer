@@ -20,11 +20,6 @@ permissions:
   contents: read
   packages: write
 
-env:
-  REGISTRY: ghcr.io
-  IMAGE_RUNTIME: ghcr.io/${{ github.repository_owner }}/coretrace-stack-analyzer
-  IMAGE_CI: ghcr.io/${{ github.repository_owner }}/coretrace-stack-analyzer-ci
-
 jobs:
   publish:
     name: Build and push images to GHCR
@@ -37,10 +32,19 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      - name: Resolve image names
+        id: images
+        shell: bash
+        run: |
+          owner_lower="$(echo "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
+          echo "registry=ghcr.io" >> "${GITHUB_OUTPUT}"
+          echo "runtime=ghcr.io/${owner_lower}/coretrace-stack-analyzer" >> "${GITHUB_OUTPUT}"
+          echo "ci=ghcr.io/${owner_lower}/coretrace-stack-analyzer-ci" >> "${GITHUB_OUTPUT}"
+
       - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
-          registry: ${{ env.REGISTRY }}
+          registry: ${{ steps.images.outputs.registry }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
@@ -67,12 +71,14 @@ jobs:
             push_latest="true"
           fi
 
-          runtime_tags="${IMAGE_RUNTIME}:${version}"$'\n'"${IMAGE_RUNTIME}:sha-${short_sha}"
-          ci_tags="${IMAGE_CI}:${version}"$'\n'"${IMAGE_CI}:sha-${short_sha}"
+          runtime_base="${{ steps.images.outputs.runtime }}"
+          ci_base="${{ steps.images.outputs.ci }}"
+          runtime_tags="${runtime_base}:${version}"$'\n'"${runtime_base}:sha-${short_sha}"
+          ci_tags="${ci_base}:${version}"$'\n'"${ci_base}:sha-${short_sha}"
 
           if [[ "${push_latest}" == "true" ]]; then
-            runtime_tags+=$'\n'"${IMAGE_RUNTIME}:latest"
-            ci_tags+=$'\n'"${IMAGE_CI}:latest"
+            runtime_tags+=$'\n'"${runtime_base}:latest"
+            ci_tags+=$'\n'"${ci_base}:latest"
           fi
 
           {
@@ -106,7 +112,7 @@ jobs:
           tags: ${{ steps.tags.outputs.ci_tags }}
           platforms: linux/amd64
           build-args: |
-            CORETRACE_RUNTIME_IMAGE=${{ env.IMAGE_RUNTIME }}:${{ steps.tags.outputs.version }}
+            CORETRACE_RUNTIME_IMAGE=${{ steps.images.outputs.runtime }}:${{ steps.tags.outputs.version }}
             VERSION=${{ steps.tags.outputs.version }}
             VCS_REF=${{ steps.tags.outputs.short_sha }}
           cache-from: type=gha
