@@ -399,11 +399,15 @@ namespace ctrace::stack
             os << "              \"physicalLocation\": {\n";
             std::string diagFilePath = d.filePath.empty() ? inputFile : d.filePath;
             std::string uriPath = stripBase(diagFilePath, baseDir);
+            // SARIF requires 1-based locations. Some diagnostics can keep 0 as
+            // "unknown" internally; clamp here for schema compliance.
+            const unsigned sarifStartLine = d.line > 0 ? d.line : 1;
+            const unsigned sarifStartColumn = d.column > 0 ? d.column : 1;
             os << "                \"artifactLocation\": { \"uri\": \"" << jsonEscape(uriPath)
                << "\" },\n";
             os << "                \"region\": {\n";
-            os << "                  \"startLine\": " << d.line << ",\n";
-            os << "                  \"startColumn\": " << d.column << "\n";
+            os << "                  \"startLine\": " << sarifStartLine << ",\n";
+            os << "                  \"startColumn\": " << sarifStartColumn << "\n";
             os << "                }\n";
             os << "              }\n";
             os << "            }\n";
