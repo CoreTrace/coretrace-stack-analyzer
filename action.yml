@@ -22,7 +22,7 @@ inputs:
   base-dir:
     description: "Base directory stripped from SARIF URIs to produce relative paths."
     required: false
-    default: "${{ github.workspace }}"
+    default: ""
   stack-limit:
     description: "Override stack size limit (e.g. 8KiB, 1MiB)."
     required: false
@@ -43,6 +43,26 @@ inputs:
     description: "Extra arguments forwarded to the analyzer (space-separated)."
     required: false
     default: ""
+  analysis-profile:
+    description: "Analysis profile passed to analyzer (fast|full)."
+    required: false
+    default: "fast"
+  resource-model:
+    description: "Resource model path. Use 'default' to use analyzer bundled model."
+    required: false
+    default: "default"
+  resource-cache-memory-only:
+    description: "Enable memory-only cross-TU resource summary cache (true/false)."
+    required: false
+    default: "true"
+  warnings-only:
+    description: "Emit warnings/errors only (true/false)."
+    required: false
+    default: "false"
+  inputs-from-git-fallback:
+    description: "When compile_commands.json is not found, analyze tracked source files from git (true/false)."
+    required: false
+    default: "true"
   llvm-version:
     description: "LLVM version to install."
     required: false
@@ -118,39 +138,82 @@ runs:
       run: |
         ANALYZER="${{ github.action_path }}/build/stack_usage_analyzer"
         SCRIPT="${{ github.action_path }}/scripts/ci/run_code_analysis.py"
+        DEFAULT_RESOURCE_MODEL="${{ github.action_path }}/models/resource-lifetime/generic.txt"
+        WORKSPACE_DIR="${GITHUB_WORKSPACE:-$PWD}"
 
-        ARGS=""
-        if [ -n "${{ inputs.stack-limit }}" ]; then
-          ARGS="${ARGS} --analyzer-arg --stack-limit=${{ inputs.stack-limit }}"
+        cmd=(
+          python3 "${SCRIPT}"
+          --analyzer "${ANALYZER}"
+          --json-out "${{ inputs.json-file }}"
+          --sarif-out "${{ inputs.sarif-file }}"
+          --fail-on "${{ inputs.fail-on }}"
+        )
+
+        BASE_DIR_INPUT="${{ inputs.base-dir }}"
+        if [ -n "${BASE_DIR_INPUT}" ]; then
+          cmd+=(--base-dir "${BASE_DIR_INPUT}")
+        else
+          cmd+=(--base-dir "${WORKSPACE_DIR}")
         fi
-        if [ -n "${{ inputs.base-dir }}" ]; then
-          ARGS="${ARGS} --base-dir ${{ inputs.base-dir }}"
-        fi
-        if [ -n "${{ inputs.extra-args }}" ]; then
-          for arg in ${{ inputs.extra-args }}; do
-            ARGS="${ARGS} --analyzer-arg ${arg}"
+
+        COMPDB_INPUT="${{ inputs.compile-commands }}"
+        COMPDB_PATH=""
+        if [ -n "${COMPDB_INPUT}" ]; then
+          COMPDB_PATH="${COMPDB_INPUT}"
+        else
+          for candidate in \
+            "${WORKSPACE_DIR}/build/compile_commands.json" \
+            "${WORKSPACE_DIR}/compile_commands.json" \
+            "${WORKSPACE_DIR}/.coretrace/build-linux/compile_commands.json"; do
+            if [ -f "${candidate}" ]; then
+              COMPDB_PATH="${candidate}"
+              break
+            fi
           done
         fi
-
-        INPUTS=""
-        if [ -n "${{ inputs.sources }}" ]; then
-          INPUTS="${{ inputs.sources }}"
+        if [ -n "${COMPDB_PATH}" ]; then
+          echo "[coretrace-action] using compile_commands.json: ${COMPDB_PATH}"
+          cmd+=(--compdb "${COMPDB_PATH}")
+        elif [ "${{ inputs.inputs-from-git-fallback }}" = "true" ]; then
+          echo "[coretrace-action] compile_commands.json not found; falling back to git-tracked sources"
+          cmd+=(--inputs-from-git --repo-root "${WORKSPACE_DIR}")
+        else
+          echo "[coretrace-action] compile_commands.json not found and git fallback disabled" >&2
+          exit 2
         fi
 
-        COMPDB=""
-        if [ -n "${{ inputs.compile-commands }}" ]; then
-          COMPDB="--compdb ${{ inputs.compile-commands }}"
+        # Sensible defaults for whole-repo CI scans.
+        cmd+=(--analyzer-arg="--analysis-profile=${{ inputs.analysis-profile }}")
+        if [ "${{ inputs.resource-cache-memory-only }}" = "true" ]; then
+          cmd+=(--analyzer-arg="--resource-summary-cache-memory-only")
+        fi
+        if [ "${{ inputs.warnings-only }}" = "true" ]; then
+          cmd+=(--analyzer-arg="--warnings-only")
+        fi
+        if [ -n "${{ inputs.stack-limit }}" ]; then
+          cmd+=(--analyzer-arg="--stack-limit=${{ inputs.stack-limit }}")
+        fi
+        if [ "${{ inputs.resource-model }}" = "default" ]; then
+          cmd+=(--analyzer-arg="--resource-model=${DEFAULT_RESOURCE_MODEL}")
+        elif [ -n "${{ inputs.resource-model }}" ]; then
+          cmd+=(--analyzer-arg="--resource-model=${{ inputs.resource-model }}")
+        fi
+
+        if [ -n "${{ inputs.extra-args }}" ]; then
+          # shellcheck disable=SC2206
+          extra_args=( ${{ inputs.extra-args }} )
+          for arg in "${extra_args[@]}"; do
+            cmd+=(--analyzer-arg="${arg}")
+          done
+        fi
+        if [ -n "${{ inputs.sources }}" ]; then
+          # shellcheck disable=SC2206
+          source_args=( ${{ inputs.sources }} )
+          cmd+=("${source_args[@]}")
         fi
 
         set +e
-        python3 "${SCRIPT}" \
-          --analyzer "${ANALYZER}" \
-          ${COMPDB} \
-          --json-out "${{ inputs.json-file }}" \
-          --sarif-out "${{ inputs.sarif-file }}" \
-          --fail-on "${{ inputs.fail-on }}" \
-          ${ARGS} \
-          ${INPUTS}
+        "${cmd[@]}"
         EXIT_CODE=$?
         set -e
 
@@ -159,8 +222,8 @@ runs:
 
         # Extract counts from the script output
         if [ -f "${{ inputs.json-file }}" ]; then
-          ERRORS=$(python3 -c "import json; d=json.load(open('${{ inputs.json-file }}')); print(sum(1 for x in d.get('diagnostics',[]) if x.get('severity','').lower()=='error'))" 2>/dev/null || echo "0")
-          WARNINGS=$(python3 -c "import json; d=json.load(open('${{ inputs.json-file }}')); print(sum(1 for x in d.get('diagnostics',[]) if x.get('severity','').lower()=='warning'))" 2>/dev/null || echo "0")
+          ERRORS=$(python3 -c "import json; d=json.load(open('${{ inputs.json-file }}')); diags=d.get('diagnostics',[]); sev=lambda x: ('ERROR' if str(x.get('severity', x.get('level', x.get('details',{}).get('severity','')))).upper() in {'2','ERROR'} else ('WARNING' if str(x.get('severity', x.get('level', x.get('details',{}).get('severity','')))).upper() in {'1','WARNING','WARN'} else 'INFO')); print(sum(1 for x in diags if sev(x)=='ERROR'))" 2>/dev/null || echo "0")
+          WARNINGS=$(python3 -c "import json; d=json.load(open('${{ inputs.json-file }}')); diags=d.get('diagnostics',[]); sev=lambda x: ('ERROR' if str(x.get('severity', x.get('level', x.get('details',{}).get('severity','')))).upper() in {'2','ERROR'} else ('WARNING' if str(x.get('severity', x.get('level', x.get('details',{}).get('severity','')))).upper() in {'1','WARNING','WARN'} else 'INFO')); print(sum(1 for x in diags if sev(x)=='WARNING'))" 2>/dev/null || echo "0")
           echo "errors=${ERRORS}" >> "$GITHUB_OUTPUT"
           echo "warnings=${WARNINGS}" >> "$GITHUB_OUTPUT"
         fi
