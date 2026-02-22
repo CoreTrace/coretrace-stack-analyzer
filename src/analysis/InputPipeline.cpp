@@ -6,6 +6,7 @@
 #include <chrono>
 #include <filesystem>
 #include <iostream>
+#include <mutex>
 #include <system_error>
 #include <vector>
 
@@ -23,6 +24,8 @@ namespace ctrace::stack::analysis
 {
     namespace
     {
+        std::mutex gCompileWorkingDirMutex;
+
         std::string makeAbsolutePath(const std::string& path)
         {
             std::error_code ec;
@@ -53,8 +56,19 @@ namespace ctrace::stack::analysis
             std::vector<std::string> filtered;
             filtered.reserve(args.size());
 
-            for (const auto& arg : args)
+            for (std::size_t i = 0; i < args.size(); ++i)
             {
+                const auto& arg = args[i];
+
+                auto skipFlagWithValue = [&](const std::string& flag) -> bool
+                {
+                    if (arg != flag)
+                        return false;
+                    if (i + 1 < args.size())
+                        ++i;
+                    return true;
+                };
+
                 if (arg.size() > 1 && arg.rfind("-O", 0) == 0)
                     continue;
                 if (arg.rfind("-g", 0) == 0)
@@ -65,6 +79,46 @@ namespace ctrace::stack::analysis
                     continue;
                 if (arg.rfind("-fprofile", 0) == 0 || arg.rfind("-fcoverage", 0) == 0)
                     continue;
+
+                // Cross-platform portability: drop Apple-specific compile flags that
+                // commonly appear in macOS compile databases and fail on Linux CI.
+                if (skipFlagWithValue("-arch"))
+                    continue;
+                if (arg.rfind("-arch=", 0) == 0)
+                    continue;
+
+                if (skipFlagWithValue("-isysroot"))
+                    continue;
+                if (arg.rfind("-isysroot=", 0) == 0)
+                    continue;
+
+                if (skipFlagWithValue("-iframework"))
+                    continue;
+
+                if (arg.rfind("-mmacosx-version-min", 0) == 0)
+                    continue;
+                if (arg.rfind("-miphoneos-version-min", 0) == 0)
+                    continue;
+                if (arg.rfind("-mios-simulator-version-min", 0) == 0)
+                    continue;
+
+                if (arg == "-fembed-bitcode" || arg == "-fapplication-extension")
+                    continue;
+
+                if (arg == "-target" && i + 1 < args.size())
+                {
+                    const std::string& triple = args[i + 1];
+                    if (triple.find("apple") != std::string::npos)
+                    {
+                        ++i;
+                        continue;
+                    }
+                }
+                if (arg.rfind("--target=", 0) == 0 &&
+                    arg.find("apple", std::string("--target=").size()) != std::string::npos)
+                {
+                    continue;
+                }
 
                 filtered.push_back(arg);
             }
@@ -307,32 +361,62 @@ namespace ctrace::stack::analysis
 
             if (config.timing)
                 llvm::errs() << "Compiling " << filename << "...\n";
-            std::string cwdError;
-            ScopedCurrentPath cwdGuard(workingDir, cwdError);
-            if (!cwdError.empty())
-            {
-                result.error = cwdError + "\n";
-                return result;
-            }
             compilerlib::OutputMode mode = compilerlib::OutputMode::ToMemory;
-            auto res = compilerlib::compile(args, mode);
+            bool retriedWithWorkingDir = false;
+            auto compileWithOptionalWorkingDir =
+                [&](bool useWorkingDir) -> std::optional<compilerlib::CompileResult>
+            {
+                if (!useWorkingDir)
+                    return compilerlib::compile(args, mode);
+
+                std::string cwdError;
+                ScopedCurrentPath cwdGuard(workingDir, cwdError);
+                if (!cwdError.empty())
+                {
+                    result.error = cwdError + "\n";
+                    return std::nullopt;
+                }
+                return compilerlib::compile(args, mode);
+            };
+
+            std::optional<compilerlib::CompileResult> res;
+            const bool hasWorkingDir = !workingDir.empty();
+            if (config.jobs > 1 && hasWorkingDir)
+            {
+                // Optimistic fast path for multi-job runs: most compdb commands use absolute paths.
+                res = compileWithOptionalWorkingDir(false);
+                if (!res || !res->success)
+                {
+                    // Fallback keeps correctness for relative include paths and avoids process cwd races.
+                    std::lock_guard<std::mutex> lock(gCompileWorkingDirMutex);
+                    res = compileWithOptionalWorkingDir(true);
+                    retriedWithWorkingDir = true;
+                }
+            }
+            else
+            {
+                res = compileWithOptionalWorkingDir(hasWorkingDir);
+            }
+
+            if (!res)
+                return result;
             compiled = true;
 
-            if (!res.success)
+            if (!res->success)
             {
-                result.error = "Compilation failed:\n" + res.diagnostics + '\n';
+                result.error = "Compilation failed:\n" + res->diagnostics + '\n';
                 return result;
             }
-            if (!res.diagnostics.empty() && !config.quiet)
+            if (!res->diagnostics.empty() && !config.quiet)
             {
-                llvm::errs() << res.diagnostics;
-                if (res.diagnostics.back() != '\n')
+                llvm::errs() << res->diagnostics;
+                if (res->diagnostics.back() != '\n')
                 {
                     llvm::errs() << '\n';
                 }
             }
 
-            if (res.llvmIR.empty())
+            if (res->llvmIR.empty())
             {
                 result.error = "No LLVM IR produced by compilerlib::compile\n";
                 return result;
@@ -344,10 +428,13 @@ namespace ctrace::stack::analysis
                 auto ms =
                     std::chrono::duration_cast<std::chrono::milliseconds>(compileEnd - compileStart)
                         .count();
-                llvm::errs() << "Compilation done in " << ms << " ms\n";
+                llvm::errs() << "Compilation done in " << ms << " ms";
+                if (retriedWithWorkingDir)
+                    llvm::errs() << " (retry with working directory)";
+                llvm::errs() << "\n";
             }
 
-            auto buffer = llvm::MemoryBuffer::getMemBuffer(res.llvmIR, "in_memory_ll");
+            auto buffer = llvm::MemoryBuffer::getMemBuffer(res->llvmIR, "in_memory_ll");
 
             llvm::SMDiagnostic diag;
             auto parseStart = Clock::now();

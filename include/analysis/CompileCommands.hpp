@@ -20,6 +20,7 @@ namespace ctrace::stack::analysis
                                                                  std::string& error);
 
         const CompileCommand* findCommandForFile(const std::string& filePath) const;
+        std::vector<std::string> listSourceFiles() const;
 
         const std::string& sourcePath() const
         {
