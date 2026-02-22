@@ -111,7 +111,9 @@ runs:
       uses: actions/cache@v4
       with:
         path: ${{ github.action_path }}/build
-        key: coretrace-analyzer-${{ runner.os }}-llvm${{ inputs.llvm-version }}-${{ hashFiles(format('{0}/CMakeLists.txt', github.action_path)) }}
+        # NOTE: hashFiles() inside composite action metadata can fail on some runners
+        # when evaluated against action_path. Use a stable, cross-run key instead.
+        key: coretrace-analyzer-${{ runner.os }}-llvm${{ inputs.llvm-version }}-${{ github.sha }}
 
     - name: Build analyzer
       if: steps.cache-analyzer.outputs.cache-hit != 'true'
