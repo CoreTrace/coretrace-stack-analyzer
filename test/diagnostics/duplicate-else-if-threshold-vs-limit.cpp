@@ -1,10 +1,7 @@
 // not contains: unreachable else-if branch: condition is equivalent to a previous 'if' condition
-int classify_alloca_case(bool sizeIsConst,
-                         unsigned long long sizeBytes,
-                         bool hasUpperBound,
+int classify_alloca_case(bool sizeIsConst, unsigned long long sizeBytes, bool hasUpperBound,
                          unsigned long long upperBoundBytes,
-                         unsigned long long allocaLargeThreshold,
-                         unsigned long long stackLimit)
+                         unsigned long long allocaLargeThreshold, unsigned long long stackLimit)
 {
     bool isOversized = false;
 
