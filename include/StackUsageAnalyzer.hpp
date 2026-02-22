@@ -18,6 +18,8 @@ namespace llvm
 namespace ctrace::stack::analysis
 {
     class CompilationDatabase;
+    struct ResourceSummaryIndex;
+    struct UninitializedSummaryIndex;
 } // namespace ctrace::stack::analysis
 
 namespace ctrace::stack
@@ -31,10 +33,17 @@ namespace ctrace::stack
         ABI
     };
 
+    enum class AnalysisProfile
+    {
+        Fast,
+        Full
+    };
+
     // Analysis configuration (mode + stack limit).
     struct AnalysisConfig
     {
         AnalysisMode mode = AnalysisMode::IR;
+        AnalysisProfile profile = AnalysisProfile::Full;
         StackSize stackLimit = 8ull * 1024ull * 1024ull; // 8 MiB default
         bool quiet = false;
         bool warningsOnly = false;
@@ -42,14 +51,25 @@ namespace ctrace::stack
         std::shared_ptr<const analysis::CompilationDatabase> compilationDatabase;
         bool requireCompilationDatabase = false;
         bool compdbFast = false;
+        unsigned jobs = 1;
         bool timing = false;
         std::vector<std::string> onlyFiles;
         std::vector<std::string> onlyDirs;
+        std::vector<std::string> excludeDirs;
         std::vector<std::string> onlyFunctions;
         bool includeSTL = false;
         bool dumpFilter = false;
         std::string dumpIRPath;
         bool dumpIRIsDir = false;
+        bool demangle = false;
+        std::string escapeModelPath;
+        std::string resourceModelPath;
+        bool resourceCrossTU = true;
+        std::string resourceSummaryCacheDir = ".cache/resource-lifetime";
+        bool resourceSummaryMemoryOnly = false;
+        std::shared_ptr<const analysis::ResourceSummaryIndex> resourceSummaryIndex;
+        bool uninitializedCrossTU = true;
+        std::shared_ptr<const analysis::UninitializedSummaryIndex> uninitializedSummaryIndex;
     };
 
     // Per-function result
@@ -122,12 +142,13 @@ namespace ctrace::stack
         SizeMinusOneWrite = 12,
         DuplicateIfCondition = 13,
         UninitializedLocalRead = 14,
-        StackFrameTooLarge = 15
+        StackFrameTooLarge = 15,
+        ResourceLifetimeIssue = 16
     };
 
     template <> struct EnumTraits<DescriptiveErrorCode>
     {
-        static constexpr std::array<std::string_view, 16> names = {"None",
+        static constexpr std::array<std::string_view, 17> names = {"None",
                                                                    "StackBufferOverflow",
                                                                    "NegativeStackIndex",
                                                                    "VLAUsage",
@@ -142,7 +163,8 @@ namespace ctrace::stack
                                                                    "SizeMinusOneWrite",
                                                                    "DuplicateIfCondition",
                                                                    "UninitializedLocalRead",
-                                                                   "StackFrameTooLarge"};
+                                                                   "StackFrameTooLarge",
+                                                                   "ResourceLifetimeIssue"};
     };
 
     /*
