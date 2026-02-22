@@ -3,15 +3,23 @@
 # =============================================================================
 # Multi-stage build: builds the analyzer, then creates a slim runtime image.
 #
+# Default runtime behavior (via entrypoint wrapper):
+# - auto-detect /workspace/build/compile_commands.json (fallback: /workspace/compile_commands.json)
+# - --analysis-profile=fast
+# - --compdb-fast
+# - --resource-summary-cache-memory-only
+# - --resource-model=/models/resource-lifetime/generic.txt
+#
 # Usage:
 #   docker build -t coretrace-stack-analyzer .
-#   docker run -v $(pwd):/workspace coretrace-stack-analyzer \
-#       /workspace/src/main.c --format=sarif --base-dir=/workspace
+#   docker run --rm -v $(pwd):/workspace coretrace-stack-analyzer
 #
-# With compile_commands.json:
-#   docker run -v $(pwd):/workspace coretrace-stack-analyzer \
-#       --compile-commands=/workspace/build/compile_commands.json \
-#       --format=sarif --base-dir=/workspace /workspace/src/main.c
+# Override defaults with explicit args:
+#   docker run --rm -v $(pwd):/workspace coretrace-stack-analyzer \
+#       --analysis-profile=full --resource-model=/models/resource-lifetime/generic.txt
+#
+# Bypass defaults completely:
+#   docker run --rm -v $(pwd):/workspace coretrace-stack-analyzer --raw --help
 # =============================================================================
 
 # ---------------------------------------------------------------------------
@@ -72,6 +80,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     lsb-release \
     software-properties-common \
     python3 \
+    git \
     && curl -fsSL https://apt.llvm.org/llvm.sh -o /tmp/llvm.sh \
     && chmod +x /tmp/llvm.sh \
     && /tmp/llvm.sh ${LLVM_VERSION} \
@@ -80,13 +89,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get install -y --no-install-recommends libclang-${LLVM_VERSION}-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy the built binary and CI helper script
+# Copy runtime files
 COPY --from=builder /repo/build/stack_usage_analyzer /usr/local/bin/stack_usage_analyzer
 COPY --from=builder /repo/scripts/ci/run_code_analysis.py /usr/local/bin/run_code_analysis.py
+COPY --from=builder /repo/scripts/docker/coretrace_entrypoint.py /usr/local/bin/coretrace-entrypoint.py
+COPY --from=builder /repo/models /models
+
+RUN chmod +x /usr/local/bin/coretrace-entrypoint.py
 
 # Make sure the binary can find LLVM shared libs
 ENV LD_LIBRARY_PATH=/usr/lib/llvm-${LLVM_VERSION}/lib
 
 WORKDIR /workspace
 
-ENTRYPOINT ["stack_usage_analyzer"]
+ENTRYPOINT ["/usr/local/bin/coretrace-entrypoint.py"]
