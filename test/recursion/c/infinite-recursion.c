@@ -1,7 +1,7 @@
 #include <stdio.h>
 
 // at line 11, column 5
-// [ !!Warn ] recursive or mutually recursive function detected
+// [ !Info! ] recursive or mutually recursive function detected
 
 // at line 11, column 5
 // [!!!Error] unconditional self recursion detected (no base case)
