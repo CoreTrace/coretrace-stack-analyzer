@@ -72,6 +72,47 @@ namespace ctrace::stack::analysis
             return !fragment.empty() && path.find(fragment) != std::string::npos;
         }
 
+        static bool pathHasSuffix(const std::string& path, const std::string& suffix)
+        {
+            if (suffix.empty() || path.size() < suffix.size())
+                return false;
+            return path.compare(path.size() - suffix.size(), suffix.size(), suffix) == 0;
+        }
+
+        static bool pathContainsSegment(const std::string& path, const std::string& segment)
+        {
+            if (segment.empty() || path.empty())
+                return false;
+
+            std::size_t start = 0;
+            while (start < path.size())
+            {
+                while (start < path.size() && path[start] == '/')
+                    ++start;
+                if (start >= path.size())
+                    break;
+                std::size_t end = path.find('/', start);
+                if (end == std::string::npos)
+                    end = path.size();
+                if (path.compare(start, end - start, segment) == 0)
+                    return true;
+                start = end + 1;
+            }
+            return false;
+        }
+
+        static std::string pathBasename(const std::string& path)
+        {
+            if (path.empty())
+                return {};
+            const std::size_t slash = path.find_last_of('/');
+            if (slash == std::string::npos)
+                return path;
+            if (slash + 1 >= path.size())
+                return {};
+            return path.substr(slash + 1);
+        }
+
         static bool isLikelySystemPath(const std::string& path)
         {
             if (path.empty())
@@ -112,6 +153,36 @@ namespace ctrace::stack::analysis
             {
                 if (pathContainsFragment(normalized, fragment))
                     return true;
+            }
+
+            return false;
+        }
+
+        static bool isLikelyThirdPartyPath(const std::string& path)
+        {
+            if (path.empty())
+                return false;
+
+            const std::string normalized = toLowerCopy(normalizePathForMatch(path));
+            if (normalized.empty())
+                return false;
+
+            static constexpr std::array<const char*, 13> thirdPartySegments = {
+                "third_party", "third-party",     "thirdparty", "3rdparty", "vendor",
+                "vendors",     "external",        "extern",     "deps",     "_deps",
+                "submodules",  "vcpkg_installed", "conan"};
+            for (const char* segment : thirdPartySegments)
+            {
+                if (pathContainsSegment(normalized, segment))
+                    return true;
+            }
+
+            const std::string base = pathBasename(normalized);
+            if (base.rfind("stb_", 0) == 0 &&
+                (pathHasSuffix(base, ".h") || pathHasSuffix(base, ".hh") ||
+                 pathHasSuffix(base, ".hpp") || pathHasSuffix(base, ".hxx")))
+            {
+                return true;
             }
 
             return false;
@@ -164,12 +235,12 @@ namespace ctrace::stack::analysis
                 if (!path.empty())
                 {
                     usedPath = path;
-                    decision = !isLikelySystemPath(usedPath);
+                    decision = !isLikelySystemPath(usedPath) && !isLikelyThirdPartyPath(usedPath);
                 }
                 else if (!moduleSourcePath.empty())
                 {
                     usedPath = moduleSourcePath;
-                    decision = !isLikelySystemPath(usedPath);
+                    decision = !isLikelySystemPath(usedPath) && !isLikelyThirdPartyPath(usedPath);
                 }
                 else
                 {

@@ -67,4 +67,22 @@ namespace ctrace_tools
                                              const std::vector<std::string>& paramTypes);
 
     [[nodiscard]] std::string demangle(const char* name);
+
+    /**
+     * @brief Canonicalizes a mangled C++ symbol by normalizing standard-library
+     *        implementation namespaces.
+     *
+     * Different C++ standard library implementations encode their internal
+     * namespace differently in mangled names:
+     *   - libc++ (Apple/LLVM): `std::__1::`  → mangled as `St3__1`
+     *   - libstdc++ (GCC):     `std::__cxx11::` → mangled as `St7__cxx11`
+     *
+     * This function replaces both variants with the bare `St` prefix so that
+     * cross-TU summary lookups match regardless of the stdlib used to compile
+     * each translation unit.
+     *
+     * @param name The (possibly mangled) symbol name.
+     * @return A new string with stdlib namespace prefixes normalized.
+     */
+    [[nodiscard]] std::string canonicalizeMangledName(std::string_view name);
 }; // namespace ctrace_tools

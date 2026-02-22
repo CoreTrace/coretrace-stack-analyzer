@@ -35,7 +35,7 @@ namespace ctrace::stack::analysis
     {
         std::map<const llvm::Function*, StackEstimate> TotalStack; // max stack, including callees
         std::set<const llvm::Function*> RecursiveFuncs;         // functions in at least one cycle
-        std::set<const llvm::Function*> InfiniteRecursionFuncs; // “infinite” self-recursion
+        std::set<const llvm::Function*> InfiniteRecursionFuncs; // recursive cycle with no base case
     };
 
     CallGraph buildCallGraph(llvm::Module& M);
@@ -47,7 +47,12 @@ namespace ctrace::stack::analysis
     computeGlobalStackUsage(const CallGraph& CG,
                             const std::map<const llvm::Function*, LocalStackInfo>& LocalStack);
 
+    std::vector<std::vector<const llvm::Function*>>
+    computeRecursiveComponents(const CallGraph& CG,
+                               const std::vector<const llvm::Function*>& nodes);
+
     bool detectInfiniteSelfRecursion(llvm::Function& F);
+    bool detectInfiniteRecursionComponent(const std::vector<const llvm::Function*>& component);
 
     StackSize computeAllocaLargeThreshold(const AnalysisConfig& config);
 } // namespace ctrace::stack::analysis

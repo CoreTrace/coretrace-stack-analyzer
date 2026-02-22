@@ -527,12 +527,50 @@ namespace ctrace::stack::analysis
             return false;
         }
 
+        static bool hasDtorToken(llvm::StringRef symbol, llvm::StringRef token)
+        {
+            std::size_t pos = symbol.find(token);
+            while (pos != llvm::StringRef::npos)
+            {
+                const std::size_t nextPos = pos + token.size();
+                if (nextPos >= symbol.size())
+                    return true;
+
+                const char next = symbol[nextPos];
+                if (next == 'E' || next == 'B' || next == 'v' || next == 'I')
+                    return true;
+
+                pos = symbol.find(token, pos + 1);
+            }
+            return false;
+        }
+
+        static bool isLikelyCppDestructor(const llvm::Function& F)
+        {
+            const llvm::StringRef symbol = F.getName();
+            if (symbol.starts_with("_Z"))
+            {
+                return hasDtorToken(symbol, "D0") || hasDtorToken(symbol, "D1") ||
+                       hasDtorToken(symbol, "D2");
+            }
+
+            if (const llvm::DISubprogram* SP = F.getSubprogram())
+            {
+                if (SP->getName().contains("~"))
+                    return true;
+            }
+
+            return false;
+        }
+
         static void analyzeConstParamsInFunction(llvm::Function& F,
                                                  std::vector<ConstParamIssue>& out)
         {
             using namespace llvm;
 
             if (F.isDeclaration())
+                return;
+            if (isLikelyCppDestructor(F))
                 return;
 
             for (Argument& Arg : F.args())
