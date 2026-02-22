@@ -150,6 +150,11 @@ runs:
           --sarif-out "${{ inputs.sarif-file }}"
           --fail-on "${{ inputs.fail-on }}"
         )
+        SOURCES_INPUT="${{ inputs.sources }}"
+        HAS_EXPLICIT_SOURCES="false"
+        if [ -n "${SOURCES_INPUT}" ]; then
+          HAS_EXPLICIT_SOURCES="true"
+        fi
 
         BASE_DIR_INPUT="${{ inputs.base-dir }}"
         if [ -n "${BASE_DIR_INPUT}" ]; then
@@ -162,7 +167,7 @@ runs:
         COMPDB_PATH=""
         if [ -n "${COMPDB_INPUT}" ]; then
           COMPDB_PATH="${COMPDB_INPUT}"
-        else
+        elif [ "${HAS_EXPLICIT_SOURCES}" != "true" ]; then
           for candidate in \
             "${WORKSPACE_DIR}/build/compile_commands.json" \
             "${WORKSPACE_DIR}/compile_commands.json" \
@@ -176,10 +181,10 @@ runs:
         if [ -n "${COMPDB_PATH}" ]; then
           echo "[coretrace-action] using compile_commands.json: ${COMPDB_PATH}"
           cmd+=(--compdb "${COMPDB_PATH}")
-        elif [ "${{ inputs.inputs-from-git-fallback }}" = "true" ]; then
+        elif [ "${HAS_EXPLICIT_SOURCES}" != "true" ] && [ "${{ inputs.inputs-from-git-fallback }}" = "true" ]; then
           echo "[coretrace-action] compile_commands.json not found; falling back to git-tracked sources"
           cmd+=(--inputs-from-git --repo-root "${WORKSPACE_DIR}")
-        else
+        elif [ "${HAS_EXPLICIT_SOURCES}" != "true" ]; then
           echo "[coretrace-action] compile_commands.json not found and git fallback disabled" >&2
           exit 2
         fi
@@ -208,9 +213,9 @@ runs:
             cmd+=(--analyzer-arg="${arg}")
           done
         fi
-        if [ -n "${{ inputs.sources }}" ]; then
+        if [ -n "${SOURCES_INPUT}" ]; then
           # shellcheck disable=SC2206
-          source_args=( ${{ inputs.sources }} )
+          source_args=( ${SOURCES_INPUT} )
           cmd+=("${source_args[@]}")
         fi
 
