@@ -1,4 +1,5 @@
 #include "analysis/UninitializedVarAnalysis.hpp"
+#include "mangle.hpp"
 
 #include <algorithm>
 #include <array>
@@ -9,6 +10,7 @@
 #include <limits>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include <llvm/ADT/BitVector.h>
@@ -84,10 +86,22 @@ namespace ctrace::stack::analysis
         using RangeSet = std::vector<ByteRange>;
         using InitRangeState = std::vector<RangeSet>;
 
+        struct PointerSlotWriteEffect
+        {
+            std::uint64_t slotOffset = 0;
+            std::uint64_t writeSizeBytes = 0; // 0 => unknown/full pointee write.
+
+            bool operator==(const PointerSlotWriteEffect& other) const
+            {
+                return slotOffset == other.slotOffset && writeSizeBytes == other.writeSizeBytes;
+            }
+        };
+
         struct PointerParamEffectSummary
         {
             RangeSet readBeforeWriteRanges;
             RangeSet writeRanges;
+            std::vector<PointerSlotWriteEffect> pointerSlotWrites;
             bool hasUnknownReadBeforeWrite = false;
             bool hasUnknownWrite = false;
 
@@ -95,6 +109,7 @@ namespace ctrace::stack::analysis
             {
                 return readBeforeWriteRanges == other.readBeforeWriteRanges &&
                        writeRanges == other.writeRanges &&
+                       pointerSlotWrites == other.pointerSlotWrites &&
                        hasUnknownReadBeforeWrite == other.hasUnknownReadBeforeWrite &&
                        hasUnknownWrite == other.hasUnknownWrite;
             }
@@ -102,7 +117,8 @@ namespace ctrace::stack::analysis
             bool hasAnyEffect() const
             {
                 return hasUnknownReadBeforeWrite || hasUnknownWrite ||
-                       !readBeforeWriteRanges.empty() || !writeRanges.empty();
+                       !readBeforeWriteRanges.empty() || !writeRanges.empty() ||
+                       !pointerSlotWrites.empty();
             }
         };
 
@@ -117,6 +133,7 @@ namespace ctrace::stack::analysis
         };
 
         using FunctionSummaryMap = llvm::DenseMap<const llvm::Function*, FunctionSummary>;
+        using ExternalSummaryMapByName = std::unordered_map<std::string, FunctionSummary>;
 
         static constexpr std::uint64_t kUnknownObjectFullRange =
             std::numeric_limits<std::uint64_t>::max() / 4;
@@ -308,26 +325,6 @@ namespace ctrace::stack::analysis
             return "<unnamed>";
         }
 
-        static bool isLikelyCompilerTemporaryName(llvm::StringRef name)
-        {
-            if (name.empty() || name == "<unnamed>")
-                return true;
-
-            if (name.starts_with("ref.tmp") || name.starts_with("agg.tmp") ||
-                name.starts_with("coerce") || name.starts_with("__range") ||
-                name.starts_with("__begin") || name.starts_with("__end") ||
-                name.starts_with("retval") || name.starts_with("exn.slot") ||
-                name.starts_with("ehselector.slot"))
-            {
-                return true;
-            }
-
-            if (name.ends_with(".addr"))
-                return true;
-
-            return name.contains(".tmp");
-        }
-
         static std::string toLowerPathForMatch(const std::string& input)
         {
             std::string out;
@@ -417,6 +414,38 @@ namespace ctrace::stack::analysis
             if (!isAllocaObject(obj))
                 return false;
             return !isLikelyCompilerTemporaryName(getTrackedObjectName(obj));
+        }
+
+        static bool hasMeaningfulAllocaUse(const llvm::AllocaInst& AI)
+        {
+            for (const llvm::Use& U : AI.uses())
+            {
+                const llvm::User* user = U.getUser();
+                if (const auto* II = llvm::dyn_cast<llvm::IntrinsicInst>(user))
+                {
+                    if (llvm::isa<llvm::DbgInfoIntrinsic>(II) ||
+                        llvm::isa<llvm::LifetimeIntrinsic>(II))
+                    {
+                        continue;
+                    }
+                }
+
+                return true;
+            }
+
+            return false;
+        }
+
+        static bool shouldSuppressDeadAggregateNeverInit(const llvm::AllocaInst& AI)
+        {
+            const llvm::Type* allocatedTy = AI.getAllocatedType();
+            if (!allocatedTy || !allocatedTy->isStructTy())
+                return false;
+
+            // Dead aggregate slots may remain in IR after front-end constant folding
+            // (e.g. code behind compile-time disabled branches). Emitting "never
+            // initialized" on these unused slots is noisy and not actionable.
+            return !hasMeaningfulAllocaUse(AI);
         }
 
         static bool clipRangeToObject(const TrackedMemoryObject& obj, std::uint64_t begin,
@@ -911,6 +940,148 @@ namespace ctrace::stack::analysis
             return summary.paramEffects[argNo];
         }
 
+        static void addPointerSlotWriteEffect(PointerParamEffectSummary& effect,
+                                              std::uint64_t slotOffset,
+                                              std::uint64_t writeSizeBytes)
+        {
+            const PointerSlotWriteEffect candidate{slotOffset, writeSizeBytes};
+            auto it = std::find(effect.pointerSlotWrites.begin(), effect.pointerSlotWrites.end(),
+                                candidate);
+            if (it == effect.pointerSlotWrites.end())
+                effect.pointerSlotWrites.push_back(candidate);
+        }
+
+        static bool isEmptyParamEffect(const PointerParamEffectSummary& effect)
+        {
+            return !effect.hasAnyEffect();
+        }
+
+        static void trimTrailingEmptyParamEffects(FunctionSummary& summary)
+        {
+            while (!summary.paramEffects.empty() && isEmptyParamEffect(summary.paramEffects.back()))
+            {
+                summary.paramEffects.pop_back();
+            }
+        }
+
+        static void mergeParamEffect(PointerParamEffectSummary& dst,
+                                     const PointerParamEffectSummary& src)
+        {
+            for (const ByteRange& rr : src.readBeforeWriteRanges)
+                addRange(dst.readBeforeWriteRanges, rr.begin, rr.end);
+            for (const ByteRange& wr : src.writeRanges)
+                addRange(dst.writeRanges, wr.begin, wr.end);
+            for (const PointerSlotWriteEffect& slotWrite : src.pointerSlotWrites)
+            {
+                addPointerSlotWriteEffect(dst, slotWrite.slotOffset, slotWrite.writeSizeBytes);
+            }
+            dst.hasUnknownReadBeforeWrite |= src.hasUnknownReadBeforeWrite;
+            dst.hasUnknownWrite |= src.hasUnknownWrite;
+        }
+
+        static bool mergeFunctionSummary(FunctionSummary& dst, const FunctionSummary& src)
+        {
+            bool changed = false;
+            if (dst.paramEffects.size() < src.paramEffects.size())
+            {
+                dst.paramEffects.resize(src.paramEffects.size());
+                changed = true;
+            }
+
+            for (std::size_t i = 0; i < src.paramEffects.size(); ++i)
+            {
+                const PointerParamEffectSummary before = dst.paramEffects[i];
+                mergeParamEffect(dst.paramEffects[i], src.paramEffects[i]);
+                if (!(before == dst.paramEffects[i]))
+                    changed = true;
+            }
+
+            const std::size_t beforeSize = dst.paramEffects.size();
+            trimTrailingEmptyParamEffects(dst);
+            if (dst.paramEffects.size() != beforeSize)
+                changed = true;
+            return changed;
+        }
+
+        static ExternalSummaryMapByName
+        importExternalSummaryMap(const UninitializedSummaryIndex* externalSummaries)
+        {
+            ExternalSummaryMapByName out;
+            if (!externalSummaries)
+                return out;
+
+            out.reserve(externalSummaries->functions.size());
+            for (const auto& entry : externalSummaries->functions)
+            {
+                FunctionSummary summary;
+                summary.paramEffects.resize(entry.second.paramEffects.size());
+
+                for (std::size_t paramIdx = 0; paramIdx < entry.second.paramEffects.size();
+                     ++paramIdx)
+                {
+                    const UninitializedSummaryParamEffect& srcEffect =
+                        entry.second.paramEffects[paramIdx];
+                    PointerParamEffectSummary& dstEffect = summary.paramEffects[paramIdx];
+
+                    for (const UninitializedSummaryRange& rr : srcEffect.readBeforeWriteRanges)
+                    {
+                        addRange(dstEffect.readBeforeWriteRanges, rr.begin, rr.end);
+                    }
+                    for (const UninitializedSummaryRange& wr : srcEffect.writeRanges)
+                    {
+                        addRange(dstEffect.writeRanges, wr.begin, wr.end);
+                    }
+                    for (const UninitializedSummaryPointerSlotWrite& slotWrite :
+                         srcEffect.pointerSlotWrites)
+                    {
+                        addPointerSlotWriteEffect(dstEffect, slotWrite.slotOffset,
+                                                  slotWrite.writeSizeBytes);
+                    }
+                    dstEffect.hasUnknownReadBeforeWrite = srcEffect.hasUnknownReadBeforeWrite;
+                    dstEffect.hasUnknownWrite = srcEffect.hasUnknownWrite;
+                }
+
+                trimTrailingEmptyParamEffects(summary);
+                if (!summary.paramEffects.empty())
+                    out.emplace(ctrace_tools::canonicalizeMangledName(entry.first),
+                                std::move(summary));
+            }
+
+            return out;
+        }
+
+        static bool shouldExportFunctionSummary(const llvm::Function& F)
+        {
+            if (F.isDeclaration())
+                return false;
+            if (!F.hasName() || F.getName().empty())
+                return false;
+            // Cross-TU exchange by symbol name is meaningful only for externally
+            // visible functions.
+            if (F.hasLocalLinkage())
+                return false;
+            return true;
+        }
+
+        static bool resolvePointerSlotBaseFromLoadedPointer(const llvm::Value* ptrOperand,
+                                                            const TrackedObjectContext& tracked,
+                                                            const llvm::DataLayout& DL,
+                                                            unsigned& outObjectIdx,
+                                                            std::uint64_t& outSlotOffset,
+                                                            bool& outHasConstSlotOffset)
+        {
+            if (!ptrOperand || !ptrOperand->getType()->isPointerTy())
+                return false;
+
+            const llvm::Value* stripped = ptrOperand->stripPointerCasts();
+            const auto* LI = llvm::dyn_cast<llvm::LoadInst>(stripped);
+            if (!LI)
+                return false;
+
+            return resolveTrackedObjectBase(LI->getPointerOperand(), tracked, DL, outObjectIdx,
+                                            outSlotOffset, outHasConstSlotOffset);
+        }
+
         static bool hasCtorToken(llvm::StringRef symbol, llvm::StringRef token)
         {
             std::size_t pos = symbol.find(token);
@@ -951,6 +1122,29 @@ namespace ctrace::stack::analysis
         {
             if (!ptrOperand || !ptrOperand->getType()->isPointerTy())
                 return;
+
+            unsigned slotObjectIdx = 0;
+            std::uint64_t slotOffset = 0;
+            bool hasConstSlotOffset = false;
+            const bool hasSlotBase = resolvePointerSlotBaseFromLoadedPointer(
+                ptrOperand, tracked, DL, slotObjectIdx, slotOffset, hasConstSlotOffset);
+            if (hasSlotBase)
+            {
+                const TrackedMemoryObject& slotObj = tracked.objects[slotObjectIdx];
+                if (currentSummary && isParamObject(slotObj) && slotObj.param)
+                {
+                    PointerParamEffectSummary& paramEffect =
+                        getParamEffect(*currentSummary, *slotObj.param);
+                    if (!hasConstSlotOffset)
+                    {
+                        paramEffect.hasUnknownWrite = true;
+                        return;
+                    }
+
+                    addPointerSlotWriteEffect(paramEffect, slotOffset, writeSizeBytes);
+                    return;
+                }
+            }
 
             unsigned objectIdx = 0;
             std::uint64_t baseOffset = 0;
@@ -1049,6 +1243,219 @@ namespace ctrace::stack::analysis
             return 0;
         }
 
+        static bool declarationCallReturnIsControlChecked(const llvm::CallBase& CB)
+        {
+            if (CB.getType()->isVoidTy())
+                return true;
+            if (CB.use_empty())
+                return false;
+
+            llvm::SmallPtrSet<const llvm::Value*, 32> visited;
+            llvm::SmallVector<const llvm::Value*, 16> worklist;
+            worklist.push_back(&CB);
+
+            while (!worklist.empty())
+            {
+                const llvm::Value* current = worklist.pop_back_val();
+                if (!visited.insert(current).second)
+                    continue;
+
+                for (const llvm::Use& U : current->uses())
+                {
+                    const llvm::User* user = U.getUser();
+                    if (const auto* BI = llvm::dyn_cast<llvm::BranchInst>(user))
+                    {
+                        if (BI->isConditional() && BI->getCondition() == current)
+                            return true;
+                        continue;
+                    }
+                    if (const auto* SI = llvm::dyn_cast<llvm::SwitchInst>(user))
+                    {
+                        if (SI->getCondition() == current)
+                            return true;
+                        continue;
+                    }
+                    if (const auto* Sel = llvm::dyn_cast<llvm::SelectInst>(user))
+                    {
+                        if (Sel->getCondition() == current)
+                            return true;
+                    }
+
+                    if (const auto* St = llvm::dyn_cast<llvm::StoreInst>(user))
+                    {
+                        if (St->getValueOperand() != current)
+                            continue;
+                        const auto* slot = llvm::dyn_cast<llvm::AllocaInst>(
+                            St->getPointerOperand()->stripPointerCasts());
+                        if (!slot || !slot->isStaticAlloca())
+                            continue;
+                        for (const llvm::Use& slotUse : slot->uses())
+                        {
+                            const auto* slotLoad =
+                                llvm::dyn_cast<llvm::LoadInst>(slotUse.getUser());
+                            if (!slotLoad)
+                                continue;
+                            if (slotLoad->getPointerOperand()->stripPointerCasts() != slot)
+                                continue;
+                            worklist.push_back(slotLoad);
+                        }
+                        continue;
+                    }
+
+                    if (llvm::isa<llvm::CastInst>(user) || llvm::isa<llvm::PHINode>(user) ||
+                        llvm::isa<llvm::SelectInst>(user) || llvm::isa<llvm::CmpInst>(user) ||
+                        llvm::isa<llvm::FreezeInst>(user))
+                    {
+                        worklist.push_back(user);
+                    }
+                }
+            }
+
+            return false;
+        }
+
+        static bool isKnownMemsetLikeDeclarationArg(const llvm::Function& callee, unsigned argIdx)
+        {
+            if (argIdx != 0)
+                return false;
+
+            const llvm::StringRef name = callee.getName();
+            return name == "memset" || name == "__memset_chk" || name.contains("memset");
+        }
+
+        static bool isKnownBzeroLikeDeclarationArg(const llvm::Function& callee, unsigned argIdx)
+        {
+            if (argIdx != 0)
+                return false;
+
+            const llvm::StringRef name = callee.getName();
+            return name == "bzero" || name == "explicit_bzero" || name.contains("bzero");
+        }
+
+        static bool isLikelyStatusOutParamDeclarationArg(const llvm::CallBase& CB,
+                                                         const llvm::Function& callee,
+                                                         unsigned argIdx)
+        {
+            if (callee.getReturnType()->isVoidTy())
+                return false;
+            if (callee.arg_size() < 2)
+                return false;
+            if (argIdx >= CB.arg_size())
+                return false;
+            if (!CB.getArgOperand(argIdx)->getType()->isPointerTy())
+                return false;
+            if (argIdx + 2 < CB.arg_size())
+                return false; // Status APIs generally place out-params near the tail.
+            if (CB.paramHasAttr(argIdx, llvm::Attribute::ReadOnly) ||
+                CB.paramHasAttr(argIdx, llvm::Attribute::ReadNone))
+            {
+                return false;
+            }
+
+            // Keep this conservative: require the argument to be a local slot/object
+            // or a direct projection of the current function's sret aggregate.
+            const llvm::Value* actual = CB.getArgOperand(argIdx)->stripPointerCasts();
+            const llvm::Value* underlying = llvm::getUnderlyingObject(actual, 32);
+            if (const auto* AI = llvm::dyn_cast_or_null<llvm::AllocaInst>(underlying))
+                return AI->isStaticAlloca();
+
+            const auto* underlyingArg = llvm::dyn_cast_or_null<llvm::Argument>(underlying);
+            if (!underlyingArg)
+                return false;
+
+            const llvm::Function* caller = CB.getFunction();
+            if (!caller || underlyingArg->getParent() != caller)
+                return false;
+
+            if (underlyingArg->hasStructRetAttr() ||
+                caller->getAttributes().hasParamAttr(underlyingArg->getArgNo(),
+                                                     llvm::Attribute::StructRet))
+            {
+                return true;
+            }
+
+            return false;
+        }
+
+        static bool isKnownAlwaysWritingDeclarationArg(const llvm::CallBase& CB,
+                                                       const llvm::Function& callee,
+                                                       unsigned argIdx)
+        {
+            return isKnownMemsetLikeDeclarationArg(callee, argIdx) ||
+                   isKnownBzeroLikeDeclarationArg(callee, argIdx) ||
+                   isLikelyStatusOutParamDeclarationArg(CB, callee, argIdx);
+        }
+
+        static bool declarationCallArgMayWriteThrough(const llvm::CallBase& CB,
+                                                      const llvm::Function* callee, unsigned argIdx)
+        {
+            if (!callee || !callee->isDeclaration() || callee->isIntrinsic())
+                return false;
+            if (argIdx >= CB.arg_size())
+                return false;
+            if (callee->isVarArg())
+                return false;
+
+            const llvm::Value* actual = CB.getArgOperand(argIdx);
+            if (!actual || !actual->getType()->isPointerTy())
+                return false;
+
+            if (CB.paramHasAttr(argIdx, llvm::Attribute::ReadOnly) ||
+                CB.paramHasAttr(argIdx, llvm::Attribute::ReadNone))
+            {
+                return false;
+            }
+            if (CB.paramHasAttr(argIdx, llvm::Attribute::WriteOnly))
+                return true;
+
+            if (isKnownAlwaysWritingDeclarationArg(CB, *callee, argIdx))
+                return true;
+
+            if (callee->doesNotAccessMemory() || callee->onlyReadsMemory())
+                return false;
+            if (!callee->getReturnType()->isVoidTy() && !declarationCallReturnIsControlChecked(CB))
+            {
+                return false;
+            }
+
+            if (argIdx >= callee->arg_size())
+                return true; // varargs/ABI mismatch: stay conservative.
+
+            const auto& attrs = callee->getAttributes();
+            if (attrs.hasParamAttr(argIdx, llvm::Attribute::ReadOnly) ||
+                attrs.hasParamAttr(argIdx, llvm::Attribute::ReadNone))
+            {
+                return false;
+            }
+            if (attrs.hasParamAttr(argIdx, llvm::Attribute::WriteOnly))
+                return true;
+
+            return true;
+        }
+
+        static void applyExternalDeclarationCallWriteEffects(const llvm::CallBase& CB,
+                                                             const llvm::Function* callee,
+                                                             const TrackedObjectContext& tracked,
+                                                             const llvm::DataLayout& DL,
+                                                             InitRangeState& initialized,
+                                                             llvm::BitVector* writeSeen,
+                                                             FunctionSummary* currentSummary)
+        {
+            if (!callee || !callee->isDeclaration())
+                return;
+
+            for (unsigned argIdx = 0; argIdx < CB.arg_size(); ++argIdx)
+            {
+                if (!declarationCallArgMayWriteThrough(CB, callee, argIdx))
+                    continue;
+
+                const llvm::Value* ptrOperand = CB.getArgOperand(argIdx);
+                const std::uint64_t inferredSize = inferWriteSizeFromPointerOperand(ptrOperand, DL);
+                markKnownWriteOnPointerOperand(ptrOperand, tracked, DL, initialized, writeSeen,
+                                               currentSummary, inferredSize);
+            }
+        }
+
         static void
         applyKnownCallWriteEffects(const llvm::CallBase& CB, const llvm::Function* callee,
                                    const TrackedObjectContext& tracked, const llvm::DataLayout& DL,
@@ -1120,6 +1527,82 @@ namespace ctrace::stack::analysis
                                                    currentSummary, inferredSize);
                 }
             }
+        }
+
+        static bool storeTargetsTrackedSlot(const llvm::StoreInst& SI, unsigned slotObjectIdx,
+                                            std::uint64_t slotOffset,
+                                            const TrackedObjectContext& tracked,
+                                            const llvm::DataLayout& DL)
+        {
+            unsigned objectIdx = 0;
+            std::uint64_t offset = 0;
+            bool hasConstOffset = false;
+            if (!resolveTrackedObjectBase(SI.getPointerOperand(), tracked, DL, objectIdx, offset,
+                                          hasConstOffset))
+            {
+                return false;
+            }
+
+            return hasConstOffset && objectIdx == slotObjectIdx && offset == slotOffset;
+        }
+
+        static const llvm::Value* findStoredPointerForTrackedSlotBeforeCall(
+            const llvm::CallBase& CB, unsigned slotObjectIdx, std::uint64_t slotOffset,
+            const TrackedObjectContext& tracked, const llvm::DataLayout& DL)
+        {
+            const llvm::BasicBlock* callBB = CB.getParent();
+            const llvm::Value* lastInBlock = nullptr;
+            if (callBB)
+            {
+                for (const llvm::Instruction& I : *callBB)
+                {
+                    if (&I == &CB)
+                        break;
+                    const auto* SI = llvm::dyn_cast<llvm::StoreInst>(&I);
+                    if (!SI)
+                        continue;
+                    if (!SI->getValueOperand()->getType()->isPointerTy())
+                        continue;
+                    if (!storeTargetsTrackedSlot(*SI, slotObjectIdx, slotOffset, tracked, DL))
+                        continue;
+                    lastInBlock = SI->getValueOperand()->stripPointerCasts();
+                }
+            }
+            if (lastInBlock)
+                return lastInBlock;
+
+            const llvm::Function* F = CB.getFunction();
+            if (!F)
+                return nullptr;
+
+            const llvm::Value* uniqueFallback = nullptr;
+            for (const llvm::BasicBlock& BB : *F)
+            {
+                for (const llvm::Instruction& I : BB)
+                {
+                    if (&BB == callBB && &I == &CB)
+                        break;
+                    const auto* SI = llvm::dyn_cast<llvm::StoreInst>(&I);
+                    if (!SI)
+                        continue;
+                    if (!SI->getValueOperand()->getType()->isPointerTy())
+                        continue;
+                    if (!storeTargetsTrackedSlot(*SI, slotObjectIdx, slotOffset, tracked, DL))
+                        continue;
+
+                    const llvm::Value* candidate = SI->getValueOperand()->stripPointerCasts();
+                    if (!uniqueFallback)
+                    {
+                        uniqueFallback = candidate;
+                    }
+                    else if (uniqueFallback != candidate)
+                    {
+                        return nullptr;
+                    }
+                }
+            }
+
+            return uniqueFallback;
         }
 
         static void applyCalleeSummaryAtCall(
@@ -1243,6 +1726,39 @@ namespace ctrace::stack::analysis
                     }
                 }
 
+                if (!effect.pointerSlotWrites.empty())
+                {
+                    if (hasConstOffset)
+                    {
+                        for (const PointerSlotWriteEffect& slotWrite : effect.pointerSlotWrites)
+                        {
+                            const std::uint64_t mappedSlotOffset =
+                                saturatingAdd(baseOffset, slotWrite.slotOffset);
+
+                            if (const llvm::Value* storedPtr =
+                                    findStoredPointerForTrackedSlotBeforeCall(
+                                        CB, objectIdx, mappedSlotOffset, tracked, DL))
+                            {
+                                markKnownWriteOnPointerOperand(storedPtr, tracked, DL, initialized,
+                                                               writeSeen, currentSummary,
+                                                               slotWrite.writeSizeBytes);
+                            }
+
+                            if (currentSummary && isParamObject(obj) && obj.param)
+                            {
+                                PointerParamEffectSummary& current =
+                                    getParamEffect(*currentSummary, *obj.param);
+                                addPointerSlotWriteEffect(current, mappedSlotOffset,
+                                                          slotWrite.writeSizeBytes);
+                            }
+                        }
+                    }
+                    else if (currentSummary && isParamObject(obj) && obj.param)
+                    {
+                        getParamEffect(*currentSummary, *obj.param).hasUnknownWrite = true;
+                    }
+                }
+
                 bool wroteSomething = false;
                 bool writeWasUnknown = false;
                 if (hasConstOffset)
@@ -1300,6 +1816,7 @@ namespace ctrace::stack::analysis
         static void
         transferInstruction(const llvm::Instruction& I, const TrackedObjectContext& tracked,
                             const llvm::DataLayout& DL, const FunctionSummaryMap& summaries,
+                            const ExternalSummaryMapByName* externalSummariesByName,
                             InitRangeState& initialized, llvm::BitVector* writeSeen,
                             llvm::BitVector* readBeforeInitSeen, FunctionSummary* currentSummary,
                             std::vector<UninitializedLocalReadIssue>* emittedIssues)
@@ -1600,31 +2117,49 @@ namespace ctrace::stack::analysis
                 return;
 
             const llvm::Function* callee = CB->getCalledFunction();
-            auto itSummary = callee ? summaries.find(callee) : summaries.end();
-            const bool hasSummary = callee && (itSummary != summaries.end());
+            const FunctionSummary* calleeSummary = nullptr;
+            if (callee)
+            {
+                auto itSummary = summaries.find(callee);
+                if (itSummary != summaries.end())
+                {
+                    calleeSummary = &itSummary->second;
+                }
+                else if (externalSummariesByName)
+                {
+                    auto itExternal = externalSummariesByName->find(
+                        ctrace_tools::canonicalizeMangledName(callee->getName().str()));
+                    if (itExternal != externalSummariesByName->end())
+                        calleeSummary = &itExternal->second;
+                }
+            }
+            const bool hasSummary = (calleeSummary != nullptr);
             if (!hasSummary)
             {
                 applyKnownCallWriteEffects(*CB, callee, tracked, DL, initialized, writeSeen,
                                            currentSummary);
+                applyExternalDeclarationCallWriteEffects(*CB, callee, tracked, DL, initialized,
+                                                         writeSeen, currentSummary);
             }
-            if (!callee || callee->isDeclaration())
+            if (!callee)
                 return;
 
             if (!hasSummary)
                 return;
 
-            applyCalleeSummaryAtCall(*CB, *callee, itSummary->second, tracked, DL, initialized,
+            applyCalleeSummaryAtCall(*CB, *callee, *calleeSummary, tracked, DL, initialized,
                                      writeSeen, readBeforeInitSeen, currentSummary, emittedIssues);
 
             if (!currentSummary)
             {
-                applySummaryGapCallWriteFallbacks(*CB, callee, itSummary->second, tracked, DL,
+                applySummaryGapCallWriteFallbacks(*CB, callee, *calleeSummary, tracked, DL,
                                                   initialized, writeSeen, currentSummary);
             }
         }
 
         static void analyzeFunction(const llvm::Function& F, const llvm::DataLayout& DL,
                                     const FunctionSummaryMap& summaries,
+                                    const ExternalSummaryMapByName* externalSummariesByName,
                                     FunctionSummary* outSummary,
                                     std::vector<UninitializedLocalReadIssue>* outIssues)
         {
@@ -1670,8 +2205,8 @@ namespace ctrace::stack::analysis
                     InitRangeState state = newIn;
                     for (const llvm::Instruction& I : BB)
                     {
-                        transferInstruction(I, tracked, DL, summaries, state, nullptr, nullptr,
-                                            nullptr, nullptr);
+                        transferInstruction(I, tracked, DL, summaries, externalSummariesByName,
+                                            state, nullptr, nullptr, nullptr, nullptr);
                     }
 
                     InitRangeState& oldIn = inState[&BB];
@@ -1699,8 +2234,8 @@ namespace ctrace::stack::analysis
                     InitRangeState state = inState[&BB];
                     for (const llvm::Instruction& I : BB)
                     {
-                        transferInstruction(I, tracked, DL, summaries, state, nullptr, nullptr,
-                                            outSummary, nullptr);
+                        transferInstruction(I, tracked, DL, summaries, externalSummariesByName,
+                                            state, nullptr, nullptr, outSummary, nullptr);
                     }
                 }
                 return;
@@ -1717,8 +2252,8 @@ namespace ctrace::stack::analysis
                 InitRangeState state = inState[&BB];
                 for (const llvm::Instruction& I : BB)
                 {
-                    transferInstruction(I, tracked, DL, summaries, state, &writeSeen,
-                                        &readBeforeInitSeen, nullptr, outIssues);
+                    transferInstruction(I, tracked, DL, summaries, externalSummariesByName, state,
+                                        &writeSeen, &readBeforeInitSeen, nullptr, outIssues);
                 }
             }
 
@@ -1734,6 +2269,8 @@ namespace ctrace::stack::analysis
 
                 const llvm::AllocaInst* AI = obj.alloca;
                 if (!AI)
+                    continue;
+                if (shouldSuppressDeadAggregateNeverInit(*AI))
                     continue;
 
                 const std::string varName = deriveAllocaName(AI);
@@ -1756,7 +2293,8 @@ namespace ctrace::stack::analysis
 
         static FunctionSummaryMap
         computeFunctionSummaries(llvm::Module& mod,
-                                 const std::function<bool(const llvm::Function&)>& shouldAnalyze)
+                                 const std::function<bool(const llvm::Function&)>& shouldAnalyze,
+                                 const ExternalSummaryMapByName* externalSummariesByName)
         {
             FunctionSummaryMap summaries;
             for (const llvm::Function& F : mod)
@@ -1783,7 +2321,8 @@ namespace ctrace::stack::analysis
                         continue;
 
                     FunctionSummary next = makeEmptySummary(F);
-                    analyzeFunction(F, mod.getDataLayout(), summaries, &next, nullptr);
+                    analyzeFunction(F, mod.getDataLayout(), summaries, externalSummariesByName,
+                                    &next, nullptr);
                     FunctionSummary& cur = summaries[&F];
                     if (!(cur == next))
                     {
@@ -1837,11 +2376,169 @@ namespace ctrace::stack::analysis
 
             return inScope;
         }
+
+        static FunctionSummary
+        importPublicFunctionSummary(const UninitializedSummaryFunction& publicSummary)
+        {
+            FunctionSummary out;
+            out.paramEffects.resize(publicSummary.paramEffects.size());
+            for (std::size_t paramIdx = 0; paramIdx < publicSummary.paramEffects.size(); ++paramIdx)
+            {
+                const UninitializedSummaryParamEffect& src = publicSummary.paramEffects[paramIdx];
+                PointerParamEffectSummary& dst = out.paramEffects[paramIdx];
+                for (const UninitializedSummaryRange& rr : src.readBeforeWriteRanges)
+                    addRange(dst.readBeforeWriteRanges, rr.begin, rr.end);
+                for (const UninitializedSummaryRange& wr : src.writeRanges)
+                    addRange(dst.writeRanges, wr.begin, wr.end);
+                for (const UninitializedSummaryPointerSlotWrite& slotWrite : src.pointerSlotWrites)
+                {
+                    addPointerSlotWriteEffect(dst, slotWrite.slotOffset, slotWrite.writeSizeBytes);
+                }
+                dst.hasUnknownReadBeforeWrite = src.hasUnknownReadBeforeWrite;
+                dst.hasUnknownWrite = src.hasUnknownWrite;
+            }
+            trimTrailingEmptyParamEffects(out);
+            return out;
+        }
+
+        static UninitializedSummaryFunction
+        exportPublicFunctionSummary(const FunctionSummary& summary)
+        {
+            UninitializedSummaryFunction out;
+            out.paramEffects.reserve(summary.paramEffects.size());
+            for (const PointerParamEffectSummary& effect : summary.paramEffects)
+            {
+                UninitializedSummaryParamEffect exported;
+                exported.readBeforeWriteRanges.reserve(effect.readBeforeWriteRanges.size());
+                for (const ByteRange& rr : effect.readBeforeWriteRanges)
+                {
+                    exported.readBeforeWriteRanges.push_back({rr.begin, rr.end});
+                }
+                exported.writeRanges.reserve(effect.writeRanges.size());
+                for (const ByteRange& wr : effect.writeRanges)
+                {
+                    exported.writeRanges.push_back({wr.begin, wr.end});
+                }
+                exported.pointerSlotWrites.reserve(effect.pointerSlotWrites.size());
+                for (const PointerSlotWriteEffect& slotWrite : effect.pointerSlotWrites)
+                {
+                    exported.pointerSlotWrites.push_back(
+                        {slotWrite.slotOffset, slotWrite.writeSizeBytes});
+                }
+                exported.hasUnknownReadBeforeWrite = effect.hasUnknownReadBeforeWrite;
+                exported.hasUnknownWrite = effect.hasUnknownWrite;
+                out.paramEffects.push_back(std::move(exported));
+            }
+
+            while (!out.paramEffects.empty())
+            {
+                const UninitializedSummaryParamEffect& tail = out.paramEffects.back();
+                if (tail.hasUnknownReadBeforeWrite || tail.hasUnknownWrite ||
+                    !tail.readBeforeWriteRanges.empty() || !tail.writeRanges.empty() ||
+                    !tail.pointerSlotWrites.empty())
+                {
+                    break;
+                }
+                out.paramEffects.pop_back();
+            }
+
+            return out;
+        }
+
+        static UninitializedSummaryIndex
+        exportSummaryIndexForModule(llvm::Module& mod, const FunctionSummaryMap& summaries)
+        {
+            UninitializedSummaryIndex out;
+            for (llvm::Function& F : mod)
+            {
+                if (!shouldExportFunctionSummary(F))
+                    continue;
+
+                const auto it = summaries.find(&F);
+                if (it == summaries.end())
+                    continue;
+
+                FunctionSummary normalized = it->second;
+                trimTrailingEmptyParamEffects(normalized);
+                if (normalized.paramEffects.empty())
+                    continue;
+
+                out.functions[ctrace_tools::canonicalizeMangledName(F.getName().str())] =
+                    exportPublicFunctionSummary(normalized);
+            }
+            return out;
+        }
     } // namespace
+
+    UninitializedSummaryIndex
+    buildUninitializedSummaryIndex(llvm::Module& mod,
+                                   const std::function<bool(const llvm::Function&)>& shouldAnalyze,
+                                   const UninitializedSummaryIndex* externalSummaries)
+    {
+        const llvm::DenseSet<const llvm::Function*> summaryScope =
+            collectSummaryScope(mod, shouldAnalyze);
+        auto shouldSummarize = [&](const llvm::Function& F) -> bool
+        { return summaryScope.find(&F) != summaryScope.end(); };
+
+        const ExternalSummaryMapByName externalMap = importExternalSummaryMap(externalSummaries);
+        FunctionSummaryMap summaries = computeFunctionSummaries(
+            mod, shouldSummarize, externalMap.empty() ? nullptr : &externalMap);
+        return exportSummaryIndexForModule(mod, summaries);
+    }
+
+    bool mergeUninitializedSummaryIndex(UninitializedSummaryIndex& dst,
+                                        const UninitializedSummaryIndex& src)
+    {
+        bool changed = false;
+        for (const auto& entry : src.functions)
+        {
+            const FunctionSummary srcInternal = importPublicFunctionSummary(entry.second);
+            if (srcInternal.paramEffects.empty())
+                continue;
+
+            auto it = dst.functions.find(entry.first);
+            if (it == dst.functions.end())
+            {
+                dst.functions.emplace(entry.first, exportPublicFunctionSummary(srcInternal));
+                changed = true;
+                continue;
+            }
+
+            FunctionSummary dstInternal = importPublicFunctionSummary(it->second);
+            if (mergeFunctionSummary(dstInternal, srcInternal))
+            {
+                it->second = exportPublicFunctionSummary(dstInternal);
+                changed = true;
+            }
+        }
+        return changed;
+    }
+
+    bool uninitializedSummaryIndexEquals(const UninitializedSummaryIndex& lhs,
+                                         const UninitializedSummaryIndex& rhs)
+    {
+        if (lhs.functions.size() != rhs.functions.size())
+            return false;
+
+        for (const auto& entry : lhs.functions)
+        {
+            auto rhsIt = rhs.functions.find(entry.first);
+            if (rhsIt == rhs.functions.end())
+                return false;
+
+            const FunctionSummary left = importPublicFunctionSummary(entry.second);
+            const FunctionSummary right = importPublicFunctionSummary(rhsIt->second);
+            if (!(left == right))
+                return false;
+        }
+
+        return true;
+    }
 
     std::vector<UninitializedLocalReadIssue>
     analyzeUninitializedLocalReads(llvm::Module& mod,
-                                   const std::function<bool(const llvm::Function&)>& shouldAnalyze)
+                                   const std::function<bool(const llvm::Function&)>& shouldAnalyze,
+                                   const UninitializedSummaryIndex* externalSummaries)
     {
         std::vector<UninitializedLocalReadIssue> issues;
 
@@ -1849,7 +2546,9 @@ namespace ctrace::stack::analysis
             collectSummaryScope(mod, shouldAnalyze);
         auto shouldSummarize = [&](const llvm::Function& F) -> bool
         { return summaryScope.find(&F) != summaryScope.end(); };
-        FunctionSummaryMap summaries = computeFunctionSummaries(mod, shouldSummarize);
+        const ExternalSummaryMapByName externalMap = importExternalSummaryMap(externalSummaries);
+        FunctionSummaryMap summaries = computeFunctionSummaries(
+            mod, shouldSummarize, externalMap.empty() ? nullptr : &externalMap);
 
         for (const llvm::Function& F : mod)
         {
@@ -1858,7 +2557,8 @@ namespace ctrace::stack::analysis
             if (!shouldAnalyze(F))
                 continue;
 
-            analyzeFunction(F, mod.getDataLayout(), summaries, nullptr, &issues);
+            analyzeFunction(F, mod.getDataLayout(), summaries,
+                            externalMap.empty() ? nullptr : &externalMap, nullptr, &issues);
         }
 
         return issues;
