@@ -65,8 +65,11 @@ jobs:
 
     - name: Test Stack Usage Analyzer (Linux/macOS)
       if: runner.os == 'Linux' || runner.os == 'macOS'
+      timeout-minutes: 45
       run: |
-        python3 run_test.py
+        TEST_JOBS="$(python3 -c 'import os; print(max(1, min(8, os.cpu_count() or 1)))')"
+        echo "Running run_test.py with ${TEST_JOBS} job(s)"
+        python3 -u run_test.py --jobs="${TEST_JOBS}"
 
     - name: Self-analysis (analyze own source code)
       if: runner.os == 'Linux'
