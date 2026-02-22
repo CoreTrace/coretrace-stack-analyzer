@@ -1,0 +1,65 @@
+name: CoreTrace Stack Analyzer (Docker)
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  stack-analysis:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      security-events: write
+
+    steps:
+      - name: Checkout target project
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Install target-project dependencies needed for configure/headers.
+      # Adapt this list to your project.
+      - name: Install target dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake \
+            ninja-build \
+            pkg-config
+          # Add your project SDK/header deps here when needed.
+          # Example for Vulkan projects: libvulkan-dev libglfw3-dev
+
+      # For CMake projects: generate compile_commands.json in CI.
+      # For non-CMake projects, replace this step with your own compile DB generation
+      # (e.g. bear, compiledb, Meson export, etc.).
+      - name: Configure target project (compile_commands.json)
+        run: |
+          cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+
+      - name: Pull analyzer image
+        run: |
+          docker pull ghcr.io/<org>/coretrace-stack-analyzer:0.1.0
+
+      # Defaults are provided by the Docker entrypoint:
+      # - --compile-commands=/workspace/build/compile_commands.json (auto-detected)
+      # - --analysis-profile=fast
+      # - --resource-summary-cache-memory-only
+      # - --resource-model=/models/resource-lifetime/generic.txt
+      - name: Run analysis (SARIF)
+        run: |
+          mkdir -p artifacts
+          docker run --rm \
+            -u "$(id -u):$(id -g)" \
+            -v "$PWD:/workspace" \
+            ghcr.io/<org>/coretrace-stack-analyzer:0.1.0 \
+            --format=sarif \
+            --base-dir=/workspace \
+            --warnings-only \
+            > artifacts/stack-usage.sarif
+
+      - name: Upload SARIF to GitHub Code Scanning
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: artifacts/stack-usage.sarif

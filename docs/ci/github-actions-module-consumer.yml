@@ -1,0 +1,48 @@
+name: CoreTrace Stack Analyzer (Action Module)
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  stack-analysis:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      security-events: write
+
+    steps:
+      - name: Checkout target project
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Generate compile_commands.json in CI.
+      # Replace this with your own build-system export if you do not use CMake.
+      - name: Configure target project (compile_commands.json)
+        run: |
+          cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+
+      # Consume the analyzer as a reusable GitHub Action module.
+      - name: Run CoreTrace analyzer
+        id: coretrace
+        uses: CoreTrace/coretrace-stack-analyzer@v0
+        with:
+          compile-commands: build/compile_commands.json
+          analysis-profile: fast
+          resource-model: default
+          resource-cache-memory-only: "true"
+          fail-on: error
+          warnings-only: "false"
+          json-file: artifacts/coretrace-stack-analysis.json
+          sarif-file: artifacts/coretrace-stack-analysis.sarif
+          upload-sarif: "true"
+
+      - name: Print summary
+        run: |
+          echo "errors=${{ steps.coretrace.outputs.errors }}"
+          echo "warnings=${{ steps.coretrace.outputs.warnings }}"
+          echo "sarif=${{ steps.coretrace.outputs.sarif-file }}"
+          echo "json=${{ steps.coretrace.outputs.json-file }}"
