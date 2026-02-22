@@ -85,7 +85,7 @@ jobs:
           --analyzer-arg=--resource-model=models/resource-lifetime/generic.txt
 
     - name: Upload SARIF to Code Scanning
-      if: runner.os == 'Linux' && always()
+      if: runner.os == 'Linux' && always() && hashFiles('artifacts/self-analysis.sarif') != ''
       uses: github/codeql-action/upload-sarif@v3
       with:
         sarif_file: artifacts/self-analysis.sarif
