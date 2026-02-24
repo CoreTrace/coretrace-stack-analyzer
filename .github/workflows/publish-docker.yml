@@ -1,0 +1,119 @@
+name: Publish Docker Images
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Optional version tag override (example: v0.2.0)."
+        required: false
+        default: ""
+      push_latest:
+        description: "Also publish the latest tag."
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    name: Build and push images to GHCR
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Resolve image names
+        id: images
+        shell: bash
+        run: |
+          owner_lower="$(echo "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
+          echo "registry=ghcr.io" >> "${GITHUB_OUTPUT}"
+          echo "runtime=ghcr.io/${owner_lower}/coretrace-stack-analyzer" >> "${GITHUB_OUTPUT}"
+          echo "ci=ghcr.io/${owner_lower}/coretrace-stack-analyzer-ci" >> "${GITHUB_OUTPUT}"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ steps.images.outputs.registry }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute image tags
+        id: tags
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          short_sha="$(git rev-parse --short=12 HEAD)"
+
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            version="${GITHUB_REF_NAME}"
+          elif [[ -n "${{ github.event.inputs.version }}" ]]; then
+            version="${{ github.event.inputs.version }}"
+          else
+            version="sha-${short_sha}"
+          fi
+
+          push_latest="false"
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            push_latest="true"
+          elif [[ "${{ github.event.inputs.push_latest }}" == "true" ]]; then
+            push_latest="true"
+          fi
+
+          runtime_base="${{ steps.images.outputs.runtime }}"
+          ci_base="${{ steps.images.outputs.ci }}"
+          runtime_tags="${runtime_base}:${version}"$'\n'"${runtime_base}:sha-${short_sha}"
+          ci_tags="${ci_base}:${version}"$'\n'"${ci_base}:sha-${short_sha}"
+
+          if [[ "${push_latest}" == "true" ]]; then
+            runtime_tags+=$'\n'"${runtime_base}:latest"
+            ci_tags+=$'\n'"${ci_base}:latest"
+          fi
+
+          {
+            echo "runtime_tags<<EOF"
+            echo "${runtime_tags}"
+            echo "EOF"
+            echo "ci_tags<<EOF"
+            echo "${ci_tags}"
+            echo "EOF"
+            echo "version=${version}"
+            echo "short_sha=${short_sha}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Build and push runtime image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ${{ steps.tags.outputs.runtime_tags }}
+          platforms: linux/amd64
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build and push CI image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile.ci
+          push: true
+          tags: ${{ steps.tags.outputs.ci_tags }}
+          platforms: linux/amd64
+          build-args: |
+            CORETRACE_RUNTIME_IMAGE=${{ steps.images.outputs.runtime }}:${{ steps.tags.outputs.version }}
+            VERSION=${{ steps.tags.outputs.version }}
+            VCS_REF=${{ steps.tags.outputs.short_sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

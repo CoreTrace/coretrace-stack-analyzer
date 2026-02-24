@@ -31,6 +31,7 @@
 #include "analysis/IRValueUtils.hpp"
 #include "analysis/InvalidBaseReconstruction.hpp"
 #include "analysis/MemIntrinsicOverflow.hpp"
+#include "analysis/ResourceLifetimeAnalysis.hpp"
 #include "analysis/SizeMinusKWrites.hpp"
 #include "analysis/StackBufferAnalysis.hpp"
 #include "analysis/StackComputation.hpp"
@@ -266,13 +267,20 @@ namespace ctrace::stack
             analysis::InternalAnalysisState state =
                 analysis::computeGlobalStackUsage(CG, localStack);
 
+            std::vector<const llvm::Function*> nodes;
+            nodes.reserve(ctx.allDefinedFunctions.size());
             for (llvm::Function* F : ctx.allDefinedFunctions)
             {
-                const llvm::Function* Fn = F;
-                if (!state.RecursiveFuncs.count(Fn))
+                nodes.push_back(F);
+            }
+
+            const auto recursiveComponents = analysis::computeRecursiveComponents(CG, nodes);
+            for (const auto& component : recursiveComponents)
+            {
+                if (!analysis::detectInfiniteRecursionComponent(component))
                     continue;
 
-                if (analysis::detectInfiniteSelfRecursion(*F))
+                for (const llvm::Function* Fn : component)
                 {
                     state.InfiniteRecursionFuncs.insert(Fn);
                 }
@@ -368,15 +376,15 @@ namespace ctrace::stack
                     Diagnostic diag;
                     diag.funcName = fr.name;
                     diag.filePath = fr.filePath;
-                    diag.severity = DiagnosticSeverity::Warning;
+                    diag.severity = DiagnosticSeverity::Info;
                     diag.errCode = DescriptiveErrorCode::None;
                     if (hasFunctionLoc)
                     {
                         diag.line = functionLoc.line;
                         diag.column = functionLoc.column;
                     }
-                    diag.message =
-                        "\t[ !!Warn ] recursive or mutually recursive function detected\n";
+                    diag.message = "\t" + std::string(prefixForSeverity(diag.severity)) +
+                                   " recursive or mutually recursive function detected\n";
                     result.diagnostics.push_back(std::move(diag));
                 }
 
@@ -1353,6 +1361,91 @@ namespace ctrace::stack
                 result.diagnostics.push_back(std::move(diag));
             }
         }
+
+        static void appendResourceLifetimeDiagnostics(
+            AnalysisResult& result, const std::vector<analysis::ResourceLifetimeIssue>& issues)
+        {
+            for (const auto& issue : issues)
+            {
+                unsigned line = 0;
+                unsigned column = 0;
+                bool haveLoc = false;
+                if (issue.inst)
+                {
+                    llvm::DebugLoc DL = issue.inst->getDebugLoc();
+                    if (DL)
+                    {
+                        line = DL.getLine();
+                        column = DL.getCol();
+                        haveLoc = (line != 0);
+                    }
+                }
+
+                Diagnostic diag;
+                diag.funcName = issue.funcName;
+                diag.line = haveLoc ? line : 0;
+                diag.column = haveLoc ? column : 0;
+                diag.errCode = DescriptiveErrorCode::ResourceLifetimeIssue;
+                diag.confidence = 0.80;
+
+                std::ostringstream body;
+                switch (issue.kind)
+                {
+                case analysis::ResourceLifetimeIssueKind::MissingRelease:
+                    diag.severity = DiagnosticSeverity::Warning;
+                    diag.ruleId = "ResourceLifetime.MissingRelease";
+                    diag.cweId = "CWE-772";
+                    body << "\t" << prefixForSeverity(diag.severity)
+                         << " potential resource leak: '" << issue.resourceKind
+                         << "' acquired in handle '" << issue.handleName
+                         << "' is not released in this function\n";
+                    body << kDiagIndentArrow
+                         << "no matching release call was found for the tracked "
+                            "handle\n";
+                    break;
+                case analysis::ResourceLifetimeIssueKind::DoubleRelease:
+                    diag.severity = DiagnosticSeverity::Error;
+                    diag.ruleId = "ResourceLifetime.DoubleRelease";
+                    diag.cweId = "CWE-415";
+                    body << "\t" << prefixForSeverity(diag.severity)
+                         << " potential double release: '" << issue.resourceKind << "' handle '"
+                         << issue.handleName
+                         << "' is released without a matching acquire in this function\n";
+                    body << kDiagIndentArrow
+                         << "this may indicate release-after-release or ownership mismatch\n";
+                    break;
+                case analysis::ResourceLifetimeIssueKind::MissingDestructorRelease:
+                    diag.severity = DiagnosticSeverity::Warning;
+                    diag.ruleId = "ResourceLifetime.MissingDestructorRelease";
+                    diag.cweId = "CWE-772";
+                    body << "\t" << prefixForSeverity(diag.severity)
+                         << " resource acquired in constructor may leak: class '" << issue.className
+                         << "' does not release '" << issue.resourceKind << "' field '"
+                         << issue.handleName << "' in destructor\n";
+                    body << kDiagIndentArrow
+                         << "tracked constructor acquisitions for this field have "
+                            "no matching destructor release\n";
+                    break;
+                case analysis::ResourceLifetimeIssueKind::IncompleteInterproc:
+                    diag.severity = DiagnosticSeverity::Warning;
+                    diag.ruleId = "ResourceLifetime.IncompleteInterproc";
+                    body << "\t" << prefixForSeverity(diag.severity)
+                         << " inter-procedural resource analysis incomplete: handle '"
+                         << issue.handleName
+                         << "' may be acquired by an unmodeled/external callee before release\n";
+                    body << kDiagIndentArrow
+                         << "no matching resource model rule or cross-TU summary was found for at "
+                            "least one related call\n";
+                    body << kDiagIndentArrow
+                         << "include callee definitions in inputs or extend --resource-model to "
+                            "improve precision\n";
+                    break;
+                }
+
+                diag.message = body.str();
+                result.diagnostics.push_back(std::move(diag));
+            }
+        }
     } // namespace
 
     // ============================================================================
@@ -1419,7 +1512,7 @@ namespace ctrace::stack
         // 6) Detect stack buffer overflows (intra-function analysis)
         t0 = Clock::now();
         std::vector<analysis::StackBufferOverflowIssue> bufferIssues =
-            analysis::analyzeStackBufferOverflows(mod, shouldAnalyzeFunction);
+            analysis::analyzeStackBufferOverflows(mod, shouldAnalyzeFunction, config);
         appendStackBufferDiagnostics(result, bufferIssues);
         logDuration("Stack buffer overflows", t0);
 
@@ -1454,7 +1547,7 @@ namespace ctrace::stack
         // 12) Detect multiple stores into the same stack buffer
         t0 = Clock::now();
         std::vector<analysis::MultipleStoreIssue> multiStoreIssues =
-            analysis::analyzeMultipleStores(mod, shouldAnalyzeFunction);
+            analysis::analyzeMultipleStores(mod, shouldAnalyzeFunction, config);
         appendMultipleStoreDiagnostics(result, multiStoreIssues);
 
         // 12b) Détection de branches else-if inatteignables (condition dupliquée)
@@ -1466,7 +1559,8 @@ namespace ctrace::stack
         // 12c) Detect potential reads from uninitialized local stack variables
         t0 = Clock::now();
         std::vector<analysis::UninitializedLocalReadIssue> uninitializedReadIssues =
-            analysis::analyzeUninitializedLocalReads(mod, shouldAnalyzeFunction);
+            analysis::analyzeUninitializedLocalReads(mod, shouldAnalyzeFunction,
+                                                     config.uninitializedSummaryIndex.get());
         appendUninitializedLocalReadDiagnostics(result, uninitializedReadIssues);
         logDuration("Uninitialized local reads", t0);
 
@@ -1480,7 +1574,8 @@ namespace ctrace::stack
         // 14) Detect stack pointer escapes (potential use-after-return)
         t0 = Clock::now();
         std::vector<analysis::StackPointerEscapeIssue> escapeIssues =
-            analysis::analyzeStackPointerEscapes(mod, shouldAnalyzeFunction);
+            analysis::analyzeStackPointerEscapes(mod, shouldAnalyzeFunction,
+                                                 config.escapeModelPath);
         appendStackPointerEscapeDiagnostics(result, escapeIssues);
         logDuration("Stack pointer escapes", t0);
 
@@ -1490,6 +1585,14 @@ namespace ctrace::stack
             analysis::analyzeConstParams(mod, shouldAnalyzeFunction);
         appendConstParamDiagnostics(result, constParamIssues);
         logDuration("Const params", t0);
+
+        // 16) Generic resource lifetime checks (model-driven acquire/release)
+        t0 = Clock::now();
+        std::vector<analysis::ResourceLifetimeIssue> resourceLifetimeIssues =
+            analysis::analyzeResourceLifetime(mod, shouldAnalyzeFunction, config.resourceModelPath,
+                                              config.resourceSummaryIndex.get());
+        appendResourceLifetimeDiagnostics(result, resourceLifetimeIssues);
+        logDuration("Resource lifetime", t0);
 
         return result;
     }

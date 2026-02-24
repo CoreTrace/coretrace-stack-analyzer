@@ -1,13 +1,155 @@
 #!/usr/bin/env python3
+import argparse
+import contextlib
+import importlib.util
+import io
 import sys
 import subprocess
 import json
 import re
+import hashlib
+import os
+import shutil
+import threading
+import tempfile
+import uuid
+from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-# Path to the analyzer binary
-ANALYZER = Path("./build/stack_usage_analyzer")   # adjust if needed
-TEST_DIR = Path("test")                     # folder containing the .c files
+DEFAULT_ANALYZER = Path("./build/stack_usage_analyzer")
+DEFAULT_TEST_DIR = Path("test")
+DEFAULT_CACHE_DIR = Path(".cache/run_test")
+
+
+@dataclass
+class TestRunConfig:
+    analyzer: Path = DEFAULT_ANALYZER
+    test_dir: Path = DEFAULT_TEST_DIR
+    cache_dir: Path = DEFAULT_CACHE_DIR
+    jobs: int = 1
+    cache_enabled: bool = True
+
+
+RUN_CONFIG = TestRunConfig()
+_CACHE_LOCK = threading.Lock()
+_MEM_CACHE = {}
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Run analyzer regression tests with optional parallelism and caching."
+    )
+    parser.add_argument(
+        "--jobs",
+        type=int,
+        default=1,
+        help="Number of worker threads used for per-file checks (default: 1).",
+    )
+    parser.add_argument(
+        "--cache-dir",
+        default=str(RUN_CONFIG.cache_dir),
+        help="Directory used for analyzer output cache (default: .cache/run_test).",
+    )
+    parser.add_argument(
+        "--no-cache",
+        action="store_true",
+        help="Disable analyzer output cache.",
+    )
+    parser.add_argument(
+        "--clear-cache",
+        action="store_true",
+        help="Delete cache directory before running tests.",
+    )
+    return parser.parse_args()
+
+
+def _collect_cache_dependencies(args):
+    deps = []
+    candidates = {Path(__file__).resolve(), RUN_CONFIG.analyzer.resolve()}
+    for arg in args:
+        if arg.startswith("-") and "=" in arg:
+            value = arg.split("=", 1)[1]
+            if value:
+                p = Path(value)
+                if p.exists():
+                    candidates.add(p.resolve())
+            continue
+
+        if arg.startswith("-"):
+            continue
+
+        p = Path(arg)
+        if p.exists():
+            candidates.add(p.resolve())
+
+    for p in sorted(candidates, key=lambda x: str(x)):
+        try:
+            st = p.stat()
+        except OSError:
+            continue
+        deps.append([str(p), st.st_mtime_ns, st.st_size])
+    return deps
+
+
+def _cache_key_for_args(args):
+    payload = {
+        "analyzer": str(RUN_CONFIG.analyzer.resolve()),
+        "args": list(args),
+        "cwd": str(Path.cwd()),
+        "deps": _collect_cache_dependencies(args),
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _cache_path_for_key(key):
+    return RUN_CONFIG.cache_dir / f"{key}.json"
+
+
+def _cache_load(key):
+    if not RUN_CONFIG.cache_enabled:
+        return None
+    cache_path = _cache_path_for_key(key)
+    if not cache_path.exists():
+        return None
+    try:
+        data = json.loads(cache_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    return subprocess.CompletedProcess(
+        args=data.get("args", []),
+        returncode=int(data.get("returncode", 1)),
+        stdout=data.get("stdout", ""),
+        stderr=data.get("stderr", ""),
+    )
+
+
+def _cache_store(key, result):
+    if not RUN_CONFIG.cache_enabled:
+        return
+    try:
+        RUN_CONFIG.cache_dir.mkdir(parents=True, exist_ok=True)
+        cache_path = _cache_path_for_key(key)
+        tmp_path = cache_path.with_suffix(
+            f"{cache_path.suffix}.{os.getpid()}.{threading.get_ident()}.tmp"
+        )
+        tmp_path.write_text(
+            json.dumps(
+                {
+                    "args": result.args,
+                    "returncode": result.returncode,
+                    "stdout": result.stdout or "",
+                    "stderr": result.stderr or "",
+                },
+                ensure_ascii=True,
+            ),
+            encoding="utf-8",
+        )
+        tmp_path.replace(cache_path)
+    except Exception:
+        # Cache failures must not fail tests.
+        pass
 
 
 def normalize(s: str) -> str:
@@ -32,6 +174,30 @@ def normalize(s: str) -> str:
     return "\n".join(lines).strip()
 
 
+def _location_tolerant_variants(expectation: str) -> list[str]:
+    """
+    Build location-tolerant expectation variants for known cross-toolchain
+    one-column drifts in "at line X, column Y" headers.
+    """
+    lines = expectation.splitlines()
+    if not lines:
+        return []
+    match = re.match(r"\s*at line (\d+), column (\d+)\s*$", lines[0])
+    if not match:
+        return []
+    line = int(match.group(1))
+    column = int(match.group(2))
+    variants: list[str] = []
+    for delta in (-1, 1):
+        candidate_column = column + delta
+        if candidate_column <= 0:
+            continue
+        alt_lines = list(lines)
+        alt_lines[0] = f"at line {line}, column {candidate_column}"
+        variants.append("\n".join(alt_lines))
+    return variants
+
+
 def extract_expectations(c_path: Path):
     """
     Extract expected comment blocks from a .c file.
@@ -41,6 +207,8 @@ def extract_expectations(c_path: Path):
     expectations = []
     negative_expectations = []
     stack_limit = None
+    resource_model = None
+    escape_model = None
     lines = c_path.read_text().splitlines()
     i = 0
     n = len(lines)
@@ -52,6 +220,16 @@ def extract_expectations(c_path: Path):
         stack_match = re.match(r"//\s*stack-limit\s*[:=]\s*(\S+)", stripped, re.IGNORECASE)
         if stack_match:
             stack_limit = stack_match.group(1)
+            i += 1
+            continue
+        resource_match = re.match(r"//\s*resource-model\s*[:=]\s*(\S+)", stripped, re.IGNORECASE)
+        if resource_match:
+            resource_model = resource_match.group(1)
+            i += 1
+            continue
+        escape_match = re.match(r"//\s*escape-model\s*[:=]\s*(\S+)", stripped, re.IGNORECASE)
+        if escape_match:
+            escape_model = escape_match.group(1)
             i += 1
             continue
 
@@ -85,21 +263,21 @@ def extract_expectations(c_path: Path):
         else:
             i += 1
 
-    return expectations, negative_expectations, stack_limit
+    return expectations, negative_expectations, stack_limit, resource_model, escape_model
 
 
-def run_analyzer_on_file(c_path: Path, stack_limit=None) -> str:
+def run_analyzer_on_file(c_path: Path, stack_limit=None, resource_model=None, escape_model=None) -> str:
     """
     Run the analyzer on a C file and capture stdout+stderr.
     """
-    args = [str(ANALYZER), str(c_path)]
+    args = [str(c_path)]
     if stack_limit:
         args.append(f"--stack-limit={stack_limit}")
-    result = subprocess.run(
-        args,
-        capture_output=True,
-        text=True,
-    )
+    if resource_model:
+        args.append(f"--resource-model={resource_model}")
+    if escape_model:
+        args.append(f"--escape-model={escape_model}")
+    result = run_analyzer(args)
     output = (result.stdout or "") + (result.stderr or "")
     return output
 
@@ -108,7 +286,87 @@ def run_analyzer(args) -> subprocess.CompletedProcess:
     """
     Run analyzer with custom args and return the CompletedProcess.
     """
-    return subprocess.run([str(ANALYZER)] + args, capture_output=True, text=True)
+    cmd = [str(RUN_CONFIG.analyzer)] + args
+    key = _cache_key_for_args(args)
+
+    with _CACHE_LOCK:
+        in_memory = _MEM_CACHE.get(key)
+    if in_memory is not None:
+        return subprocess.CompletedProcess(
+            args=cmd,
+            returncode=in_memory["returncode"],
+            stdout=in_memory["stdout"],
+            stderr=in_memory["stderr"],
+        )
+
+    cached = _cache_load(key)
+    if cached is not None:
+        cached.args = cmd
+        with _CACHE_LOCK:
+            _MEM_CACHE[key] = {
+                "returncode": cached.returncode,
+                "stdout": cached.stdout or "",
+                "stderr": cached.stderr or "",
+            }
+        return cached
+
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    with _CACHE_LOCK:
+        _MEM_CACHE[key] = {
+            "returncode": result.returncode,
+            "stdout": result.stdout or "",
+            "stderr": result.stderr or "",
+        }
+    _cache_store(key, result)
+    return result
+
+
+def run_analyzer_uncached(args) -> subprocess.CompletedProcess:
+    """
+    Run analyzer with custom args and bypass run_test.py cache layer.
+    Useful for checks that assert filesystem side effects.
+    """
+    cmd = [str(RUN_CONFIG.analyzer)] + args
+    return subprocess.run(cmd, capture_output=True, text=True)
+
+
+def fail_check(message: str, output: str = "") -> bool:
+    print(f"  ❌ {message}")
+    if output:
+        print(output)
+    print()
+    return False
+
+
+def expect_returncode_zero(result: subprocess.CompletedProcess, output: str, context: str) -> bool:
+    if result.returncode == 0:
+        return True
+    return fail_check(f"{context} (code {result.returncode})", output)
+
+
+def expect_contains(output: str, needle: str, context: str) -> bool:
+    if needle in output:
+        return True
+    return fail_check(context, output)
+
+
+def expect_not_contains(output: str, needle: str, context: str) -> bool:
+    if needle not in output:
+        return True
+    return fail_check(context, output)
+
+
+def load_docker_entrypoint_module():
+    entrypoint_path = Path("scripts/docker/coretrace_entrypoint.py")
+    if not entrypoint_path.exists():
+        return None, f"entrypoint script not found: {entrypoint_path}"
+    module_name = f"coretrace_entrypoint_test_{uuid.uuid4().hex}"
+    spec = importlib.util.spec_from_file_location(module_name, entrypoint_path)
+    if spec is None or spec.loader is None:
+        return None, f"unable to load module spec: {entrypoint_path}"
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module, ""
 
 
 def parse_stack_line(line: str, label: str):
@@ -319,6 +577,155 @@ def parse_human_diagnostic_messages(output: str):
     return blocks
 
 
+def _check_human_vs_json_parity_sample(sample: Path):
+    lines = []
+    sample_ok = True
+
+    human = run_analyzer([str(sample)])
+    if human.returncode != 0:
+        lines.append(f"  ❌ human run failed for {sample} (code {human.returncode})")
+        lines.append(human.stdout or "")
+        lines.append(human.stderr or "")
+        return False, "\n".join(lines).rstrip() + "\n"
+
+    structured = run_analyzer([str(sample), "--format=json"])
+    if structured.returncode != 0:
+        lines.append(f"  ❌ json run failed for {sample} (code {structured.returncode})")
+        lines.append(structured.stdout or "")
+        lines.append(structured.stderr or "")
+        return False, "\n".join(lines).rstrip() + "\n"
+
+    try:
+        payload = json.loads(structured.stdout)
+    except json.JSONDecodeError as exc:
+        lines.append(f"  ❌ invalid JSON output for {sample}: {exc}")
+        lines.append(structured.stdout or "")
+        return False, "\n".join(lines).rstrip() + "\n"
+
+    human_output = (human.stdout or "") + (human.stderr or "")
+    norm_human = normalize(human_output)
+    human_functions = parse_human_functions(human_output)
+    human_diag_blocks = parse_human_diagnostic_messages(human_output)
+
+    mode = payload.get("meta", {}).get("mode")
+    if mode and f"Mode: {mode}" not in human_output:
+        lines.append(f"  ❌ mode mismatch for {sample} (json={mode})")
+        sample_ok = False
+
+    for f in payload.get("functions", []):
+        name = f.get("name", "")
+        if not name:
+            continue
+        if name not in human_functions:
+            lines.append(f"  ❌ function missing in human output: {name}")
+            sample_ok = False
+            continue
+        hf = human_functions[name]
+
+        if hf["localStackUnknown"] is None:
+            lines.append(f"  ❌ local stack missing in human output for: {name}")
+            sample_ok = False
+        elif f.get("localStackUnknown") != hf["localStackUnknown"]:
+            lines.append(f"  ❌ local stack unknown flag mismatch for: {name}")
+            sample_ok = False
+        elif not f.get("localStackUnknown"):
+            if f.get("localStack") != hf["localStack"]:
+                lines.append(f"  ❌ local stack value mismatch for: {name}")
+                sample_ok = False
+        elif hf["localStackLowerBound"] is not None:
+            json_lb = f.get("localStackLowerBound")
+            if json_lb != hf["localStackLowerBound"]:
+                lines.append(f"  ❌ local stack lower bound mismatch for: {name}")
+                sample_ok = False
+
+        if hf["maxStackUnknown"] is None:
+            lines.append(f"  ❌ max stack missing in human output for: {name}")
+            sample_ok = False
+        elif f.get("maxStackUnknown") != hf["maxStackUnknown"]:
+            lines.append(f"  ❌ max stack unknown flag mismatch for: {name}")
+            sample_ok = False
+        elif not f.get("maxStackUnknown"):
+            if f.get("maxStack") != hf["maxStack"]:
+                lines.append(f"  ❌ max stack value mismatch for: {name}")
+                sample_ok = False
+        elif hf["maxStackLowerBound"] is not None:
+            json_lb = f.get("maxStackLowerBound")
+            if json_lb != hf["maxStackLowerBound"]:
+                lines.append(f"  ❌ max stack lower bound mismatch for: {name}")
+                sample_ok = False
+
+        if f.get("isRecursive") != hf["isRecursive"]:
+            lines.append(f"  ❌ recursion flag mismatch for: {name}")
+            lines.append(f"     human: {hf['isRecursive']} json: {f.get('isRecursive')}")
+            block = extract_human_function_block(human_output, name)
+            if block:
+                lines.append("     human block:")
+                lines.append(block)
+            else:
+                lines.append("     human block: <not found>")
+            lines.append(f"     json function: {f}")
+            # Do not fail on flag mismatch alone; message parity handles recursion info.
+        if f.get("hasInfiniteSelfRecursion") != hf["hasInfiniteSelfRecursion"]:
+            lines.append(f"  ❌ infinite recursion flag mismatch for: {name}")
+            lines.append(
+                f"     human: {hf['hasInfiniteSelfRecursion']} json: {f.get('hasInfiniteSelfRecursion')}"
+            )
+            block = extract_human_function_block(human_output, name)
+            if block:
+                lines.append("     human block:")
+                lines.append(block)
+            else:
+                lines.append("     human block: <not found>")
+            lines.append(f"     json function: {f}")
+            # Do not fail on flag mismatch alone; message parity handles recursion info.
+        if f.get("exceedsLimit") != hf["exceedsLimit"]:
+            lines.append(f"  ❌ stack limit flag mismatch for: {name}")
+            lines.append(f"     human: {hf['exceedsLimit']} json: {f.get('exceedsLimit')}")
+            block = extract_human_function_block(human_output, name)
+            if block:
+                lines.append("     human block:")
+                lines.append(block)
+            else:
+                lines.append("     human block: <not found>")
+            lines.append(f"     json function: {f}")
+            sample_ok = False
+
+    for d in payload.get("diagnostics", []):
+        details = d.get("details", {})
+        msg = details.get("message", "")
+        if msg and normalize(msg) not in norm_human:
+            lines.append("  ❌ diagnostic message missing in human output")
+            lines.append(f"     message: {msg}")
+            sample_ok = False
+        loc = d.get("location", {})
+        line = loc.get("startLine", 0)
+        column = loc.get("startColumn", 0)
+        if line and column:
+            needle = normalize(f"at line {line}, column {column}")
+            if needle not in norm_human:
+                lines.append("  ❌ diagnostic location missing in human output")
+                lines.append(f"     location: line {line}, column {column}")
+                sample_ok = False
+
+    json_messages = {
+        normalize(d.get("details", {}).get("message", ""))
+        for d in payload.get("diagnostics", [])
+        if d.get("details", {}).get("message")
+    }
+    for block in human_diag_blocks:
+        if block and block not in json_messages:
+            lines.append("  ❌ diagnostic message missing in JSON output")
+            lines.append(f"     message: {block}")
+            sample_ok = False
+
+    if sample_ok:
+        lines.append(f"  ✅ parity OK for {sample}")
+    else:
+        lines.append(f"  ❌ parity FAIL for {sample}")
+
+    return sample_ok, "\n".join(lines).rstrip() + "\n"
+
+
 def check_human_vs_json_parity() -> bool:
     """
     Compare human-readable output vs JSON output for the same input.
@@ -327,171 +734,24 @@ def check_human_vs_json_parity() -> bool:
     print("=== Testing human vs JSON parity ===")
     samples = []
     for ext in ("*.c", "*.cpp"):
-        samples.extend(TEST_DIR.glob(f"**/{ext}"))
+        samples.extend(RUN_CONFIG.test_dir.glob(f"**/{ext}"))
     samples = sorted(samples)
     if not samples:
         print("  (no .c/.cpp files found, skipping)\n")
         return True
 
     ok = True
-    for sample in samples:
-        sample_ok = True
-        human = run_analyzer([str(sample)])
-        if human.returncode != 0:
-            print(f"  ❌ human run failed for {sample} (code {human.returncode})")
-            print(human.stdout)
-            print(human.stderr)
-            sample_ok = False
-            ok = False
-            continue
-
-        structured = run_analyzer([str(sample), "--format=json"])
-        if structured.returncode != 0:
-            print(f"  ❌ json run failed for {sample} (code {structured.returncode})")
-            print(structured.stdout)
-            print(structured.stderr)
-            sample_ok = False
-            ok = False
-            continue
-
-        try:
-            payload = json.loads(structured.stdout)
-        except json.JSONDecodeError as exc:
-            print(f"  ❌ invalid JSON output for {sample}: {exc}")
-            print(structured.stdout)
-            sample_ok = False
-            ok = False
-            continue
-
-        human_output = (human.stdout or "") + (human.stderr or "")
-        norm_human = normalize(human_output)
-        human_functions = parse_human_functions(human_output)
-        human_diag_blocks = parse_human_diagnostic_messages(human_output)
-
-        mode = payload.get("meta", {}).get("mode")
-        if mode and f"Mode: {mode}" not in human_output:
-            print(f"  ❌ mode mismatch for {sample} (json={mode})")
-            sample_ok = False
-
-        def has_json_recursion_diag(func_name: str, needle: str) -> bool:
-            for d in payload.get("diagnostics", []):
-                loc = d.get("location", {})
-                if loc.get("function") != func_name:
-                    continue
-                msg = d.get("details", {}).get("message", "")
-                if needle in msg:
-                    return True
-            return False
-
-        for f in payload.get("functions", []):
-            name = f.get("name", "")
-            if not name:
-                continue
-            if name not in human_functions:
-                print(f"  ❌ function missing in human output: {name}")
-                sample_ok = False
-                continue
-            hf = human_functions[name]
-
-            if hf["localStackUnknown"] is None:
-                print(f"  ❌ local stack missing in human output for: {name}")
-                sample_ok = False
-            elif f.get("localStackUnknown") != hf["localStackUnknown"]:
-                print(f"  ❌ local stack unknown flag mismatch for: {name}")
-                sample_ok = False
-            elif not f.get("localStackUnknown"):
-                if f.get("localStack") != hf["localStack"]:
-                    print(f"  ❌ local stack value mismatch for: {name}")
-                    sample_ok = False
-            elif hf["localStackLowerBound"] is not None:
-                json_lb = f.get("localStackLowerBound")
-                if json_lb != hf["localStackLowerBound"]:
-                    print(f"  ❌ local stack lower bound mismatch for: {name}")
-                    sample_ok = False
-
-            if hf["maxStackUnknown"] is None:
-                print(f"  ❌ max stack missing in human output for: {name}")
-                sample_ok = False
-            elif f.get("maxStackUnknown") != hf["maxStackUnknown"]:
-                print(f"  ❌ max stack unknown flag mismatch for: {name}")
-                sample_ok = False
-            elif not f.get("maxStackUnknown"):
-                if f.get("maxStack") != hf["maxStack"]:
-                    print(f"  ❌ max stack value mismatch for: {name}")
-                    sample_ok = False
-            elif hf["maxStackLowerBound"] is not None:
-                json_lb = f.get("maxStackLowerBound")
-                if json_lb != hf["maxStackLowerBound"]:
-                    print(f"  ❌ max stack lower bound mismatch for: {name}")
-                    sample_ok = False
-
-            if f.get("isRecursive") != hf["isRecursive"]:
-                print(f"  ❌ recursion flag mismatch for: {name}")
-                print(f"     human: {hf['isRecursive']} json: {f.get('isRecursive')}")
-                block = extract_human_function_block(human_output, name)
-                if block:
-                    print("     human block:")
-                    print(block)
-                else:
-                    print("     human block: <not found>")
-                print(f"     json function: {f}")
-                # Do not fail on flag mismatch alone; message parity handles recursion info.
-            if f.get("hasInfiniteSelfRecursion") != hf["hasInfiniteSelfRecursion"]:
-                print(f"  ❌ infinite recursion flag mismatch for: {name}")
-                print(f"     human: {hf['hasInfiniteSelfRecursion']} json: {f.get('hasInfiniteSelfRecursion')}")
-                block = extract_human_function_block(human_output, name)
-                if block:
-                    print("     human block:")
-                    print(block)
-                else:
-                    print("     human block: <not found>")
-                print(f"     json function: {f}")
-                # Do not fail on flag mismatch alone; message parity handles recursion info.
-            if f.get("exceedsLimit") != hf["exceedsLimit"]:
-                print(f"  ❌ stack limit flag mismatch for: {name}")
-                print(f"     human: {hf['exceedsLimit']} json: {f.get('exceedsLimit')}")
-                block = extract_human_function_block(human_output, name)
-                if block:
-                    print("     human block:")
-                    print(block)
-                else:
-                    print("     human block: <not found>")
-                print(f"     json function: {f}")
-                sample_ok = False
-
-        for d in payload.get("diagnostics", []):
-            details = d.get("details", {})
-            msg = details.get("message", "")
-            if msg and normalize(msg) not in norm_human:
-                print("  ❌ diagnostic message missing in human output")
-                print(f"     message: {msg}")
-                sample_ok = False
-            loc = d.get("location", {})
-            line = loc.get("startLine", 0)
-            column = loc.get("startColumn", 0)
-            if line and column:
-                needle = normalize(f"at line {line}, column {column}")
-                if needle not in norm_human:
-                    print("  ❌ diagnostic location missing in human output")
-                    print(f"     location: line {line}, column {column}")
-                    sample_ok = False
-
-        json_messages = {
-            normalize(d.get("details", {}).get("message", ""))
-            for d in payload.get("diagnostics", [])
-            if d.get("details", {}).get("message")
-        }
-        for block in human_diag_blocks:
-            if block and block not in json_messages:
-                print("  ❌ diagnostic message missing in JSON output")
-                print(f"     message: {block}")
-                sample_ok = False
-
-        if sample_ok:
-            print(f"  ✅ parity OK for {sample}")
-        else:
-            print(f"  ❌ parity FAIL for {sample}")
-        ok = ok and sample_ok
+    if RUN_CONFIG.jobs <= 1:
+        for sample in samples:
+            sample_ok, report = _check_human_vs_json_parity_sample(sample)
+            print(report, end="")
+            ok = ok and sample_ok
+    else:
+        with ThreadPoolExecutor(max_workers=RUN_CONFIG.jobs) as executor:
+            reports = list(executor.map(_check_human_vs_json_parity_sample, samples))
+        for sample_ok, report in reports:
+            print(report, end="")
+            ok = ok and sample_ok
 
     print()
     return ok
@@ -505,7 +765,7 @@ def check_help_flags() -> bool:
     ok = True
     for flag in ["-h", "--help"]:
         result = subprocess.run(
-            [str(ANALYZER), flag],
+            [str(RUN_CONFIG.analyzer), flag],
             capture_output=True,
             text=True,
         )
@@ -532,11 +792,11 @@ def check_multi_file_json() -> bool:
     Check that analysis accepts multiple files and JSON aggregates correctly.
     """
     print("=== Testing multi-file JSON ===")
-    file_a = TEST_DIR / "test.ll"
-    file_b = TEST_DIR / "recursion/c/limited-recursion.ll"
+    file_a = RUN_CONFIG.test_dir / "test.ll"
+    file_b = RUN_CONFIG.test_dir / "recursion/c/limited-recursion.ll"
 
     result = subprocess.run(
-        [str(ANALYZER), str(file_a), str(file_b), "--format=json"],
+        [str(RUN_CONFIG.analyzer), str(file_a), str(file_b), "--format=json"],
         capture_output=True,
         text=True,
     )
@@ -600,16 +860,88 @@ def check_multi_file_json() -> bool:
     return True
 
 
+def check_multi_file_total_summary() -> bool:
+    """
+    Check that multi-file human output prints an aggregated diagnostics summary
+    and that totals match per-file summaries.
+    """
+    print("=== Testing multi-file total summary ===")
+    file_a = RUN_CONFIG.test_dir / "test.ll"
+    file_b = RUN_CONFIG.test_dir / "recursion/c/limited-recursion.ll"
+    files = [file_a, file_b]
+
+    result = run_analyzer([str(file_a), str(file_b)])
+    output = (result.stdout or "") + (result.stderr or "")
+    if result.returncode != 0:
+        print(f"  ❌ multi-file run failed (code {result.returncode})")
+        print(output)
+        print()
+        return False
+
+    per_file_matches = re.findall(
+        r"^Diagnostics summary: info=(\d+), warning=(\d+), error=(\d+)\s*$",
+        output,
+        flags=re.MULTILINE,
+    )
+    if len(per_file_matches) != len(files):
+        print("  ❌ unexpected number of per-file summaries")
+        print(f"     expected: {len(files)} got: {len(per_file_matches)}")
+        print(output)
+        print()
+        return False
+
+    total_match = re.search(
+        r"^Total diagnostics summary: info=(\d+), warning=(\d+), error=(\d+) \(across (\d+) files\)\s*$",
+        output,
+        flags=re.MULTILINE,
+    )
+    if not total_match:
+        print("  ❌ missing total diagnostics summary line")
+        print(output)
+        print()
+        return False
+
+    total_info = int(total_match.group(1))
+    total_warning = int(total_match.group(2))
+    total_error = int(total_match.group(3))
+    total_files = int(total_match.group(4))
+
+    if total_files != len(files):
+        print("  ❌ total diagnostics file count mismatch")
+        print(f"     expected: {len(files)} got: {total_files}")
+        print(output)
+        print()
+        return False
+
+    sum_info = sum(int(m[0]) for m in per_file_matches)
+    sum_warning = sum(int(m[1]) for m in per_file_matches)
+    sum_error = sum(int(m[2]) for m in per_file_matches)
+    if (total_info, total_warning, total_error) != (sum_info, sum_warning, sum_error):
+        print("  ❌ total diagnostics count mismatch")
+        print(
+            f"     expected: info={sum_info}, warning={sum_warning}, error={sum_error}"
+        )
+        print(
+            f"     got: info={total_info}, warning={total_warning}, error={total_error}"
+        )
+        print(output)
+        print()
+        return False
+
+    print("  ✅ multi-file total summary OK\n")
+    return True
+
+
 def check_multi_file_failure() -> bool:
     """
     Check fail-fast behavior when a file is invalid.
     """
     print("=== Testing multi-file failure ===")
-    valid_file = TEST_DIR / "test.ll"
-    missing_file = TEST_DIR / "does-not-exist.ll"
+    valid_file = RUN_CONFIG.test_dir / "test.ll"
+    missing_file = RUN_CONFIG.test_dir / "does-not-exist.ll"
 
     result = subprocess.run(
-        [str(ANALYZER), str(valid_file), str(missing_file)],
+        [str(RUN_CONFIG.analyzer), str(valid_file), str(missing_file)],
         capture_output=True,
         text=True,
     )
@@ -637,19 +969,21 @@ def check_cli_parsing_and_filters() -> bool:
     print("=== Testing CLI parsing & filters ===")
     ok = True
 
-    sample = TEST_DIR / "false-positif/unique_ptr_state.cpp"
+    sample = RUN_CONFIG.test_dir / "false-positif/unique_ptr_state.cpp"
 
     # Missing-argument cases
     missing_arg_cases = [
         ("--only-file", "Missing argument for --only-file"),
         ("--only-dir", "Missing argument for --only-dir"),
+        ("--exclude-dir", "Missing argument for --exclude-dir"),
         ("--only-func", "Missing argument for --only-func"),
         ("--only-function", "Missing argument for --only-function"),
+        ("--jobs", "Missing argument for --jobs"),
         ("-I", "Missing argument for -I"),
         ("-D", "Missing argument for -D"),
     ]
     for flag, needle in missing_arg_cases:
-        result = subprocess.run([str(ANALYZER), flag], capture_output=True, text=True)
+        result = subprocess.run([str(RUN_CONFIG.analyzer), flag], capture_output=True, text=True)
         output = (result.stdout or "") + (result.stderr or "")
         if result.returncode == 0 or needle not in output:
             print(f"  ❌ {flag} missing-arg handling")
@@ -659,7 +993,7 @@ def check_cli_parsing_and_filters() -> bool:
             print(f"  ✅ {flag} missing-arg OK")
 
     # Unknown option
-    result = subprocess.run([str(ANALYZER), "--unknown-option"], capture_output=True, text=True)
+    result = subprocess.run([str(RUN_CONFIG.analyzer), "--unknown-option"], capture_output=True, text=True)
     output = (result.stdout or "") + (result.stderr or "")
     if "Unknown option: --unknown-option" not in output:
         print("  ❌ unknown option handling")
@@ -667,6 +1001,19 @@ def check_cli_parsing_and_filters() -> bool:
         ok = False
     else:
         print("  ✅ unknown option OK")
+
+    # jobs value parsing
+    for bad_value in ["0", "x", "-1"]:
+        result = subprocess.run(
+            [str(RUN_CONFIG.analyzer), f"--jobs={bad_value}", str(sample)], capture_output=True, text=True
+        )
+        output = (result.stdout or "") + (result.stderr or "")
+        if result.returncode == 0 or "Invalid --jobs value:" not in output:
+            print(f"  ❌ --jobs invalid value handling failed: {bad_value}")
+            print(output)
+            ok = False
+        else:
+            print(f"  ✅ --jobs invalid value OK: {bad_value}")
 
     # only-function variants
     only_function_cases = [
@@ -678,7 +1025,7 @@ def check_cli_parsing_and_filters() -> bool:
         ["--only-func", "transition"],
     ]
     for opt in only_function_cases:
-        cmd = [str(ANALYZER), str(sample)] + opt
+        cmd = [str(RUN_CONFIG.analyzer), str(sample)] + opt
         result = subprocess.run(cmd, capture_output=True, text=True)
         output = (result.stdout or "") + (result.stderr or "")
         if result.returncode != 0 or "Function:" not in output:
@@ -694,7 +1041,7 @@ def check_cli_parsing_and_filters() -> bool:
         ["--only-dir", str(sample.parent)],
     ]
     for opt in only_file_dir_cases:
-        cmd = [str(ANALYZER), str(sample)] + opt + ["--only-function=transition"]
+        cmd = [str(RUN_CONFIG.analyzer), str(sample)] + opt + ["--only-function=transition"]
         result = subprocess.run(cmd, capture_output=True, text=True)
         output = (result.stdout or "") + (result.stderr or "")
         if result.returncode != 0 or "Function:" not in output:
@@ -712,7 +1059,7 @@ def check_cli_parsing_and_filters() -> bool:
         ["-D", "VALUE=42"],
     ]
     for opt in macro_cases:
-        cmd = [str(ANALYZER), str(sample)] + opt + ["--only-function=transition"]
+        cmd = [str(RUN_CONFIG.analyzer), str(sample)] + opt + ["--only-function=transition"]
         result = subprocess.run(cmd, capture_output=True, text=True)
         output = (result.stdout or "") + (result.stderr or "")
         if result.returncode != 0 or "Function:" not in output:
@@ -724,7 +1071,7 @@ def check_cli_parsing_and_filters() -> bool:
 
     # STL toggle
     for opt in [["--STL"], ["--stl"]]:
-        cmd = [str(ANALYZER), str(sample)] + opt + ["--only-function=transition"]
+        cmd = [str(RUN_CONFIG.analyzer), str(sample)] + opt + ["--only-function=transition"]
         result = subprocess.run(cmd, capture_output=True, text=True)
         output = (result.stdout or "") + (result.stderr or "")
         if result.returncode != 0 or "Function:" not in output:
@@ -743,7 +1090,7 @@ def check_only_func_uninitialized() -> bool:
     Regression: --only-func must keep interprocedural uninitialized warnings.
     """
     print("=== Testing --only-func for uninitialized analysis ===")
-    sample = TEST_DIR / "uninitialized-variable/uninitialized-local-interproc-struct-partial.cpp"
+    sample = RUN_CONFIG.test_dir / "uninitialized-variable/uninitialized-local-interproc-struct-partial.cpp"
     result = run_analyzer([str(sample), "--only-func=main", "--warnings-only"])
     output = (result.stdout or "") + (result.stderr or "")
 
@@ -768,17 +1115,618 @@ def check_only_func_uninitialized() -> bool:
     return True
 
 
+def check_unknown_alloca_virtual_callback_escape() -> bool:
+    """
+    Regression: unknown-origin unnamed allocas must not be silently treated as
+    compiler temporaries in virtual-like indirect callback paths.
+    """
+    print("=== Testing unknown alloca virtual callback escape ===")
+    sample = RUN_CONFIG.test_dir / "escape-stack/virtual-unnamed-alloca-unknown-target.ll"
+    result = run_analyzer([str(sample)])
+    output = (result.stdout or "") + (result.stderr or "")
+    norm_output = normalize(output)
+
+    if result.returncode != 0:
+        print(f"  ❌ analyzer failed (code {result.returncode})")
+        print(output)
+        print()
+        return False
+
+    must_contain = [
+        "Function: test_virtual_unknown",
+        "stack pointer escape: address of variable '<unnamed>' escapes this function",
+    ]
+    for needle in must_contain:
+        if normalize(needle) not in norm_output:
+            print(f"  ❌ missing expected output: {needle}")
+            print(output)
+            print()
+            return False
+
+    print("  ✅ unknown-origin unnamed alloca still reports escape\n")
+    return True
+
+
+def check_resource_lifetime_cross_tu() -> bool:
+    """
+    Regression: cross-TU resource summaries must propagate acquire/release effects
+    across separate translation units.
+    """
+    print("=== Testing resource lifetime cross-TU summaries ===")
+    model = "models/resource-lifetime/generic.txt"
+
+    wrapper_use = RUN_CONFIG.test_dir / "resource-lifetime/cross-tu-wrapper-use.c"
+    result = run_analyzer([str(wrapper_use), f"--resource-model={model}", "--warnings-only"])
+    output = (result.stdout or "") + (result.stderr or "")
+    if not expect_returncode_zero(result, output, "single-file wrapper run failed"):
+        return False
+    if not expect_contains(
+        output,
+        "Resource inter-procedural analysis: unavailable",
+        "missing inter-proc unavailable status message in single-file mode",
+    ):
+        return False
+    if not expect_contains(
+        output,
+        "inter-procedural resource analysis incomplete: handle 'h'",
+        "missing IncompleteInterproc warning in single-file wrapper case",
+    ):
+        return False
+    if not expect_not_contains(
+        output,
+        "potential double release: 'GenericHandle' handle 'h'",
+        "unexpected double release in single-file wrapper case",
+    ):
+        return False
+
+    wrapper_def = RUN_CONFIG.test_dir / "resource-lifetime/cross-tu-wrapper-def.c"
+    result = run_analyzer(
+        [
+            str(wrapper_def),
+            str(wrapper_use),
+            f"--resource-model={model}",
+            "--jobs=2",
+            "--warnings-only",
+        ]
+    )
+    output = (result.stdout or "") + (result.stderr or "")
+    if not expect_returncode_zero(result, output, "wrapper cross-TU run failed"):
+        return False
+    if not expect_contains(
+        output,
+        "Resource inter-procedural analysis: enabled (cross-TU summaries across 2 files",
+        "missing inter-proc enabled status message in cross-TU mode",
+    ):
+        return False
+    if not expect_contains(output, "jobs: 2", "missing jobs count in inter-proc enabled status message"):
+        return False
+    if not expect_not_contains(
+        output,
+        "potential double release: 'GenericHandle' handle 'h'",
+        "unexpected double release in cross-TU wrapper release case",
+    ):
+        return False
+
+    wrapper_leak = RUN_CONFIG.test_dir / "resource-lifetime/cross-tu-wrapper-leak-use.c"
+    result = run_analyzer(
+        [str(wrapper_def), str(wrapper_leak), f"--resource-model={model}", "--warnings-only"]
+    )
+    output = (result.stdout or "") + (result.stderr or "")
+    if not expect_returncode_zero(result, output, "wrapper leak cross-TU run failed"):
+        return False
+    if not expect_contains(
+        output,
+        "potential resource leak: 'GenericHandle' acquired in handle 'h'",
+        "missing leak warning in cross-TU wrapper leak case",
+    ):
+        return False
+
+    ret_def = RUN_CONFIG.test_dir / "resource-lifetime/cross-tu-return-def.c"
+    ret_use = RUN_CONFIG.test_dir / "resource-lifetime/cross-tu-return-use.c"
+    result = run_analyzer(
+        [str(ret_def), str(ret_use), f"--resource-model={model}", "--warnings-only"]
+    )
+    output = (result.stdout or "") + (result.stderr or "")
+    if not expect_returncode_zero(result, output, "return cross-TU run failed"):
+        return False
+    if not expect_not_contains(
+        output,
+        "potential double release: 'HeapAlloc' handle 'p'",
+        "unexpected double release in cross-TU acquire_ret case",
+    ):
+        return False
+
+    result = run_analyzer(
+        [
+            str(ret_def),
+            str(ret_use),
+            f"--resource-model={model}",
+            "--no-resource-cross-tu",
+            "--warnings-only",
+        ]
+    )
+    output = (result.stdout or "") + (result.stderr or "")
+    if not expect_returncode_zero(result, output, "return cross-TU disabled run failed"):
+        return False
+    if not expect_contains(
+        output,
+        "inter-procedural resource analysis incomplete: handle 'p'",
+        "expected local-only incomplete inter-proc warning is missing with --no-resource-cross-tu",
+    ):
+        return False
+
+    cache_dir = Path(".cache/run_test_resource_summary")
+    if cache_dir.exists():
+        shutil.rmtree(cache_dir, ignore_errors=True)
+    result = run_analyzer_uncached(
+        [
+            str(ret_def),
+            str(ret_use),
+            f"--resource-model={model}",
+            f"--resource-summary-cache-dir={cache_dir}",
+            "--warnings-only",
+        ]
+    )
+    output = (result.stdout or "") + (result.stderr or "")
+    if not expect_returncode_zero(result, output, "return cross-TU cache run failed"):
+        return False
+    if not list(cache_dir.glob("*.json")):
+        return fail_check("cross-TU cache directory was not populated", output)
+
+    memory_only_cache_dir = Path(".cache/run_test_resource_summary_memory_only")
+    if memory_only_cache_dir.exists():
+        shutil.rmtree(memory_only_cache_dir, ignore_errors=True)
+    result = run_analyzer_uncached(
+        [
+            str(ret_def),
+            str(ret_use),
+            f"--resource-model={model}",
+            "--resource-summary-cache-memory-only",
+            f"--resource-summary-cache-dir={memory_only_cache_dir}",
+            "--warnings-only",
+        ]
+    )
+    output = (result.stdout or "") + (result.stderr or "")
+    if not expect_returncode_zero(result, output, "return cross-TU memory-only cache run failed"):
+        return False
+    if not expect_contains(output, "cache: memory-only", "missing memory-only cache status message"):
+        return False
+    if list(memory_only_cache_dir.glob("*.json")):
+        return fail_check("memory-only cache mode unexpectedly wrote summary files", output)
+
+    print("  ✅ cross-TU resource summaries OK\n")
+    return True
+
+
+def check_uninitialized_cross_tu() -> bool:
+    """
+    Regression: cross-TU uninitialized summaries must propagate indirect out-param
+    writes across separate translation units.
+    """
+    print("=== Testing uninitialized cross-TU summaries ===")
+
+    wrapper_def = RUN_CONFIG.test_dir / "uninitialized-variable/cross-tu-uninitialized-wrapper-def.c"
+    wrapper_use = RUN_CONFIG.test_dir / "uninitialized-variable/cross-tu-uninitialized-wrapper-use.c"
+
+    result = run_analyzer([str(wrapper_use), "--warnings-only"])
+    output = (result.stdout or "") + (result.stderr or "")
+    if not expect_returncode_zero(result, output, "single-file uninitialized run failed"):
+        return False
+    if not expect_contains(
+        output,
+        "potential read of uninitialized local variable 'value'",
+        "missing uninitialized warning in single-file wrapper case",
+    ):
+        return False
+
+    result = run_analyzer([str(wrapper_def), str(wrapper_use), "--jobs=2", "--warnings-only"])
+    output = (result.stdout or "") + (result.stderr or "")
+    if not expect_returncode_zero(result, output, "cross-TU uninitialized run failed"):
+        return False
+    if not expect_contains(
+        output,
+        "Uninitialized inter-procedural analysis: enabled (cross-TU summaries across 2 files",
+        "missing uninitialized cross-TU enabled status message",
+    ):
+        return False
+    if not expect_not_contains(
+        output,
+        "potential read of uninitialized local variable 'value'",
+        "unexpected uninitialized warning in cross-TU wrapper case",
+    ):
+        return False
+
+    sret_def = RUN_CONFIG.test_dir / "uninitialized-variable/cross-tu-uninitialized-sret-status-def.cpp"
+    sret_use = RUN_CONFIG.test_dir / "uninitialized-variable/cross-tu-uninitialized-sret-status-use.cpp"
+    result = run_analyzer([str(sret_def), str(sret_use), "--jobs=2", "--warnings-only"])
+    output = (result.stdout or "") + (result.stderr or "")
+    if not expect_returncode_zero(result, output, "cross-TU sret-status run failed"):
+        return False
+    if not expect_not_contains(
+        output,
+        "potential read of uninitialized local variable 'out'",
+        "unexpected uninitialized warning in cross-TU sret-status wrapper case",
+    ):
+        return False
+
+    result = run_analyzer(
+        [
+            str(wrapper_def),
+            str(wrapper_use),
+            "--no-uninitialized-cross-tu",
+            "--warnings-only",
+        ]
+    )
+    output = (result.stdout or "") + (result.stderr or "")
+    if not expect_returncode_zero(result, output, "cross-TU disabled uninitialized run failed"):
+        return False
+    if not expect_contains(
+        output,
+        "potential read of uninitialized local variable 'value'",
+        "expected local-only uninitialized warning is missing with --no-uninitialized-cross-tu",
+    ):
+        return False
+
+    print("  ✅ cross-TU uninitialized summaries OK\n")
+    return True
+
+
+def check_escape_model_rejects_unsupported_brackets() -> bool:
+    """
+    Regression: stack escape model must reject unsupported [..] classes
+    with an explicit error instead of silently mis-matching patterns.
+    """
+    print("=== Testing stack escape model rejects unsupported bracket classes ===")
+    with tempfile.TemporaryDirectory(prefix="ct_escape_model_brackets_") as tmp:
+        tmpdir = Path(tmp)
+        source_file = tmpdir / "sample.c"
+        model_file = tmpdir / "invalid-model.txt"
+        source_file.write_text("int main(void) { return 0; }\n", encoding="utf-8")
+        model_file.write_text("noescape_arg vkFoo[AB] 0\n", encoding="utf-8")
+
+        result = run_analyzer([str(source_file), f"--escape-model={model_file}"])
+        output = (result.stdout or "") + (result.stderr or "")
+        if not expect_returncode_zero(result, output, "escape-model validation run failed"):
+            return False
+        if not expect_contains(
+            output,
+            "stack escape model ignored: unsupported character class syntax '[...]'",
+            "missing explicit unsupported bracket-class warning in stack escape model",
+        ):
+            return False
+
+    print("  ✅ stack escape model bracket-class rejection OK\n")
+    return True
+
+
+def check_docker_entrypoint_guardrails() -> bool:
+    """
+    Regression: docker wrapper should only create compatibility symlinks under
+    allowlisted roots and should fail cleanly when analyzer binary is missing.
+    """
+    print("=== Testing docker entrypoint guardrails ===")
+    module, error = load_docker_entrypoint_module()
+    if module is None:
+        return fail_check(error)
+
+    original_allowlist = os.environ.get("CORETRACE_COMPAT_SYMLINK_ALLOWED_ROOTS")
+    try:
+        with tempfile.TemporaryDirectory(prefix="ct_entrypoint_ws_") as tmp:
+            workspace = Path(tmp)
+            module.WORKSPACE = str(workspace)
+            build_dir = workspace / "build"
+            build_dir.mkdir(parents=True, exist_ok=True)
+            compdb_path = build_dir / "compile_commands.json"
+
+            blocked_root = Path("/malicious-coretrace-compat-root")
+            blocked_entry_dir = blocked_root / "build"
+            compdb_path.write_text(
+                json.dumps(
+                    [
+                        {
+                            "directory": str(blocked_entry_dir),
+                            "file": str(blocked_root / "source.c"),
+                            "arguments": ["clang", "-c", "source.c"],
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            os.environ["CORETRACE_COMPAT_SYMLINK_ALLOWED_ROOTS"] = "/tmp:/var/tmp"
+            blocked_log = io.StringIO()
+            with contextlib.redirect_stderr(blocked_log):
+                module.ensure_compdb_compat_symlink(str(compdb_path))
+            if "outside allowlist roots" not in blocked_log.getvalue():
+                return fail_check("missing allowlist refusal message for blocked symlink root")
+            if blocked_root.is_symlink():
+                return fail_check("blocked compatibility symlink was unexpectedly created")
+
+            allowed_root = Path(f"/tmp/ct_entrypoint_link_{uuid.uuid4().hex[:10]}")
+            allowed_entry_dir = allowed_root / "build"
+            compdb_path.write_text(
+                json.dumps(
+                    [
+                        {
+                            "directory": str(allowed_entry_dir),
+                            "file": str(allowed_root / "source.c"),
+                            "arguments": ["clang", "-c", "source.c"],
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            if allowed_root.exists() or allowed_root.is_symlink():
+                try:
+                    if allowed_root.is_symlink():
+                        allowed_root.unlink()
+                    elif allowed_root.is_dir():
+                        shutil.rmtree(allowed_root, ignore_errors=True)
+                    else:
+                        allowed_root.unlink()
+                except OSError:
+                    pass
+            allowed_log = io.StringIO()
+            with contextlib.redirect_stderr(allowed_log):
+                module.ensure_compdb_compat_symlink(str(compdb_path))
+            if not allowed_root.is_symlink():
+                return fail_check("allowlisted compatibility symlink was not created")
+            if allowed_root.resolve() != workspace.resolve():
+                return fail_check("allowlisted compatibility symlink target is incorrect")
+            allowed_root.unlink(missing_ok=True)
+
+            exec_log = io.StringIO()
+            with contextlib.redirect_stderr(exec_log):
+                ret = module.exec_analyzer(["/definitely/missing/coretrace-analyzer-bin"])
+            if ret != 127:
+                return fail_check(f"expected exec_analyzer missing-binary exit code 127, got {ret}")
+            if "analyzer executable not found" not in exec_log.getvalue():
+                return fail_check("missing user-friendly execvp error message")
+    finally:
+        if original_allowlist is None:
+            os.environ.pop("CORETRACE_COMPAT_SYMLINK_ALLOWED_ROOTS", None)
+        else:
+            os.environ["CORETRACE_COMPAT_SYMLINK_ALLOWED_ROOTS"] = original_allowlist
+
+    print("  ✅ docker entrypoint guardrails OK\n")
+    return True
+
+
+def check_compdb_as_default_input_source() -> bool:
+    """
+    Regression: when no positional inputs are provided and --compile-commands is set,
+    analyzer must use compile_commands.json entries as input source-of-truth.
+    """
+    print("=== Testing compile_commands as default input source ===")
+    with tempfile.TemporaryDirectory(prefix="ct_compdb_default_") as tmp:
+        tmpdir = Path(tmp)
+        c_file = tmpdir / "from_compdb.c"
+        empty_cpp = tmpdir / "empty_tu.cpp"
+        objc_file = tmpdir / "ignored.m"
+        compdb = tmpdir / "compile_commands.json"
+
+        c_file.write_text("int from_compdb(void) { return 42; }\n", encoding="utf-8")
+        empty_cpp.write_text("namespace only_decl {}\n", encoding="utf-8")
+        objc_file.write_text("int ignored_objc(void) { return 0; }\n", encoding="utf-8")
+
+        entries = [
+            {
+                "directory": str(tmpdir),
+                "file": str(c_file),
+                "arguments": ["clang", "-c", str(c_file)],
+            },
+            {
+                "directory": str(tmpdir),
+                "file": str(empty_cpp),
+                "arguments": ["clang++", "-c", str(empty_cpp)],
+            },
+            {
+                "directory": str(tmpdir),
+                "file": str(objc_file),
+                "arguments": ["clang", "-c", str(objc_file)],
+            },
+        ]
+        compdb.write_text(json.dumps(entries), encoding="utf-8")
+
+        result = run_analyzer([f"--compile-commands={compdb}", "--warnings-only"])
+        output = (result.stdout or "") + (result.stderr or "")
+        if result.returncode != 0:
+            print(f"  ❌ default compdb input run failed (code {result.returncode})")
+            print(output)
+            print()
+            return False
+
+        if "No explicit input files provided: using 2 supported file(s) from compile_commands.json" not in output:
+            print("  ❌ missing compdb default input status message")
+            print(output)
+            print()
+            return False
+        if "skipped 1 unsupported entry/entries" not in output:
+            print("  ❌ missing unsupported entry count in compdb default input status")
+            print(output)
+            print()
+            return False
+        if "Function: from_compdb" not in output:
+            print("  ❌ expected function from compdb-driven input is missing")
+            print(output)
+            print()
+            return False
+        if "No analyzable functions in:" not in output or "empty_tu.cpp (skipping)" not in output:
+            print("  ❌ missing informational skip message for empty translation unit")
+            print(output)
+            print()
+            return False
+        if "Unsupported input file type:" in output:
+            print("  ❌ analyzer still attempted unsupported compdb entry")
+            print(output)
+            print()
+            return False
+
+    print("  ✅ compile_commands default input source OK\n")
+    return True
+
+
+def check_exclude_dir_filter() -> bool:
+    """
+    Regression: --exclude-dir must filter input files before analysis.
+    """
+    print("=== Testing --exclude-dir input filtering ===")
+    with tempfile.TemporaryDirectory(prefix="ct_exclude_dir_") as tmp:
+        tmpdir = Path(tmp)
+        keep_dir = tmpdir / "keep"
+        skip_dir = tmpdir / "skip/sub"
+        keep_dir.mkdir(parents=True, exist_ok=True)
+        skip_dir.mkdir(parents=True, exist_ok=True)
+
+        keep_file = keep_dir / "keep.c"
+        skip_file = skip_dir / "skip.c"
+        compdb = tmpdir / "compile_commands.json"
+
+        keep_file.write_text("int keep_fn(void) { return 1; }\n", encoding="utf-8")
+        skip_file.write_text("int skip_fn(void) { return 2; }\n", encoding="utf-8")
+
+        entries = [
+            {
+                "directory": str(tmpdir),
+                "file": str(keep_file),
+                "arguments": ["clang", "-c", str(keep_file)],
+            },
+            {
+                "directory": str(tmpdir),
+                "file": str(skip_file),
+                "arguments": ["clang", "-c", str(skip_file)],
+            },
+        ]
+        compdb.write_text(json.dumps(entries), encoding="utf-8")
+
+        result = run_analyzer(
+            [
+                f"--compile-commands={compdb}",
+                f"--exclude-dir={skip_dir.parent},{tmpdir / 'does-not-exist'}",
+                "--warnings-only",
+            ]
+        )
+        output = (result.stdout or "") + (result.stderr or "")
+        if result.returncode != 0:
+            print(f"  ❌ --exclude-dir run failed (code {result.returncode})")
+            print(output)
+            print()
+            return False
+
+        if "Excluded 1 input file(s) via --exclude-dir filters" not in output:
+            print("  ❌ missing exclude-dir status message")
+            print(output)
+            print()
+            return False
+        if "Function: keep_fn" not in output:
+            print("  ❌ expected kept function is missing")
+            print(output)
+            print()
+            return False
+        if "Function: skip_fn" in output:
+            print("  ❌ excluded function is still present in output")
+            print(output)
+            print()
+            return False
+
+    print("  ✅ --exclude-dir input filtering OK\n")
+    return True
+
+
+def check_multi_tu_folder_analysis() -> bool:
+    """
+    Regression: compile_commands-driven auto-discovery must handle a folder
+    that contains multiple translation units and aggregate them in one run.
+    """
+    print("=== Testing multi-TU folder analysis ===")
+    fixture_dir = RUN_CONFIG.test_dir / "test-multi-tu"
+    entry_file = fixture_dir / "entry.c"
+    worker_file = fixture_dir / "worker.c"
+
+    if not entry_file.exists() or not worker_file.exists():
+        print("  ❌ missing multi-TU fixture files")
+        print(f"     expected: {entry_file} and {worker_file}")
+        print()
+        return False
+
+    with tempfile.TemporaryDirectory(prefix="ct_multi_tu_folder_") as tmp:
+        tmpdir = Path(tmp)
+        compdb = tmpdir / "compile_commands.json"
+        entries = [
+            {
+                "directory": str(fixture_dir.resolve()),
+                "file": str(entry_file.resolve()),
+                "arguments": ["clang", "-c", str(entry_file.resolve())],
+            },
+            {
+                "directory": str(fixture_dir.resolve()),
+                "file": str(worker_file.resolve()),
+                "arguments": ["clang", "-c", str(worker_file.resolve())],
+            },
+        ]
+        compdb.write_text(json.dumps(entries), encoding="utf-8")
+
+        result = run_analyzer(
+            [f"--compile-commands={compdb}", "--format=json", "--warnings-only"]
+        )
+        output = (result.stdout or "") + (result.stderr or "")
+        if result.returncode != 0:
+            print(f"  ❌ multi-TU folder run failed (code {result.returncode})")
+            print(output)
+            print()
+            return False
+
+        if "No explicit input files provided: using 2 supported file(s) from compile_commands.json" not in output:
+            print("  ❌ missing auto-discovery status for multi-TU folder run")
+            print(output)
+            print()
+            return False
+
+        try:
+            payload = json.loads(result.stdout or "")
+        except json.JSONDecodeError as exc:
+            print(f"  ❌ invalid JSON output for multi-TU folder run: {exc}")
+            print(result.stdout or "")
+            print()
+            return False
+
+        expected_inputs = sorted([str(entry_file.resolve()), str(worker_file.resolve())])
+        inputs = payload.get("meta", {}).get("inputFiles", [])
+        if inputs != expected_inputs:
+            print("  ❌ multi-TU inputFiles mismatch")
+            print(f"     expected: {expected_inputs}")
+            print(f"     got:      {inputs}")
+            print()
+            return False
+
+        names = {f.get("name", "") for f in payload.get("functions", [])}
+        missing_names = sorted([name for name in ["mtu_entry", "mtu_worker"] if name not in names])
+        if missing_names:
+            print("  ❌ missing multi-TU functions in aggregated output")
+            print(f"     missing: {missing_names}")
+            print(result.stdout or "")
+            print()
+            return False
+
+    print("  ✅ multi-TU folder analysis OK\n")
+    return True
+
+
 def check_file(c_path: Path):
     """
     Check that, for this file, all expectations are present in the analyzer output.
     """
-    print(f"=== Testing {c_path} ===")
-    expectations, negative_expectations, stack_limit = extract_expectations(c_path)
+    report_lines = [f"=== Testing {c_path} ==="]
+    expectations, negative_expectations, stack_limit, resource_model, escape_model = extract_expectations(c_path)
     if not expectations and not negative_expectations:
-        print("  (no expectations found, skipping)\n")
-        return True, 0, 0
+        report_lines.append("  (no expectations found, skipping)")
+        return True, 0, 0, "\n".join(report_lines) + "\n\n"
 
-    analyzer_output = run_analyzer_on_file(c_path, stack_limit=stack_limit)
+    analyzer_output = run_analyzer_on_file(
+        c_path,
+        stack_limit=stack_limit,
+        resource_model=resource_model,
+        escape_model=escape_model,
+    )
     norm_output = normalize(analyzer_output)
 
     all_ok = True
@@ -786,37 +1734,50 @@ def check_file(c_path: Path):
     passed = 0
     for idx, exp in enumerate(expectations, start=1):
         norm_exp = normalize(exp)
-        if norm_exp in norm_output:
-            print(f"  ✅ expectation #{idx} FOUND")
+        matched = norm_exp in norm_output
+        if not matched:
+            for alt in _location_tolerant_variants(exp):
+                if normalize(alt) in norm_output:
+                    matched = True
+                    break
+        if matched:
+            report_lines.append(f"  ✅ expectation #{idx} FOUND")
             passed += 1
         else:
-            print(f"  ❌ expectation #{idx} MISSING")
-            print("----- Expected block -----")
-            print(exp)
-            print("----- Analyzer output (normalized) -----")
-            print(f"<{norm_output}>")
-            print("---------------------------")
+            report_lines.append(f"  ❌ expectation #{idx} MISSING")
+            report_lines.append("----- Expected block -----")
+            report_lines.append(exp)
+            report_lines.append("----- Analyzer output (normalized) -----")
+            report_lines.append(f"<{norm_output}>")
+            report_lines.append("---------------------------")
             all_ok = False
 
     for idx, neg in enumerate(negative_expectations, start=1):
         norm_neg = normalize(neg)
         if norm_neg and norm_neg not in norm_output:
-            print(f"  ✅ negative expectation #{idx} NOT FOUND (as expected)")
+            report_lines.append(f"  ✅ negative expectation #{idx} NOT FOUND (as expected)")
             passed += 1
         else:
-            print(f"  ❌ negative expectation #{idx} FOUND (unexpected)")
-            print("----- Forbidden text -----")
-            print(neg)
-            print("----- Analyzer output (normalized) -----")
-            print(f"<{norm_output}>")
-            print("---------------------------")
+            report_lines.append(f"  ❌ negative expectation #{idx} FOUND (unexpected)")
+            report_lines.append("----- Forbidden text -----")
+            report_lines.append(neg)
+            report_lines.append("----- Analyzer output (normalized) -----")
+            report_lines.append(f"<{norm_output}>")
+            report_lines.append("---------------------------")
             all_ok = False
 
-    print()
-    return all_ok, total, passed
+    return all_ok, total, passed, "\n".join(report_lines) + "\n\n"
 
 
 def main() -> int:
+    cli = parse_args()
+    RUN_CONFIG.jobs = max(1, cli.jobs)
+    RUN_CONFIG.cache_enabled = not cli.no_cache
+    RUN_CONFIG.cache_dir = Path(cli.cache_dir)
+
+    if cli.clear_cache and RUN_CONFIG.cache_dir.exists():
+        shutil.rmtree(RUN_CONFIG.cache_dir, ignore_errors=True)
+
     total_tests = 0
     passed_tests = 0
 
@@ -830,26 +1791,55 @@ def main() -> int:
     global_ok = record_ok(check_help_flags())
     if not record_ok(check_multi_file_json()):
         global_ok = False
+    if not record_ok(check_multi_file_total_summary()):
+        global_ok = False
     if not record_ok(check_multi_file_failure()):
         global_ok = False
     if not record_ok(check_cli_parsing_and_filters()):
         global_ok = False
     if not record_ok(check_only_func_uninitialized()):
         global_ok = False
+    if not record_ok(check_unknown_alloca_virtual_callback_escape()):
+        global_ok = False
+    if not record_ok(check_compdb_as_default_input_source()):
+        global_ok = False
+    if not record_ok(check_exclude_dir_filter()):
+        global_ok = False
+    if not record_ok(check_multi_tu_folder_analysis()):
+        global_ok = False
+    if not record_ok(check_resource_lifetime_cross_tu()):
+        global_ok = False
+    if not record_ok(check_uninitialized_cross_tu()):
+        global_ok = False
+    if not record_ok(check_escape_model_rejects_unsupported_brackets()):
+        global_ok = False
+    if not record_ok(check_docker_entrypoint_guardrails()):
+        global_ok = False
     if not record_ok(check_human_vs_json_parity()):
         global_ok = False
 
-    c_files = sorted(list(TEST_DIR.glob("**/*.c")) + list(TEST_DIR.glob("**/*.cpp")))
+    c_files = sorted(list(RUN_CONFIG.test_dir.glob("**/*.c")) + list(RUN_CONFIG.test_dir.glob("**/*.cpp")))
     if not c_files:
-        print(f"No .c/.cpp files found under {TEST_DIR}")
+        print(f"No .c/.cpp files found under {RUN_CONFIG.test_dir}")
         return 0 if global_ok else 1
 
-    for f in c_files:
-        ok, total, passed = check_file(f)
-        passed_tests += passed
-        total_tests += total
-        if not ok:
-            global_ok = False
+    if RUN_CONFIG.jobs <= 1:
+        for f in c_files:
+            ok, total, passed, report = check_file(f)
+            print(report, end="")
+            passed_tests += passed
+            total_tests += total
+            if not ok:
+                global_ok = False
+    else:
+        with ThreadPoolExecutor(max_workers=RUN_CONFIG.jobs) as executor:
+            results = list(executor.map(check_file, c_files))
+        for ok, total, passed, report in results:
+            print(report, end="")
+            passed_tests += passed
+            total_tests += total
+            if not ok:
+                global_ok = False
 
     if global_ok:
         print("✅ All tests passed.")

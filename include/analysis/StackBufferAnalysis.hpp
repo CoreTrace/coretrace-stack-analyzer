@@ -56,9 +56,11 @@ namespace ctrace::stack::analysis
 
     std::vector<StackBufferOverflowIssue>
     analyzeStackBufferOverflows(llvm::Module& mod,
-                                const std::function<bool(const llvm::Function&)>& shouldAnalyze);
+                                const std::function<bool(const llvm::Function&)>& shouldAnalyze,
+                                const AnalysisConfig& config);
 
     std::vector<MultipleStoreIssue>
     analyzeMultipleStores(llvm::Module& mod,
-                          const std::function<bool(const llvm::Function&)>& shouldAnalyze);
+                          const std::function<bool(const llvm::Function&)>& shouldAnalyze,
+                          const AnalysisConfig& config);
 } // namespace ctrace::stack::analysis

@@ -1,0 +1,122 @@
+# Generic lifecycle rules:
+#   acquire_out <function-pattern> <out-arg-index> <resource-kind>
+#   acquire_ret <function-pattern> <resource-kind>
+#   release_arg <function-pattern> <arg-index> <resource-kind>
+
+# Generic out-param handle pattern
+acquire_out acquire_handle 0 GenericHandle
+release_arg release_handle 0 GenericHandle
+
+# C heap allocation
+acquire_ret malloc HeapAlloc
+release_arg free 0 HeapAlloc
+
+# C++ heap allocation (demangled names contain spaces, so use glob patterns)
+acquire_ret operator*new* CppHeap
+release_arg operator*delete* 0 CppHeap
+
+# Vulkan resource lifecycle rules
+# Covers vkCreate*/vkDestroy* and vkAllocate*/vkFree* pairs
+
+# Instance & Device
+
+# vkCreateInstance(pCreateInfo, pAllocator, pInstance*)
+acquire_out vkCreateInstance 2 VkInstance
+release_arg vkDestroyInstance 0 VkInstance
+
+# vkCreateDevice(physicalDevice, pCreateInfo, pAllocator, pDevice*)
+acquire_out vkCreateDevice 3 VkDevice
+release_arg vkDestroyDevice 0 VkDevice
+
+# Swapchain
+
+# vkCreateSwapchainKHR(device, pCreateInfo, pAllocator, pSwapchain*)
+acquire_out vkCreateSwapchainKHR 3 VkSwapchainKHR
+release_arg vkDestroySwapchainKHR 1 VkSwapchainKHR
+
+# Command Pool & Buffers
+
+# vkCreateCommandPool(device, pCreateInfo, pAllocator, pCommandPool*)
+acquire_out vkCreateCommandPool 3 VkCommandPool
+release_arg vkDestroyCommandPool 1 VkCommandPool
+
+# vkAllocateCommandBuffers(device, pAllocateInfo, pCommandBuffers*)
+acquire_out vkAllocateCommandBuffers 2 VkCommandBuffer
+# vkFreeCommandBuffers(device, commandPool, count, pCommandBuffers*)
+release_arg vkFreeCommandBuffers 3 VkCommandBuffer
+# Wrapper-style helpers returning a temporary command buffer consumed by an end helper.
+acquire_ret *beginSingleTimeCommands* VkCommandBuffer
+release_arg *endSingleTimeCommands* 3 VkCommandBuffer
+
+# Buffers & Memory
+
+# vkCreateBuffer(device, pCreateInfo, pAllocator, pBuffer*)
+acquire_out vkCreateBuffer 3 VkBuffer
+release_arg vkDestroyBuffer 1 VkBuffer
+
+# vkAllocateMemory(device, pAllocateInfo, pAllocator, pMemory*)
+acquire_out vkAllocateMemory 3 VkDeviceMemory
+release_arg vkFreeMemory 1 VkDeviceMemory
+
+# Images & Views
+
+# vkCreateImage(device, pCreateInfo, pAllocator, pImage*)
+acquire_out vkCreateImage 3 VkImage
+release_arg vkDestroyImage 1 VkImage
+
+# vkCreateImageView(device, pCreateInfo, pAllocator, pView*)
+acquire_out vkCreateImageView 3 VkImageView
+release_arg vkDestroyImageView 1 VkImageView
+
+# vkCreateSampler(device, pCreateInfo, pAllocator, pSampler*)
+acquire_out vkCreateSampler 3 VkSampler
+release_arg vkDestroySampler 1 VkSampler
+
+# Synchronization
+
+# vkCreateSemaphore(device, pCreateInfo, pAllocator, pSemaphore*)
+acquire_out vkCreateSemaphore 3 VkSemaphore
+release_arg vkDestroySemaphore 1 VkSemaphore
+
+# vkCreateFence(device, pCreateInfo, pAllocator, pFence*)
+acquire_out vkCreateFence 3 VkFence
+release_arg vkDestroyFence 1 VkFence
+
+# Pipeline
+
+# vkCreateShaderModule(device, pCreateInfo, pAllocator, pShaderModule*)
+acquire_out vkCreateShaderModule 3 VkShaderModule
+acquire_ret *createShaderModule* VkShaderModule
+release_arg vkDestroyShaderModule 1 VkShaderModule
+
+# vkCreatePipelineLayout(device, pCreateInfo, pAllocator, pPipelineLayout*)
+acquire_out vkCreatePipelineLayout 3 VkPipelineLayout
+release_arg vkDestroyPipelineLayout 1 VkPipelineLayout
+
+# vkCreateRenderPass(device, pCreateInfo, pAllocator, pRenderPass*)
+acquire_out vkCreateRenderPass 3 VkRenderPass
+release_arg vkDestroyRenderPass 1 VkRenderPass
+
+# vkCreateGraphicsPipelines(device, cache, count, pCreateInfos, pAllocator, pPipelines*)
+acquire_out vkCreateGraphicsPipelines 5 VkPipeline
+release_arg vkDestroyPipeline 1 VkPipeline
+
+# vkCreateFramebuffer(device, pCreateInfo, pAllocator, pFramebuffer*)
+acquire_out vkCreateFramebuffer 3 VkFramebuffer
+release_arg vkDestroyFramebuffer 1 VkFramebuffer
+
+# Descriptors
+
+# vkCreateDescriptorSetLayout(device, pCreateInfo, pAllocator, pSetLayout*)
+acquire_out vkCreateDescriptorSetLayout 3 VkDescriptorSetLayout
+release_arg vkDestroyDescriptorSetLayout 1 VkDescriptorSetLayout
+
+# vkCreateDescriptorPool(device, pCreateInfo, pAllocator, pDescriptorPool*)
+acquire_out vkCreateDescriptorPool 3 VkDescriptorPool
+release_arg vkDestroyDescriptorPool 1 VkDescriptorPool
+
+# Debug
+
+# vkCreateDebugUtilsMessengerEXT(instance, pCreateInfo, pAllocator, pMessenger*)
+acquire_out vkCreateDebugUtilsMessengerEXT 3 VkDebugUtilsMessengerEXT
+release_arg vkDestroyDebugUtilsMessengerEXT 1 VkDebugUtilsMessengerEXT

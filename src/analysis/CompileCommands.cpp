@@ -1,5 +1,6 @@
 #include "analysis/CompileCommands.hpp"
 
+#include <algorithm>
 #include <cctype>
 #include <filesystem>
 #include <string>
@@ -238,6 +239,62 @@ namespace ctrace::stack::analysis
                 args.erase(args.begin(), args.begin() + static_cast<std::ptrdiff_t>(start));
         }
 
+        std::size_t commandSemanticWeight(const std::vector<std::string>& args)
+        {
+            std::size_t weight = 0;
+            for (std::size_t i = 0; i < args.size(); ++i)
+            {
+                const std::string& arg = args[i];
+                if (arg.empty())
+                    continue;
+
+                if (arg == "-I" || arg == "-isystem" || arg == "-D" || arg == "-U" ||
+                    arg == "-include" || arg == "-imacros")
+                {
+                    weight += 3;
+                    if (i + 1 < args.size())
+                        ++weight;
+                    continue;
+                }
+                if (arg.rfind("-I", 0) == 0 || arg.rfind("-D", 0) == 0 || arg.rfind("-U", 0) == 0 ||
+                    arg.rfind("--sysroot=", 0) == 0 || arg.rfind("-std=", 0) == 0 ||
+                    arg.rfind("-isystem", 0) == 0)
+                {
+                    weight += 3;
+                    continue;
+                }
+                if (arg == "-std" || arg == "--sysroot")
+                {
+                    weight += 2;
+                    if (i + 1 < args.size())
+                        ++weight;
+                    continue;
+                }
+                if (arg[0] == '-')
+                    ++weight;
+            }
+            return weight;
+        }
+
+        bool shouldPreferCandidateCommand(const CompileCommand& existing,
+                                          const CompileCommand& candidate)
+        {
+            const std::size_t existingWeight = commandSemanticWeight(existing.arguments);
+            const std::size_t candidateWeight = commandSemanticWeight(candidate.arguments);
+            if (candidateWeight != existingWeight)
+                return candidateWeight > existingWeight;
+
+            if (candidate.arguments.size() != existing.arguments.size())
+                return candidate.arguments.size() > existing.arguments.size();
+
+            if (candidate.directory != existing.directory)
+                return candidate.directory < existing.directory;
+
+            return std::lexicographical_compare(
+                candidate.arguments.begin(), candidate.arguments.end(), existing.arguments.begin(),
+                existing.arguments.end());
+        }
+
         std::filesystem::path normalizeDirectoryPath(const std::filesystem::path& compdbDir,
                                                      const std::string& directory)
         {
@@ -322,13 +379,18 @@ namespace ctrace::stack::analysis
             stripOutputAndDependencyArgs(args);
             stripInputFileArg(args, directoryKey, fileKey);
 
-            if (db->commands_.find(fileKey) != db->commands_.end())
-                continue;
-
             CompileCommand command;
             command.directory = directoryKey;
             command.arguments = std::move(args);
-            db->commands_.emplace(fileKey, std::move(command));
+            auto it = db->commands_.find(fileKey);
+            if (it == db->commands_.end())
+            {
+                db->commands_.emplace(fileKey, std::move(command));
+                continue;
+            }
+
+            if (shouldPreferCandidateCommand(it->second, command))
+                it->second = std::move(command);
         }
 
         if (db->commands_.empty())
@@ -377,5 +439,15 @@ namespace ctrace::stack::analysis
             return nullptr;
         }
         return &it->second;
+    }
+
+    std::vector<std::string> CompilationDatabase::listSourceFiles() const
+    {
+        std::vector<std::string> files;
+        files.reserve(commands_.size());
+        for (const auto& entry : commands_)
+            files.push_back(entry.first);
+        std::sort(files.begin(), files.end());
+        return files;
     }
 } // namespace ctrace::stack::analysis

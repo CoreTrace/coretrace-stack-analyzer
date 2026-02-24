@@ -1,0 +1,248 @@
+name: "CoreTrace Stack Analyzer"
+description: "Static stack usage analysis for C/C++ code — detects stack overflows, VLAs, recursion, and more."
+author: "CoreTrace"
+
+branding:
+  icon: "shield"
+  color: "blue"
+
+inputs:
+  sources:
+    description: "Source files to analyze (space-separated). If omitted, discovered from compile-commands."
+    required: false
+    default: ""
+  compile-commands:
+    description: "Path to compile_commands.json (file or directory)."
+    required: false
+    default: ""
+  fail-on:
+    description: "CI gate policy: none (never fail), error (fail on errors), warning (fail on errors+warnings)."
+    required: false
+    default: "error"
+  base-dir:
+    description: "Base directory stripped from SARIF URIs to produce relative paths."
+    required: false
+    default: ""
+  stack-limit:
+    description: "Override stack size limit (e.g. 8KiB, 1MiB)."
+    required: false
+    default: ""
+  sarif-file:
+    description: "Output path for the SARIF report."
+    required: false
+    default: "coretrace-stack-analysis.sarif"
+  json-file:
+    description: "Output path for the JSON report."
+    required: false
+    default: "coretrace-stack-analysis.json"
+  upload-sarif:
+    description: "Upload SARIF to GitHub Code Scanning (true/false)."
+    required: false
+    default: "true"
+  extra-args:
+    description: "Extra arguments forwarded to the analyzer (space-separated)."
+    required: false
+    default: ""
+  analysis-profile:
+    description: "Analysis profile passed to analyzer (fast|full)."
+    required: false
+    default: "fast"
+  resource-model:
+    description: "Resource model path. Use 'default' to use analyzer bundled model."
+    required: false
+    default: "default"
+  resource-cache-memory-only:
+    description: "Enable memory-only cross-TU resource summary cache (true/false)."
+    required: false
+    default: "true"
+  warnings-only:
+    description: "Emit warnings/errors only (true/false)."
+    required: false
+    default: "false"
+  inputs-from-git-fallback:
+    description: "When compile_commands.json is not found, analyze tracked source files from git (true/false)."
+    required: false
+    default: "true"
+  llvm-version:
+    description: "LLVM version to install."
+    required: false
+    default: "20"
+
+outputs:
+  sarif-file:
+    description: "Path to the generated SARIF report."
+    value: ${{ steps.run-analysis.outputs.sarif-file }}
+  json-file:
+    description: "Path to the generated JSON report."
+    value: ${{ steps.run-analysis.outputs.json-file }}
+  errors:
+    description: "Number of errors found."
+    value: ${{ steps.run-analysis.outputs.errors }}
+  warnings:
+    description: "Number of warnings found."
+    value: ${{ steps.run-analysis.outputs.warnings }}
+
+runs:
+  using: "composite"
+  steps:
+    # ---------------------------------------------------------------
+    # 1. Install LLVM
+    # ---------------------------------------------------------------
+    - name: Install LLVM ${{ inputs.llvm-version }}
+      shell: bash
+      run: |
+        sudo apt-get update
+        wget -qO - https://apt.llvm.org/llvm-snapshot.gpg.key | sudo apt-key add -
+        CODENAME=$(lsb_release -cs)
+        sudo apt-add-repository "deb http://apt.llvm.org/${CODENAME}/ llvm-toolchain-${CODENAME}-${{ inputs.llvm-version }} main"
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends \
+          cmake ninja-build python3 build-essential \
+          llvm-${{ inputs.llvm-version }} \
+          llvm-${{ inputs.llvm-version }}-dev \
+          clang-${{ inputs.llvm-version }} \
+          libclang-${{ inputs.llvm-version }}-dev
+
+    # ---------------------------------------------------------------
+    # 2. Cache + Build the analyzer
+    # ---------------------------------------------------------------
+    - name: Cache analyzer build
+      id: cache-analyzer
+      uses: actions/cache@v4
+      with:
+        path: ${{ github.action_path }}/build
+        # NOTE: hashFiles() inside composite action metadata can fail on some runners
+        # when evaluated against action_path. Use a stable, cross-run key instead.
+        key: coretrace-analyzer-${{ runner.os }}-llvm${{ inputs.llvm-version }}-${{ github.sha }}
+
+    - name: Build analyzer
+      if: steps.cache-analyzer.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        LLVM_DIR: /usr/lib/llvm-${{ inputs.llvm-version }}/lib/cmake/llvm
+        Clang_DIR: /usr/lib/llvm-${{ inputs.llvm-version }}/lib/cmake/clang
+      run: |
+        cd "${{ github.action_path }}"
+        cmake -S . -B build -G Ninja \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DLLVM_DIR="${LLVM_DIR}" \
+          -DClang_DIR="${Clang_DIR}" \
+          -DLLVM_LINK_LLVM_DYLIB=ON \
+          -DUSE_SHARED_LIB=OFF
+        cmake --build build -j"$(nproc)"
+
+    # ---------------------------------------------------------------
+    # 3. Run analysis
+    # ---------------------------------------------------------------
+    - name: Run stack analysis
+      id: run-analysis
+      shell: bash
+      run: |
+        ANALYZER="${{ github.action_path }}/build/stack_usage_analyzer"
+        SCRIPT="${{ github.action_path }}/scripts/ci/run_code_analysis.py"
+        DEFAULT_RESOURCE_MODEL="${{ github.action_path }}/models/resource-lifetime/generic.txt"
+        WORKSPACE_DIR="${GITHUB_WORKSPACE:-$PWD}"
+
+        cmd=(
+          python3 "${SCRIPT}"
+          --analyzer "${ANALYZER}"
+          --json-out "${{ inputs.json-file }}"
+          --sarif-out "${{ inputs.sarif-file }}"
+          --fail-on "${{ inputs.fail-on }}"
+        )
+        SOURCES_INPUT="${{ inputs.sources }}"
+        HAS_EXPLICIT_SOURCES="false"
+        if [ -n "${SOURCES_INPUT}" ]; then
+          HAS_EXPLICIT_SOURCES="true"
+        fi
+
+        BASE_DIR_INPUT="${{ inputs.base-dir }}"
+        if [ -n "${BASE_DIR_INPUT}" ]; then
+          cmd+=(--base-dir "${BASE_DIR_INPUT}")
+        else
+          cmd+=(--base-dir "${WORKSPACE_DIR}")
+        fi
+
+        COMPDB_INPUT="${{ inputs.compile-commands }}"
+        COMPDB_PATH=""
+        if [ -n "${COMPDB_INPUT}" ]; then
+          COMPDB_PATH="${COMPDB_INPUT}"
+        elif [ "${HAS_EXPLICIT_SOURCES}" != "true" ]; then
+          for candidate in \
+            "${WORKSPACE_DIR}/build/compile_commands.json" \
+            "${WORKSPACE_DIR}/compile_commands.json" \
+            "${WORKSPACE_DIR}/.coretrace/build-linux/compile_commands.json"; do
+            if [ -f "${candidate}" ]; then
+              COMPDB_PATH="${candidate}"
+              break
+            fi
+          done
+        fi
+        if [ -n "${COMPDB_PATH}" ]; then
+          echo "[coretrace-action] using compile_commands.json: ${COMPDB_PATH}"
+          cmd+=(--compdb "${COMPDB_PATH}")
+        elif [ "${HAS_EXPLICIT_SOURCES}" != "true" ] && [ "${{ inputs.inputs-from-git-fallback }}" = "true" ]; then
+          echo "[coretrace-action] compile_commands.json not found; falling back to git-tracked sources"
+          cmd+=(--inputs-from-git --repo-root "${WORKSPACE_DIR}")
+        elif [ "${HAS_EXPLICIT_SOURCES}" != "true" ]; then
+          echo "[coretrace-action] compile_commands.json not found and git fallback disabled" >&2
+          exit 2
+        fi
+
+        # Sensible defaults for whole-repo CI scans.
+        cmd+=(--analyzer-arg="--analysis-profile=${{ inputs.analysis-profile }}")
+        if [ "${{ inputs.resource-cache-memory-only }}" = "true" ]; then
+          cmd+=(--analyzer-arg="--resource-summary-cache-memory-only")
+        fi
+        if [ "${{ inputs.warnings-only }}" = "true" ]; then
+          cmd+=(--analyzer-arg="--warnings-only")
+        fi
+        if [ -n "${{ inputs.stack-limit }}" ]; then
+          cmd+=(--analyzer-arg="--stack-limit=${{ inputs.stack-limit }}")
+        fi
+        if [ "${{ inputs.resource-model }}" = "default" ]; then
+          cmd+=(--analyzer-arg="--resource-model=${DEFAULT_RESOURCE_MODEL}")
+        elif [ -n "${{ inputs.resource-model }}" ]; then
+          cmd+=(--analyzer-arg="--resource-model=${{ inputs.resource-model }}")
+        fi
+
+        if [ -n "${{ inputs.extra-args }}" ]; then
+          # shellcheck disable=SC2206
+          extra_args=( ${{ inputs.extra-args }} )
+          for arg in "${extra_args[@]}"; do
+            cmd+=(--analyzer-arg="${arg}")
+          done
+        fi
+        if [ -n "${SOURCES_INPUT}" ]; then
+          # shellcheck disable=SC2206
+          source_args=( ${SOURCES_INPUT} )
+          cmd+=("${source_args[@]}")
+        fi
+
+        set +e
+        "${cmd[@]}"
+        EXIT_CODE=$?
+        set -e
+
+        echo "sarif-file=${{ inputs.sarif-file }}" >> "$GITHUB_OUTPUT"
+        echo "json-file=${{ inputs.json-file }}" >> "$GITHUB_OUTPUT"
+
+        # Extract counts from the script output
+        if [ -f "${{ inputs.json-file }}" ]; then
+          ERRORS=$(python3 -c "import json; d=json.load(open('${{ inputs.json-file }}')); diags=d.get('diagnostics',[]); sev=lambda x: ('ERROR' if str(x.get('severity', x.get('level', x.get('details',{}).get('severity','')))).upper() in {'2','ERROR'} else ('WARNING' if str(x.get('severity', x.get('level', x.get('details',{}).get('severity','')))).upper() in {'1','WARNING','WARN'} else 'INFO')); print(sum(1 for x in diags if sev(x)=='ERROR'))" 2>/dev/null || echo "0")
+          WARNINGS=$(python3 -c "import json; d=json.load(open('${{ inputs.json-file }}')); diags=d.get('diagnostics',[]); sev=lambda x: ('ERROR' if str(x.get('severity', x.get('level', x.get('details',{}).get('severity','')))).upper() in {'2','ERROR'} else ('WARNING' if str(x.get('severity', x.get('level', x.get('details',{}).get('severity','')))).upper() in {'1','WARNING','WARN'} else 'INFO')); print(sum(1 for x in diags if sev(x)=='WARNING'))" 2>/dev/null || echo "0")
+          echo "errors=${ERRORS}" >> "$GITHUB_OUTPUT"
+          echo "warnings=${WARNINGS}" >> "$GITHUB_OUTPUT"
+        fi
+
+        exit ${EXIT_CODE}
+
+    # ---------------------------------------------------------------
+    # 4. Upload SARIF to GitHub Code Scanning
+    # ---------------------------------------------------------------
+    - name: Upload SARIF to GitHub Code Scanning
+      if: inputs.upload-sarif == 'true' && always()
+      uses: github/codeql-action/upload-sarif@v3
+      with:
+        sarif_file: ${{ inputs.sarif-file }}
+        category: coretrace-stack-analyzer

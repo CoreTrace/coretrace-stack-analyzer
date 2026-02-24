@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdio> // std::snprintf
+#include <filesystem>
 #include <iomanip>
 #include <sstream>
 #include <string>
@@ -96,6 +97,34 @@ namespace ctrace::stack
             std::ostringstream os;
             os << std::fixed << std::setprecision(2) << confidence;
             return os.str();
+        }
+
+        // Strip a base directory prefix from a file path to produce a relative URI.
+        // If baseDir is empty, the path is returned unchanged (backward-compatible).
+        static std::string stripBase(const std::string& path, const std::string& baseDir)
+        {
+            if (baseDir.empty())
+                return path;
+
+            std::filesystem::path canonical;
+            try
+            {
+                canonical = std::filesystem::canonical(baseDir);
+            }
+            catch (...)
+            {
+                canonical = std::filesystem::path(baseDir);
+            }
+            std::string base = canonical.string();
+
+            // Ensure the base ends with a separator.
+            if (!base.empty() && base.back() != '/')
+                base += '/';
+
+            if (path.size() >= base.size() && path.compare(0, base.size(), base) == 0)
+                return path.substr(base.size());
+
+            return path;
         }
 
     } // anonymous namespace
@@ -268,7 +297,8 @@ namespace ctrace::stack
     }
 
     std::string toSarif(const AnalysisResult& result, const std::string& inputFile,
-                        const std::string& toolName, const std::string& toolVersion)
+                        const std::string& toolName, const std::string& toolVersion,
+                        const std::string& baseDir)
     {
         struct SarifRuleEntry
         {
@@ -368,11 +398,16 @@ namespace ctrace::stack
             os << "            {\n";
             os << "              \"physicalLocation\": {\n";
             std::string diagFilePath = d.filePath.empty() ? inputFile : d.filePath;
-            os << "                \"artifactLocation\": { \"uri\": \"" << jsonEscape(diagFilePath)
+            std::string uriPath = stripBase(diagFilePath, baseDir);
+            // SARIF requires 1-based locations. Some diagnostics can keep 0 as
+            // "unknown" internally; clamp here for schema compliance.
+            const unsigned sarifStartLine = d.line > 0 ? d.line : 1;
+            const unsigned sarifStartColumn = d.column > 0 ? d.column : 1;
+            os << "                \"artifactLocation\": { \"uri\": \"" << jsonEscape(uriPath)
                << "\" },\n";
             os << "                \"region\": {\n";
-            os << "                  \"startLine\": " << d.line << ",\n";
-            os << "                  \"startColumn\": " << d.column << "\n";
+            os << "                  \"startLine\": " << sarifStartLine << ",\n";
+            os << "                  \"startColumn\": " << sarifStartColumn << "\n";
             os << "                }\n";
             os << "              }\n";
             os << "            }\n";

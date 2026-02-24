@@ -5,6 +5,7 @@
 #include <fstream>
 #include <unordered_map>
 
+#include <llvm/ADT/ArrayRef.h>
 #include <llvm/ADT/StringRef.h>
 #include <llvm/ADT/SmallPtrSet.h>
 #include <llvm/ADT/SmallVector.h>
@@ -149,6 +150,93 @@ namespace ctrace::stack::analysis
             return false;
         }
 
+        static std::string trimAsciiWhitespace(std::string value)
+        {
+            std::size_t first = 0;
+            while (first < value.size() && std::isspace(static_cast<unsigned char>(value[first])))
+            {
+                ++first;
+            }
+
+            std::size_t last = value.size();
+            while (last > first && std::isspace(static_cast<unsigned char>(value[last - 1])))
+            {
+                --last;
+            }
+
+            return value.substr(first, last - first);
+        }
+
+        static bool detectIfConditionNegation(const std::vector<std::string>& lines, unsigned line,
+                                              unsigned column, bool& outNegated)
+        {
+            if (line == 0 || line > lines.size())
+                return false;
+
+            std::string view = stripLineComment(lines[line - 1]);
+            if (view.empty())
+                return false;
+
+            std::size_t probe = view.size() - 1;
+            if (column > 0)
+                probe = std::min<std::size_t>(column - 1, probe);
+
+            std::size_t openParen = view.rfind('(', probe);
+            if (openParen == std::string::npos)
+                return false;
+
+            std::size_t closeParen = std::string::npos;
+            unsigned depth = 1;
+            for (std::size_t i = openParen + 1; i < view.size(); ++i)
+            {
+                if (view[i] == '(')
+                {
+                    ++depth;
+                }
+                else if (view[i] == ')')
+                {
+                    if (--depth == 0)
+                    {
+                        closeParen = i;
+                        break;
+                    }
+                }
+            }
+
+            std::string condition = (closeParen == std::string::npos)
+                                        ? view.substr(openParen + 1)
+                                        : view.substr(openParen + 1, closeParen - openParen - 1);
+            condition = trimAsciiWhitespace(condition);
+            if (condition.empty())
+                return false;
+
+            std::string normalized;
+            normalized.reserve(condition.size());
+            for (char c : condition)
+            {
+                if (!std::isspace(static_cast<unsigned char>(c)))
+                    normalized.push_back(c);
+            }
+            if (normalized.empty())
+                return false;
+
+            if (normalized[0] == '!')
+            {
+                outNegated = true;
+                return true;
+            }
+
+            // Keep this filter intentionally conservative: when the source
+            // condition is an explicit comparison (== / !=), do not infer
+            // negation polarity from source text.
+            if (normalized.find("==") != std::string::npos ||
+                normalized.find("!=") != std::string::npos)
+                return false;
+
+            outNegated = false;
+            return true;
+        }
+
         static bool getSourceLocation(const llvm::Instruction* inst, SourceLocation& out)
         {
             if (!inst)
@@ -201,6 +289,14 @@ namespace ctrace::stack::analysis
             llvm::SmallVector<MemoryOperand, 2> memoryOperands;
         };
 
+        struct ConditionAtom
+        {
+            ConditionKey key;
+            bool polarity = true;
+        };
+
+        using ConditionSignature = llvm::SmallVector<ConditionAtom, 4>;
+
         struct DeterminismCache
         {
             std::unordered_map<const llvm::Function*, bool> memo;
@@ -231,11 +327,79 @@ namespace ctrace::stack::analysis
             return v;
         }
 
+        static const llvm::Value* resolvePointerSource(const llvm::Value* ptr, unsigned depth = 0)
+        {
+            if (!ptr || depth > 6)
+                return ptr;
+
+            ptr = ptr->stripPointerCasts();
+            auto* load = llvm::dyn_cast<llvm::LoadInst>(ptr);
+            if (!load)
+                return ptr;
+
+            const llvm::Value* slotPtr = load->getPointerOperand()->stripPointerCasts();
+            auto* slot = llvm::dyn_cast<llvm::AllocaInst>(slotPtr);
+            if (!slot)
+                return ptr;
+
+            const llvm::Value* uniqueStoredPtr = nullptr;
+            for (const llvm::Use& use : slot->uses())
+            {
+                const auto* inst = llvm::dyn_cast<llvm::Instruction>(use.getUser());
+                if (!inst)
+                    continue;
+
+                if (inst == load || llvm::isa<llvm::LoadInst>(inst) ||
+                    llvm::isa<llvm::DbgInfoIntrinsic>(inst))
+                {
+                    continue;
+                }
+
+                if (auto* intrinsic = llvm::dyn_cast<llvm::IntrinsicInst>(inst))
+                {
+                    const auto id = intrinsic->getIntrinsicID();
+                    if (id == llvm::Intrinsic::lifetime_start ||
+                        id == llvm::Intrinsic::lifetime_end)
+                    {
+                        continue;
+                    }
+                }
+
+                auto* store = llvm::dyn_cast<llvm::StoreInst>(inst);
+                if (!store || store->getPointerOperand()->stripPointerCasts() != slot)
+                    return ptr;
+
+                const llvm::Value* stored = store->getValueOperand()->stripPointerCasts();
+                if (!stored->getType()->isPointerTy())
+                    return ptr;
+
+                if (!uniqueStoredPtr)
+                {
+                    uniqueStoredPtr = stored;
+                    continue;
+                }
+
+                if (uniqueStoredPtr != stored)
+                    return ptr;
+            }
+
+            if (!uniqueStoredPtr)
+                return ptr;
+
+            return resolvePointerSource(uniqueStoredPtr, depth + 1);
+        }
+
         static const llvm::Value* getUnderlyingTrackedObject(const llvm::Value* ptr)
         {
             if (!ptr)
                 return nullptr;
-            return llvm::getUnderlyingObject(ptr->stripPointerCasts());
+            const llvm::Value* resolved = resolvePointerSource(ptr);
+            const llvm::Value* base = llvm::getUnderlyingObject(resolved->stripPointerCasts());
+            if (!base)
+                return nullptr;
+
+            base = resolvePointerSource(base);
+            return llvm::getUnderlyingObject(base->stripPointerCasts());
         }
 
         static bool isLocalWritableObject(const llvm::Value* ptr, const llvm::Function& F)
@@ -424,6 +588,34 @@ namespace ctrace::stack::analysis
             return deterministic;
         }
 
+        static bool isLikelyConstObserverCall(const llvm::CallBase* call,
+                                              const llvm::Function& callee)
+        {
+            if (!call)
+                return false;
+            if (callee.isVarArg())
+                return false;
+
+            const llvm::StringRef name = callee.getName();
+            // Itanium ABI: const member functions are encoded as "_ZNK...".
+            if (!name.starts_with("_ZNK"))
+                return false;
+
+            // Member function call: first argument is 'this' pointer.
+            if (call->arg_size() == 0 || !call->getArgOperand(0)->getType()->isPointerTy())
+                return false;
+
+            // Keep conservative behavior: additional pointer arguments may encode
+            // out-params / writable aliasing that we cannot validate without body.
+            for (unsigned i = 1; i < call->arg_size(); ++i)
+            {
+                if (call->getArgOperand(i)->getType()->isPointerTy())
+                    return false;
+            }
+
+            return true;
+        }
+
         static bool isDeterministicConditionCall(const llvm::CallBase* call)
         {
             if (!call)
@@ -431,10 +623,20 @@ namespace ctrace::stack::analysis
             const llvm::Function* callee = call->getCalledFunction();
             if (!callee)
                 return false;
-            const llvm::StringRef name = callee->getName();
-            if (name.starts_with("_ZNSt3__1eq"))
+
+            if (callee->isDeclaration())
+            {
+                if (isKnownDeterministicDeclaration(*callee))
+                    return true;
+            }
+
+            if (isFunctionDeterministic(*callee))
                 return true;
-            return isFunctionDeterministic(*callee);
+
+            // Generic fallback for observer-like const methods. This recovers
+            // stable duplicate-condition detection on O0 IR where deterministic
+            // function bodies may be obscured by ABI lowering patterns.
+            return isLikelyConstObserverCall(call, *callee);
         }
 
         static bool valuesEquivalent(const llvm::Value* a, const llvm::Value* b, int depth = 0);
@@ -588,6 +790,42 @@ namespace ctrace::stack::analysis
             key.memoryOperands.swap(deduped);
         }
 
+        static bool normalizeBoolComparison(llvm::CmpInst::Predicate pred, llvm::Value* lhs,
+                                            llvm::Value* rhs, llvm::Value*& outBoolValue)
+        {
+            if (pred != llvm::CmpInst::ICMP_EQ && pred != llvm::CmpInst::ICMP_NE)
+                return false;
+
+            auto* rhsConst = llvm::dyn_cast<llvm::ConstantInt>(rhs);
+            if (!rhsConst)
+            {
+                auto* lhsConst = llvm::dyn_cast<llvm::ConstantInt>(lhs);
+                if (!lhsConst)
+                    return false;
+                pred = llvm::CmpInst::getSwappedPredicate(pred);
+                std::swap(lhs, rhs);
+                rhsConst = lhsConst;
+            }
+
+            if (!lhs || !lhs->getType()->isIntegerTy())
+                return false;
+
+            const llvm::APInt& constant = rhsConst->getValue();
+            if (constant.isZero())
+            {
+                outBoolValue = lhs;
+                return true;
+            }
+
+            if (constant.isOne() && lhs->getType()->isIntegerTy(1))
+            {
+                outBoolValue = lhs;
+                return true;
+            }
+
+            return false;
+        }
+
         static ConditionKey buildConditionKey(llvm::Value* cond)
         {
             ConditionKey key;
@@ -606,10 +844,22 @@ namespace ctrace::stack::analysis
             }
 
             key.valid = true;
-            key.kind = ConditionKind::ICmp;
             key.pred = cmp->getPredicate();
-            key.lhs = canonicalizeOperand(cmp->getOperand(0), key);
-            key.rhs = canonicalizeOperand(cmp->getOperand(1), key);
+            llvm::Value* rawLhs = stripCasts(cmp->getOperand(0));
+            llvm::Value* rawRhs = stripCasts(cmp->getOperand(1));
+
+            llvm::Value* normalizedBoolValue = nullptr;
+            if (normalizeBoolComparison(key.pred, rawLhs, rawRhs, normalizedBoolValue))
+            {
+                key.kind = ConditionKind::BoolValue;
+                key.boolValue = canonicalizeOperand(normalizedBoolValue, key);
+                dedupeMemoryOperands(key);
+                return key;
+            }
+
+            key.kind = ConditionKind::ICmp;
+            key.lhs = canonicalizeOperand(rawLhs, key);
+            key.rhs = canonicalizeOperand(rawRhs, key);
 
             if (std::less<llvm::Value*>{}(key.rhs, key.lhs))
             {
@@ -619,6 +869,145 @@ namespace ctrace::stack::analysis
 
             dedupeMemoryOperands(key);
             return key;
+        }
+
+        static ConditionKey buildConditionKey(const llvm::Value* cond)
+        {
+            return buildConditionKey(const_cast<llvm::Value*>(cond));
+        }
+
+        static bool conditionKeysEquivalent(const ConditionKey& a, const ConditionKey& b);
+
+        static const llvm::MDNode* getInstructionDebugScope(const llvm::Instruction* I)
+        {
+            if (!I)
+                return nullptr;
+            llvm::DebugLoc DL = I->getDebugLoc();
+            if (!DL)
+                return nullptr;
+            return DL.getScope();
+        }
+
+        static bool haveCompatibleConditionScope(const llvm::Instruction* first,
+                                                 const llvm::Instruction* second)
+        {
+            const llvm::MDNode* a = getInstructionDebugScope(first);
+            const llvm::MDNode* b = getInstructionDebugScope(second);
+            if (!a || !b)
+                return false;
+            return a == b;
+        }
+
+        static bool isShortCircuitContinuation(const llvm::BranchInst* branch, unsigned succIndex,
+                                               const llvm::BranchInst*& nextBranch)
+        {
+            nextBranch = nullptr;
+            if (!branch || !branch->isConditional() || succIndex > 1)
+                return false;
+
+            const llvm::BasicBlock* succ = branch->getSuccessor(succIndex);
+            if (!succ || succ->getSinglePredecessor() != branch->getParent())
+                return false;
+
+            auto* succTerm = llvm::dyn_cast<llvm::BranchInst>(succ->getTerminator());
+            if (!succTerm || !succTerm->isConditional())
+                return false;
+
+            if (!haveCompatibleConditionScope(branch, succTerm))
+                return false;
+
+            nextBranch = succTerm;
+            return true;
+        }
+
+        static ConditionSignature buildConditionSignature(const llvm::BranchInst* branch)
+        {
+            ConditionSignature sig;
+            if (!branch || !branch->isConditional())
+                return sig;
+
+            llvm::SmallPtrSet<const llvm::BasicBlock*, 8> seen;
+            const llvm::BranchInst* cur = branch;
+            for (unsigned depth = 0; cur && depth < 16; ++depth)
+            {
+                if (!seen.insert(cur->getParent()).second)
+                    break;
+
+                ConditionAtom atom;
+                atom.key = buildConditionKey(cur->getCondition());
+                if (!atom.key.valid)
+                {
+                    sig.clear();
+                    return sig;
+                }
+
+                const llvm::BranchInst* nextOnTrue = nullptr;
+                const llvm::BranchInst* nextOnFalse = nullptr;
+                bool continueOnTrue = isShortCircuitContinuation(cur, 0, nextOnTrue);
+                bool continueOnFalse = isShortCircuitContinuation(cur, 1, nextOnFalse);
+
+                if (continueOnTrue && continueOnFalse)
+                {
+                    atom.polarity = true;
+                    sig.push_back(std::move(atom));
+                    break;
+                }
+
+                if (continueOnTrue)
+                {
+                    atom.polarity = true;
+                    sig.push_back(std::move(atom));
+                    cur = nextOnTrue;
+                    continue;
+                }
+
+                if (continueOnFalse)
+                {
+                    atom.polarity = false;
+                    sig.push_back(std::move(atom));
+                    cur = nextOnFalse;
+                    continue;
+                }
+
+                atom.polarity = true;
+                sig.push_back(std::move(atom));
+                break;
+            }
+
+            return sig;
+        }
+
+        static bool conditionSignaturesEquivalent(const ConditionSignature& a,
+                                                  const ConditionSignature& b)
+        {
+            if (a.size() != b.size())
+                return false;
+            for (std::size_t i = 0; i < a.size(); ++i)
+            {
+                if (a[i].polarity != b[i].polarity)
+                    return false;
+                if (!conditionKeysEquivalent(a[i].key, b[i].key))
+                    return false;
+            }
+            return true;
+        }
+
+        static llvm::SmallVector<MemoryOperand, 4>
+        collectSignatureMemoryOperands(const ConditionSignature& sig)
+        {
+            llvm::SmallPtrSet<const llvm::Value*, 8> seen;
+            llvm::SmallVector<MemoryOperand, 4> out;
+            for (const auto& atom : sig)
+            {
+                for (const auto& mem : atom.key.memoryOperands)
+                {
+                    if (!mem.ptr)
+                        continue;
+                    if (seen.insert(mem.ptr).second)
+                        out.push_back(mem);
+                }
+            }
+            return out;
         }
 
         static bool conditionKeysEquivalent(const ConditionKey& a, const ConditionKey& b)
@@ -695,7 +1084,7 @@ namespace ctrace::stack::analysis
         static bool
         hasInterveningWrites(const llvm::Function& F, const llvm::DominatorTree& DT,
                              const llvm::BasicBlock* pathBlock, const llvm::Instruction* at,
-                             const llvm::SmallVector<MemoryOperand, 2>& memoryOps,
+                             llvm::ArrayRef<MemoryOperand> memoryOps,
                              const llvm::SmallPtrSet<const llvm::Instruction*, 8>& ignoredWrites)
         {
             if (memoryOps.empty() || !pathBlock || !at)
@@ -774,9 +1163,11 @@ namespace ctrace::stack::analysis
             if (!node)
                 return false;
 
-            ConditionKey curKey = buildConditionKey(branch->getCondition());
-            if (!curKey.valid)
+            ConditionSignature curSig = buildConditionSignature(branch);
+            if (curSig.empty())
                 return false;
+            llvm::SmallVector<MemoryOperand, 4> curMemoryOps =
+                collectSignatureMemoryOperands(curSig);
 
             SourceLocation currentLoc;
             getSourceLocation(branch, currentLoc);
@@ -792,12 +1183,21 @@ namespace ctrace::stack::analysis
                 if (!domTerm || !domTerm->isConditional())
                     continue;
 
-                const llvm::BasicBlock* falseSucc = domTerm->getSuccessor(1);
-                if (!falseSucc || !DT.dominates(falseSucc, curBlock))
+                const llvm::BasicBlock* elsePathSucc = nullptr;
+                unsigned dominatingSuccCount = 0;
+                for (unsigned succIndex = 0; succIndex < domTerm->getNumSuccessors(); ++succIndex)
+                {
+                    const llvm::BasicBlock* succ = domTerm->getSuccessor(succIndex);
+                    if (!succ || !DT.dominates(succ, curBlock))
+                        continue;
+                    elsePathSucc = succ;
+                    ++dominatingSuccCount;
+                }
+                if (!elsePathSucc || dominatingSuccCount != 1)
                     continue;
 
-                ConditionKey domKey = buildConditionKey(domTerm->getCondition());
-                if (!conditionKeysEquivalent(domKey, curKey))
+                ConditionSignature domSig = buildConditionSignature(domTerm);
+                if (domSig.empty() || !conditionSignaturesEquivalent(domSig, curSig))
                     continue;
 
                 SourceLocation domLoc;
@@ -812,8 +1212,17 @@ namespace ctrace::stack::analysis
                     !hasElseBetween(*lines, domLoc.line, currentLoc.line, currentLoc.column))
                     continue;
 
-                if (hasInterveningWrites(*curBlock->getParent(), DT, falseSucc, branch,
-                                         curKey.memoryOperands, currentConditionInsts))
+                bool domNegated = false;
+                bool currentNegated = false;
+                const bool domKnown =
+                    detectIfConditionNegation(*lines, domLoc.line, domLoc.column, domNegated);
+                const bool currentKnown = detectIfConditionNegation(
+                    *lines, currentLoc.line, currentLoc.column, currentNegated);
+                if (domKnown && currentKnown && domNegated != currentNegated)
+                    continue;
+
+                if (hasInterveningWrites(*curBlock->getParent(), DT, elsePathSucc, branch,
+                                         curMemoryOps, currentConditionInsts))
                     continue;
 
                 out.funcName = branch->getFunction()->getName().str();

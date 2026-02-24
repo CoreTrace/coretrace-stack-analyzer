@@ -1,8 +1,10 @@
 #include "analysis/StackBufferAnalysis.hpp"
 
 #include <algorithm>
+#include <limits>
 #include <map>
 #include <optional>
+#include <unordered_map>
 
 #include <llvm/ADT/SmallPtrSet.h>
 #include <llvm/Analysis/ValueTracking.h>
@@ -16,6 +18,7 @@
 #include <llvm/IR/Type.h>
 
 #include "analysis/IntRanges.hpp"
+#include "analysis/IRValueUtils.hpp"
 
 namespace ctrace::stack::analysis
 {
@@ -35,6 +38,32 @@ namespace ctrace::stack::analysis
                 set.erase(value);
             }
         };
+
+        struct AnalysisComplexityBudgets
+        {
+            std::size_t pointerStoreScanInstrThreshold = 0;
+            std::size_t maxInstrForStackBufferPass = 1200;
+            std::size_t maxAnalyzedGEPsPerFunction = 16;
+            std::size_t maxInstrForMultipleStoresPass = 1200;
+            std::size_t maxAnalyzedStoresPerFunction = 32;
+        };
+
+        constexpr std::size_t kUnlimitedBudget = std::numeric_limits<std::size_t>::max();
+
+        static AnalysisComplexityBudgets
+        buildAnalysisComplexityBudgets(const AnalysisConfig& config)
+        {
+            if (config.profile == AnalysisProfile::Full)
+            {
+                return AnalysisComplexityBudgets{.pointerStoreScanInstrThreshold = kUnlimitedBudget,
+                                                 .maxInstrForStackBufferPass = kUnlimitedBudget,
+                                                 .maxAnalyzedGEPsPerFunction = kUnlimitedBudget,
+                                                 .maxInstrForMultipleStoresPass = kUnlimitedBudget,
+                                                 .maxAnalyzedStoresPerFunction = kUnlimitedBudget};
+            }
+
+            return AnalysisComplexityBudgets{};
+        }
 
         // Size (in elements) for a stack array alloca
         static std::optional<StackSize> getAllocaElementCount(llvm::AllocaInst* AI)
@@ -77,7 +106,8 @@ namespace ctrace::stack::analysis
 
         static const llvm::AllocaInst* resolveArrayAllocaFromPointerInternal(
             const llvm::Value* V, llvm::Function& F, std::vector<std::string>& path,
-            llvm::SmallPtrSetImpl<const llvm::Value*>& recursionStack, int depth)
+            llvm::SmallPtrSetImpl<const llvm::Value*>& recursionStack, int depth,
+            bool allowPointerStoreScan)
         {
             using namespace llvm;
 
@@ -134,6 +164,8 @@ namespace ctrace::stack::analysis
                     // (char *ptr; char **pp; etc.). Walk stores into this variable
                     // to see what values get assigned, and try to trace back to
                     // a real array alloca.
+                    if (!allowPointerStoreScan)
+                        return nullptr;
                     const AllocaInst* foundAI = nullptr;
 
                     for (BasicBlock& BB : F)
@@ -149,7 +181,8 @@ namespace ctrace::stack::analysis
                             const Value* storedPtr = SI->getValueOperand();
                             std::vector<std::string> subPath;
                             const AllocaInst* cand = resolveArrayAllocaFromPointerInternal(
-                                storedPtr, F, subPath, recursionStack, depth + 1);
+                                storedPtr, F, subPath, recursionStack, depth + 1,
+                                allowPointerStoreScan);
                             if (!cand)
                                 continue;
 
@@ -210,7 +243,7 @@ namespace ctrace::stack::analysis
                         const Value* inV = PN->getIncomingValue(i);
                         std::vector<std::string> subPath;
                         const AllocaInst* cand = resolveArrayAllocaFromPointerInternal(
-                            inV, F, subPath, recursionStack, depth + 1);
+                            inV, F, subPath, recursionStack, depth + 1, allowPointerStoreScan);
                         if (!cand)
                             continue;
                         if (!foundAI)
@@ -306,19 +339,57 @@ namespace ctrace::stack::analysis
 
         static const llvm::AllocaInst* resolveArrayAllocaFromPointer(const llvm::Value* V,
                                                                      llvm::Function& F,
-                                                                     std::vector<std::string>& path)
+                                                                     std::vector<std::string>& path,
+                                                                     bool allowPointerStoreScan)
         {
             llvm::SmallPtrSet<const llvm::Value*, 32> recursionStack;
-            return resolveArrayAllocaFromPointerInternal(V, F, path, recursionStack, 0);
+            return resolveArrayAllocaFromPointerInternal(V, F, path, recursionStack, 0,
+                                                         allowPointerStoreScan);
         }
 
         static void
         analyzeStackBufferOverflowsInFunction(llvm::Function& F,
-                                              std::vector<StackBufferOverflowIssue>& out)
+                                              std::vector<StackBufferOverflowIssue>& out,
+                                              const AnalysisComplexityBudgets& budgets)
         {
             using namespace llvm;
 
+            std::size_t instructionCount = 0;
+            for (const BasicBlock& BB : F)
+                instructionCount += BB.size();
+            if (instructionCount > budgets.maxInstrForStackBufferPass)
+                return;
+            const bool allowPointerStoreScan =
+                instructionCount <= budgets.pointerStoreScanInstrThreshold;
             auto ranges = computeIntRangesFromICmps(F);
+            std::size_t analyzedGEPs = 0;
+            struct CachedResolution
+            {
+                const AllocaInst* alloca = nullptr;
+                std::vector<std::string> aliasPath;
+                bool computed = false;
+            };
+            std::unordered_map<const Value*, CachedResolution> resolutionCache;
+
+            auto resolveArrayAllocaCached =
+                [&](const Value* basePtr, std::vector<std::string>& aliasPath) -> const AllocaInst*
+            {
+                auto& cached = resolutionCache[basePtr];
+                if (cached.computed)
+                {
+                    aliasPath = cached.aliasPath;
+                    return cached.alloca;
+                }
+
+                cached.computed = true;
+                std::vector<std::string> resolvedPath;
+                cached.alloca =
+                    resolveArrayAllocaFromPointer(basePtr, F, resolvedPath, allowPointerStoreScan);
+                if (cached.alloca)
+                    cached.aliasPath = std::move(resolvedPath);
+                aliasPath = cached.aliasPath;
+                return cached.alloca;
+            };
 
             for (BasicBlock& BB : F)
             {
@@ -327,11 +398,14 @@ namespace ctrace::stack::analysis
                     auto* GEP = dyn_cast<GetElementPtrInst>(&I);
                     if (!GEP)
                         continue;
+                    if (budgets.maxAnalyzedGEPsPerFunction != kUnlimitedBudget &&
+                        ++analyzedGEPs > budgets.maxAnalyzedGEPsPerFunction)
+                        return;
 
                     // 1) Find the pointer base (test, &test[0], ptr, etc.)
                     const Value* basePtr = GEP->getPointerOperand();
                     std::vector<std::string> aliasPath;
-                    const AllocaInst* AI = resolveArrayAllocaFromPointer(basePtr, F, aliasPath);
+                    const AllocaInst* AI = resolveArrayAllocaCached(basePtr, aliasPath);
                     if (!AI)
                         continue;
 
@@ -630,12 +704,21 @@ namespace ctrace::stack::analysis
         }
 
         static void analyzeMultipleStoresInFunction(llvm::Function& F,
-                                                    std::vector<MultipleStoreIssue>& out)
+                                                    std::vector<MultipleStoreIssue>& out,
+                                                    const AnalysisComplexityBudgets& budgets)
         {
             using namespace llvm;
 
             if (F.isDeclaration())
                 return;
+            std::size_t instructionCount = 0;
+            for (const BasicBlock& BB : F)
+                instructionCount += BB.size();
+            if (instructionCount > budgets.maxInstrForMultipleStoresPass)
+                return;
+            const bool allowPointerStoreScan =
+                instructionCount <= budgets.pointerStoreScanInstrThreshold;
+            std::size_t analyzedStores = 0;
 
             struct Info
             {
@@ -653,6 +736,9 @@ namespace ctrace::stack::analysis
                     auto* S = dyn_cast<StoreInst>(&I);
                     if (!S)
                         continue;
+                    if (budgets.maxAnalyzedStoresPerFunction != kUnlimitedBudget &&
+                        ++analyzedStores > budgets.maxAnalyzedStoresPerFunction)
+                        return;
 
                     Value* ptr = S->getPointerOperand();
                     auto* GEP = dyn_cast<GetElementPtrInst>(ptr);
@@ -662,8 +748,8 @@ namespace ctrace::stack::analysis
                     // Walk back to the base to find a stack array alloca.
                     const Value* basePtr = GEP->getPointerOperand();
                     std::vector<std::string> dummyAliasPath;
-                    const AllocaInst* AI =
-                        resolveArrayAllocaFromPointer(basePtr, F, dummyAliasPath);
+                    const AllocaInst* AI = resolveArrayAllocaFromPointer(basePtr, F, dummyAliasPath,
+                                                                         allowPointerStoreScan);
                     if (!AI)
                         continue;
 
@@ -722,9 +808,13 @@ namespace ctrace::stack::analysis
                 if (info.storeCount <= 1)
                     continue; // single store -> no warning
 
+                const std::string varName = deriveAllocaName(AI);
+                if (isLikelyCompilerTemporaryName(varName))
+                    continue;
+
                 MultipleStoreIssue issue;
                 issue.funcName = F.getName().str();
-                issue.varName = AI->hasName() ? AI->getName().str() : std::string("<unnamed>");
+                issue.varName = varName;
                 issue.storeCount = info.storeCount;
                 issue.distinctIndexCount = info.indexKeys.size();
                 issue.allocaInst = AI;
@@ -736,9 +826,11 @@ namespace ctrace::stack::analysis
 
     std::vector<StackBufferOverflowIssue>
     analyzeStackBufferOverflows(llvm::Module& mod,
-                                const std::function<bool(const llvm::Function&)>& shouldAnalyze)
+                                const std::function<bool(const llvm::Function&)>& shouldAnalyze,
+                                const AnalysisConfig& config)
     {
         std::vector<StackBufferOverflowIssue> out;
+        const AnalysisComplexityBudgets budgets = buildAnalysisComplexityBudgets(config);
 
         for (llvm::Function& F : mod)
         {
@@ -746,7 +838,7 @@ namespace ctrace::stack::analysis
                 continue;
             if (!shouldAnalyze(F))
                 continue;
-            analyzeStackBufferOverflowsInFunction(F, out);
+            analyzeStackBufferOverflowsInFunction(F, out, budgets);
         }
 
         return out;
@@ -754,9 +846,11 @@ namespace ctrace::stack::analysis
 
     std::vector<MultipleStoreIssue>
     analyzeMultipleStores(llvm::Module& mod,
-                          const std::function<bool(const llvm::Function&)>& shouldAnalyze)
+                          const std::function<bool(const llvm::Function&)>& shouldAnalyze,
+                          const AnalysisConfig& config)
     {
         std::vector<MultipleStoreIssue> out;
+        const AnalysisComplexityBudgets budgets = buildAnalysisComplexityBudgets(config);
 
         for (llvm::Function& F : mod)
         {
@@ -764,7 +858,7 @@ namespace ctrace::stack::analysis
                 continue;
             if (!shouldAnalyze(F))
                 continue;
-            analyzeMultipleStoresInFunction(F, out);
+            analyzeMultipleStoresInFunction(F, out, budgets);
         }
 
         return out;

@@ -204,6 +204,67 @@ namespace ctrace::stack::analysis
             return false;
         }
 
+        template <typename IsRecursiveCallee>
+        static bool detectInfiniteRecursionByDominance(llvm::Function& F,
+                                                       IsRecursiveCallee&& isRecursiveCallee)
+        {
+            std::vector<llvm::BasicBlock*> recursiveCallBlocks;
+
+            for (llvm::BasicBlock& BB : F)
+            {
+                for (llvm::Instruction& I : BB)
+                {
+                    const llvm::Function* Callee = nullptr;
+
+                    if (auto* CI = llvm::dyn_cast<llvm::CallInst>(&I))
+                    {
+                        Callee = CI->getCalledFunction();
+                    }
+                    else if (auto* II = llvm::dyn_cast<llvm::InvokeInst>(&I))
+                    {
+                        Callee = II->getCalledFunction();
+                    }
+
+                    if (Callee && isRecursiveCallee(Callee))
+                    {
+                        recursiveCallBlocks.push_back(&BB);
+                        break;
+                    }
+                }
+            }
+
+            if (recursiveCallBlocks.empty())
+                return false;
+
+            llvm::DominatorTree DT(F);
+            bool hasReturn = false;
+
+            for (llvm::BasicBlock& BB : F)
+            {
+                for (llvm::Instruction& I : BB)
+                {
+                    if (!llvm::isa<llvm::ReturnInst>(&I))
+                        continue;
+
+                    hasReturn = true;
+                    bool dominatedByRecursiveCall = false;
+                    for (llvm::BasicBlock* RCB : recursiveCallBlocks)
+                    {
+                        if (DT.dominates(RCB, &BB))
+                        {
+                            dominatedByRecursiveCall = true;
+                            break;
+                        }
+                    }
+
+                    if (!dominatedByRecursiveCall)
+                        return false;
+                }
+            }
+
+            return true;
+        }
+
         struct TarjanState
         {
             std::unordered_map<const llvm::Function*, int> index;
@@ -212,6 +273,7 @@ namespace ctrace::stack::analysis
             std::unordered_set<const llvm::Function*> onStack;
             int nextIndex = 0;
             std::set<const llvm::Function*> recursive;
+            std::vector<std::vector<const llvm::Function*>> recursiveComponents;
         };
 
         static void strongConnect(const llvm::Function* V, const CallGraph& CG, TarjanState& state)
@@ -257,10 +319,12 @@ namespace ctrace::stack::analysis
                     {
                         state.recursive.insert(Fn);
                     }
+                    state.recursiveComponents.push_back(std::move(component));
                 }
                 else if (hasSelfCall(V, CG))
                 {
                     state.recursive.insert(V);
+                    state.recursiveComponents.push_back(std::move(component));
                 }
             }
         }
@@ -367,72 +431,55 @@ namespace ctrace::stack::analysis
         return Res;
     }
 
+    std::vector<std::vector<const llvm::Function*>>
+    computeRecursiveComponents(const CallGraph& CG, const std::vector<const llvm::Function*>& nodes)
+    {
+        TarjanState state;
+        state.index.reserve(nodes.size());
+        state.lowlink.reserve(nodes.size());
+        state.stack.reserve(nodes.size());
+        state.onStack.reserve(nodes.size());
+
+        for (const llvm::Function* V : nodes)
+        {
+            if (state.index.find(V) == state.index.end())
+            {
+                strongConnect(V, CG, state);
+            }
+        }
+
+        return state.recursiveComponents;
+    }
+
     bool detectInfiniteSelfRecursion(llvm::Function& F)
     {
         if (F.isDeclaration())
             return false;
 
         const llvm::Function* Self = &F;
+        return detectInfiniteRecursionByDominance(F, [Self](const llvm::Function* Callee)
+                                                  { return Callee == Self; });
+    }
 
-        std::vector<llvm::BasicBlock*> SelfCallBlocks;
-
-        for (llvm::BasicBlock& BB : F)
-        {
-            for (llvm::Instruction& I : BB)
-            {
-                const llvm::Function* Callee = nullptr;
-
-                if (auto* CI = llvm::dyn_cast<llvm::CallInst>(&I))
-                {
-                    Callee = CI->getCalledFunction();
-                }
-                else if (auto* II = llvm::dyn_cast<llvm::InvokeInst>(&I))
-                {
-                    Callee = II->getCalledFunction();
-                }
-
-                if (Callee == Self)
-                {
-                    SelfCallBlocks.push_back(&BB);
-                    break;
-                }
-            }
-        }
-
-        if (SelfCallBlocks.empty())
+    bool detectInfiniteRecursionComponent(const std::vector<const llvm::Function*>& component)
+    {
+        if (component.empty())
             return false;
 
-        llvm::DominatorTree DT(F);
+        std::unordered_set<const llvm::Function*> componentSet(component.begin(), component.end());
 
-        bool hasReturn = false;
-
-        for (llvm::BasicBlock& BB : F)
+        for (const llvm::Function* CF : component)
         {
-            for (llvm::Instruction& I : BB)
-            {
-                if (llvm::isa<llvm::ReturnInst>(&I))
-                {
-                    hasReturn = true;
+            if (!CF || CF->isDeclaration())
+                return false;
 
-                    bool dominatedBySelfCall = false;
-                    for (llvm::BasicBlock* SCB : SelfCallBlocks)
-                    {
-                        if (DT.dominates(SCB, &BB))
-                        {
-                            dominatedBySelfCall = true;
-                            break;
-                        }
-                    }
+            llvm::Function* F = const_cast<llvm::Function*>(CF);
+            const bool hasNoBaseCase =
+                detectInfiniteRecursionByDominance(*F, [&componentSet](const llvm::Function* Callee)
+                                                   { return componentSet.count(Callee) != 0; });
 
-                    if (!dominatedBySelfCall)
-                        return false;
-                }
-            }
-        }
-
-        if (!hasReturn)
-        {
-            return true;
+            if (!hasNoBaseCase)
+                return false;
         }
 
         return true;

@@ -762,6 +762,37 @@ namespace ctrace::stack::analysis
             return originMember.value() == resultMember.value();
         }
 
+        static bool isMemberProjectionWithMatchingPointeeType(
+            int64_t originOffset, int64_t resultOffset, const llvm::StructType* structType,
+            uint64_t allocaSize, const llvm::DataLayout& DL, const llvm::Type* sourceElementType)
+        {
+            if (!sourceElementType)
+                return false;
+            if (originOffset < 0 || resultOffset < 0)
+                return false;
+            if (!structType)
+                return false;
+            uint64_t uOrigin = static_cast<uint64_t>(originOffset);
+            if (uOrigin >= allocaSize)
+                return false;
+            if (!isOffsetWithinSameAllocaMember(originOffset, resultOffset, structType, allocaSize,
+                                                DL))
+            {
+                return false;
+            }
+
+            auto memberIdx = getStructMemberIndexAtOffset(structType, DL, uOrigin);
+            if (!memberIdx.has_value())
+                return false;
+
+            llvm::Type* memberType = structType->getElementType(memberIdx.value());
+            if (memberType == sourceElementType)
+                return true;
+            if (auto* memberArray = llvm::dyn_cast<llvm::ArrayType>(memberType))
+                return memberArray->getElementType() == sourceElementType;
+            return false;
+        }
+
         static void analyzeInvalidBaseReconstructionsInFunction(
             llvm::Function& F, const llvm::DataLayout& DL,
             std::vector<InvalidBaseReconstructionIssue>& out)
@@ -947,6 +978,7 @@ namespace ctrace::stack::analysis
                         };
 
                         std::map<const llvm::AllocaInst*, AggEntry> agg;
+                        const llvm::Type* sourceElementType = GEP->getSourceElementType();
 
                         for (const auto& origin : origins)
                         {
@@ -969,7 +1001,9 @@ namespace ctrace::stack::analysis
                                 (static_cast<uint64_t>(resultOffset) >= allocaSize);
                             bool isMemberOffset = isOffsetWithinSameAllocaMember(
                                 origin.offset, resultOffset, structType, allocaSize, DL);
-                            bool allowMemberSuppression = gepOffset != 0;
+                            bool allowMemberSuppression = isMemberProjectionWithMatchingPointeeType(
+                                origin.offset, resultOffset, structType, allocaSize, DL,
+                                sourceElementType);
 
                             std::string targetType;
                             Type* targetTy = GEP->getType();

@@ -3,6 +3,7 @@
 #include <llvm/ADT/SmallPtrSet.h>
 #include <llvm/ADT/SmallVector.h>
 #include <llvm/IR/Constants.h>
+#include <llvm/IR/DebugInfo.h>
 #include <llvm/IR/DebugInfoMetadata.h>
 #include <llvm/IR/Function.h>
 #include <llvm/IR/Instructions.h>
@@ -11,6 +12,26 @@
 
 namespace ctrace::stack::analysis
 {
+    bool isLikelyCompilerTemporaryName(llvm::StringRef name)
+    {
+        if (name.empty() || name == "<unnamed>")
+            return true;
+
+        if (name.starts_with("ref.tmp") || name.starts_with("agg.tmp") ||
+            name.starts_with("coerce") || name.starts_with("__range") ||
+            name.starts_with("__begin") || name.starts_with("__end") ||
+            name.starts_with("retval") || name.starts_with("exn.slot") ||
+            name.starts_with("ehselector.slot"))
+        {
+            return true;
+        }
+
+        if (name.ends_with(".addr"))
+            return true;
+
+        return name.contains(".tmp");
+    }
+
     std::string deriveAllocaName(const llvm::AllocaInst* AI)
     {
         using namespace llvm;
@@ -85,6 +106,54 @@ namespace ctrace::stack::analysis
         }
 
         return std::string("<unnamed>");
+    }
+
+    AllocaOrigin classifyAllocaOrigin(const llvm::AllocaInst* AI)
+    {
+        using namespace llvm;
+
+        if (!AI)
+            return AllocaOrigin::Unknown;
+
+        bool sawUserDebugVar = false;
+        bool sawArtificialDebugVar = false;
+        for (DbgDeclareInst* declareInst : findDbgDeclares(const_cast<AllocaInst*>(AI)))
+        {
+            if (!declareInst)
+                continue;
+            const DILocalVariable* var = declareInst->getVariable();
+            if (!var)
+                continue;
+            if (var->isArtificial())
+                sawArtificialDebugVar = true;
+            else
+                sawUserDebugVar = true;
+        }
+
+        if (sawUserDebugVar && !sawArtificialDebugVar)
+            return AllocaOrigin::User;
+        if (sawArtificialDebugVar && !sawUserDebugVar)
+            return AllocaOrigin::CompilerGenerated;
+
+        // Conservative fallback when variable debug metadata is absent:
+        // treat only explicit compiler-like names as compiler-generated.
+        const std::string derivedName = deriveAllocaName(AI);
+        if (!derivedName.empty() && derivedName != "<unnamed>" &&
+            isLikelyCompilerTemporaryName(derivedName))
+        {
+            return AllocaOrigin::CompilerGenerated;
+        }
+
+        if (AI->hasName())
+        {
+            llvm::StringRef irName = AI->getName();
+            if (!irName.empty() && irName != "<unnamed>" && isLikelyCompilerTemporaryName(irName))
+            {
+                return AllocaOrigin::CompilerGenerated;
+            }
+        }
+
+        return AllocaOrigin::Unknown;
     }
 
     const llvm::ConstantInt* tryGetConstFromValue(const llvm::Value* V, const llvm::Function& F)

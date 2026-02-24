@@ -25,5 +25,6 @@ namespace ctrace::stack::analysis
 
     std::vector<StackPointerEscapeIssue>
     analyzeStackPointerEscapes(llvm::Module& mod,
-                               const std::function<bool(const llvm::Function&)>& shouldAnalyze);
+                               const std::function<bool(const llvm::Function&)>& shouldAnalyze,
+                               const std::string& escapeModelPath = "");
 } // namespace ctrace::stack::analysis

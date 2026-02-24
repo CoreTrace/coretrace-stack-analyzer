@@ -2,15 +2,20 @@ name: Build
 
 on:
   push:
-    branches: [ main, 3-feat-ci-add-build-workflow ]
+    branches:
+      - "**"
   pull_request:
-    branches: [ main ]
+    branches:
+      - "**"
   workflow_dispatch:
 
 jobs:
   build:
     name: Build on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+      security-events: write
     strategy:
       fail-fast: false
       matrix:
@@ -60,5 +65,31 @@ jobs:
 
     - name: Test Stack Usage Analyzer (Linux/macOS)
       if: runner.os == 'Linux' || runner.os == 'macOS'
+      timeout-minutes: 45
       run: |
-        python3 run_test.py
+        TEST_JOBS="$(python3 -c 'import os; print(max(1, min(8, os.cpu_count() or 1)))')"
+        echo "Running run_test.py with ${TEST_JOBS} job(s)"
+        python3 -u run_test.py --jobs="${TEST_JOBS}"
+
+    - name: Self-analysis (analyze own source code)
+      if: runner.os == 'Linux'
+      run: |
+        mkdir -p artifacts
+        python3 scripts/ci/run_code_analysis.py \
+          --analyzer build/stack_usage_analyzer \
+          --compdb build/compile_commands.json \
+          --exclude build/_deps/ \
+          --base-dir ${{ github.workspace }} \
+          --sarif-out artifacts/self-analysis.sarif \
+          --json-out artifacts/self-analysis.json \
+          --fail-on error \
+          --analyzer-arg=--analysis-profile=fast \
+          --analyzer-arg=--resource-summary-cache-memory-only \
+          --analyzer-arg=--resource-model=models/resource-lifetime/generic.txt
+
+    - name: Upload SARIF to Code Scanning
+      if: runner.os == 'Linux' && always() && hashFiles('artifacts/self-analysis.sarif') != ''
+      uses: github/codeql-action/upload-sarif@v3
+      with:
+        sarif_file: artifacts/self-analysis.sarif
+        category: coretrace-self-analysis

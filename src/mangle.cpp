@@ -79,4 +79,19 @@ namespace ctrace_tools
 
         return result;
     }
+
+    std::string canonicalizeMangledName(std::string_view name)
+    {
+        std::string result(name);
+
+        // libc++ (Apple/LLVM): std::__1:: is mangled as St3__1
+        for (std::size_t pos = 0; (pos = result.find("St3__1", pos)) != std::string::npos;)
+            result.replace(pos, 6, "St");
+
+        // libstdc++ (GCC): std::__cxx11:: is mangled as St7__cxx11
+        for (std::size_t pos = 0; (pos = result.find("St7__cxx11", pos)) != std::string::npos;)
+            result.replace(pos, 10, "St");
+
+        return result;
+    }
 }; // namespace ctrace_tools

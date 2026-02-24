@@ -34,6 +34,4 @@ int main(void)
 // ↳ size is unbounded at compile time
 // ↳ size depends on user-controlled input (function argument or non-local value)
 
-// at line 20, column 18
-// [ !!Warn ] potential read of uninitialized local variable 'tmp'
-// ↳ this load may execute before any definite initialization on all control-flow paths
+// not contains: potential read of uninitialized local variable 'tmp'

@@ -1,0 +1,61 @@
+name: CoreTrace Stack Analyzer
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  stack-analysis:
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      security-events: write
+
+    steps:
+      - name: Checkout target project
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Checkout analyzer toolchain
+        uses: actions/checkout@v4
+        with:
+          repository: CoreTrace/coretrace-stack-analyzer
+          path: tools/coretrace-stack-analyzer
+          fetch-depth: 1
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          wget -O - https://apt.llvm.org/llvm-snapshot.gpg.key | sudo apt-key add -
+          sudo apt-add-repository "deb http://apt.llvm.org/jammy/ llvm-toolchain-jammy-20 main"
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake ninja-build python3 \
+            llvm-20 llvm-20-dev clang-20 libclang-20-dev
+
+      - name: Configure target project (compile_commands.json)
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+
+      - name: Build analyzer
+        env:
+          LLVM_DIR: /usr/lib/llvm-20/lib/cmake/llvm
+          Clang_DIR: /usr/lib/llvm-20/lib/cmake/clang
+        run: |
+          cd tools/coretrace-stack-analyzer
+          ./build.sh --build-dir build --type Release
+
+      - name: Run analyzer gate
+        run: |
+          python3 tools/coretrace-stack-analyzer/scripts/ci/run_code_analysis.py \
+            --analyzer tools/coretrace-stack-analyzer/build/stack_usage_analyzer \
+            --compdb build/compile_commands.json \
+            --fail-on error \
+            --json-out artifacts/stack-usage.json \
+            --sarif-out artifacts/stack-usage.sarif
+
+      - name: Upload SARIF to GitHub Code Scanning
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: artifacts/stack-usage.sarif

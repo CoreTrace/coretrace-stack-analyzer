@@ -70,10 +70,13 @@ set(STACK_ANALYZER_SOURCES
     src/analysis/InputPipeline.cpp
     src/analysis/InvalidBaseReconstruction.cpp
     src/analysis/MemIntrinsicOverflow.cpp
+    src/analysis/ResourceLifetimeAnalysis.cpp
     src/analysis/SizeMinusKWrites.cpp
     src/analysis/StackBufferAnalysis.cpp
     src/analysis/StackComputation.cpp
     src/analysis/StackPointerEscape.cpp
+    src/analysis/StackPointerEscapeModel.cpp
+    src/analysis/StackPointerEscapeResolver.cpp
     src/analysis/UninitializedVarAnalysis.cpp
     src/report/ReportSerialization.cpp
     src/mangle.cpp
