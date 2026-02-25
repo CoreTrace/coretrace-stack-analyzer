@@ -57,6 +57,12 @@ option(ENABLE_STACK_USAGE "Emit per-function stack usage (.su) files" OFF)
 #  Communs Sources
 # ===========================
 set(STACK_ANALYZER_SOURCES
+    src/analyzer/AnalysisPipeline.cpp
+    src/analyzer/DiagnosticEmitter.cpp
+    src/analyzer/LocationResolver.cpp
+    src/analyzer/ModulePreparationService.cpp
+    src/app/AnalyzerApp.cpp
+    src/cli/ArgParser.cpp
     src/StackUsageAnalyzer.cpp
     src/analysis/AllocaUsage.cpp
     src/analysis/AnalyzerUtils.cpp
@@ -71,6 +77,7 @@ set(STACK_ANALYZER_SOURCES
     src/analysis/InvalidBaseReconstruction.cpp
     src/analysis/MemIntrinsicOverflow.cpp
     src/analysis/ResourceLifetimeAnalysis.cpp
+    src/analysis/Reachability.cpp
     src/analysis/SizeMinusKWrites.cpp
     src/analysis/StackBufferAnalysis.cpp
     src/analysis/StackComputation.cpp
@@ -185,6 +192,30 @@ if(BUILD_CLI)
         target_compile_options(stack_usage_analyzer PRIVATE -fsanitize=address -fno-omit-frame-pointer -g)
         target_link_options(stack_usage_analyzer PRIVATE -fsanitize=address)
     endif()
+endif()
+
+# =========
+#  TESTING
+# =========
+if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
+  include(CTest)
+
+  option(BUILD_ANALYZER_UNIT_TESTS "Build fine-grained analyzer module unit tests" OFF)
+  if(BUILD_ANALYZER_UNIT_TESTS)
+    add_executable(stack_usage_analyzer_unit_tests
+      test/unit/analyzer_module_unit_tests.cpp
+    )
+
+    target_link_libraries(stack_usage_analyzer_unit_tests
+      PRIVATE
+        stack_usage_analyzer_lib
+    )
+
+    add_test(
+      NAME analyzer_module_unit_tests
+      COMMAND stack_usage_analyzer_unit_tests ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+  endif()
 endif()
 
 # ============
