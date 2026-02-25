@@ -24,3 +24,11 @@ int main(int argc, char* argv[])
 
     return 2;
 }
+
+// at line 13, column 26
+// [ !!Warn ] unreachable else-if branch: condition is equivalent to a previous 'if' condition
+//             ↳ else branch implies previous condition is false
+
+// at line 20, column 18
+// [ !!Warn ] unreachable else-if branch: condition is equivalent to a previous 'if' condition
+//             ↳ else branch implies previous condition is false
