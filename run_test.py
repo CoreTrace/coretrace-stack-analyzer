@@ -16,6 +16,7 @@ import uuid
 from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import Optional
 
 DEFAULT_ANALYZER = Path("./build/stack_usage_analyzer")
 DEFAULT_TEST_DIR = Path("test")
@@ -34,6 +35,27 @@ class TestRunConfig:
 RUN_CONFIG = TestRunConfig()
 _CACHE_LOCK = threading.Lock()
 _MEM_CACHE = {}
+
+
+def is_fixture_source(path: Path) -> bool:
+    """
+    Return True if this source file should be analyzed as a regression fixture.
+    """
+    try:
+        rel = path.resolve().relative_to(RUN_CONFIG.test_dir.resolve())
+    except Exception:
+        rel = path
+    return not (len(rel.parts) > 0 and rel.parts[0] == "unit")
+
+
+def collect_fixture_sources():
+    """
+    Collect C/C++ fixtures under test/, excluding helper/unit-test sources.
+    """
+    c_files = sorted(
+        list(RUN_CONFIG.test_dir.glob("**/*.c")) + list(RUN_CONFIG.test_dir.glob("**/*.cpp"))
+    )
+    return [path for path in c_files if is_fixture_source(path)]
 
 
 def parse_args():
@@ -732,10 +754,7 @@ def check_human_vs_json_parity() -> bool:
     Fails if information present in one view is missing in the other.
     """
     print("=== Testing human vs JSON parity ===")
-    samples = []
-    for ext in ("*.c", "*.cpp"):
-        samples.extend(RUN_CONFIG.test_dir.glob(f"**/{ext}"))
-    samples = sorted(samples)
+    samples = collect_fixture_sources()
     if not samples:
         print("  (no .c/.cpp files found, skipping)\n")
         return True
@@ -970,15 +989,69 @@ def check_cli_parsing_and_filters() -> bool:
     ok = True
 
     sample = RUN_CONFIG.test_dir / "false-positif/unique_ptr_state.cpp"
+    sample_c = RUN_CONFIG.test_dir / "alloca/oversized-constant.c"
+    resource_model = Path("models/resource-lifetime/generic.txt")
+    escape_model = Path("models/stack-escape/generic.txt")
 
-    # Missing-argument cases
+    def run_success_case(label: str, args: list[str], required: Optional[list[str]] = None, fmt: str = "text") -> bool:
+        result = run_analyzer(args)
+        output = (result.stdout or "") + (result.stderr or "")
+        if result.returncode != 0:
+            print(f"  ❌ {label} failed (code {result.returncode})")
+            print(output)
+            return False
+
+        required = required or []
+        if fmt == "json":
+            try:
+                payload = json.loads(result.stdout or "")
+            except json.JSONDecodeError as exc:
+                print(f"  ❌ {label} produced invalid JSON: {exc}")
+                print(result.stdout or "")
+                return False
+            if not isinstance(payload, dict):
+                print(f"  ❌ {label} JSON root is not an object")
+                print(result.stdout or "")
+                return False
+        elif fmt == "sarif":
+            try:
+                payload = json.loads(result.stdout or "")
+            except json.JSONDecodeError as exc:
+                print(f"  ❌ {label} produced invalid SARIF JSON: {exc}")
+                print(result.stdout or "")
+                return False
+            if payload.get("version") != "2.1.0":
+                print(f"  ❌ {label} produced unexpected SARIF version")
+                print(result.stdout or "")
+                return False
+
+        for needle in required:
+            if needle not in output:
+                print(f"  ❌ {label} missing expected output: {needle}")
+                print(output)
+                return False
+
+        print(f"  ✅ {label} OK")
+        return True
+
+    # Missing-argument cases (all options requiring a value).
     missing_arg_cases = [
         ("--only-file", "Missing argument for --only-file"),
         ("--only-dir", "Missing argument for --only-dir"),
         ("--exclude-dir", "Missing argument for --exclude-dir"),
         ("--only-func", "Missing argument for --only-func"),
         ("--only-function", "Missing argument for --only-function"),
+        ("--stack-limit", "Missing argument for --stack-limit"),
+        ("--dump-ir", "Missing argument for --dump-ir"),
+        ("--compile-arg", "Missing argument for --compile-arg"),
+        ("--analysis-profile", "Missing argument for --analysis-profile"),
         ("--jobs", "Missing argument for --jobs"),
+        ("--resource-model", "Missing argument for --resource-model"),
+        ("--escape-model", "Missing argument for --escape-model"),
+        ("--resource-summary-cache-dir", "Missing argument for --resource-summary-cache-dir"),
+        ("--compile-commands", "Missing argument for --compile-commands"),
+        ("--compdb", "Missing argument for --compdb"),
+        ("--base-dir", "Missing argument for --base-dir"),
         ("-I", "Missing argument for -I"),
         ("-D", "Missing argument for -D"),
     ]
@@ -992,94 +1065,141 @@ def check_cli_parsing_and_filters() -> bool:
         else:
             print(f"  ✅ {flag} missing-arg OK")
 
-    # Unknown option
+    # Unknown option and invalid values.
     result = subprocess.run([str(RUN_CONFIG.analyzer), "--unknown-option"], capture_output=True, text=True)
     output = (result.stdout or "") + (result.stderr or "")
     if "Unknown option: --unknown-option" not in output:
         print("  ❌ unknown option handling")
         print(output)
         ok = False
+    elif "Did you mean" in output:
+        print("  ❌ unknown option unexpectedly suggested a flag")
+        print(output)
+        ok = False
     else:
         print("  ✅ unknown option OK")
 
-    # jobs value parsing
-    for bad_value in ["0", "x", "-1"]:
-        result = subprocess.run(
-            [str(RUN_CONFIG.analyzer), f"--jobs={bad_value}", str(sample)], capture_output=True, text=True
-        )
-        output = (result.stdout or "") + (result.stderr or "")
-        if result.returncode == 0 or "Invalid --jobs value:" not in output:
-            print(f"  ❌ --jobs invalid value handling failed: {bad_value}")
-            print(output)
-            ok = False
-        else:
-            print(f"  ✅ --jobs invalid value OK: {bad_value}")
-
-    # only-function variants
-    only_function_cases = [
-        ["--only-function=transition"],
-        ["--only-function=transition,does_not_exist"],
-        ["--only-function=transition, InitState::handle"],
-        ["--only-function", "transition"],
-        ["--only-func=transition"],
-        ["--only-func", "transition"],
+    unknown_suggestion_cases = [
+        ("--only-fil", "Did you mean '--only-file'?"),
+        ("--format=sraif", "Did you mean '--format=sarif'?"),
+        ("--mdoe=abi", "Did you mean '--mode=abi'?"),
     ]
-    for opt in only_function_cases:
-        cmd = [str(RUN_CONFIG.analyzer), str(sample)] + opt
-        result = subprocess.run(cmd, capture_output=True, text=True)
+    for bad_opt, expected_hint in unknown_suggestion_cases:
+        result = subprocess.run([str(RUN_CONFIG.analyzer), bad_opt], capture_output=True, text=True)
         output = (result.stdout or "") + (result.stderr or "")
-        if result.returncode != 0 or "Function:" not in output:
-            print(f"  ❌ only-function case failed: {opt}")
+        if result.returncode == 0 or expected_hint not in output:
+            print(f"  ❌ suggestion handling failed: {bad_opt}")
             print(output)
             ok = False
         else:
-            print(f"  ✅ only-function case OK: {opt}")
+            print(f"  ✅ suggestion handling OK: {bad_opt}")
 
-    # only-file / only-dir with space
-    only_file_dir_cases = [
-        ["--only-file", str(sample)],
-        ["--only-dir", str(sample.parent)],
+    invalid_value_cases = [
+        (["--jobs=0", str(sample)], "Invalid --jobs value:"),
+        (["--jobs=x", str(sample)], "Invalid --jobs value:"),
+        (["--jobs=-1", str(sample)], "Invalid --jobs value:"),
+        (["--analysis-profile=unknown", str(sample)], "Invalid --analysis-profile value:"),
+        (["--stack-limit=oops", str(sample)], "Invalid --stack-limit value:"),
+        (["--mode=unknown", str(sample)], "Unknown mode: unknown (expected 'ir' or 'abi')"),
     ]
-    for opt in only_file_dir_cases:
-        cmd = [str(RUN_CONFIG.analyzer), str(sample)] + opt + ["--only-function=transition"]
-        result = subprocess.run(cmd, capture_output=True, text=True)
+    for args, needle in invalid_value_cases:
+        result = run_analyzer(args)
         output = (result.stdout or "") + (result.stderr or "")
-        if result.returncode != 0 or "Function:" not in output:
-            print(f"  ❌ only-file/dir case failed: {' '.join(opt)}")
+        if result.returncode == 0 or needle not in output:
+            print(f"  ❌ invalid-value handling failed: {' '.join(args)}")
             print(output)
             ok = False
         else:
-            print(f"  ✅ only-file/dir case OK: {' '.join(opt)}")
+            print(f"  ✅ invalid-value handling OK: {' '.join(args)}")
 
-    # -D variants
-    macro_cases = [
-        ["-DHELLO"],
-        ["-D", "HELLO"],
-        ["-DVALUE=42"],
-        ["-D", "VALUE=42"],
-    ]
-    for opt in macro_cases:
-        cmd = [str(RUN_CONFIG.analyzer), str(sample)] + opt + ["--only-function=transition"]
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        output = (result.stdout or "") + (result.stderr or "")
-        if result.returncode != 0 or "Function:" not in output:
-            print(f"  ❌ macro case failed: {' '.join(opt)}")
-            print(output)
-            ok = False
-        else:
-            print(f"  ✅ macro case OK: {' '.join(opt)}")
+    with tempfile.TemporaryDirectory(prefix="ct_cli_option_matrix_") as tmp:
+        tmpdir = Path(tmp)
+        dump_ir_space = tmpdir / "dump-space.ll"
+        dump_ir_eq = tmpdir / "dump-eq.ll"
+        resource_cache = tmpdir / "resource-cache"
+        compdb = tmpdir / "compile_commands.json"
 
-    # STL toggle
-    for opt in [["--STL"], ["--stl"]]:
-        cmd = [str(RUN_CONFIG.analyzer), str(sample)] + opt + ["--only-function=transition"]
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        output = (result.stdout or "") + (result.stderr or "")
-        if result.returncode != 0 or "Function:" not in output:
-            print(f"  ❌ STL flag case failed: {' '.join(opt)}")
-            print(output)
+        entries = [
+            {
+                "directory": str(sample.resolve().parent),
+                "file": str(sample.resolve()),
+                "arguments": ["clang", "-c", str(sample.resolve())],
+            }
+        ]
+        compdb.write_text(json.dumps(entries), encoding="utf-8")
+
+        success_cases = [
+            ("--demangle", [str(sample), "--demangle", "--only-function=transition"], ["Function:"], "text"),
+            ("--quiet", [str(sample), "--quiet"], [], "text"),
+            ("--verbose", [str(sample), "--verbose", "--only-function=transition"], ["Function:"], "text"),
+            ("--STL", [str(sample), "--STL", "--only-function=transition"], ["Function:"], "text"),
+            ("--stl", [str(sample), "--stl", "--only-function=transition"], ["Function:"], "text"),
+            ("--only-file space", [str(sample), "--only-file", str(sample), "--only-function=transition"], ["Function:"], "text"),
+            ("--only-file equals", [str(sample), f"--only-file={sample}", "--only-function=transition"], ["Function:"], "text"),
+            ("--only-dir space", [str(sample), "--only-dir", str(sample.parent), "--only-function=transition"], ["Function:"], "text"),
+            ("--only-dir equals", [str(sample), f"--only-dir={sample.parent}", "--only-function=transition"], ["Function:"], "text"),
+            ("--exclude-dir space", [str(sample), "--exclude-dir", "never-match-dir", "--only-function=transition"], ["Function:"], "text"),
+            ("--exclude-dir equals", [str(sample), "--exclude-dir=never-match-dir", "--only-function=transition"], ["Function:"], "text"),
+            ("--only-function equals", [str(sample), "--only-function=transition"], ["Function:"], "text"),
+            ("--only-function space", [str(sample), "--only-function", "transition"], ["Function:"], "text"),
+            ("--only-func equals", [str(sample), "--only-func=transition"], ["Function:"], "text"),
+            ("--only-func space", [str(sample), "--only-func", "transition"], ["Function:"], "text"),
+            ("--stack-limit space", [str(sample_c), "--stack-limit", "8MiB"], ["Function:"], "text"),
+            ("--stack-limit equals", [str(sample_c), "--stack-limit=8MiB"], ["Function:"], "text"),
+            ("--dump-filter", [str(sample), "--dump-filter", "--only-function=transition"], ["Function:"], "text"),
+            ("--dump-ir space", [str(sample_c), "--dump-ir", str(dump_ir_space)], ["Function:"], "text"),
+            ("--dump-ir equals", [str(sample_c), f"--dump-ir={dump_ir_eq}"], ["Function:"], "text"),
+            ("-I<dir>", [str(sample), f"-I{sample.parent}", "--only-function=transition"], ["Function:"], "text"),
+            ("-I <dir>", [str(sample), "-I", str(sample.parent), "--only-function=transition"], ["Function:"], "text"),
+            ("-D<name>", [str(sample), "-DHELLO", "--only-function=transition"], ["Function:"], "text"),
+            ("-D <name>", [str(sample), "-D", "HELLO", "--only-function=transition"], ["Function:"], "text"),
+            ("--compile-arg", [str(sample), "--compile-arg=-I.", "--only-function=transition"], ["Function:"], "text"),
+            ("--compdb-fast", [str(sample), "--compdb-fast", "--only-function=transition"], ["Function:"], "text"),
+            ("--analysis-profile space", [str(sample), "--analysis-profile", "fast", "--only-function=transition"], ["Function:"], "text"),
+            ("--analysis-profile equals", [str(sample), "--analysis-profile=full", "--only-function=transition"], ["Function:"], "text"),
+            ("--jobs space", [str(sample), "--jobs", "2", "--only-function=transition"], ["Function:"], "text"),
+            ("--jobs equals", [str(sample), "--jobs=2", "--only-function=transition"], ["Function:"], "text"),
+            ("--timing", [str(sample), "--timing", "--only-function=transition"], ["Function:"], "text"),
+            ("--resource-model space", [str(sample), "--resource-model", str(resource_model), "--only-function=transition"], ["Function:"], "text"),
+            ("--resource-model equals", [str(sample), f"--resource-model={resource_model}", "--only-function=transition"], ["Function:"], "text"),
+            ("--escape-model space", [str(sample), "--escape-model", str(escape_model), "--only-function=transition"], ["Function:"], "text"),
+            ("--escape-model equals", [str(sample), f"--escape-model={escape_model}", "--only-function=transition"], ["Function:"], "text"),
+            ("--resource-cross-tu", [str(sample), "--resource-cross-tu", "--only-function=transition"], ["Function:"], "text"),
+            ("--no-resource-cross-tu", [str(sample), "--no-resource-cross-tu", "--only-function=transition"], ["Function:"], "text"),
+            ("--uninitialized-cross-tu", [str(sample), "--uninitialized-cross-tu", "--only-function=transition"], ["Function:"], "text"),
+            ("--no-uninitialized-cross-tu", [str(sample), "--no-uninitialized-cross-tu", "--only-function=transition"], ["Function:"], "text"),
+            ("--resource-summary-cache-dir space", [str(sample), "--resource-summary-cache-dir", str(resource_cache), "--only-function=transition"], ["Function:"], "text"),
+            ("--resource-summary-cache-dir equals", [str(sample), f"--resource-summary-cache-dir={resource_cache}", "--only-function=transition"], ["Function:"], "text"),
+            ("--resource-summary-cache-memory-only", [str(sample), "--resource-summary-cache-memory-only", "--only-function=transition"], ["Function:"], "text"),
+            ("--warnings-only", [str(sample), "--warnings-only", "--only-function=transition"], ["Function:"], "text"),
+            ("--format=json", [str(sample), "--format=json"], [], "json"),
+            ("--format=sarif", [str(sample), "--format=sarif"], [], "sarif"),
+            ("--format=human", [str(sample), "--format=human", "--only-function=transition"], ["Function:"], "text"),
+            ("--base-dir space", [str(sample), "--format=sarif", "--base-dir", str(sample.parent)], [], "sarif"),
+            ("--base-dir equals", [str(sample), "--format=sarif", f"--base-dir={sample.parent}"], [], "sarif"),
+            ("--mode=ir", [str(sample), "--mode=ir", "--only-function=transition"], ["Function:"], "text"),
+            ("--mode=abi", [str(sample), "--mode=abi", "--only-function=transition"], ["Function:"], "text"),
+            ("--compile-commands space", [str(sample), "--compile-commands", str(compdb), "--only-function=transition"], ["Function:"], "text"),
+            ("--compile-commands equals", [str(sample), f"--compile-commands={compdb}", "--only-function=transition"], ["Function:"], "text"),
+            ("--compdb space", [str(sample), "--compdb", str(compdb), "--only-function=transition"], ["Function:"], "text"),
+            ("--compdb equals", [str(sample), f"--compdb={compdb}", "--only-function=transition"], ["Function:"], "text"),
+            ("--include-compdb-deps", [f"--compile-commands={compdb}", "--include-compdb-deps", "--warnings-only"], [], "text"),
+        ]
+
+        for label, args, required, fmt in success_cases:
+            if not run_success_case(label, args, required, fmt):
+                ok = False
+
+        if not dump_ir_space.exists():
+            print(f"  ❌ --dump-ir space did not create output file: {dump_ir_space}")
             ok = False
         else:
-            print(f"  ✅ STL flag case OK: {' '.join(opt)}")
+            print("  ✅ --dump-ir space created file")
+        if not dump_ir_eq.exists():
+            print(f"  ❌ --dump-ir equals did not create output file: {dump_ir_eq}")
+            ok = False
+        else:
+            print("  ✅ --dump-ir equals created file")
 
     print()
     return ok
@@ -1711,6 +1831,151 @@ def check_multi_tu_folder_analysis() -> bool:
     return True
 
 
+def check_diagnostic_rule_coverage_regression() -> bool:
+    """
+    Ensure representative rules are still emitted after analyzer refactors.
+    """
+    print("=== Testing diagnostic rule coverage regression ===")
+    ok = True
+
+    cases = [
+        (
+            "StackBufferOverflow",
+            ["test/bound-storage/bound-storage.c", "--format=json"],
+            {"StackBufferOverflow"},
+        ),
+        (
+            "VLAUsage",
+            ["test/vla/vla-unknown-stack.c", "--format=json"],
+            {"VLAUsage"},
+        ),
+        (
+            "AllocaTooLarge",
+            ["test/alloca/oversized-constant.c", "--format=json"],
+            {"AllocaTooLarge"},
+        ),
+        (
+            "SizeMinusOneWrite",
+            ["test/size-arg/strncpy-size-minus-1.c", "--format=json"],
+            {"SizeMinusOneWrite"},
+        ),
+        (
+            "MultipleStoresToStackBuffer",
+            ["test/multiple-storage/same-storage.c", "--format=json"],
+            {"MultipleStoresToStackBuffer"},
+        ),
+        (
+            "DuplicateIfCondition",
+            ["test/diagnostics/duplicate-else-if-basic.c", "--format=json"],
+            {"DuplicateIfCondition"},
+        ),
+        (
+            "UninitializedLocalRead",
+            ["test/uninitialized-variable/uninitialized-local-basic.c", "--format=json"],
+            {"UninitializedLocalRead"},
+        ),
+        (
+            "InvalidBaseReconstruction",
+            ["test/offset_of-container_of/container_of_wrong_member_offset_error.c", "--format=json"],
+            {"InvalidBaseReconstruction"},
+        ),
+        (
+            "StackPointerEscape",
+            ["test/escape-stack/return-buf.c", "--format=json"],
+            {"StackPointerEscape"},
+        ),
+        (
+            "ConstParameterNotModified",
+            ["test/pointer_reference-const_correctness/readonly-pointer.c", "--format=json"],
+            {"ConstParameterNotModified.Pointer", "ConstParameterNotModified.PointerConstOnly"},
+        ),
+        (
+            "ResourceLifetime.MissingRelease",
+            [
+                "test/resource-lifetime/malloc-missing-release.c",
+                "--format=json",
+                "--resource-model=models/resource-lifetime/generic.txt",
+            ],
+            {"ResourceLifetime.MissingRelease"},
+        ),
+    ]
+
+    for label, args, expected in cases:
+        result = run_analyzer(args)
+        output = (result.stdout or "") + (result.stderr or "")
+        if result.returncode != 0:
+            print(f"  ❌ {label} run failed (code {result.returncode})")
+            print(output)
+            ok = False
+            continue
+
+        try:
+            payload = json.loads(result.stdout or "")
+        except json.JSONDecodeError as exc:
+            print(f"  ❌ {label} invalid JSON output: {exc}")
+            print(result.stdout or "")
+            ok = False
+            continue
+
+        diagnostics = payload.get("diagnostics", [])
+        rule_ids = {diag.get("ruleId", "") for diag in diagnostics}
+        if not any(rule in rule_ids for rule in expected):
+            print(f"  ❌ {label} missing expected rule")
+            print(f"     expected one of: {sorted(expected)}")
+            print(f"     got: {sorted(rule_ids)}")
+            ok = False
+            continue
+
+        has_loc = False
+        for diag in diagnostics:
+            location = diag.get("location", {})
+            if int(location.get("startLine", 0) or 0) > 0:
+                has_loc = True
+                break
+        if not has_loc:
+            print(f"  ❌ {label} has no diagnostic with source location")
+            print(result.stdout or "")
+            ok = False
+            continue
+
+        print(f"  ✅ {label} rule coverage OK")
+
+    print()
+    return ok
+
+
+def check_analyzer_module_unit_tests() -> bool:
+    """
+    Run fine-grained C++ unit tests for analyzer modules.
+    """
+    print("=== Testing analyzer module unit tests ===")
+    unit_test_bin = RUN_CONFIG.analyzer.parent / "stack_usage_analyzer_unit_tests"
+    if not unit_test_bin.exists():
+        print("  [info] unit test binary not found, skipping")
+        print(f"     expected: {unit_test_bin}")
+        print("     enable with: cmake -S . -B build -DBUILD_ANALYZER_UNIT_TESTS=ON")
+        print("     then build:   cmake --build build --target stack_usage_analyzer_unit_tests")
+        print()
+        return True
+
+    repo_root = Path(__file__).resolve().parent
+    result = subprocess.run(
+        [str(unit_test_bin), str(repo_root.resolve())], capture_output=True, text=True
+    )
+    output = (result.stdout or "") + (result.stderr or "")
+    if result.returncode != 0:
+        print(f"  ❌ analyzer module unit tests failed (code {result.returncode})")
+        print(output)
+        print()
+        return False
+
+    print("  ✅ analyzer module unit tests OK")
+    if output.strip():
+        print(output.rstrip())
+    print()
+    return True
+
+
 def check_file(c_path: Path):
     """
     Check that, for this file, all expectations are present in the analyzer output.
@@ -1789,6 +2054,8 @@ def main() -> int:
         return ok
 
     global_ok = record_ok(check_help_flags())
+    if not record_ok(check_analyzer_module_unit_tests()):
+        global_ok = False
     if not record_ok(check_multi_file_json()):
         global_ok = False
     if not record_ok(check_multi_file_total_summary()):
@@ -1817,8 +2084,10 @@ def main() -> int:
         global_ok = False
     if not record_ok(check_human_vs_json_parity()):
         global_ok = False
+    if not record_ok(check_diagnostic_rule_coverage_regression()):
+        global_ok = False
 
-    c_files = sorted(list(RUN_CONFIG.test_dir.glob("**/*.c")) + list(RUN_CONFIG.test_dir.glob("**/*.cpp")))
+    c_files = collect_fixture_sources()
     if not c_files:
         print(f"No .c/.cpp files found under {RUN_CONFIG.test_dir}")
         return 0 if global_ok else 1
