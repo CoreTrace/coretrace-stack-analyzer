@@ -25,6 +25,8 @@
 #include <llvm/IR/Value.h>
 #include <llvm/Support/ErrorHandling.h>
 
+#include <coretrace/logger.hpp>
+
 #include "analysis/IRValueUtils.hpp"
 #include "mangle.hpp"
 
@@ -2191,9 +2193,9 @@ namespace ctrace::stack::analysis
                         {
                             if (interprocUncertaintyReported.insert(stateKey).second)
                             {
-                                llvm::errs()
-                                    << "[DEBUG-INTERPROC] PATH=fromSummary func=" << F.getName()
-                                    << " handle=" << storage.displayName << "\n";
+                                coretrace::log(coretrace::Level::Info,
+                                               "[DEBUG-INTERPROC] PATH=fromSummary func={} handle={}\n",
+                                               F.getName().str(), storage.displayName);
                                 ResourceLifetimeIssue issue;
                                 issue.funcName = F.getName().str();
                                 issue.resourceKind = resourceKind;
@@ -2213,9 +2215,9 @@ namespace ctrace::stack::analysis
                         {
                             if (interprocUncertaintyReported.insert(stateKey).second)
                             {
-                                llvm::errs()
-                                    << "[DEBUG-INTERPROC] PATH=externalStore func=" << F.getName()
-                                    << " handle=" << storage.displayName << "\n";
+                                coretrace::log(coretrace::Level::Info,
+                                               "[DEBUG-INTERPROC] PATH=externalStore func={} handle={}\n",
+                                               F.getName().str(), storage.displayName);
                                 ResourceLifetimeIssue issue;
                                 issue.funcName = F.getName().str();
                                 issue.resourceKind = resourceKind;
@@ -2251,9 +2253,9 @@ namespace ctrace::stack::analysis
                         {
                             if (interprocUncertaintyReported.insert(stateKey).second)
                             {
-                                llvm::errs()
-                                    << "[DEBUG-INTERPROC] PATH=escapeUnmodeled func=" << F.getName()
-                                    << " handle=" << storage.displayName << "\n";
+                                coretrace::log(coretrace::Level::Info,
+                                               "[DEBUG-INTERPROC] PATH=escapeUnmodeled func={} handle={}\n",
+                                               F.getName().str(), storage.displayName);
                                 ResourceLifetimeIssue issue;
                                 issue.funcName = F.getName().str();
                                 issue.resourceKind = resourceKind;

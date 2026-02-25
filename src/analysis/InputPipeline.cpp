@@ -19,6 +19,7 @@
 #include <llvm/Support/raw_ostream.h>
 
 #include <compilerlib/compiler.h>
+#include <coretrace/logger.hpp>
 
 namespace ctrace::stack::analysis
 {
@@ -127,6 +128,20 @@ namespace ctrace::stack::analysis
             filtered.push_back("-gline-tables-only");
             filtered.push_back("-fno-sanitize=all");
             args.swap(filtered);
+        }
+
+        static void logText(coretrace::Level level, const std::string& text)
+        {
+            if (text.empty())
+                return;
+            if (text.back() == '\n')
+            {
+                coretrace::log(level, "{}", text);
+            }
+            else
+            {
+                coretrace::log(level, "{}\n", text);
+            }
         }
 
         static bool resolveDumpIRPath(const AnalysisConfig& config, const std::string& inputPath,
@@ -360,7 +375,7 @@ namespace ctrace::stack::analysis
             }
 
             if (config.timing)
-                llvm::errs() << "Compiling " << filename << "...\n";
+                coretrace::log(coretrace::Level::Info, "Compiling {}...\n", filename);
             compilerlib::OutputMode mode = compilerlib::OutputMode::ToMemory;
             bool retriedWithWorkingDir = false;
             auto compileWithOptionalWorkingDir =
@@ -409,11 +424,7 @@ namespace ctrace::stack::analysis
             }
             if (!res->diagnostics.empty() && !config.quiet)
             {
-                llvm::errs() << res->diagnostics;
-                if (res->diagnostics.back() != '\n')
-                {
-                    llvm::errs() << '\n';
-                }
+                logText(coretrace::Level::Warn, res->diagnostics);
             }
 
             if (res->llvmIR.empty())
@@ -428,10 +439,8 @@ namespace ctrace::stack::analysis
                 auto ms =
                     std::chrono::duration_cast<std::chrono::milliseconds>(compileEnd - compileStart)
                         .count();
-                llvm::errs() << "Compilation done in " << ms << " ms";
-                if (retriedWithWorkingDir)
-                    llvm::errs() << " (retry with working directory)";
-                llvm::errs() << "\n";
+                coretrace::log(coretrace::Level::Info, "Compilation done in {} ms{}\n", ms,
+                               retriedWithWorkingDir ? " (retry with working directory)" : "");
             }
 
             auto buffer = llvm::MemoryBuffer::getMemBuffer(res->llvmIR, "in_memory_ll");
@@ -445,7 +454,7 @@ namespace ctrace::stack::analysis
                 auto ms =
                     std::chrono::duration_cast<std::chrono::milliseconds>(parseEnd - parseStart)
                         .count();
-                llvm::errs() << "IR parse done in " << ms << " ms\n";
+                coretrace::log(coretrace::Level::Info, "IR parse done in {} ms\n", ms);
             }
 
             if (!result.module)
@@ -464,7 +473,7 @@ namespace ctrace::stack::analysis
         }
 
         if (config.timing)
-            llvm::errs() << "Parsing IR " << filename << "...\n";
+            coretrace::log(coretrace::Level::Info, "Parsing IR {}...\n", filename);
         auto parseStart = Clock::now();
         result.module = llvm::parseIRFile(filename, err, ctx);
         if (config.timing)
@@ -472,7 +481,7 @@ namespace ctrace::stack::analysis
             auto parseEnd = Clock::now();
             auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(parseEnd - parseStart)
                           .count();
-            llvm::errs() << "IR parse done in " << ms << " ms\n";
+            coretrace::log(coretrace::Level::Info, "IR parse done in {} ms\n", ms);
         }
         if (result.module)
         {
