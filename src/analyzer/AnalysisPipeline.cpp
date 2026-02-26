@@ -51,9 +51,7 @@ namespace ctrace::stack::analyzer
         };
     } // namespace
 
-    AnalysisPipeline::AnalysisPipeline(const AnalysisConfig& config) : config_(config)
-    {
-    }
+    AnalysisPipeline::AnalysisPipeline(const AnalysisConfig& config) : config_(config) {}
 
     AnalysisResult AnalysisPipeline::run(llvm::Module& mod) const
     {
@@ -66,44 +64,34 @@ namespace ctrace::stack::analyzer
             if (!config_.timing)
                 return;
             const auto end = Clock::now();
-            const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+            const auto ms =
+                std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
             std::cerr << label << " done in " << ms << " ms\n";
         };
 
         std::vector<PipelineStep> steps;
-        steps.push_back({"Function attrs pass",
-                         [](PipelineData& state)
-                         {
-                             runFunctionAttrsPass(state.mod);
-                         }});
+        steps.push_back(
+            {"Function attrs pass", [](PipelineData& state) { runFunctionAttrsPass(state.mod); }});
 
-        steps.push_back({"Prepare module",
-                         [](PipelineData& state)
+        steps.push_back({"Prepare module", [](PipelineData& state)
                          {
                              state.prepared = std::make_unique<PreparedModule>(
                                  state.preparation.prepare(state.mod, state.config));
                          }});
 
-        steps.push_back({"Build results",
-                         [](PipelineData& state)
+        steps.push_back({"Build results", [](PipelineData& state)
+                         { state.result = buildResults(*state.prepared, state.aux); }});
+
+        steps.push_back({"Emit summary diagnostics", [](PipelineData& state)
+                         { emitSummaryDiagnostics(state.result, *state.prepared, state.aux); }});
+
+        steps.push_back({"Compute alloca threshold", [](PipelineData& state)
                          {
-                             state.result = buildResults(*state.prepared, state.aux);
+                             state.allocaLargeThreshold =
+                                 analysis::computeAllocaLargeThreshold(state.config);
                          }});
 
-        steps.push_back({"Emit summary diagnostics",
-                         [](PipelineData& state)
-                         {
-                             emitSummaryDiagnostics(state.result, *state.prepared, state.aux);
-                         }});
-
-        steps.push_back({"Compute alloca threshold",
-                         [](PipelineData& state)
-                         {
-                             state.allocaLargeThreshold = analysis::computeAllocaLargeThreshold(state.config);
-                         }});
-
-        steps.push_back({"Stack buffer overflows",
-                         [](PipelineData& state)
+        steps.push_back({"Stack buffer overflows", [](PipelineData& state)
                          {
                              auto shouldAnalyze = [&](const llvm::Function& F) -> bool
                              { return state.prepared->ctx.shouldAnalyze(F); };
@@ -113,8 +101,7 @@ namespace ctrace::stack::analyzer
                              appendStackBufferDiagnostics(state.result, issues);
                          }});
 
-        steps.push_back({"Dynamic allocas",
-                         [](PipelineData& state)
+        steps.push_back({"Dynamic allocas", [](PipelineData& state)
                          {
                              auto shouldAnalyze = [&](const llvm::Function& F) -> bool
                              { return state.prepared->ctx.shouldAnalyze(F); };
@@ -123,23 +110,21 @@ namespace ctrace::stack::analyzer
                              appendDynamicAllocaDiagnostics(state.result, issues);
                          }});
 
-        steps.push_back({"Alloca usage",
-                         [](PipelineData& state)
-                         {
-                             auto shouldAnalyze = [&](const llvm::Function& F) -> bool
-                             { return state.prepared->ctx.shouldAnalyze(F); };
-                             const llvm::DataLayout& dataLayout = *state.prepared->ctx.dataLayout;
-                             const std::vector<analysis::AllocaUsageIssue> issues =
-                                 analysis::analyzeAllocaUsage(
-                                     state.mod, dataLayout, state.prepared->recursionState.RecursiveFuncs,
-                                     state.prepared->recursionState.InfiniteRecursionFuncs,
-                                     shouldAnalyze);
-                             appendAllocaUsageDiagnostics(state.result, state.config,
-                                                          state.allocaLargeThreshold, issues);
-                         }});
+        steps.push_back(
+            {"Alloca usage", [](PipelineData& state)
+             {
+                 auto shouldAnalyze = [&](const llvm::Function& F) -> bool
+                 { return state.prepared->ctx.shouldAnalyze(F); };
+                 const llvm::DataLayout& dataLayout = *state.prepared->ctx.dataLayout;
+                 const std::vector<analysis::AllocaUsageIssue> issues =
+                     analysis::analyzeAllocaUsage(
+                         state.mod, dataLayout, state.prepared->recursionState.RecursiveFuncs,
+                         state.prepared->recursionState.InfiniteRecursionFuncs, shouldAnalyze);
+                 appendAllocaUsageDiagnostics(state.result, state.config,
+                                              state.allocaLargeThreshold, issues);
+             }});
 
-        steps.push_back({"Mem intrinsic overflows",
-                         [](PipelineData& state)
+        steps.push_back({"Mem intrinsic overflows", [](PipelineData& state)
                          {
                              auto shouldAnalyze = [&](const llvm::Function& F) -> bool
                              { return state.prepared->ctx.shouldAnalyze(F); };
@@ -150,8 +135,7 @@ namespace ctrace::stack::analyzer
                              appendMemIntrinsicDiagnostics(state.result, issues);
                          }});
 
-        steps.push_back({"Size-minus-k writes",
-                         [](PipelineData& state)
+        steps.push_back({"Size-minus-k writes", [](PipelineData& state)
                          {
                              auto shouldAnalyze = [&](const llvm::Function& F) -> bool
                              { return state.prepared->ctx.shouldAnalyze(F); };
@@ -162,8 +146,7 @@ namespace ctrace::stack::analyzer
                              appendSizeMinusKDiagnostics(state.result, issues);
                          }});
 
-        steps.push_back({"Multiple stores",
-                         [](PipelineData& state)
+        steps.push_back({"Multiple stores", [](PipelineData& state)
                          {
                              auto shouldAnalyze = [&](const llvm::Function& F) -> bool
                              { return state.prepared->ctx.shouldAnalyze(F); };
@@ -173,8 +156,7 @@ namespace ctrace::stack::analyzer
                              appendMultipleStoreDiagnostics(state.result, issues);
                          }});
 
-        steps.push_back({"Duplicate if conditions",
-                         [](PipelineData& state)
+        steps.push_back({"Duplicate if conditions", [](PipelineData& state)
                          {
                              auto shouldAnalyze = [&](const llvm::Function& F) -> bool
                              { return state.prepared->ctx.shouldAnalyze(F); };
@@ -183,8 +165,7 @@ namespace ctrace::stack::analyzer
                              appendDuplicateIfConditionDiagnostics(state.result, issues);
                          }});
 
-        steps.push_back({"Uninitialized local reads",
-                         [](PipelineData& state)
+        steps.push_back({"Uninitialized local reads", [](PipelineData& state)
                          {
                              auto shouldAnalyze = [&](const llvm::Function& F) -> bool
                              { return state.prepared->ctx.shouldAnalyze(F); };
@@ -195,8 +176,7 @@ namespace ctrace::stack::analyzer
                              appendUninitializedLocalReadDiagnostics(state.result, issues);
                          }});
 
-        steps.push_back({"Invalid base reconstructions",
-                         [](PipelineData& state)
+        steps.push_back({"Invalid base reconstructions", [](PipelineData& state)
                          {
                              auto shouldAnalyze = [&](const llvm::Function& F) -> bool
                              { return state.prepared->ctx.shouldAnalyze(F); };
@@ -207,8 +187,7 @@ namespace ctrace::stack::analyzer
                              appendInvalidBaseReconstructionDiagnostics(state.result, issues);
                          }});
 
-        steps.push_back({"Stack pointer escapes",
-                         [](PipelineData& state)
+        steps.push_back({"Stack pointer escapes", [](PipelineData& state)
                          {
                              auto shouldAnalyze = [&](const llvm::Function& F) -> bool
                              { return state.prepared->ctx.shouldAnalyze(F); };
@@ -218,8 +197,7 @@ namespace ctrace::stack::analyzer
                              appendStackPointerEscapeDiagnostics(state.result, issues);
                          }});
 
-        steps.push_back({"Const params",
-                         [](PipelineData& state)
+        steps.push_back({"Const params", [](PipelineData& state)
                          {
                              auto shouldAnalyze = [&](const llvm::Function& F) -> bool
                              { return state.prepared->ctx.shouldAnalyze(F); };
@@ -228,8 +206,7 @@ namespace ctrace::stack::analyzer
                              appendConstParamDiagnostics(state.result, issues);
                          }});
 
-        steps.push_back({"Resource lifetime",
-                         [](PipelineData& state)
+        steps.push_back({"Resource lifetime", [](PipelineData& state)
                          {
                              auto shouldAnalyze = [&](const llvm::Function& F) -> bool
                              { return state.prepared->ctx.shouldAnalyze(F); };

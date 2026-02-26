@@ -1865,20 +1865,20 @@ class AnalyzerApp
 namespace ctrace::stack::app
 {
 
-RunResult runAnalyzerApp(cli::ParsedArguments parsedArgs, llvm::LLVMContext& context)
-{
-    AnalyzerApp app;
-    AppResult<int> runResult = app.run(std::move(parsedArgs), context);
-
-    RunResult result;
-    if (!runResult.isOk())
+    RunResult runAnalyzerApp(cli::ParsedArguments parsedArgs, llvm::LLVMContext& context)
     {
-        result.error = std::move(runResult.error);
+        AnalyzerApp app;
+        AppResult<int> runResult = app.run(std::move(parsedArgs), context);
+
+        RunResult result;
+        if (!runResult.isOk())
+        {
+            result.error = std::move(runResult.error);
+            return result;
+        }
+
+        result.exitCode = *runResult.value;
         return result;
     }
-
-    result.exitCode = *runResult.value;
-    return result;
-}
 
 } // namespace ctrace::stack::app

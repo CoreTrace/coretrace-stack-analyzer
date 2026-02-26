@@ -196,8 +196,7 @@ namespace ctrace::stack::analysis
                    name.starts_with("__tsan_") || name.starts_with("__msan_");
         }
 
-        static void logFilterDecision(const llvm::Function& F, const std::string& file,
-                                      bool keep)
+        static void logFilterDecision(const llvm::Function& F, const std::string& file, bool keep)
         {
             coretrace::log(coretrace::Level::Info, "[filter] func={} file={} keep={}\n",
                            F.getName().str(), file, keep ? "yes" : "no");

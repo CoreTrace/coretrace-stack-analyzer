@@ -2193,9 +2193,10 @@ namespace ctrace::stack::analysis
                         {
                             if (interprocUncertaintyReported.insert(stateKey).second)
                             {
-                                coretrace::log(coretrace::Level::Info,
-                                               "[DEBUG-INTERPROC] PATH=fromSummary func={} handle={}\n",
-                                               F.getName().str(), storage.displayName);
+                                coretrace::log(
+                                    coretrace::Level::Info,
+                                    "[DEBUG-INTERPROC] PATH=fromSummary func={} handle={}\n",
+                                    F.getName().str(), storage.displayName);
                                 ResourceLifetimeIssue issue;
                                 issue.funcName = F.getName().str();
                                 issue.resourceKind = resourceKind;
@@ -2215,9 +2216,10 @@ namespace ctrace::stack::analysis
                         {
                             if (interprocUncertaintyReported.insert(stateKey).second)
                             {
-                                coretrace::log(coretrace::Level::Info,
-                                               "[DEBUG-INTERPROC] PATH=externalStore func={} handle={}\n",
-                                               F.getName().str(), storage.displayName);
+                                coretrace::log(
+                                    coretrace::Level::Info,
+                                    "[DEBUG-INTERPROC] PATH=externalStore func={} handle={}\n",
+                                    F.getName().str(), storage.displayName);
                                 ResourceLifetimeIssue issue;
                                 issue.funcName = F.getName().str();
                                 issue.resourceKind = resourceKind;
@@ -2253,9 +2255,10 @@ namespace ctrace::stack::analysis
                         {
                             if (interprocUncertaintyReported.insert(stateKey).second)
                             {
-                                coretrace::log(coretrace::Level::Info,
-                                               "[DEBUG-INTERPROC] PATH=escapeUnmodeled func={} handle={}\n",
-                                               F.getName().str(), storage.displayName);
+                                coretrace::log(
+                                    coretrace::Level::Info,
+                                    "[DEBUG-INTERPROC] PATH=escapeUnmodeled func={} handle={}\n",
+                                    F.getName().str(), storage.displayName);
                                 ResourceLifetimeIssue issue;
                                 issue.funcName = F.getName().str();
                                 issue.resourceKind = resourceKind;

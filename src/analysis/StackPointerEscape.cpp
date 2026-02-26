@@ -651,10 +651,11 @@ namespace ctrace::stack::analysis
 
             if (changed)
             {
-                coretrace::log(coretrace::Level::Warn,
-                               "Stack escape inter-procedural analysis: reached fixed-point "
-                               "iteration cap ({}); summary may be non-converged and conservative\n",
-                               kEscapeSummaryMaxIterations);
+                coretrace::log(
+                    coretrace::Level::Warn,
+                    "Stack escape inter-procedural analysis: reached fixed-point "
+                    "iteration cap ({}); summary may be non-converged and conservative\n",
+                    kEscapeSummaryMaxIterations);
             }
 
             return summaries;

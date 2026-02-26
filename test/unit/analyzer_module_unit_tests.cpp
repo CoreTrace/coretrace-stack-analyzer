@@ -77,8 +77,7 @@ namespace
         const ctrace::stack::AnalysisConfig config;
         LoadedModule loaded;
         std::string loadError;
-        const std::filesystem::path source =
-            repoRoot / "test/alloca/oversized-constant.c";
+        const std::filesystem::path source = repoRoot / "test/alloca/oversized-constant.c";
         if (!loadModuleFromSource(source, config, loaded, loadError))
         {
             report.expect(false, "LocationResolver setup: failed to load module: " + loadError);
@@ -152,8 +151,7 @@ namespace
                 return;
             }
 
-            std::function<bool(const llvm::Function&)> shouldAnalyze =
-                [](const llvm::Function&)
+            std::function<bool(const llvm::Function&)> shouldAnalyze = [](const llvm::Function&)
             { return true; };
             const auto issues = ctrace::stack::analysis::analyzeStackBufferOverflows(
                 *loaded.module, shouldAnalyze, config);
@@ -179,9 +177,8 @@ namespace
             }
             else
             {
-                report.expect(
-                    foundExpectedClassification,
-                    fixtureLabel + " keeps non-unreachable stack accesses as reachable");
+                report.expect(foundExpectedClassification,
+                              fixtureLabel + " keeps non-unreachable stack accesses as reachable");
             }
         };
 

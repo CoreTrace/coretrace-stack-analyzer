@@ -23,7 +23,8 @@ namespace ctrace::stack::analyzer
         constexpr std::string_view kErrorPrefix = "[!!!Error]";
         constexpr std::string_view kDiagIndentArrow = "\t\t ↳ ";
 
-        constexpr std::string_view prefixForSeverity(ctrace::stack::DiagnosticSeverity severity) noexcept
+        constexpr std::string_view
+        prefixForSeverity(ctrace::stack::DiagnosticSeverity severity) noexcept
         {
             switch (severity)
             {
@@ -171,8 +172,8 @@ namespace ctrace::stack::analyzer
             functionResult.isRecursive = prepared.recursionState.RecursiveFuncs.count(fn) != 0;
             functionResult.hasInfiniteSelfRecursion =
                 prepared.recursionState.InfiniteRecursionFuncs.count(fn) != 0;
-            functionResult.exceedsLimit =
-                (!functionResult.maxStackUnknown && totalInfo.bytes > prepared.ctx.config.stackLimit);
+            functionResult.exceedsLimit = (!functionResult.maxStackUnknown &&
+                                           totalInfo.bytes > prepared.ctx.config.stackLimit);
 
             unsigned line = 0;
             unsigned column = 0;
@@ -181,8 +182,8 @@ namespace ctrace::stack::analyzer
 
             if (!functionResult.isRecursive && totalInfo.bytes > localInfo.bytes)
             {
-                std::string path =
-                    analysis::buildMaxStackCallPath(fn, prepared.callGraph, prepared.recursionState);
+                std::string path = analysis::buildMaxStackCallPath(fn, prepared.callGraph,
+                                                                   prepared.recursionState);
                 if (!path.empty())
                     aux.callPaths[fn] = path;
             }
@@ -289,12 +290,11 @@ namespace ctrace::stack::analyzer
                 else if (!itLocals->second.empty())
                 {
                     localsDetails += "\t\t ↳ locals: " + std::to_string(itLocals->second.size()) +
-                                    " variables (total " +
-                                    std::to_string(functionResult.localStack) + " bytes)\n";
+                                     " variables (total " +
+                                     std::to_string(functionResult.localStack) + " bytes)\n";
 
                     std::vector<std::pair<std::string, StackSize>> named = itLocals->second;
-                    named.erase(std::remove_if(named.begin(), named.end(),
-                                               [](const auto& value)
+                    named.erase(std::remove_if(named.begin(), named.end(), [](const auto& value)
                                                { return value.first == "<unnamed>"; }),
                                 named.end());
                     std::sort(named.begin(), named.end(),
@@ -316,7 +316,8 @@ namespace ctrace::stack::analyzer
                         {
                             if (i > 0)
                                 listLine += ", ";
-                            listLine += named[i].first + "(" + std::to_string(named[i].second) + ")";
+                            listLine +=
+                                named[i].first + "(" + std::to_string(named[i].second) + ")";
                         }
                         localsDetails += listLine + "\n";
                     }
@@ -333,9 +334,9 @@ namespace ctrace::stack::analyzer
                 suffix += "\t\t ↳ path: " + itPath->second + "\n";
             }
 
-            const std::string mainLine =
-                " potential stack overflow: exceeds limit of " +
-                std::to_string(prepared.ctx.config.stackLimit) + " bytes\n";
+            const std::string mainLine = " potential stack overflow: exceeds limit of " +
+                                         std::to_string(prepared.ctx.config.stackLimit) +
+                                         " bytes\n";
 
             message = "\t" + std::string(prefixForSeverity(DiagnosticSeverity::Error)) + mainLine +
                       message + suffix;
@@ -349,8 +350,7 @@ namespace ctrace::stack::analyzer
     }
 
     void appendStackBufferDiagnostics(
-        AnalysisResult& result,
-        const std::vector<analysis::StackBufferOverflowIssue>& bufferIssues)
+        AnalysisResult& result, const std::vector<analysis::StackBufferOverflowIssue>& bufferIssues)
     {
         for (const auto& issue : bufferIssues)
         {
@@ -380,8 +380,8 @@ namespace ctrace::stack::analyzer
                 if (issue.indexIsConstant)
                 {
                     body << "\t\t ↳ constant index " << issue.indexOrUpperBound
-                         << " is out of bounds (0.."
-                         << (issue.arraySize ? issue.arraySize - 1 : 0) << ")\n";
+                         << " is out of bounds (0.." << (issue.arraySize ? issue.arraySize - 1 : 0)
+                         << ")\n";
                 }
                 else
                 {
@@ -412,18 +412,17 @@ namespace ctrace::stack::analyzer
         }
     }
 
-    void appendDynamicAllocaDiagnostics(
-        AnalysisResult& result,
-        const std::vector<analysis::DynamicAllocaIssue>& issues)
+    void appendDynamicAllocaDiagnostics(AnalysisResult& result,
+                                        const std::vector<analysis::DynamicAllocaIssue>& issues)
     {
         for (const auto& issue : issues)
         {
-            const ResolvedLocation loc = resolveFromInstruction(
-                static_cast<const llvm::Instruction*>(issue.allocaInst));
+            const ResolvedLocation loc =
+                resolveFromInstruction(static_cast<const llvm::Instruction*>(issue.allocaInst));
 
             std::ostringstream body;
-            body << "\t[ !!Warn ] dynamic stack allocation detected for variable '"
-                 << issue.varName << "'\n";
+            body << "\t[ !!Warn ] dynamic stack allocation detected for variable '" << issue.varName
+                 << "'\n";
             body << "\t\t ↳ allocated type: " << issue.typeName << "\n";
             body << "\t\t ↳ size of this allocation is not compile-time constant "
                     "(VLA / variable alloca) and may lead to unbounded stack usage\n";
@@ -445,8 +444,8 @@ namespace ctrace::stack::analyzer
     {
         for (const auto& issue : issues)
         {
-            const ResolvedLocation loc = resolveFromInstruction(
-                static_cast<const llvm::Instruction*>(issue.allocaInst));
+            const ResolvedLocation loc =
+                resolveFromInstruction(static_cast<const llvm::Instruction*>(issue.allocaInst));
 
             bool isOversized = false;
             if (issue.sizeIsConst && issue.sizeBytes >= allocaLargeThreshold)
@@ -531,9 +530,8 @@ namespace ctrace::stack::analyzer
         }
     }
 
-    void appendMemIntrinsicDiagnostics(
-        AnalysisResult& result,
-        const std::vector<analysis::MemIntrinsicIssue>& issues)
+    void appendMemIntrinsicDiagnostics(AnalysisResult& result,
+                                       const std::vector<analysis::MemIntrinsicIssue>& issues)
     {
         for (const auto& issue : issues)
         {
@@ -544,8 +542,7 @@ namespace ctrace::stack::analyzer
                  << " potential stack buffer overflow in " << issue.intrinsicName
                  << " on variable '" << issue.varName << "'\n";
             body << "\t\t ↳ destination stack buffer size: " << issue.destSizeBytes << " bytes\n";
-            body << "\t\t ↳ requested " << issue.lengthBytes
-                 << " bytes to be copied/initialized\n";
+            body << "\t\t ↳ requested " << issue.lengthBytes << " bytes to be copied/initialized\n";
 
             DiagnosticBuilder builder;
             builder.function(issue.funcName)
@@ -556,9 +553,8 @@ namespace ctrace::stack::analyzer
         }
     }
 
-    void appendSizeMinusKDiagnostics(
-        AnalysisResult& result,
-        const std::vector<analysis::SizeMinusKWriteIssue>& issues)
+    void appendSizeMinusKDiagnostics(AnalysisResult& result,
+                                     const std::vector<analysis::SizeMinusKWriteIssue>& issues)
     {
         for (const auto& issue : issues)
         {
@@ -593,9 +589,8 @@ namespace ctrace::stack::analyzer
         }
     }
 
-    void appendMultipleStoreDiagnostics(
-        AnalysisResult& result,
-        const std::vector<analysis::MultipleStoreIssue>& issues)
+    void appendMultipleStoreDiagnostics(AnalysisResult& result,
+                                        const std::vector<analysis::MultipleStoreIssue>& issues)
     {
         for (const auto& issue : issues)
         {
@@ -605,8 +600,8 @@ namespace ctrace::stack::analyzer
 
             std::ostringstream body;
             body << "\t" << prefixForSeverity(DiagnosticSeverity::Info)
-                 << " multiple stores to stack buffer '" << issue.varName
-                 << "' in this function (" << issue.storeCount << " store instruction(s)";
+                 << " multiple stores to stack buffer '" << issue.varName << "' in this function ("
+                 << issue.storeCount << " store instruction(s)";
             if (issue.distinctIndexCount > 0)
                 body << ", " << issue.distinctIndexCount << " distinct index expression(s)";
             body << ")\n";
@@ -660,8 +655,7 @@ namespace ctrace::stack::analyzer
     }
 
     void appendUninitializedLocalReadDiagnostics(
-        AnalysisResult& result,
-        const std::vector<analysis::UninitializedLocalReadIssue>& issues)
+        AnalysisResult& result, const std::vector<analysis::UninitializedLocalReadIssue>& issues)
     {
         for (const auto& issue : issues)
         {
@@ -712,11 +706,13 @@ namespace ctrace::stack::analyzer
             if (haveLoc)
                 builder.lineColumn(line, column);
 
-            builder.ruleId((issue.kind == analysis::UninitializedLocalIssueKind::ReadBeforeDefiniteInit ||
-                            issue.kind ==
-                                analysis::UninitializedLocalIssueKind::ReadBeforeDefiniteInitViaCall)
-                               ? "UninitializedLocalRead"
-                               : "UninitializedLocalVariable")
+            builder
+                .ruleId(
+                    (issue.kind == analysis::UninitializedLocalIssueKind::ReadBeforeDefiniteInit ||
+                     issue.kind ==
+                         analysis::UninitializedLocalIssueKind::ReadBeforeDefiniteInitViaCall)
+                        ? "UninitializedLocalRead"
+                        : "UninitializedLocalVariable")
                 .confidence((issue.kind == analysis::UninitializedLocalIssueKind::NeverInitialized)
                                 ? 0.75
                                 : 0.90)
@@ -727,8 +723,7 @@ namespace ctrace::stack::analyzer
     }
 
     void appendInvalidBaseReconstructionDiagnostics(
-        AnalysisResult& result,
-        const std::vector<analysis::InvalidBaseReconstructionIssue>& issues)
+        AnalysisResult& result, const std::vector<analysis::InvalidBaseReconstructionIssue>& issues)
     {
         for (const auto& issue : issues)
         {
@@ -863,9 +858,8 @@ namespace ctrace::stack::analyzer
             {
                 body << "\t" << prefixForSeverity(DiagnosticSeverity::Info)
                      << " ConstParameterNotModified." << subLabel << ": parameter '"
-                     << issue.paramName << "' in function '" << displayFuncName
-                     << "' is declared '" << issue.currentType
-                     << "' but the pointed object is never modified\n";
+                     << issue.paramName << "' in function '" << displayFuncName << "' is declared '"
+                     << issue.currentType << "' but the pointed object is never modified\n";
                 body << kDiagIndentArrow << "consider '" << issue.suggestedType
                      << "' for API const-correctness\n";
             }
@@ -895,8 +889,9 @@ namespace ctrace::stack::analyzer
         }
     }
 
-    void appendResourceLifetimeDiagnostics(
-        AnalysisResult& result, const std::vector<analysis::ResourceLifetimeIssue>& issues)
+    void
+    appendResourceLifetimeDiagnostics(AnalysisResult& result,
+                                      const std::vector<analysis::ResourceLifetimeIssue>& issues)
     {
         for (const auto& issue : issues)
         {

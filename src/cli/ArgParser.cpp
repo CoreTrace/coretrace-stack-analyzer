@@ -92,7 +92,8 @@ namespace ctrace::stack::cli
                 bool valid = false;
             };
 
-            static std::optional<std::string> suggestFixedValueOption(std::string_view unknownOption)
+            static std::optional<std::string>
+            suggestFixedValueOption(std::string_view unknownOption)
             {
                 return suggestByMatcher(unknownOption, true);
             }
@@ -105,7 +106,7 @@ namespace ctrace::stack::cli
             }
 
             static std::optional<std::string> suggestByMatcher(std::string_view query,
-                                                                bool onlyFixedValueCandidates)
+                                                               bool onlyFixedValueCandidates)
             {
                 CandidateScore best = findBestCandidate(query, onlyFixedValueCandidates);
                 if (!best.valid)
@@ -166,7 +167,8 @@ namespace ctrace::stack::cli
                 lowered.reserve(input.size());
                 for (char c : input)
                 {
-                    lowered.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+                    lowered.push_back(
+                        static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
                 }
                 return lowered;
             }

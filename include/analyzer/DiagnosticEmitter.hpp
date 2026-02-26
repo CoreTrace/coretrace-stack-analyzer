@@ -49,32 +49,27 @@ namespace ctrace::stack::analyzer
         AnalysisResult& result,
         const std::vector<analysis::StackBufferOverflowIssue>& bufferIssues);
 
-    void appendDynamicAllocaDiagnostics(
-        AnalysisResult& result,
-        const std::vector<analysis::DynamicAllocaIssue>& issues);
+    void appendDynamicAllocaDiagnostics(AnalysisResult& result,
+                                        const std::vector<analysis::DynamicAllocaIssue>& issues);
 
     void appendAllocaUsageDiagnostics(AnalysisResult& result, const AnalysisConfig& config,
                                       StackSize allocaLargeThreshold,
                                       const std::vector<analysis::AllocaUsageIssue>& issues);
 
-    void appendMemIntrinsicDiagnostics(
-        AnalysisResult& result,
-        const std::vector<analysis::MemIntrinsicIssue>& issues);
+    void appendMemIntrinsicDiagnostics(AnalysisResult& result,
+                                       const std::vector<analysis::MemIntrinsicIssue>& issues);
 
-    void appendSizeMinusKDiagnostics(
-        AnalysisResult& result,
-        const std::vector<analysis::SizeMinusKWriteIssue>& issues);
+    void appendSizeMinusKDiagnostics(AnalysisResult& result,
+                                     const std::vector<analysis::SizeMinusKWriteIssue>& issues);
 
-    void appendMultipleStoreDiagnostics(
-        AnalysisResult& result,
-        const std::vector<analysis::MultipleStoreIssue>& issues);
+    void appendMultipleStoreDiagnostics(AnalysisResult& result,
+                                        const std::vector<analysis::MultipleStoreIssue>& issues);
 
     void appendDuplicateIfConditionDiagnostics(
         AnalysisResult& result, const std::vector<analysis::DuplicateIfConditionIssue>& issues);
 
     void appendUninitializedLocalReadDiagnostics(
-        AnalysisResult& result,
-        const std::vector<analysis::UninitializedLocalReadIssue>& issues);
+        AnalysisResult& result, const std::vector<analysis::UninitializedLocalReadIssue>& issues);
 
     void appendInvalidBaseReconstructionDiagnostics(
         AnalysisResult& result,
@@ -86,7 +81,8 @@ namespace ctrace::stack::analyzer
     void appendConstParamDiagnostics(AnalysisResult& result,
                                      const std::vector<analysis::ConstParamIssue>& issues);
 
-    void appendResourceLifetimeDiagnostics(
-        AnalysisResult& result, const std::vector<analysis::ResourceLifetimeIssue>& issues);
+    void
+    appendResourceLifetimeDiagnostics(AnalysisResult& result,
+                                      const std::vector<analysis::ResourceLifetimeIssue>& issues);
 
 } // namespace ctrace::stack::analyzer
