@@ -989,6 +989,7 @@ def check_cli_parsing_and_filters() -> bool:
     ok = True
 
     sample = RUN_CONFIG.test_dir / "false-positif/unique_ptr_state.cpp"
+    sample_warning = RUN_CONFIG.test_dir / "uninitialized-variable/uninitialized-local-basic.c"
     sample_c = RUN_CONFIG.test_dir / "alloca/oversized-constant.c"
     resource_model = Path("models/resource-lifetime/generic.txt")
     escape_model = Path("models/stack-escape/generic.txt")
@@ -1171,7 +1172,12 @@ def check_cli_parsing_and_filters() -> bool:
             ("--resource-summary-cache-dir space", [str(sample), "--resource-summary-cache-dir", str(resource_cache), "--only-function=transition"], ["Function:"], "text"),
             ("--resource-summary-cache-dir equals", [str(sample), f"--resource-summary-cache-dir={resource_cache}", "--only-function=transition"], ["Function:"], "text"),
             ("--resource-summary-cache-memory-only", [str(sample), "--resource-summary-cache-memory-only", "--only-function=transition"], ["Function:"], "text"),
-            ("--warnings-only", [str(sample), "--warnings-only", "--only-function=transition"], ["Function:"], "text"),
+            (
+                "--warnings-only",
+                [str(sample_warning), "--warnings-only"],
+                ["Function: read_uninitialized_basic"],
+                "text",
+            ),
             ("--format=json", [str(sample), "--format=json"], [], "json"),
             ("--format=sarif", [str(sample), "--format=sarif"], [], "sarif"),
             ("--format=human", [str(sample), "--format=human", "--only-function=transition"], ["Function:"], "text"),
@@ -1232,6 +1238,170 @@ def check_only_func_uninitialized() -> bool:
             return False
 
     print("  ✅ --only-func preserves warning\n")
+    return True
+
+
+def check_warnings_only_filters_function_listing() -> bool:
+    """
+    Regression: --warnings-only must only list functions that carry warnings/errors.
+    """
+    print("=== Testing --warnings-only function listing filter ===")
+    sample = (
+        RUN_CONFIG.test_dir
+        / "uninitialized-variable/uninitialized-local-warnings-only-function-filter.c"
+    )
+    result = run_analyzer([str(sample), "--warnings-only"])
+    output = (result.stdout or "") + (result.stderr or "")
+
+    if result.returncode != 0:
+        print(f"  ❌ analyzer failed (code {result.returncode})")
+        print(output)
+        print()
+        return False
+
+    required = [
+        "Function: read_uninitialized_value",
+        "potential read of uninitialized local variable 'value'",
+    ]
+    forbidden = [
+        "Function: clean_value",
+        "Function: main",
+    ]
+
+    for needle in required:
+        if needle not in output:
+            print(f"  ❌ missing expected output: {needle}")
+            print(output)
+            print()
+            return False
+
+    for needle in forbidden:
+        if needle in output:
+            print(f"  ❌ unexpected function listed in --warnings-only output: {needle}")
+            print(output)
+            print()
+            return False
+
+    print("  ✅ --warnings-only function listing filter OK\n")
+    return True
+
+
+def check_uninitialized_verbose_ctor_trace() -> bool:
+    """
+    Regression: --verbose must expose whether default-constructor evidence was
+    detected (at constructor mark time and/or never-init triage).
+    """
+    print("=== Testing verbose constructor detection trace ===")
+    cases = [
+        (
+            "default ctor detected",
+            RUN_CONFIG.test_dir / "uninitialized-variable/uninitialized-local-opaque-ctor.cpp",
+            [
+                "[uninit][ctor]",
+                "local=obj",
+                "default_ctor_detected=yes",
+                "action=mark_default_ctor",
+            ],
+        ),
+        (
+            "default ctor not detected",
+            RUN_CONFIG.test_dir / "uninitialized-variable/uninitialized-local-cpp-trivial-ctor.cpp",
+            [
+                "[uninit][ctor]",
+                "local=app",
+                "default_ctor_detected=no",
+                "action=suppress_never_initialized",
+            ],
+        ),
+    ]
+
+    for label, fixture, needles in cases:
+        result = run_analyzer([str(fixture), "--verbose", "--warnings-only"])
+        output = (result.stdout or "") + (result.stderr or "")
+        if result.returncode != 0:
+            print(f"  ❌ {label} failed (code {result.returncode})")
+            print(output)
+            print()
+            return False
+        for needle in needles:
+            if needle not in output:
+                print(f"  ❌ {label}: missing expected verbose trace token: {needle}")
+                print(output)
+                print()
+                return False
+
+    print("  ✅ verbose ctor trace OK\n")
+    return True
+
+
+def check_uninitialized_unsummarized_defined_bool_out_param() -> bool:
+    """
+    Regression: defined-but-unsummarized bool/status calls guarded by return-value
+    control flow must mark out-param writes (self-analysis case).
+    """
+    print("=== Testing unsummarized defined bool out-param fallback ===")
+    sample = Path("src/analysis/SizeMinusKWrites.cpp")
+    compdb = Path("build/compile_commands.json")
+
+    if not sample.exists():
+        print(f"  [info] sample not found, skipping: {sample}\n")
+        return True
+    if not compdb.exists():
+        print(f"  [info] compile_commands not found, skipping: {compdb}\n")
+        return True
+
+    result = run_analyzer(
+        [str(sample), f"--compile-commands={compdb}", "--warnings-only"]
+    )
+    output = (result.stdout or "") + (result.stderr or "")
+    if result.returncode != 0:
+        print(f"  ❌ analyzer failed (code {result.returncode})")
+        print(output)
+        print()
+        return False
+
+    forbidden = "potential read of uninitialized local variable 'lf'"
+    if forbidden in output:
+        print(f"  ❌ unexpected warning still present: {forbidden}")
+        print(output)
+        print()
+        return False
+
+    print("  ✅ unsummarized defined bool out-param fallback OK\n")
+    return True
+
+
+def check_uninitialized_optional_receiver_index_repro() -> bool:
+    """
+    Reproducer: optional receiver-index tracking passed by value can trigger
+    a false positive on local initialization.
+    """
+    print("=== Testing optional receiver index false-positive reproducer ===")
+    sample = (
+        RUN_CONFIG.test_dir
+        / "uninitialized-variable/uninitialized-local-cpp-optional-receiver-index.cpp"
+    )
+
+    if not sample.exists():
+        print(f"  [info] sample not found, skipping: {sample}\n")
+        return True
+
+    result = run_analyzer([str(sample), "--warnings-only"])
+    output = (result.stdout or "") + (result.stderr or "")
+    if result.returncode != 0:
+        print(f"  ❌ analyzer failed (code {result.returncode})")
+        print(output)
+        print()
+        return False
+
+    expected = "potential read of uninitialized local variable 'methodReceiverIdx'"
+    if expected not in output:
+        print(f"  ❌ expected warning not found: {expected}")
+        print(output)
+        print()
+        return False
+
+    print("  ✅ optional receiver index false-positive reproduced\n")
     return True
 
 
@@ -1647,7 +1817,7 @@ def check_compdb_as_default_input_source() -> bool:
         ]
         compdb.write_text(json.dumps(entries), encoding="utf-8")
 
-        result = run_analyzer([f"--compile-commands={compdb}", "--warnings-only"])
+        result = run_analyzer([f"--compile-commands={compdb}"])
         output = (result.stdout or "") + (result.stderr or "")
         if result.returncode != 0:
             print(f"  ❌ default compdb input run failed (code {result.returncode})")
@@ -1722,7 +1892,6 @@ def check_exclude_dir_filter() -> bool:
             [
                 f"--compile-commands={compdb}",
                 f"--exclude-dir={skip_dir.parent},{tmpdir / 'does-not-exist'}",
-                "--warnings-only",
             ]
         )
         output = (result.stdout or "") + (result.stderr or "")
@@ -2065,6 +2234,14 @@ def main() -> int:
     if not record_ok(check_cli_parsing_and_filters()):
         global_ok = False
     if not record_ok(check_only_func_uninitialized()):
+        global_ok = False
+    if not record_ok(check_warnings_only_filters_function_listing()):
+        global_ok = False
+    if not record_ok(check_uninitialized_verbose_ctor_trace()):
+        global_ok = False
+    if not record_ok(check_uninitialized_unsummarized_defined_bool_out_param()):
+        global_ok = False
+    if not record_ok(check_uninitialized_optional_receiver_index_repro()):
         global_ok = False
     if not record_ok(check_unknown_alloca_virtual_callback_escape()):
         global_ok = False
