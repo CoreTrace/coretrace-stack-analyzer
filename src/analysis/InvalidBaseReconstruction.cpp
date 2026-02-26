@@ -1,6 +1,7 @@
 #include "analysis/InvalidBaseReconstruction.hpp"
 
 #include <cstddef>
+#include <limits>
 #include <map>
 #include <optional>
 #include <set>
@@ -185,7 +186,7 @@ namespace ctrace::stack::analysis
                 }
                 break;
             }
-            return Cur ? Cur : V;
+            return Cur;
         }
 
         static const llvm::Value* getPtrToIntOperand(const llvm::Value* V)
@@ -762,35 +763,158 @@ namespace ctrace::stack::analysis
             return originMember.value() == resultMember.value();
         }
 
-        static bool isMemberProjectionWithMatchingPointeeType(
-            int64_t originOffset, int64_t resultOffset, const llvm::StructType* structType,
+        struct ProjectionBounds
+        {
+            uint64_t begin = 0;
+            uint64_t end = 0;
+        };
+
+        static bool findProjectionBoundsAtOffset(const llvm::Type* currentType,
+                                                 const llvm::Type* sourceElementType,
+                                                 const llvm::DataLayout& DL, uint64_t baseOffset,
+                                                 uint64_t queryOffset, ProjectionBounds& out,
+                                                 unsigned depth = 0)
+        {
+            using namespace llvm;
+
+            if (!currentType || !sourceElementType || depth > 12)
+                return false;
+
+            const TypeSize currentAllocSize = DL.getTypeAllocSize(const_cast<Type*>(currentType));
+            if (currentAllocSize.isScalable())
+                return false;
+            const uint64_t currentSize = currentAllocSize.getFixedValue();
+            if (baseOffset > std::numeric_limits<uint64_t>::max() - currentSize)
+                return false;
+            const uint64_t currentEnd = baseOffset + currentSize;
+            if (queryOffset < baseOffset || queryOffset >= currentEnd)
+                return false;
+
+            if (currentType == sourceElementType && queryOffset == baseOffset)
+            {
+                out.begin = baseOffset;
+                out.end = currentEnd;
+                return true;
+            }
+
+            if (const auto* arrayTy = dyn_cast<ArrayType>(currentType))
+            {
+                Type* elemTy = arrayTy->getElementType();
+                const TypeSize elemAllocSize = DL.getTypeAllocSize(elemTy);
+                if (elemAllocSize.isScalable())
+                    return false;
+                const uint64_t elemSize = elemAllocSize.getFixedValue();
+                if (elemSize == 0)
+                    return false;
+
+                const uint64_t elemCount = arrayTy->getNumElements();
+                if (elemSize > 0 && elemCount > std::numeric_limits<uint64_t>::max() / elemSize)
+                    return false;
+                const uint64_t arraySpan = elemSize * elemCount;
+                if (queryOffset < baseOffset || queryOffset >= baseOffset + arraySpan)
+                    return false;
+
+                const uint64_t rel = queryOffset - baseOffset;
+                if (elemTy == sourceElementType && (rel % elemSize) == 0)
+                {
+                    out.begin = baseOffset;
+                    out.end = baseOffset + arraySpan;
+                    return true;
+                }
+
+                const uint64_t elemIdx = rel / elemSize;
+                if (elemIdx >= elemCount)
+                    return false;
+                const uint64_t elemBase = baseOffset + elemIdx * elemSize;
+                return findProjectionBoundsAtOffset(elemTy, sourceElementType, DL, elemBase,
+                                                    queryOffset, out, depth + 1);
+            }
+
+            const auto* structTy = dyn_cast<StructType>(currentType);
+            if (!structTy)
+                return false;
+
+            auto* mutableStructTy = const_cast<StructType*>(structTy);
+            const StructLayout* layout = DL.getStructLayout(mutableStructTy);
+            const unsigned memberCount = structTy->getNumElements();
+            for (unsigned i = 0; i < memberCount; ++i)
+            {
+                Type* memberTy = structTy->getElementType(i);
+                const TypeSize memberAllocSize = DL.getTypeAllocSize(memberTy);
+                if (memberAllocSize.isScalable())
+                    continue;
+
+                const uint64_t memberSize = memberAllocSize.getFixedValue();
+                const uint64_t memberOffset = layout->getElementOffset(i);
+                if (baseOffset > std::numeric_limits<uint64_t>::max() - memberOffset)
+                    continue;
+                const uint64_t memberBase = baseOffset + memberOffset;
+                if (memberBase > std::numeric_limits<uint64_t>::max() - memberSize)
+                    continue;
+                const uint64_t memberEnd = memberBase + memberSize;
+                if (queryOffset < memberBase || queryOffset >= memberEnd)
+                    continue;
+
+                if (memberTy == sourceElementType && queryOffset == memberBase)
+                {
+                    out.begin = memberBase;
+                    out.end = memberEnd;
+                    return true;
+                }
+
+                if (const auto* memberArray = dyn_cast<ArrayType>(memberTy))
+                {
+                    Type* elemTy = memberArray->getElementType();
+                    const TypeSize elemAllocSize = DL.getTypeAllocSize(elemTy);
+                    if (!elemAllocSize.isScalable() && elemTy == sourceElementType)
+                    {
+                        const uint64_t elemSize = elemAllocSize.getFixedValue();
+                        if (elemSize > 0)
+                        {
+                            const uint64_t rel = queryOffset - memberBase;
+                            if (rel < memberSize && (rel % elemSize) == 0)
+                            {
+                                out.begin = memberBase;
+                                out.end = memberEnd;
+                                return true;
+                            }
+                        }
+                    }
+                }
+
+                if (findProjectionBoundsAtOffset(memberTy, sourceElementType, DL, memberBase,
+                                                 queryOffset, out, depth + 1))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        static bool isProjectionWithinSourceSubobjectBounds(
+            int64_t originOffset, int64_t resultOffset, const llvm::Type* allocatedType,
             uint64_t allocaSize, const llvm::DataLayout& DL, const llvm::Type* sourceElementType)
         {
-            if (!sourceElementType)
+            if (!sourceElementType || !allocatedType)
                 return false;
             if (originOffset < 0 || resultOffset < 0)
                 return false;
-            if (!structType)
+
+            const uint64_t uOrigin = static_cast<uint64_t>(originOffset);
+            const uint64_t uResult = static_cast<uint64_t>(resultOffset);
+            if (uOrigin >= allocaSize || uResult >= allocaSize)
                 return false;
-            uint64_t uOrigin = static_cast<uint64_t>(originOffset);
-            if (uOrigin >= allocaSize)
-                return false;
-            if (!isOffsetWithinSameAllocaMember(originOffset, resultOffset, structType, allocaSize,
-                                                DL))
+
+            ProjectionBounds bounds;
+            if (!findProjectionBoundsAtOffset(allocatedType, sourceElementType, DL, 0, uOrigin,
+                                              bounds))
             {
                 return false;
             }
-
-            auto memberIdx = getStructMemberIndexAtOffset(structType, DL, uOrigin);
-            if (!memberIdx.has_value())
+            if (bounds.begin > bounds.end || bounds.end > allocaSize)
                 return false;
-
-            llvm::Type* memberType = structType->getElementType(memberIdx.value());
-            if (memberType == sourceElementType)
-                return true;
-            if (auto* memberArray = llvm::dyn_cast<llvm::ArrayType>(memberType))
-                return memberArray->getElementType() == sourceElementType;
-            return false;
+            return uResult >= bounds.begin && uResult < bounds.end;
         }
 
         static void analyzeInvalidBaseReconstructionsInFunction(
@@ -808,6 +932,7 @@ namespace ctrace::stack::analysis
                 std::string name;
                 uint64_t size = 0;
                 const StructType* structType = nullptr;
+                const Type* allocatedType = nullptr;
             };
             std::map<const AllocaInst*, AllocaInfo> allocaInfo;
 
@@ -829,6 +954,7 @@ namespace ctrace::stack::analysis
                     info.name = std::move(varName);
                     info.size = sizeOpt.value();
                     info.structType = getAllocaStructType(AI);
+                    info.allocatedType = AI->getAllocatedType();
                     allocaInfo[AI] = std::move(info);
                 }
             }
@@ -993,16 +1119,14 @@ namespace ctrace::stack::analysis
 
                             const std::string& varName = it->second.name;
                             uint64_t allocaSize = it->second.size;
-                            const StructType* structType = it->second.structType;
+                            const Type* allocatedType = it->second.allocatedType;
 
                             int64_t resultOffset = origin.offset + gepOffset;
                             bool isOutOfBounds =
                                 (resultOffset < 0) ||
                                 (static_cast<uint64_t>(resultOffset) >= allocaSize);
-                            bool isMemberOffset = isOffsetWithinSameAllocaMember(
-                                origin.offset, resultOffset, structType, allocaSize, DL);
-                            bool allowMemberSuppression = isMemberProjectionWithMatchingPointeeType(
-                                origin.offset, resultOffset, structType, allocaSize, DL,
+                            bool allowMemberSuppression = isProjectionWithinSourceSubobjectBounds(
+                                origin.offset, resultOffset, allocatedType, allocaSize, DL,
                                 sourceElementType);
 
                             std::string targetType;
@@ -1013,7 +1137,7 @@ namespace ctrace::stack::analysis
                             auto& entry = agg[origin.alloca];
                             entry.memberOffsets.insert(origin.offset);
                             entry.anyOutOfBounds |= isOutOfBounds;
-                            if (resultOffset != 0 && !(allowMemberSuppression && isMemberOffset))
+                            if (resultOffset != 0 && !allowMemberSuppression)
                                 entry.anyNonZeroResult = true;
                             entry.varName = varName;
                             entry.targetType = targetType;

@@ -22,6 +22,9 @@ namespace ctrace::stack::analysis
 {
     namespace
     {
+        using FunctionArgHardEscapeMap =
+            std::unordered_map<const llvm::Function*, std::vector<bool>>;
+
         struct DeferredCallback
         {
             StackPointerEscapeIssue issue;
@@ -235,6 +238,20 @@ namespace ctrace::stack::analysis
             return summaryStateForArg(summaries, callee, argIndex) == EscapeSummaryState::NoEscape;
         }
 
+        static bool summaryHasLocalHardEscape(const FunctionArgHardEscapeMap& hardEscapes,
+                                              const llvm::Function* callee, unsigned argIndex)
+        {
+            if (!callee)
+                return false;
+            const auto it = hardEscapes.find(callee);
+            if (it == hardEscapes.end())
+                return false;
+            const std::vector<bool>& perArg = it->second;
+            if (argIndex >= perArg.size())
+                return false;
+            return perArg[argIndex];
+        }
+
         static bool isOpaqueCalleeForEscapeReasoning(const FunctionEscapeSummaryMap& summaries,
                                                      const llvm::Function* callee)
         {
@@ -341,6 +358,7 @@ namespace ctrace::stack::analysis
 
             SmallPtrSet<const Value*, 32> visited;
             SmallVector<const Value*, 16> worklist;
+            SmallPtrSet<const AllocaInst*, 8> localSlotsContainingTrackedAddr;
             worklist.push_back(&arg);
 
             while (!worklist.empty())
@@ -370,6 +388,7 @@ namespace ctrace::stack::analysis
                         {
                             if (dstAI->getFunction() == &F)
                             {
+                                localSlotsContainingTrackedAddr.insert(dstAI);
                                 worklist.push_back(dstAI);
                                 continue;
                             }
@@ -383,7 +402,19 @@ namespace ctrace::stack::analysis
                     {
                         if (LI->getPointerOperand()->stripPointerCasts() != V)
                             continue;
-                        if (LI->getType()->isPointerTy())
+
+                        bool shouldPropagateLoadedPointer = true;
+                        if (const AllocaInst* srcAI =
+                                getUnderlyingAlloca(LI->getPointerOperand(), returnedArgAliases))
+                        {
+                            if (srcAI->getFunction() == &F &&
+                                !localSlotsContainingTrackedAddr.contains(srcAI))
+                            {
+                                shouldPropagateLoadedPointer = false;
+                            }
+                        }
+
+                        if (shouldPropagateLoadedPointer && LI->getType()->isPointerTy())
                             worklist.push_back(LI);
                         continue;
                     }
@@ -437,7 +468,12 @@ namespace ctrace::stack::analysis
 
                             if (!isLikelyVirtualDispatchCall(*CB))
                             {
-                                facts.hardEscape = true;
+                                // Unknown non-virtual callback target reached through a
+                                // parameter: keep the summary conservative (Unknown) instead of
+                                // forcing a hard escape. Strong diagnostics are still emitted at
+                                // the originating callsite when we see the local address passed to
+                                // an unresolved callback directly.
+                                facts.hasOpaqueExternalCall = true;
                                 continue;
                             }
 
@@ -469,9 +505,16 @@ namespace ctrace::stack::analysis
                                 }
                             }
 
-                            if (dep.hasUnknownTarget || dep.candidates.empty())
+                            if (dep.candidates.empty())
                             {
                                 facts.hardEscape = true;
+                            }
+                            else if (dep.hasUnknownTarget)
+                            {
+                                // Keep this dependency conservative-but-unknown when at least one
+                                // candidate is analyzable. We only promote to hard escape if no
+                                // candidate can be reasoned about.
+                                facts.hasOpaqueExternalCall = true;
                             }
 
                             if (!dep.candidates.empty())
@@ -542,10 +585,25 @@ namespace ctrace::stack::analysis
             llvm::Module& mod, const std::function<bool(const llvm::Function&)>& shouldAnalyze,
             IndirectTargetResolver& targetResolver,
             const ReturnedPointerArgAliasMap& returnedArgAliases, const StackEscapeModel& model,
-            StackEscapeRuleMatcher& ruleMatcher)
+            StackEscapeRuleMatcher& ruleMatcher, FunctionArgHardEscapeMap* hardEscapesOut)
         {
             FunctionEscapeFactsMap factsMap = buildFunctionEscapeFacts(
                 mod, shouldAnalyze, targetResolver, returnedArgAliases, model, ruleMatcher);
+
+            if (hardEscapesOut)
+            {
+                hardEscapesOut->clear();
+                for (const auto& entry : factsMap)
+                {
+                    const llvm::Function* F = entry.first;
+                    const FunctionEscapeFacts& facts = entry.second;
+                    std::vector<bool> perArg;
+                    perArg.reserve(facts.perArg.size());
+                    for (const ParamEscapeFacts& paramFacts : facts.perArg)
+                        perArg.push_back(paramFacts.hardEscape);
+                    hardEscapesOut->emplace(F, std::move(perArg));
+                }
+            }
 
             FunctionEscapeSummaryMap summaries;
             for (const auto& entry : factsMap)
@@ -663,6 +721,7 @@ namespace ctrace::stack::analysis
 
         static void analyzeStackPointerEscapesInFunction(
             llvm::Function& F, const FunctionEscapeSummaryMap& summaries,
+            const FunctionArgHardEscapeMap& hardEscapesByArg,
             IndirectTargetResolver& targetResolver,
             const ReturnedPointerArgAliasMap& returnedArgAliases, const StackEscapeModel& model,
             StackEscapeRuleMatcher& ruleMatcher, std::vector<StackPointerEscapeIssue>& out)
@@ -855,17 +914,40 @@ namespace ctrace::stack::analysis
                                         {
                                             const std::vector<const Function*>& candidates =
                                                 targetResolver.candidatesForCall(*CB);
-                                            bool allCandidatesNoEscape = !candidates.empty();
+                                            bool hasCandidate = false;
+                                            bool hasMayEscapeCandidate = false;
                                             for (const Function* candidate : candidates)
                                             {
-                                                if (!summarySaysNoEscape(summaries, candidate,
-                                                                         argIndex))
+                                                hasCandidate = true;
+                                                if (!candidate)
+                                                    continue;
+                                                if (argIndex >= candidate->arg_size())
+                                                    continue;
+                                                if (ruleMatcher.modelSaysNoEscapeArg(
+                                                        model, candidate, argIndex))
+                                                    continue;
+                                                if (isStdLibCallee(candidate))
+                                                    continue;
+                                                const EscapeSummaryState candidateState =
+                                                    summaryStateForArg(summaries, candidate,
+                                                                       argIndex);
+                                                if (candidateState == EscapeSummaryState::MayEscape)
                                                 {
-                                                    allCandidatesNoEscape = false;
-                                                    break;
+                                                    if (summaryHasLocalHardEscape(
+                                                            hardEscapesByArg, candidate, argIndex))
+                                                    {
+                                                        hasMayEscapeCandidate = true;
+                                                        break;
+                                                    }
                                                 }
                                             }
-                                            if (allCandidatesNoEscape)
+
+                                            // For virtual dispatch, only emit a strong callback
+                                            // escape when at least one target summary proves
+                                            // potential capture. Unknown candidates are kept
+                                            // non-diagnostic to avoid broad type-based false
+                                            // positives.
+                                            if (hasCandidate && !hasMayEscapeCandidate)
                                                 continue;
                                         }
 
@@ -963,8 +1045,10 @@ namespace ctrace::stack::analysis
         IndirectTargetResolver targetResolver(mod);
         StackEscapeRuleMatcher ruleMatcher;
         const ReturnedPointerArgAliasMap returnedArgAliases = buildReturnedPointerArgAliases(mod);
-        const FunctionEscapeSummaryMap summaries = buildFunctionEscapeSummaries(
-            mod, shouldAnalyze, targetResolver, returnedArgAliases, model, ruleMatcher);
+        FunctionArgHardEscapeMap hardEscapesByArg;
+        const FunctionEscapeSummaryMap summaries =
+            buildFunctionEscapeSummaries(mod, shouldAnalyze, targetResolver, returnedArgAliases,
+                                         model, ruleMatcher, &hardEscapesByArg);
 
         for (llvm::Function& F : mod)
         {
@@ -972,8 +1056,8 @@ namespace ctrace::stack::analysis
                 continue;
             if (!shouldAnalyze(F))
                 continue;
-            analyzeStackPointerEscapesInFunction(F, summaries, targetResolver, returnedArgAliases,
-                                                 model, ruleMatcher, issues);
+            analyzeStackPointerEscapesInFunction(F, summaries, hardEscapesByArg, targetResolver,
+                                                 returnedArgAliases, model, ruleMatcher, issues);
         }
         return issues;
     }
