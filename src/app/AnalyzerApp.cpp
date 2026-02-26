@@ -399,6 +399,33 @@ static AnalysisResult filterWarningsOnly(const AnalysisResult& result, const Ana
     return filtered;
 }
 
+static AnalysisResult filterFunctionsWithDiagnostics(const AnalysisResult& result)
+{
+    AnalysisResult filtered;
+    filtered.config = result.config;
+    filtered.diagnostics = result.diagnostics;
+
+    std::unordered_set<std::string> warnedFunctions;
+    warnedFunctions.reserve(result.diagnostics.size());
+    for (const auto& d : result.diagnostics)
+    {
+        if (!d.funcName.empty())
+            warnedFunctions.insert(d.funcName);
+    }
+
+    if (warnedFunctions.empty())
+        return filtered;
+
+    filtered.functions.reserve(result.functions.size());
+    for (const auto& f : result.functions)
+    {
+        if (warnedFunctions.count(f.name) != 0)
+            filtered.functions.push_back(f);
+    }
+
+    return filtered;
+}
+
 struct LoadedInputModule
 {
     std::string filename;
@@ -970,10 +997,13 @@ static int emitHumanOutput(const std::vector<AnalysisEntry>& results, const Anal
     for (std::size_t r = 0; r < results.size(); ++r)
     {
         const auto& inputFilename = results[r].first;
-        const AnalysisResult result =
+        AnalysisResult result =
             (cfg.onlyFiles.empty() && cfg.onlyDirs.empty() && cfg.onlyFunctions.empty())
                 ? filterResult(results[r].second, cfg, normalizedFilters)
                 : results[r].second;
+        result = filterWarningsOnly(result, cfg);
+        if (cfg.warningsOnly)
+            result = filterFunctionsWithDiagnostics(result);
 
         if (multiFile)
         {
@@ -1028,8 +1058,6 @@ static int emitHumanOutput(const std::vector<AnalysisEntry>& results, const Anal
                 for (const auto& d : result.diagnostics)
                 {
                     if (d.funcName != f.name)
-                        continue;
-                    if (result.config.warningsOnly && d.severity == DiagnosticSeverity::Info)
                         continue;
                     if (d.line != 0)
                         llvm::outs() << "\tat line " << d.line << ", column " << d.column << "\n";
@@ -1867,7 +1895,7 @@ namespace ctrace::stack::app
 
     RunResult runAnalyzerApp(cli::ParsedArguments parsedArgs, llvm::LLVMContext& context)
     {
-        AnalyzerApp app;
+        AnalyzerApp app = {};
         AppResult<int> runResult = app.run(std::move(parsedArgs), context);
 
         RunResult result;
