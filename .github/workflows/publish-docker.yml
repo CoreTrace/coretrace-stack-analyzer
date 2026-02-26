@@ -29,6 +29,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -99,7 +102,7 @@ jobs:
           file: ./Dockerfile
           push: true
           tags: ${{ steps.tags.outputs.runtime_tags }}
-          platforms: linux/amd64
+          platforms: linux/amd64,linux/arm64
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -110,7 +113,7 @@ jobs:
           file: ./Dockerfile.ci
           push: true
           tags: ${{ steps.tags.outputs.ci_tags }}
-          platforms: linux/amd64
+          platforms: linux/amd64,linux/arm64
           build-args: |
             CORETRACE_RUNTIME_IMAGE=${{ steps.images.outputs.runtime }}:${{ steps.tags.outputs.version }}
             VERSION=${{ steps.tags.outputs.version }}
