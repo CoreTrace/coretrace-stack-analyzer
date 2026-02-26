@@ -91,8 +91,13 @@ namespace ctrace::stack::analysis
         const std::vector<const llvm::Function*>& candidatesForCall(const llvm::CallBase& CB) const;
 
       private:
+        using CandidatesByVTableSlot =
+            std::unordered_map<unsigned, std::vector<const llvm::Function*>>;
+
         std::unordered_map<const llvm::FunctionType*, std::vector<const llvm::Function*>>
             candidatesByFunctionType;
+        std::unordered_map<const llvm::FunctionType*, CandidatesByVTableSlot>
+            virtualCandidatesByFunctionTypeAndSlot;
         std::vector<const llvm::Function*> empty;
     };
 
