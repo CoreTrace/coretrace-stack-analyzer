@@ -1,0 +1,116 @@
+name: Build Release Binaries
+
+on:
+  pull_request:
+    branches:
+      - "**"
+  push:
+    branches:
+      - "main"
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-linux-binaries:
+    name: Build Linux binary (${{ matrix.arch }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            arch: amd64
+          - platform: linux/arm64
+            arch: arm64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve artifact version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          short_sha="$(git rev-parse --short=12 HEAD)"
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            version="${GITHUB_REF_NAME}"
+          else
+            version="sha-${short_sha}"
+          fi
+          echo "value=${version}" >> "${GITHUB_OUTPUT}"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build packaged binary with Buildx
+        shell: bash
+        run: |
+          set -euo pipefail
+          out_dir="dist/${{ matrix.arch }}"
+          mkdir -p "${out_dir}"
+          docker buildx build \
+            --platform "${{ matrix.platform }}" \
+            --file Dockerfile.release-binaries \
+            --target artifacts \
+            --build-arg VERSION="${{ steps.version.outputs.value }}" \
+            --output "type=local,dest=${out_dir}" \
+            .
+          ls -la "${out_dir}"
+
+      - name: Validate artifact files
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="dist/${{ matrix.arch }}/coretrace-stack-analyzer-${{ steps.version.outputs.value }}-linux-${{ matrix.arch }}.tar.gz"
+          checksum="${archive}.sha256"
+          test -f "${archive}" || { echo "missing archive: ${archive}"; exit 1; }
+          test -f "${checksum}" || { echo "missing checksum: ${checksum}"; exit 1; }
+          sha256sum -c "${checksum}"
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: coretrace-stack-analyzer-${{ steps.version.outputs.value }}-linux-${{ matrix.arch }}
+          path: |
+            dist/${{ matrix.arch }}/*.tar.gz
+            dist/${{ matrix.arch }}/*.sha256
+          if-no-files-found: error
+
+  publish-release-assets:
+    name: Attach binaries to GitHub Release
+    runs-on: ubuntu-24.04
+    needs: build-linux-binaries
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: coretrace-stack-analyzer-*-linux-*
+          path: dist
+          merge-multiple: true
+
+      - name: Show release files
+        shell: bash
+        run: |
+          set -euo pipefail
+          ls -la dist
+
+      - name: Publish release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.tar.gz
+            dist/*.sha256
+          fail_on_unmatched_files: true
+          generate_release_notes: true

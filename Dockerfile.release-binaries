@@ -1,0 +1,67 @@
+# syntax=docker/dockerfile:1.7
+
+FROM ubuntu:24.04 AS base
+
+ARG DEBIAN_FRONTEND=noninteractive
+ARG LLVM_VERSION=20
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    gnupg \
+    lsb-release \
+    software-properties-common \
+    build-essential \
+    cmake \
+    ninja-build \
+    python3 \
+    git \
+    tar \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN curl -fsSL https://apt.llvm.org/llvm.sh -o /tmp/llvm.sh \
+    && chmod +x /tmp/llvm.sh \
+    && /tmp/llvm.sh ${LLVM_VERSION} \
+    && rm -f /tmp/llvm.sh \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends libclang-${LLVM_VERSION}-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /repo
+
+FROM base AS builder
+
+COPY . /repo
+
+RUN cmake -S . -B build -G Ninja \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DLLVM_DIR=/usr/lib/llvm-${LLVM_VERSION}/lib/cmake/llvm \
+        -DClang_DIR=/usr/lib/llvm-${LLVM_VERSION}/lib/cmake/clang \
+        -DCLANG_LINK_CLANG_DYLIB=ON \
+        -DLLVM_LINK_LLVM_DYLIB=ON \
+        -DUSE_SHARED_LIB=OFF \
+    && cmake --build build -j"$(nproc)" \
+    && ./build/stack_usage_analyzer --help >/dev/null
+
+FROM builder AS packager
+
+ARG VERSION=dev
+ARG TARGETARCH
+
+RUN set -eux; \
+    case "${TARGETARCH}" in \
+      amd64) arch_label="amd64" ;; \
+      arm64) arch_label="arm64" ;; \
+      *) echo "unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    package_name="coretrace-stack-analyzer-${VERSION}-linux-${arch_label}"; \
+    mkdir -p "/out/${package_name}"; \
+    install -m 0755 /repo/build/stack_usage_analyzer "/out/${package_name}/stack_usage_analyzer"; \
+    install -m 0644 /repo/README.md "/out/${package_name}/README.md"; \
+    tar -C /out -czf "/out/${package_name}.tar.gz" "${package_name}"; \
+    sha256sum "/out/${package_name}.tar.gz" > "/out/${package_name}.tar.gz.sha256"; \
+    rm -rf "/out/${package_name}"
+
+FROM scratch AS artifacts
+
+COPY --from=packager /out/ /
