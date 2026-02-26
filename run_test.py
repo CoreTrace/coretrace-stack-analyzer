@@ -1375,6 +1375,8 @@ def check_uninitialized_optional_receiver_index_repro() -> bool:
     """
     Reproducer: optional receiver-index tracking passed by value can trigger
     a false positive on local initialization.
+
+    Regression target: this warning must stay suppressed across toolchains.
     """
     print("=== Testing optional receiver index false-positive reproducer ===")
     sample = (
@@ -1395,13 +1397,13 @@ def check_uninitialized_optional_receiver_index_repro() -> bool:
         return False
 
     expected = "potential read of uninitialized local variable 'methodReceiverIdx'"
-    if expected not in output:
-        print(f"  ❌ expected warning not found: {expected}")
+    if expected in output:
+        print(f"  ❌ unexpected warning still present: {expected}")
         print(output)
         print()
         return False
 
-    print("  ✅ optional receiver index false-positive reproduced\n")
+    print("  ✅ optional receiver index false-positive suppressed\n")
     return True
 
 
