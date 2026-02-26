@@ -41,7 +41,7 @@ namespace ctrace::stack
                 default:
                     if (static_cast<unsigned char>(c) < 0x20)
                     {
-                        char buf[7];
+                        char buf[7] = {};
                         std::snprintf(buf, sizeof(buf), "\\u%04x", c & 0xFF);
                         out += buf;
                     }
