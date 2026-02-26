@@ -69,11 +69,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          archive="dist/${{ matrix.arch }}/coretrace-stack-analyzer-${{ steps.version.outputs.value }}-linux-${{ matrix.arch }}.tar.gz"
+          artifact_dir="dist/${{ matrix.arch }}"
+          archive="${artifact_dir}/coretrace-stack-analyzer-${{ steps.version.outputs.value }}-linux-${{ matrix.arch }}.tar.gz"
           checksum="${archive}.sha256"
           test -f "${archive}" || { echo "missing archive: ${archive}"; exit 1; }
           test -f "${checksum}" || { echo "missing checksum: ${checksum}"; exit 1; }
-          sha256sum -c "${checksum}"
+          (
+            cd "${artifact_dir}"
+            sha256sum -c "$(basename "${checksum}")"
+          )
 
       - name: Upload workflow artifacts
         uses: actions/upload-artifact@v4

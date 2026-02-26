@@ -59,7 +59,7 @@ RUN set -eux; \
     install -m 0755 /repo/build/stack_usage_analyzer "/out/${package_name}/stack_usage_analyzer"; \
     install -m 0644 /repo/README.md "/out/${package_name}/README.md"; \
     tar -C /out -czf "/out/${package_name}.tar.gz" "${package_name}"; \
-    sha256sum "/out/${package_name}.tar.gz" > "/out/${package_name}.tar.gz.sha256"; \
+    (cd /out && sha256sum "${package_name}.tar.gz" > "${package_name}.tar.gz.sha256"); \
     rm -rf "/out/${package_name}"
 
 FROM scratch AS artifacts
