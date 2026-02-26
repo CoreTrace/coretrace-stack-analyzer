@@ -158,7 +158,8 @@ namespace ctrace::stack::analysis
     {
         return CB.paramHasAttr(argIndex, llvm::Attribute::NoCapture) ||
                CB.paramHasAttr(argIndex, llvm::Attribute::ByVal) ||
-               CB.paramHasAttr(argIndex, llvm::Attribute::ByRef);
+               CB.paramHasAttr(argIndex, llvm::Attribute::ByRef) ||
+               CB.paramHasAttr(argIndex, llvm::Attribute::StructRet);
     }
 
     bool isStdLibCallee(const llvm::Function* F)
