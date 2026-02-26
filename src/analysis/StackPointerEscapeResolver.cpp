@@ -79,7 +79,8 @@ namespace ctrace::stack::analysis
         {
             const llvm::Value* calledVal = CB.getCalledOperand();
             const auto* fnLoad =
-                calledVal ? llvm::dyn_cast<llvm::LoadInst>(calledVal->stripPointerCasts()) : nullptr;
+                calledVal ? llvm::dyn_cast<llvm::LoadInst>(calledVal->stripPointerCasts())
+                          : nullptr;
             if (!fnLoad)
                 return std::nullopt;
 
@@ -95,8 +96,8 @@ namespace ctrace::stack::analysis
             if (!isLikelyVPtrLoadFromObjectRoot(*vtableLoad))
                 return std::nullopt;
 
-            const auto* slotIndex =
-                llvm::dyn_cast<llvm::ConstantInt>(slotGEP->getOperand(slotGEP->getNumOperands() - 1));
+            const auto* slotIndex = llvm::dyn_cast<llvm::ConstantInt>(
+                slotGEP->getOperand(slotGEP->getNumOperands() - 1));
             if (!slotIndex || slotIndex->isNegative())
                 return std::nullopt;
 

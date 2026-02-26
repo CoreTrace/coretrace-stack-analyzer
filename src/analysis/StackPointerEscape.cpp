@@ -923,8 +923,8 @@ namespace ctrace::stack::analysis
                                                     continue;
                                                 if (argIndex >= candidate->arg_size())
                                                     continue;
-                                                if (ruleMatcher.modelSaysNoEscapeArg(model, candidate,
-                                                                                     argIndex))
+                                                if (ruleMatcher.modelSaysNoEscapeArg(
+                                                        model, candidate, argIndex))
                                                     continue;
                                                 if (isStdLibCallee(candidate))
                                                     continue;
@@ -1046,9 +1046,9 @@ namespace ctrace::stack::analysis
         StackEscapeRuleMatcher ruleMatcher;
         const ReturnedPointerArgAliasMap returnedArgAliases = buildReturnedPointerArgAliases(mod);
         FunctionArgHardEscapeMap hardEscapesByArg;
-        const FunctionEscapeSummaryMap summaries = buildFunctionEscapeSummaries(
-            mod, shouldAnalyze, targetResolver, returnedArgAliases, model, ruleMatcher,
-            &hardEscapesByArg);
+        const FunctionEscapeSummaryMap summaries =
+            buildFunctionEscapeSummaries(mod, shouldAnalyze, targetResolver, returnedArgAliases,
+                                         model, ruleMatcher, &hardEscapesByArg);
 
         for (llvm::Function& F : mod)
         {

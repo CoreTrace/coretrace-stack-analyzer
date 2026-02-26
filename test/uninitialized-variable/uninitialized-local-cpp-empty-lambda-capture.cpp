@@ -19,10 +19,7 @@ int empty_lambda_captured_indirect_call_should_not_warn(void)
         return MemKind::None;
     };
 
-    MemKind kind = [&]() -> MemKind
-    {
-        return classifyByName(1);
-    }();
+    MemKind kind = [&]() -> MemKind { return classifyByName(1); }();
 
     return static_cast<int>(kind);
 }

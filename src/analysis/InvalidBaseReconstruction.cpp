@@ -1125,10 +1125,9 @@ namespace ctrace::stack::analysis
                             bool isOutOfBounds =
                                 (resultOffset < 0) ||
                                 (static_cast<uint64_t>(resultOffset) >= allocaSize);
-                            bool allowMemberSuppression =
-                                isProjectionWithinSourceSubobjectBounds(
-                                    origin.offset, resultOffset, allocatedType, allocaSize, DL,
-                                    sourceElementType);
+                            bool allowMemberSuppression = isProjectionWithinSourceSubobjectBounds(
+                                origin.offset, resultOffset, allocatedType, allocaSize, DL,
+                                sourceElementType);
 
                             std::string targetType;
                             Type* targetTy = GEP->getType();

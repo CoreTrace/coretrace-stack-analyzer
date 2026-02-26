@@ -315,9 +315,9 @@ namespace ctrace::stack::analysis
             return current;
         }
 
-        static bool debugTypeHasDataMembers(
-            const llvm::DIType* type, unsigned depth,
-            llvm::SmallPtrSetImpl<const llvm::Metadata*>& visitedTypes)
+        static bool
+        debugTypeHasDataMembers(const llvm::DIType* type, unsigned depth,
+                                llvm::SmallPtrSetImpl<const llvm::Metadata*>& visitedTypes)
         {
             if (!type || depth > 12)
                 return false;
@@ -427,9 +427,9 @@ namespace ctrace::stack::analysis
                 for (unsigned idx = 0; idx < memberCount; ++idx)
                 {
                     const std::uint64_t memberOffset = layout->getElementOffset(idx);
-                    if (!collectNonPaddingLeafRangesForType(
-                            structTy->getElementType(idx), DL,
-                            saturatingAdd(baseOffset, memberOffset), depth + 1, out))
+                    if (!collectNonPaddingLeafRangesForType(structTy->getElementType(idx), DL,
+                                                            saturatingAdd(baseOffset, memberOffset),
+                                                            depth + 1, out))
                     {
                         return false;
                     }
@@ -490,8 +490,7 @@ namespace ctrace::stack::analysis
 
         static bool isRangeCoveredRespectingNonPaddingLayout(const TrackedMemoryObject& obj,
                                                              const RangeSet& initialized,
-                                                             std::uint64_t begin,
-                                                             std::uint64_t end)
+                                                             std::uint64_t begin, std::uint64_t end)
         {
             if (isRangeCovered(initialized, begin, end))
                 return true;
@@ -896,8 +895,8 @@ namespace ctrace::stack::analysis
                     obj.alloca = AI;
                     obj.param = nullptr;
                     obj.sizeBytes = sizeBytes;
-                    obj.hasNonPaddingLayout = computeAllocaNonPaddingRanges(*AI, DL,
-                                                                            obj.nonPaddingRanges);
+                    obj.hasNonPaddingLayout =
+                        computeAllocaNonPaddingRanges(*AI, DL, obj.nonPaddingRanges);
                     tracked.objects.push_back(std::move(obj));
                     tracked.allocaIndex[AI] = idx;
                 }
@@ -1842,11 +1841,11 @@ namespace ctrace::stack::analysis
             }
         }
 
-        static bool
-        unsummarizedDefinedCallArgMayWriteThrough(const llvm::CallBase& CB,
-                                                  const llvm::Function* callee, unsigned argIdx,
-                                                  bool hasMethodReceiverIdx,
-                                                  unsigned methodReceiverIdx)
+        static bool unsummarizedDefinedCallArgMayWriteThrough(const llvm::CallBase& CB,
+                                                              const llvm::Function* callee,
+                                                              unsigned argIdx,
+                                                              bool hasMethodReceiverIdx,
+                                                              unsigned methodReceiverIdx)
         {
             if (!callee || callee->isDeclaration() || callee->isIntrinsic())
                 return false;
@@ -1905,9 +1904,8 @@ namespace ctrace::stack::analysis
                 callee ? getLikelyCppMethodReceiverArgIndex(*callee, methodReceiverIdx) : false;
             for (unsigned argIdx = 0; argIdx < CB.arg_size(); ++argIdx)
             {
-                if (!unsummarizedDefinedCallArgMayWriteThrough(CB, callee, argIdx,
-                                                               hasMethodReceiverIdx,
-                                                               methodReceiverIdx))
+                if (!unsummarizedDefinedCallArgMayWriteThrough(
+                        CB, callee, argIdx, hasMethodReceiverIdx, methodReceiverIdx))
                 {
                     continue;
                 }
@@ -1923,7 +1921,8 @@ namespace ctrace::stack::analysis
         applyKnownCallWriteEffects(const llvm::CallBase& CB, const llvm::Function* callee,
                                    const TrackedObjectContext& tracked, const llvm::DataLayout& DL,
                                    InitRangeState& initialized, llvm::BitVector* writeSeen,
-                                   llvm::BitVector* constructedSeen, llvm::BitVector* defaultCtorSeen,
+                                   llvm::BitVector* constructedSeen,
+                                   llvm::BitVector* defaultCtorSeen,
                                    FunctionSummary* currentSummary)
         {
             const bool isCtor = callee && isLikelyCppConstructorSymbol(callee->getName());
@@ -2016,9 +2015,8 @@ namespace ctrace::stack::analysis
                     markKnownWriteOnPointerOperand(actual, tracked, DL, initialized, writeSeen,
                                                    currentSummary, inferredSize);
                 }
-                else if (unsummarizedDefinedCallArgMayWriteThrough(CB, callee, argIdx,
-                                                                    hasMethodReceiverIdx,
-                                                                    methodReceiverIdx))
+                else if (unsummarizedDefinedCallArgMayWriteThrough(
+                             CB, callee, argIdx, hasMethodReceiverIdx, methodReceiverIdx))
                 {
                     const std::uint64_t inferredSize = inferWriteSizeFromPointerOperand(actual, DL);
                     markKnownWriteOnPointerOperand(actual, tracked, DL, initialized, writeSeen,
@@ -2108,8 +2106,7 @@ namespace ctrace::stack::analysis
             const FunctionSummary& calleeSummary, const TrackedObjectContext& tracked,
             const llvm::DataLayout& DL, InitRangeState& initialized, llvm::BitVector* writeSeen,
             llvm::BitVector* constructedSeen, llvm::BitVector* defaultCtorSeen,
-            llvm::BitVector* readBeforeInitSeen,
-            FunctionSummary* currentSummary,
+            llvm::BitVector* readBeforeInitSeen, FunctionSummary* currentSummary,
             std::vector<UninitializedLocalReadIssue>* emittedIssues)
         {
             const bool isCtor = isLikelyCppConstructorSymbol(callee.getName());
@@ -2169,8 +2166,8 @@ namespace ctrace::stack::analysis
                         {
                             continue;
                         }
-                        if (!isRangeCoveredRespectingNonPaddingLayout(
-                                obj, initialized[objectIdx], clippedBegin, clippedEnd))
+                        if (!isRangeCoveredRespectingNonPaddingLayout(obj, initialized[objectIdx],
+                                                                      clippedBegin, clippedEnd))
                         {
                             hasReadBeforeWrite = true;
                             uncoveredReadRanges.push_back({clippedBegin, clippedEnd});
@@ -2673,8 +2670,8 @@ namespace ctrace::stack::analysis
                 return;
 
             applyCalleeSummaryAtCall(*CB, *callee, *calleeSummary, tracked, DL, initialized,
-                                     writeSeen, constructedSeen, defaultCtorSeen, readBeforeInitSeen,
-                                     currentSummary, emittedIssues);
+                                     writeSeen, constructedSeen, defaultCtorSeen,
+                                     readBeforeInitSeen, currentSummary, emittedIssues);
 
             if (!currentSummary)
             {
@@ -2813,8 +2810,7 @@ namespace ctrace::stack::analysis
                     coretrace::log(coretrace::Level::Debug,
                                    "[uninit][ctor] func={} local={} default_ctor_detected={} "
                                    "action=suppress_never_initialized\n",
-                                   F.getName().str(), varName,
-                                   hasDefaultCtor ? "yes" : "no");
+                                   F.getName().str(), varName, hasDefaultCtor ? "yes" : "no");
                     continue;
                 }
 
