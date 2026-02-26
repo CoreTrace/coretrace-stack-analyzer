@@ -49,6 +49,7 @@ python3 scripts/ci/run_code_analysis.py \
 GitHub Actions consumer example is available at:
 - `docs/ci/github-actions-consumer.yml`
 - `docs/ci/github-actions-module-consumer.yml` (consume this repo directly via `uses:`)
+- Analyzer architecture notes: `docs/architecture/analyzer-modules.md`
 
 ### Reusable GitHub Action module (for other repositories)
 
@@ -273,6 +274,32 @@ Examples:
 
 When inputs are auto-discovered from `compile_commands.json` and multiple files are analyzed,
 the CLI auto-selects `fast` unless you explicitly pass `--analysis-profile=full`.
+
+### Library mode: forward analyzer args from another CLI
+
+If you embed the analyzer as a library and still want to reuse analyzer-style
+arguments (`--mode=...`, `--jobs=...`, etc.), use the CLI parser bridge:
+
+- `ctrace::stack::cli::parseArguments(const std::vector<std::string>&)`
+- `ctrace::stack::cli::parseCommandLine(const std::string&)`
+
+Example:
+
+```cpp
+#include "cli/ArgParser.hpp"
+
+auto parsed = ctrace::stack::cli::parseCommandLine(
+    "--mode=abi --analysis-profile=fast --warnings-only --jobs=4"
+);
+if (parsed.status == ctrace::stack::cli::ParseStatus::Error) {
+    // handle parsed.error
+}
+
+ctrace::stack::AnalysisConfig cfg = parsed.parsed.config;
+```
+
+This keeps one single source of truth for option semantics between CLI and
+library consumers.
 
 When `--compile-commands` is provided and no input file is passed on the CLI,
 the analyzer automatically uses `compile_commands.json` as the source of truth:

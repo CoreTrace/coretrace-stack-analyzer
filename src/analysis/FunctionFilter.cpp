@@ -8,7 +8,8 @@
 #include <llvm/ADT/StringRef.h>
 #include <llvm/IR/Function.h>
 #include <llvm/IR/Module.h>
-#include <llvm/Support/raw_ostream.h>
+
+#include <coretrace/logger.hpp>
 
 #include "analysis/AnalyzerUtils.hpp"
 
@@ -194,6 +195,12 @@ namespace ctrace::stack::analysis
                    name.starts_with("__asan_") || name.starts_with("__ubsan_") ||
                    name.starts_with("__tsan_") || name.starts_with("__msan_");
         }
+
+        static void logFilterDecision(const llvm::Function& F, const std::string& file, bool keep)
+        {
+            coretrace::log(coretrace::Level::Info, "[filter] func={} file={} keep={}\n",
+                           F.getName().str(), file, keep ? "yes" : "no");
+        }
     } // namespace
 
     FunctionFilter buildFunctionFilter(const llvm::Module& mod, const AnalysisConfig& config)
@@ -220,7 +227,7 @@ namespace ctrace::stack::analysis
         {
             if (cfg.dumpFilter)
             {
-                llvm::errs() << "[filter] func=" << F.getName() << " file=<name-filter> keep=no\n";
+                logFilterDecision(F, "<name-filter>", false);
             }
             return false;
         }
@@ -249,12 +256,8 @@ namespace ctrace::stack::analysis
 
                 if (cfg.dumpFilter)
                 {
-                    llvm::errs() << "[filter] func=" << F.getName() << " file=";
-                    if (usedPath.empty())
-                        llvm::errs() << "<none>";
-                    else
-                        llvm::errs() << usedPath;
-                    llvm::errs() << " keep=" << (decision ? "yes" : "no") << "\n";
+                    logFilterDecision(F, usedPath.empty() ? std::string("<none>") : usedPath,
+                                      decision);
                 }
                 return decision;
             }
@@ -288,12 +291,7 @@ namespace ctrace::stack::analysis
 
         if (cfg.dumpFilter)
         {
-            llvm::errs() << "[filter] func=" << F.getName() << " file=";
-            if (usedPath.empty())
-                llvm::errs() << "<none>";
-            else
-                llvm::errs() << usedPath;
-            llvm::errs() << " keep=" << (decision ? "yes" : "no") << "\n";
+            logFilterDecision(F, usedPath.empty() ? std::string("<none>") : usedPath, decision);
         }
 
         return decision;

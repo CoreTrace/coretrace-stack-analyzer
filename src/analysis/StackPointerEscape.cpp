@@ -9,13 +9,14 @@
 #include <llvm/IR/IntrinsicInst.h>
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/Module.h>
-#include <llvm/Support/raw_ostream.h>
 #include <llvm/IR/Value.h>
 
 #include <algorithm>
 #include <optional>
 #include <string>
 #include <vector>
+
+#include <coretrace/logger.hpp>
 
 namespace ctrace::stack::analysis
 {
@@ -650,10 +651,11 @@ namespace ctrace::stack::analysis
 
             if (changed)
             {
-                llvm::errs() << "[ !!Warn ] Stack escape inter-procedural analysis: reached "
-                                "fixed-point iteration cap ("
-                             << kEscapeSummaryMaxIterations
-                             << "); summary may be non-converged and conservative\n";
+                coretrace::log(
+                    coretrace::Level::Warn,
+                    "Stack escape inter-procedural analysis: reached fixed-point "
+                    "iteration cap ({}); summary may be non-converged and conservative\n",
+                    kEscapeSummaryMaxIterations);
             }
 
             return summaries;
@@ -953,7 +955,8 @@ namespace ctrace::stack::analysis
             std::string parseError;
             if (!parseStackEscapeModel(escapeModelPath, model, parseError))
             {
-                llvm::errs() << "[ !!Warn ] stack escape model ignored: " << parseError << "\n";
+                coretrace::log(coretrace::Level::Warn, "stack escape model ignored: {}\n",
+                               parseError);
             }
         }
 

@@ -5,8 +5,9 @@
 #include <llvm/IR/PassManager.h>
 #include <llvm/Passes/PassBuilder.h>
 #include <llvm/Support/Error.h>
-#include <llvm/Support/raw_ostream.h>
 #include <llvm/TargetParser/Triple.h>
+
+#include <coretrace/logger.hpp>
 
 namespace ctrace::stack
 {
@@ -60,11 +61,12 @@ namespace ctrace::stack
             {
                 if (A.hasNoCaptureAttr() && !before.contains(&A))
                 {
-                    // llvm::errs() << "[stack-analyzer] nocapture added: " << F.getName()
-                    //  << " arg#" << idx;
+                    std::string suffix;
                     if (A.hasName())
-                        llvm::errs() << " (" << A.getName() << ")";
-                    llvm::errs() << "\n";
+                        suffix = " (" + A.getName().str() + ")";
+                    coretrace::log(coretrace::Level::Info,
+                                   "[stack-analyzer] nocapture added: {} arg#{}{}\n",
+                                   F.getName().str(), idx, suffix);
                     ++added;
                 }
                 ++idx;

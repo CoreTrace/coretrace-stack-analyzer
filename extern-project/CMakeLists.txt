@@ -6,11 +6,23 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 include(FetchContent)
 
-FetchContent_Declare(
-  stack_analyzer
-  GIT_REPOSITORY https://github.com/CoreTrace/coretrace-stack-analyzer.git
-  GIT_TAG main
-)
+# Prefer the local parent checkout when this example is built from the
+# repository tree; fallback to GitHub when used standalone.
+set(STACK_ANALYZER_LOCAL_SOURCE "${CMAKE_CURRENT_LIST_DIR}/..")
+if(EXISTS "${STACK_ANALYZER_LOCAL_SOURCE}/CMakeLists.txt")
+  message(STATUS "Using local stack analyzer source: ${STACK_ANALYZER_LOCAL_SOURCE}")
+  FetchContent_Declare(
+    stack_analyzer
+    SOURCE_DIR "${STACK_ANALYZER_LOCAL_SOURCE}"
+  )
+else()
+  message(STATUS "Using remote stack analyzer source from GitHub")
+  FetchContent_Declare(
+    stack_analyzer
+    GIT_REPOSITORY https://github.com/CoreTrace/coretrace-stack-analyzer.git
+    GIT_TAG main
+  )
+endif()
 
 FetchContent_MakeAvailable(stack_analyzer)
 

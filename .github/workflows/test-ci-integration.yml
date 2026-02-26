@@ -7,6 +7,7 @@ on:
       - "Dockerfile"
       - "action.yml"
       - "scripts/ci/**"
+      - "fixtures/ci-consumer-project/**"
       - ".github/workflows/test-ci-integration.yml"
   pull_request:
     branches: [main]
@@ -169,3 +170,80 @@ jobs:
           test -f docker-ci-results.sarif || { echo "CI SARIF missing!"; exit 1; }
           test -f docker-ci-results.json || { echo "CI JSON missing!"; exit 1; }
           echo "CI script Docker test passed!"
+
+  # =================================================================
+  # Job 3: Test analyzer on a minimal consumer project in CI
+  # =================================================================
+  test-consumer-project:
+    name: Test Consumer Project
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure consumer fixture (compile_commands.json)
+        run: |
+          cmake -S fixtures/ci-consumer-project -B fixtures/ci-consumer-project/build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+
+      - name: Run CoreTrace Stack Analyzer (consumer fixture)
+        uses: ./
+        id: consumer-analysis
+        with:
+          compile-commands: fixtures/ci-consumer-project/build/compile_commands.json
+          fail-on: none
+          base-dir: ${{ github.workspace }}
+          analysis-profile: fast
+          resource-model: default
+          resource-cache-memory-only: "true"
+          warnings-only: "false"
+          sarif-file: artifacts/consumer/action-results.sarif
+          json-file: artifacts/consumer/action-results.json
+          upload-sarif: false
+
+      - name: Validate consumer JSON and SARIF
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          json_path = Path("artifacts/consumer/action-results.json")
+          sarif_path = Path("artifacts/consumer/action-results.sarif")
+          assert json_path.is_file(), f"Missing JSON output: {json_path}"
+          assert sarif_path.is_file(), f"Missing SARIF output: {sarif_path}"
+
+          payload = json.loads(json_path.read_text(encoding="utf-8"))
+          diagnostics = payload.get("diagnostics", [])
+          assert diagnostics, "Expected at least one diagnostic in JSON output"
+          print(f"JSON diagnostics: {len(diagnostics)}")
+
+          sarif = json.loads(sarif_path.read_text(encoding="utf-8"))
+          assert sarif.get("version") == "2.1.0", "Invalid SARIF version"
+          runs = sarif.get("runs", [])
+          assert runs, "SARIF has no runs"
+          results = runs[0].get("results", [])
+          assert results, "Expected at least one SARIF result"
+
+          for result in results:
+            for loc in result.get("locations", []):
+              physical = loc.get("physicalLocation", {})
+              artifact = physical.get("artifactLocation", {})
+              uri = artifact.get("uri", "")
+              assert not uri.startswith("/"), f"URI must be relative: {uri}"
+              region = physical.get("region", {})
+              col = int(region.get("startColumn", 1))
+              assert col >= 1, f"Invalid SARIF startColumn: {col}"
+          print(f"SARIF results: {len(results)}")
+          PY
+
+      - name: Upload consumer fixture artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-consumer-analysis
+          path: |
+            artifacts/consumer/action-results.json
+            artifacts/consumer/action-results.sarif
