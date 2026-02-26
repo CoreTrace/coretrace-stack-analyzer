@@ -213,7 +213,7 @@ Ready-to-adapt workflow examples:
 --format=json|sarif|human
 --analysis-profile=fast|full selects analysis precision/performance profile (default: full)
 --quiet disables diagnostics entirely
---warnings-only keeps only important diagnostics
+--warnings-only hides info-level diagnostics; in human output it also lists only functions with warnings/errors
 --stack-limit=<value> overrides stack limit (bytes, or KiB/MiB/GiB)
 --compile-arg=<arg> passes an extra argument to the compiler
 --compile-commands=<path> uses compile_commands.json (file or directory)
