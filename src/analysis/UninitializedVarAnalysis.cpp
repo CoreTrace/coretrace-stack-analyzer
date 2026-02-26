@@ -472,10 +472,131 @@ namespace ctrace::stack::analysis
             return true;
         }
 
+        static void addRangeFromBitOffsets(RangeSet& out, std::uint64_t beginBits,
+                                           std::uint64_t endBits)
+        {
+            if (beginBits >= endBits)
+                return;
+            const std::uint64_t beginBytes = beginBits / 8;
+            const std::uint64_t endBytes = (endBits + 7) / 8;
+            addRange(out, beginBytes, endBytes);
+        }
+
+        static bool collectNonPaddingRangesForDebugType(
+            const llvm::DIType* type, std::uint64_t baseOffsetBits, unsigned depth,
+            llvm::SmallPtrSetImpl<const llvm::Metadata*>& visiting, RangeSet& out)
+        {
+            if (!type || depth > 16)
+                return false;
+            type = stripDebugTypeSugar(type);
+            if (!type)
+                return false;
+
+            if (!visiting.insert(type).second)
+                return false;
+
+            bool success = false;
+            if (const auto* composite = llvm::dyn_cast<llvm::DICompositeType>(type))
+            {
+                const unsigned tag = composite->getTag();
+                if (tag == llvm::dwarf::DW_TAG_structure_type ||
+                    tag == llvm::dwarf::DW_TAG_class_type || tag == llvm::dwarf::DW_TAG_union_type)
+                {
+                    bool sawMemberLayout = false;
+                    for (const llvm::Metadata* elem : composite->getElements())
+                    {
+                        const auto* derived = llvm::dyn_cast<llvm::DIDerivedType>(elem);
+                        if (!derived)
+                            continue;
+
+                        const unsigned elemTag = derived->getTag();
+                        if (elemTag != llvm::dwarf::DW_TAG_member &&
+                            elemTag != llvm::dwarf::DW_TAG_inheritance)
+                        {
+                            continue;
+                        }
+
+                        const llvm::DIType* memberType = derived->getBaseType();
+                        if (!memberType)
+                            continue;
+
+                        const std::uint64_t memberOffsetBits =
+                            (tag == llvm::dwarf::DW_TAG_union_type)
+                                ? 0
+                                : static_cast<std::uint64_t>(derived->getOffsetInBits());
+                        const std::uint64_t absoluteOffsetBits =
+                            saturatingAdd(baseOffsetBits, memberOffsetBits);
+
+                        if (collectNonPaddingRangesForDebugType(memberType, absoluteOffsetBits,
+                                                                depth + 1, visiting, out))
+                        {
+                            sawMemberLayout = true;
+                        }
+                    }
+
+                    if (sawMemberLayout)
+                    {
+                        success = true;
+                    }
+                    else
+                    {
+                        const std::uint64_t sizeBits = composite->getSizeInBits();
+                        if (sizeBits == 0)
+                        {
+                            success = true;
+                        }
+                        else
+                        {
+                            addRangeFromBitOffsets(out, baseOffsetBits,
+                                                   saturatingAdd(baseOffsetBits, sizeBits));
+                            success = true;
+                        }
+                    }
+                }
+                else
+                {
+                    // For array/vector/other composites, keep conservative full coverage.
+                    const std::uint64_t sizeBits = composite->getSizeInBits();
+                    if (sizeBits > 0)
+                    {
+                        addRangeFromBitOffsets(out, baseOffsetBits,
+                                               saturatingAdd(baseOffsetBits, sizeBits));
+                        success = true;
+                    }
+                }
+            }
+            else
+            {
+                const std::uint64_t sizeBits = type->getSizeInBits();
+                if (sizeBits > 0)
+                {
+                    addRangeFromBitOffsets(out, baseOffsetBits,
+                                           saturatingAdd(baseOffsetBits, sizeBits));
+                    success = true;
+                }
+            }
+
+            visiting.erase(type);
+            return success;
+        }
+
         static bool computeAllocaNonPaddingRanges(const llvm::AllocaInst& AI,
                                                   const llvm::DataLayout& DL, RangeSet& out)
         {
             out.clear();
+
+            if (const llvm::DIType* declaredType = getAllocaDebugDeclaredType(AI))
+            {
+                llvm::SmallPtrSet<const llvm::Metadata*, 32> visiting;
+                if (collectNonPaddingRangesForDebugType(declaredType, 0, 0, visiting, out))
+                {
+                    if (shouldTreatAsDataLessDebugObject(AI, DL))
+                        out.clear();
+                    return true;
+                }
+                out.clear();
+            }
+
             const llvm::Type* allocatedTy = AI.getAllocatedType();
             if (!allocatedTy)
                 return false;
