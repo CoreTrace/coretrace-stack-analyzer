@@ -2,6 +2,7 @@
 
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "StackUsageAnalyzer.hpp"
 
@@ -18,6 +19,7 @@ namespace ctrace::stack::analysis
     {
         std::unique_ptr<llvm::Module> module;
         LanguageType language = LanguageType::Unknown;
+        std::vector<Diagnostic> frontendDiagnostics;
         std::string error;
     };
 
