@@ -41,7 +41,7 @@ namespace ctrace::stack::cli
             }
 
           private:
-            static constexpr std::array<OptionCandidate, 41> kCandidates = {
+            static constexpr std::array<OptionCandidate, 42> kCandidates = {
                 {{"-h", "-h"},
                  {"--help", "--help"},
                  {"--demangle", "--demangle"},
@@ -66,6 +66,7 @@ namespace ctrace::stack::cli
                  {"--timing", "--timing"},
                  {"--resource-model", "--resource-model"},
                  {"--escape-model", "--escape-model"},
+                 {"--buffer-model", "--buffer-model"},
                  {"--resource-cross-tu", "--resource-cross-tu"},
                  {"--no-resource-cross-tu", "--no-resource-cross-tu"},
                  {"--uninitialized-cross-tu", "--uninitialized-cross-tu"},
@@ -736,6 +737,17 @@ namespace ctrace::stack::cli
                     if (!error.empty())
                         return makeError(error);
                     cfg.escapeModelPath = std::move(value);
+                    continue;
+                }
+            }
+            {
+                std::string value;
+                std::string error;
+                if (consumeLongOptionValue(argStr, "--buffer-model", i, argc, argv, value, error))
+                {
+                    if (!error.empty())
+                        return makeError(error);
+                    cfg.bufferModelPath = std::move(value);
                     continue;
                 }
             }
