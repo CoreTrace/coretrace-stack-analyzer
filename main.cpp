@@ -53,6 +53,8 @@ static void printHelp()
         << "  --timing               Print compilation/analysis timing to stderr\n"
         << "  --escape-model=<path>  Stack escape model file "
            "(noescape_arg rules)\n"
+        << "  --buffer-model=<path>  Buffer write model file "
+           "(bounded_write/unbounded_write rules)\n"
         << "  --resource-model=<path>  Resource lifetime model file "
            "(acquire_out/acquire_ret/release_arg)\n"
         << "  --resource-cross-tu    Enable cross-TU resource summaries (default: on)\n"
