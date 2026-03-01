@@ -1,5 +1,6 @@
 #include "analysis/InputPipeline.hpp"
 #include "analysis/CompileCommands.hpp"
+#include "analysis/FrontendDiagnostics.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -367,6 +368,7 @@ namespace ctrace::stack::analysis
             std::vector<std::string> args;
             std::string workingDir;
             std::string compileError;
+            std::string compileDiagnosticsText;
             if (!buildCompileArgs(filename, result.language, config, args, workingDir,
                                   compileError))
             {
@@ -426,6 +428,7 @@ namespace ctrace::stack::analysis
             {
                 logText(coretrace::Level::Warn, res->diagnostics);
             }
+            compileDiagnosticsText = res->diagnostics;
 
             if (res->llvmIR.empty())
             {
@@ -464,6 +467,11 @@ namespace ctrace::stack::analysis
                 diag.print("in_memory_ll", os);
                 result.error = "Failed to parse in-memory LLVM IR:\n" + os.str();
                 return result;
+            }
+            if (!compileDiagnosticsText.empty())
+            {
+                result.frontendDiagnostics =
+                    collectFrontendDiagnostics(compileDiagnosticsText, *result.module, filename);
             }
 
             if (!dumpModuleIR(*result.module, filename, config, baseDir, result.error))
