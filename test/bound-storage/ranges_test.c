@@ -187,7 +187,7 @@ void alias_lb_ub(int i)
 
     // at line 194, column 14
     // [!!] potential negative index on variable 'buf' (size 10)
-    // ↳ alias path: p -> arraydecay -> buf
+    // ↳ alias path: buf -> arraydecay -> p
     // ↳ inferred lower bound for index expression: -2 (index may be < 0)
     // ↳ (this is a write access)
     if (i >= -2 && i <= 12)
