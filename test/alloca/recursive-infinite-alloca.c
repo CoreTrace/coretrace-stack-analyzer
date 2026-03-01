@@ -27,3 +27,6 @@ int main(void)
     boom(32);
     return 0;
 }
+
+// at line 21, column 22
+// [!!!Error] unconditional self recursion detected (no base case)
