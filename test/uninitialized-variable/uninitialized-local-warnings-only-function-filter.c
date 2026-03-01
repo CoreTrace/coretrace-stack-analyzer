@@ -13,3 +13,7 @@ int main(void)
 {
     return read_uninitialized_value() + clean_value();
 }
+
+// at line 4, column 12
+// [ !!Warn ] potential read of uninitialized local variable 'value'
+//          ↳ this load may execute before any definite initialization on all control-flow paths
