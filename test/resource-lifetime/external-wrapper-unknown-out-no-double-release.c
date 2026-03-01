@@ -21,3 +21,6 @@ int external_wrapper_unknown_out_no_double_release(void)
 // not contains: potential double release: 'GenericHandle' handle 'h' is released without a matching acquire in this function
 // at line 17, column 5
 // [ !!Warn ] inter-procedural resource analysis incomplete: handle 'h' may be acquired by an unmodeled/external callee before release
+
+// at line 17, column 20
+// [ !!Warn ] potential read of uninitialized local variable 'h'
