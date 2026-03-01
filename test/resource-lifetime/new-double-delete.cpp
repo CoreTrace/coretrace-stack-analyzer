@@ -9,3 +9,6 @@ int new_double_delete()
 
 // at line 6, column 5
 // [!!!Error] potential double release: 'CppHeap' handle 'p' is released without a matching acquire in this function
+
+// at line 6, column 12
+// [!!!Error] potential use-after-release: 'CppHeap' handle 'p' is used after a release in this function
