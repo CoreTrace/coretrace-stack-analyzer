@@ -1,0 +1,29 @@
+# Generic buffer write rules for copy/string APIs.
+#
+# Syntax:
+#   bounded_write <function-pattern> <dst-arg-index> <size-arg-index>
+#   unbounded_write <function-pattern> <dst-arg-index>
+#
+# function-pattern supports exact names and simple globs (*, ?).
+
+# Bounded byte writes/copies
+bounded_write memcpy 0 2
+bounded_write memmove 0 2
+bounded_write memset 0 2
+bounded_write strncpy 0 2
+bounded_write strncat 0 2
+bounded_write stpncpy 0 2
+
+# Fortified / wrapped forms frequently seen in optimized builds
+bounded_write *__memcpy_chk* 0 2
+bounded_write *__memmove_chk* 0 2
+bounded_write *__memset_chk* 0 2
+bounded_write *__strncpy_chk* 0 2
+bounded_write *__strncat_chk* 0 2
+
+# Unbounded writes (no explicit size argument)
+unbounded_write strcpy 0
+unbounded_write strcat 0
+unbounded_write stpcpy 0
+unbounded_write *__strcpy_chk* 0
+unbounded_write *__strcat_chk* 0
