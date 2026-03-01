@@ -5,14 +5,20 @@
 
 #include "analysis/AllocaUsage.hpp"
 #include "analysis/ConstParamAnalysis.hpp"
+#include "analysis/CommandInjectionAnalysis.hpp"
 #include "analysis/DuplicateIfCondition.hpp"
 #include "analysis/DynamicAlloca.hpp"
+#include "analysis/IntegerOverflowAnalysis.hpp"
 #include "analysis/InvalidBaseReconstruction.hpp"
 #include "analysis/MemIntrinsicOverflow.hpp"
+#include "analysis/NullDerefAnalysis.hpp"
+#include "analysis/OOBReadAnalysis.hpp"
 #include "analysis/ResourceLifetimeAnalysis.hpp"
 #include "analysis/SizeMinusKWrites.hpp"
 #include "analysis/StackBufferAnalysis.hpp"
 #include "analysis/StackPointerEscape.hpp"
+#include "analysis/TOCTOUAnalysis.hpp"
+#include "analysis/TypeConfusionAnalysis.hpp"
 #include "analysis/UninitializedVarAnalysis.hpp"
 
 #include <cstddef>
@@ -62,6 +68,10 @@ namespace ctrace::stack::analyzer
     void appendSizeMinusKDiagnostics(AnalysisResult& result,
                                      const std::vector<analysis::SizeMinusKWriteIssue>& issues);
 
+    void
+    appendIntegerOverflowDiagnostics(AnalysisResult& result,
+                                     const std::vector<analysis::IntegerOverflowIssue>& issues);
+
     void appendMultipleStoreDiagnostics(AnalysisResult& result,
                                         const std::vector<analysis::MultipleStoreIssue>& issues);
 
@@ -80,6 +90,22 @@ namespace ctrace::stack::analyzer
 
     void appendConstParamDiagnostics(AnalysisResult& result,
                                      const std::vector<analysis::ConstParamIssue>& issues);
+
+    void
+    appendCommandInjectionDiagnostics(AnalysisResult& result,
+                                      const std::vector<analysis::CommandInjectionIssue>& issues);
+
+    void appendTOCTOUDiagnostics(AnalysisResult& result,
+                                 const std::vector<analysis::TOCTOUIssue>& issues);
+
+    void appendNullDerefDiagnostics(AnalysisResult& result,
+                                    const std::vector<analysis::NullDerefIssue>& issues);
+
+    void appendTypeConfusionDiagnostics(AnalysisResult& result,
+                                        const std::vector<analysis::TypeConfusionIssue>& issues);
+
+    void appendOOBReadDiagnostics(AnalysisResult& result,
+                                  const std::vector<analysis::OOBReadIssue>& issues);
 
     void
     appendResourceLifetimeDiagnostics(AnalysisResult& result,
