@@ -10,8 +10,10 @@
 #include <llvm/Analysis/ValueTracking.h>
 #include <llvm/BinaryFormat/Dwarf.h>
 #include <llvm/IR/Constants.h>
+#include <llvm/IR/CFG.h>
 #include <llvm/IR/DebugInfoMetadata.h>
 #include <llvm/IR/Function.h>
+#include <llvm/IR/GlobalVariable.h>
 #include <llvm/IR/IntrinsicInst.h>
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/Module.h>
@@ -63,6 +65,72 @@ namespace ctrace::stack::analysis
             }
 
             return AnalysisComplexityBudgets{};
+        }
+
+        static bool isArrayBackedType(const llvm::Type* type)
+        {
+            using namespace llvm;
+            if (!type)
+                return false;
+            if (type->isArrayTy())
+                return true;
+
+            if (auto* structTy = dyn_cast<StructType>(type))
+            {
+                for (unsigned i = 0; i < structTy->getNumElements(); ++i)
+                {
+                    if (isArrayBackedType(structTy->getElementType(i)))
+                        return true;
+                }
+            }
+
+            return false;
+        }
+
+        static std::string buildAliasPathString(const std::vector<std::string>& aliasPath)
+        {
+            if (aliasPath.empty())
+                return {};
+
+            std::vector<std::string> normalized(aliasPath.rbegin(), aliasPath.rend());
+            std::string chain;
+            for (std::size_t i = 0; i < normalized.size(); ++i)
+            {
+                chain += normalized[i];
+                if (i + 1 < normalized.size())
+                    chain += " -> ";
+            }
+            return chain;
+        }
+
+        static std::optional<StackSize> getGlobalElementCount(const llvm::GlobalVariable* GV)
+        {
+            using namespace llvm;
+            if (!GV)
+                return std::nullopt;
+
+            if (auto* arrayTy = dyn_cast<ArrayType>(GV->getValueType()))
+            {
+                return arrayTy->getNumElements();
+            }
+
+            return std::nullopt;
+        }
+
+        static const llvm::GlobalVariable* resolveArrayGlobalFromPointer(const llvm::Value* V)
+        {
+            using namespace llvm;
+            if (!V)
+                return nullptr;
+
+            const Value* base = getUnderlyingObject(V);
+            auto* GV = dyn_cast_or_null<GlobalVariable>(base);
+            if (!GV)
+                return nullptr;
+            if (!isArrayBackedType(GV->getValueType()))
+                return nullptr;
+
+            return GV;
         }
 
         // Size (in elements) for a stack array alloca
@@ -122,23 +190,13 @@ namespace ctrace::stack::analysis
 
             auto isArrayAlloca = [](const AllocaInst* AI) -> bool
             {
-                Type* T = AI->getAllocatedType();
                 // Consider a "stack buffer" as:
                 //  - real arrays,
                 //  - array-typed allocas (VLA in IR),
-                //  - structs that contain at least one array field.
-                if (T->isArrayTy() || AI->isArrayAllocation())
+                //  - structs containing array fields.
+                if (AI->isArrayAllocation())
                     return true;
-
-                if (auto* ST = llvm::dyn_cast<llvm::StructType>(T))
-                {
-                    for (unsigned i = 0; i < ST->getNumElements(); ++i)
-                    {
-                        if (ST->getElementType(i)->isArrayTy())
-                            return true;
-                    }
-                }
-                return false;
+                return isArrayBackedType(AI->getAllocatedType());
             };
 
             // Avoid weird aliasing loops
@@ -347,6 +405,456 @@ namespace ctrace::stack::analysis
                                                          allowPointerStoreScan);
         }
 
+        static void intersectRange(IntRange& target, const IntRange& incoming)
+        {
+            if (incoming.hasLower)
+            {
+                if (!target.hasLower || incoming.lower > target.lower)
+                {
+                    target.hasLower = true;
+                    target.lower = incoming.lower;
+                }
+            }
+
+            if (incoming.hasUpper)
+            {
+                if (!target.hasUpper || incoming.upper < target.upper)
+                {
+                    target.hasUpper = true;
+                    target.upper = incoming.upper;
+                }
+            }
+        }
+
+        static const llvm::StoreInst* findUniqueStoreToKeyInBlock(const llvm::BasicBlock& block,
+                                                                  const llvm::Value* key)
+        {
+            using namespace llvm;
+            const StoreInst* uniqueStore = nullptr;
+            for (const Instruction& I : block)
+            {
+                const auto* SI = dyn_cast<StoreInst>(&I);
+                if (!SI || SI->getPointerOperand() != key)
+                    continue;
+                if (uniqueStore)
+                    return nullptr;
+                uniqueStore = SI;
+            }
+            return uniqueStore;
+        }
+
+        static std::size_t countStoresToKeyInFunction(const llvm::Function& F,
+                                                      const llvm::Value* key)
+        {
+            using namespace llvm;
+            std::size_t count = 0;
+            for (const BasicBlock& BB : F)
+            {
+                for (const Instruction& I : BB)
+                {
+                    const auto* SI = dyn_cast<StoreInst>(&I);
+                    if (SI && SI->getPointerOperand() == key)
+                        ++count;
+                }
+            }
+            return count;
+        }
+
+        static std::optional<long long> extractConstantInitValue(const llvm::StoreInst& store)
+        {
+            using namespace llvm;
+            const auto* C = dyn_cast<ConstantInt>(store.getValueOperand());
+            if (!C)
+                return std::nullopt;
+            return C->getSExtValue();
+        }
+
+        static bool isDirectLoadFromKey(const llvm::Value* value, const llvm::Value* key)
+        {
+            using namespace llvm;
+            const auto* LI = dyn_cast<LoadInst>(value);
+            if (!LI)
+                return false;
+            return LI->getPointerOperand() == key;
+        }
+
+        static std::optional<long long> extractConstantStepValue(const llvm::StoreInst& store,
+                                                                 const llvm::Value* key)
+        {
+            using namespace llvm;
+            const auto* BO = dyn_cast<BinaryOperator>(store.getValueOperand());
+            if (!BO)
+                return std::nullopt;
+
+            const Value* lhs = BO->getOperand(0);
+            const Value* rhs = BO->getOperand(1);
+            const auto* lhsC = dyn_cast<ConstantInt>(lhs);
+            const auto* rhsC = dyn_cast<ConstantInt>(rhs);
+
+            long long step = 0;
+            switch (BO->getOpcode())
+            {
+            case Instruction::Add:
+                if (isDirectLoadFromKey(lhs, key) && rhsC)
+                    step = rhsC->getSExtValue();
+                else if (lhsC && isDirectLoadFromKey(rhs, key))
+                    step = lhsC->getSExtValue();
+                else
+                    return std::nullopt;
+                break;
+            case Instruction::Sub:
+                if (isDirectLoadFromKey(lhs, key) && rhsC)
+                    step = -rhsC->getSExtValue();
+                else
+                    return std::nullopt;
+                break;
+            default:
+                return std::nullopt;
+            }
+
+            if (step == 0)
+                return std::nullopt;
+            return step;
+        }
+
+        static std::optional<IntRange> deriveBoundedRangeFromNeLoopGuard(
+            const llvm::BasicBlock& target, const llvm::BasicBlock& condBlock,
+            const llvm::Value* key, const llvm::ConstantInt& boundConstant, bool takesTrueEdge)
+        {
+            using namespace llvm;
+            if (!takesTrueEdge)
+                return std::nullopt;
+            if (!isa<AllocaInst>(key))
+                return std::nullopt;
+
+            const Function* parent = condBlock.getParent();
+            if (!parent)
+                return std::nullopt;
+
+            // Keep the heuristic strict: one init store + one update store.
+            if (countStoresToKeyInFunction(*parent, key) != 2)
+                return std::nullopt;
+
+            const BasicBlock* initBlock = nullptr;
+            const BasicBlock* updateBlock = nullptr;
+            long long initValue = 0;
+            long long stepValue = 0;
+            std::size_t predCount = 0;
+
+            for (const BasicBlock* incoming : predecessors(&condBlock))
+            {
+                ++predCount;
+                const StoreInst* SI = findUniqueStoreToKeyInBlock(*incoming, key);
+                if (!SI)
+                    continue;
+
+                if (const auto maybeInit = extractConstantInitValue(*SI))
+                {
+                    if (initBlock)
+                        return std::nullopt;
+                    initBlock = incoming;
+                    initValue = *maybeInit;
+                    continue;
+                }
+
+                if (const auto maybeStep = extractConstantStepValue(*SI, key))
+                {
+                    if (updateBlock)
+                        return std::nullopt;
+                    updateBlock = incoming;
+                    stepValue = *maybeStep;
+                }
+            }
+
+            if (predCount != 2 || !initBlock || !updateBlock)
+                return std::nullopt;
+
+            bool updateReachableFromAccess = (updateBlock == &target);
+            if (!updateReachableFromAccess)
+            {
+                for (const BasicBlock* succ : successors(&target))
+                {
+                    if (succ == updateBlock)
+                    {
+                        updateReachableFromAccess = true;
+                        break;
+                    }
+                }
+            }
+            if (!updateReachableFromAccess)
+                return std::nullopt;
+
+            const long long boundValue = boundConstant.getSExtValue();
+
+            IntRange out;
+            if (stepValue > 0)
+            {
+                if (initValue >= boundValue)
+                    return std::nullopt;
+                const long long delta = boundValue - initValue;
+                if (delta % stepValue != 0)
+                    return std::nullopt;
+                out.hasLower = true;
+                out.lower = initValue;
+                out.hasUpper = true;
+                out.upper = boundValue;
+                return out;
+            }
+
+            if (initValue <= boundValue)
+                return std::nullopt;
+            const long long stepMagnitude = -stepValue;
+            const long long delta = initValue - boundValue;
+            if (delta % stepMagnitude != 0)
+                return std::nullopt;
+            out.hasLower = true;
+            out.lower = boundValue;
+            out.hasUpper = true;
+            out.upper = initValue;
+            return out;
+        }
+
+        static bool deriveConstraintFromPredicate(llvm::ICmpInst::Predicate pred, bool valueIsOp0,
+                                                  const llvm::ConstantInt& constant, IntRange& out)
+        {
+            using namespace llvm;
+            bool hasLB = false;
+            bool hasUB = false;
+            long long lb = 0;
+            long long ub = 0;
+
+            auto updateForSigned = [&](long long c)
+            {
+                if (valueIsOp0)
+                {
+                    switch (pred)
+                    {
+                    case ICmpInst::ICMP_SLT: // V < C  => V <= C-1
+                        hasUB = true;
+                        ub = c - 1;
+                        break;
+                    case ICmpInst::ICMP_SLE: // V <= C => V <= C
+                        hasUB = true;
+                        ub = c;
+                        break;
+                    case ICmpInst::ICMP_SGT: // V > C  => V >= C+1
+                        hasLB = true;
+                        lb = c + 1;
+                        break;
+                    case ICmpInst::ICMP_SGE: // V >= C => V >= C
+                        hasLB = true;
+                        lb = c;
+                        break;
+                    case ICmpInst::ICMP_EQ: // V == C => [C, C]
+                        hasLB = true;
+                        lb = c;
+                        hasUB = true;
+                        ub = c;
+                        break;
+                    default:
+                        break;
+                    }
+                }
+                else
+                {
+                    // C ? V  <=>  V ? C (reversed)
+                    switch (pred)
+                    {
+                    case ICmpInst::ICMP_SGT: // C > V  => V < C => V <= C-1
+                        hasUB = true;
+                        ub = c - 1;
+                        break;
+                    case ICmpInst::ICMP_SGE: // C >= V => V <= C
+                        hasUB = true;
+                        ub = c;
+                        break;
+                    case ICmpInst::ICMP_SLT: // C < V  => V > C => V >= C+1
+                        hasLB = true;
+                        lb = c + 1;
+                        break;
+                    case ICmpInst::ICMP_SLE: // C <= V => V >= C
+                        hasLB = true;
+                        lb = c;
+                        break;
+                    case ICmpInst::ICMP_EQ: // C == V => [C, C]
+                        hasLB = true;
+                        lb = c;
+                        hasUB = true;
+                        ub = c;
+                        break;
+                    default:
+                        break;
+                    }
+                }
+            };
+
+            auto updateForUnsigned = [&](unsigned long long cUnsigned)
+            {
+                long long c = static_cast<long long>(cUnsigned);
+                if (valueIsOp0)
+                {
+                    switch (pred)
+                    {
+                    case ICmpInst::ICMP_ULT: // V < C  => V <= C-1
+                        hasUB = true;
+                        ub = c - 1;
+                        break;
+                    case ICmpInst::ICMP_ULE: // V <= C
+                        hasUB = true;
+                        ub = c;
+                        break;
+                    case ICmpInst::ICMP_UGT: // V > C  => V >= C+1
+                        hasLB = true;
+                        lb = c + 1;
+                        break;
+                    case ICmpInst::ICMP_UGE: // V >= C
+                        hasLB = true;
+                        lb = c;
+                        break;
+                    case ICmpInst::ICMP_EQ:
+                        hasLB = true;
+                        lb = c;
+                        hasUB = true;
+                        ub = c;
+                        break;
+                    default:
+                        break;
+                    }
+                }
+                else
+                {
+                    switch (pred)
+                    {
+                    case ICmpInst::ICMP_UGT: // C > V => V < C
+                        hasUB = true;
+                        ub = c - 1;
+                        break;
+                    case ICmpInst::ICMP_UGE: // C >= V => V <= C
+                        hasUB = true;
+                        ub = c;
+                        break;
+                    case ICmpInst::ICMP_ULT: // C < V => V > C
+                        hasLB = true;
+                        lb = c + 1;
+                        break;
+                    case ICmpInst::ICMP_ULE: // C <= V => V >= C
+                        hasLB = true;
+                        lb = c;
+                        break;
+                    case ICmpInst::ICMP_EQ:
+                        hasLB = true;
+                        lb = c;
+                        hasUB = true;
+                        ub = c;
+                        break;
+                    default:
+                        break;
+                    }
+                }
+            };
+
+            if (pred == ICmpInst::ICMP_SLT || pred == ICmpInst::ICMP_SLE ||
+                pred == ICmpInst::ICMP_SGT || pred == ICmpInst::ICMP_SGE ||
+                pred == ICmpInst::ICMP_EQ)
+            {
+                updateForSigned(constant.getSExtValue());
+            }
+            else if (pred == ICmpInst::ICMP_ULT || pred == ICmpInst::ICMP_ULE ||
+                     pred == ICmpInst::ICMP_UGT || pred == ICmpInst::ICMP_UGE)
+            {
+                updateForUnsigned(constant.getZExtValue());
+            }
+
+            if (!(hasLB || hasUB))
+                return false;
+
+            out.hasLower = hasLB;
+            out.lower = lb;
+            out.hasUpper = hasUB;
+            out.upper = ub;
+            return true;
+        }
+
+        static std::optional<IntRange> deriveIncomingEdgeRange(const llvm::BasicBlock& target,
+                                                               const llvm::Value* key)
+        {
+            using namespace llvm;
+
+            const BasicBlock* pred = target.getSinglePredecessor();
+            if (!pred)
+                return std::nullopt;
+
+            const auto* br = dyn_cast<BranchInst>(pred->getTerminator());
+            if (!br || !br->isConditional())
+                return std::nullopt;
+
+            const bool takesTrueEdge = br->getSuccessor(0) == &target;
+            const auto* icmp = dyn_cast<ICmpInst>(br->getCondition());
+            if (!icmp)
+                return std::nullopt;
+
+            const Value* op0 = icmp->getOperand(0);
+            const Value* op1 = icmp->getOperand(1);
+
+            auto matchesKey = [key](const Value* V) -> bool
+            {
+                if (V == key)
+                    return true;
+                if (const auto* LI = dyn_cast<LoadInst>(V))
+                    return LI->getPointerOperand() == key;
+                return false;
+            };
+
+            const ConstantInt* C = nullptr;
+            bool valueIsOp0 = false;
+            if (matchesKey(op0) && (C = dyn_cast<ConstantInt>(op1)))
+            {
+                valueIsOp0 = true;
+            }
+            else if (matchesKey(op1) && (C = dyn_cast<ConstantInt>(op0)))
+            {
+                valueIsOp0 = false;
+            }
+            else
+            {
+                return std::nullopt;
+            }
+
+            IntRange out;
+            const auto predToApply =
+                takesTrueEdge ? icmp->getPredicate() : icmp->getInversePredicate();
+            if (!deriveConstraintFromPredicate(predToApply, valueIsOp0, *C, out))
+            {
+                if (predToApply == ICmpInst::ICMP_NE)
+                {
+                    return deriveBoundedRangeFromNeLoopGuard(target, *pred, key, *C, takesTrueEdge);
+                }
+                return std::nullopt;
+            }
+
+            return out;
+        }
+
+        static IntRange refineRangeForAccessSite(const IntRange& coarseRange,
+                                                 const llvm::BasicBlock& accessBlock,
+                                                 const llvm::Value* key)
+        {
+            IntRange refined = coarseRange;
+            const auto incomingRange = deriveIncomingEdgeRange(accessBlock, key);
+            if (!incomingRange)
+                return refined;
+
+            intersectRange(refined, *incomingRange);
+            if (refined.hasLower && refined.hasUpper && refined.lower > refined.upper)
+            {
+                // Path-insensitive coarse bounds can conflict with edge-specific bounds.
+                // In that case prefer the edge-local constraint for this access site.
+                return *incomingRange;
+            }
+
+            return refined;
+        }
+
         static void
         analyzeStackBufferOverflowsInFunction(llvm::Function& F,
                                               std::vector<StackBufferOverflowIssue>& out,
@@ -366,18 +874,21 @@ namespace ctrace::stack::analysis
             struct CachedResolution
             {
                 const AllocaInst* alloca = nullptr;
+                const GlobalVariable* global = nullptr;
                 std::vector<std::string> aliasPath;
                 bool computed = false;
             };
             std::unordered_map<const Value*, CachedResolution> resolutionCache;
 
-            auto resolveArrayAllocaCached =
-                [&](const Value* basePtr, std::vector<std::string>& aliasPath) -> const AllocaInst*
+            auto resolveArrayBufferBaseCached =
+                [&](const Value* basePtr, std::vector<std::string>& aliasPath,
+                    const GlobalVariable*& globalOut) -> const AllocaInst*
             {
                 auto& cached = resolutionCache[basePtr];
                 if (cached.computed)
                 {
                     aliasPath = cached.aliasPath;
+                    globalOut = cached.global;
                     return cached.alloca;
                 }
 
@@ -385,9 +896,20 @@ namespace ctrace::stack::analysis
                 std::vector<std::string> resolvedPath;
                 cached.alloca =
                     resolveArrayAllocaFromPointer(basePtr, F, resolvedPath, allowPointerStoreScan);
+                if (!cached.alloca)
+                    cached.global = resolveArrayGlobalFromPointer(basePtr);
+
                 if (cached.alloca)
+                {
                     cached.aliasPath = std::move(resolvedPath);
+                }
+                else if (cached.global && cached.global->hasName())
+                {
+                    cached.aliasPath.push_back(cached.global->getName().str());
+                }
+
                 aliasPath = cached.aliasPath;
+                globalOut = cached.global;
                 return cached.alloca;
             };
 
@@ -405,8 +927,9 @@ namespace ctrace::stack::analysis
                     // 1) Find the pointer base (test, &test[0], ptr, etc.)
                     const Value* basePtr = GEP->getPointerOperand();
                     std::vector<std::string> aliasPath;
-                    const AllocaInst* AI = resolveArrayAllocaCached(basePtr, aliasPath);
-                    if (!AI)
+                    const GlobalVariable* GV = nullptr;
+                    const AllocaInst* AI = resolveArrayBufferBaseCached(basePtr, aliasPath, GV);
+                    if (!AI && !GV)
                         continue;
 
                     // 2) Determine the logical target array size and retrieve the index.
@@ -465,13 +988,22 @@ namespace ctrace::stack::analysis
                     }
 
                     // If we could not infer a size via the GEP,
-                    // fall back to the size derived from the alloca
-                    // (case char buf[10]; ptr = buf; ptr[i]).
+                    // fall back to the size derived from the resolved base
+                    // (stack alloca or global array, case char buf[10]; ptr = buf; ptr[i]).
                     if (arraySize == 0 || !idxVal)
                     {
-                        if (!shouldUseAllocaFallback(AI, F))
-                            continue;
-                        auto maybeCount = getAllocaElementCount(const_cast<AllocaInst*>(AI));
+                        std::optional<StackSize> maybeCount;
+                        if (AI)
+                        {
+                            if (!shouldUseAllocaFallback(AI, F))
+                                continue;
+                            maybeCount = getAllocaElementCount(const_cast<AllocaInst*>(AI));
+                        }
+                        else if (GV)
+                        {
+                            maybeCount = getGlobalElementCount(GV);
+                        }
+
                         if (!maybeCount)
                             continue;
                         arraySize = *maybeCount;
@@ -485,8 +1017,18 @@ namespace ctrace::stack::analysis
                         idxVal = idxIt->get();
                     }
 
-                    std::string varName =
-                        AI->hasName() ? AI->getName().str() : std::string("<unnamed>");
+                    const BufferStorageClass storageClass =
+                        GV ? BufferStorageClass::Global : BufferStorageClass::Stack;
+                    std::string varName = "<unnamed>";
+                    if (AI)
+                    {
+                        varName = AI->hasName() ? AI->getName().str() : std::string("<unnamed>");
+                    }
+                    else if (GV)
+                    {
+                        varName =
+                            GV->hasName() ? GV->getName().str() : std::string("<unnamed-global>");
+                    }
 
                     // "baseIdxVal" = loop variable "i" without casts (sext/zext...)
                     Value* baseIdxVal = idxVal;
@@ -512,20 +1054,10 @@ namespace ctrace::stack::analysis
                                     report.indexOrUpperBound = static_cast<StackSize>(idxValue);
                                     report.isWrite = true;
                                     report.indexIsConstant = true;
+                                    report.storageClass = storageClass;
                                     report.inst = S;
                                     report.aliasPathVec = aliasPath;
-                                    if (!aliasPath.empty())
-                                    {
-                                        std::reverse(aliasPath.begin(), aliasPath.end());
-                                        std::string chain;
-                                        for (size_t i = 0; i < aliasPath.size(); ++i)
-                                        {
-                                            chain += aliasPath[i];
-                                            if (i + 1 < aliasPath.size())
-                                                chain += " -> ";
-                                        }
-                                        report.aliasPath = chain;
-                                    }
+                                    report.aliasPath = buildAliasPathString(aliasPath);
                                     out.push_back(std::move(report));
                                 }
                                 else if (auto* L = dyn_cast<LoadInst>(GU))
@@ -537,20 +1069,10 @@ namespace ctrace::stack::analysis
                                     report.indexOrUpperBound = static_cast<StackSize>(idxValue);
                                     report.isWrite = false;
                                     report.indexIsConstant = true;
+                                    report.storageClass = storageClass;
                                     report.inst = L;
                                     report.aliasPathVec = aliasPath;
-                                    if (!aliasPath.empty())
-                                    {
-                                        std::reverse(aliasPath.begin(), aliasPath.end());
-                                        std::string chain;
-                                        for (size_t i = 0; i < aliasPath.size(); ++i)
-                                        {
-                                            chain += aliasPath[i];
-                                            if (i + 1 < aliasPath.size())
-                                                chain += " -> ";
-                                        }
-                                        report.aliasPath = chain;
-                                    }
+                                    report.aliasPath = buildAliasPathString(aliasPath);
                                     out.push_back(std::move(report));
                                 }
                             }
@@ -569,19 +1091,35 @@ namespace ctrace::stack::analysis
                         key = LI->getPointerOperand();
                     }
 
-                    auto itRange = ranges.find(key);
-                    if (itRange == ranges.end())
+                    IntRange R;
+                    bool hasRange = false;
+
+                    if (auto itRange = ranges.find(key); itRange != ranges.end())
                     {
-                        // no known bound => say nothing here
-                        continue;
+                        R = refineRangeForAccessSite(itRange->second, BB, key);
+                        hasRange = R.hasLower || R.hasUpper;
+                    }
+                    else if (const auto localRange = deriveIncomingEdgeRange(BB, key))
+                    {
+                        R = *localRange;
+                        hasRange = R.hasLower || R.hasUpper;
                     }
 
-                    const IntRange& R = itRange->second;
+                    if (!hasRange)
+                        continue;
 
-                    // 5.a) Upper bound out of range: UB >= arraySize
-                    if (R.hasUpper && R.upper >= 0 && static_cast<StackSize>(R.upper) >= arraySize)
+                    // 5.a) Index range exceeds array end (upper or lower bound already >= size).
+                    const bool upperOutOfRange =
+                        R.hasUpper && R.upper >= 0 && static_cast<StackSize>(R.upper) >= arraySize;
+                    const bool lowerOutOfRange =
+                        R.hasLower && R.lower >= 0 && static_cast<StackSize>(R.lower) >= arraySize;
+                    if (upperOutOfRange || lowerOutOfRange)
                     {
-                        StackSize ub = static_cast<StackSize>(R.upper);
+                        StackSize ub = 0;
+                        if (upperOutOfRange)
+                            ub = static_cast<StackSize>(R.upper);
+                        else
+                            ub = static_cast<StackSize>(R.lower);
 
                         for (User* GU : GEP->users())
                         {
@@ -594,20 +1132,10 @@ namespace ctrace::stack::analysis
                                 report.indexOrUpperBound = ub;
                                 report.isWrite = true;
                                 report.indexIsConstant = false;
+                                report.storageClass = storageClass;
                                 report.inst = S;
                                 report.aliasPathVec = aliasPath;
-                                if (!aliasPath.empty())
-                                {
-                                    std::reverse(aliasPath.begin(), aliasPath.end());
-                                    std::string chain;
-                                    for (size_t i = 0; i < aliasPath.size(); ++i)
-                                    {
-                                        chain += aliasPath[i];
-                                        if (i + 1 < aliasPath.size())
-                                            chain += " -> ";
-                                    }
-                                    report.aliasPath = chain;
-                                }
+                                report.aliasPath = buildAliasPathString(aliasPath);
                                 out.push_back(std::move(report));
                             }
                             else if (auto* L = dyn_cast<LoadInst>(GU))
@@ -619,20 +1147,10 @@ namespace ctrace::stack::analysis
                                 report.indexOrUpperBound = ub;
                                 report.isWrite = false;
                                 report.indexIsConstant = false;
+                                report.storageClass = storageClass;
                                 report.inst = L;
                                 report.aliasPathVec = aliasPath;
-                                if (!aliasPath.empty())
-                                {
-                                    std::reverse(aliasPath.begin(), aliasPath.end());
-                                    std::string chain;
-                                    for (size_t i = 0; i < aliasPath.size(); ++i)
-                                    {
-                                        chain += aliasPath[i];
-                                        if (i + 1 < aliasPath.size())
-                                            chain += " -> ";
-                                    }
-                                    report.aliasPath = chain;
-                                }
+                                report.aliasPath = buildAliasPathString(aliasPath);
                                 out.push_back(std::move(report));
                             }
                         }
@@ -651,22 +1169,12 @@ namespace ctrace::stack::analysis
                                 report.arraySize = arraySize;
                                 report.isWrite = true;
                                 report.indexIsConstant = false;
+                                report.storageClass = storageClass;
                                 report.inst = S;
                                 report.isLowerBoundViolation = true;
                                 report.lowerBound = R.lower;
                                 report.aliasPathVec = aliasPath;
-                                if (!aliasPath.empty())
-                                {
-                                    std::reverse(aliasPath.begin(), aliasPath.end());
-                                    std::string chain;
-                                    for (size_t i = 0; i < aliasPath.size(); ++i)
-                                    {
-                                        chain += aliasPath[i];
-                                        if (i + 1 < aliasPath.size())
-                                            chain += " -> ";
-                                    }
-                                    report.aliasPath = chain;
-                                }
+                                report.aliasPath = buildAliasPathString(aliasPath);
                                 out.push_back(std::move(report));
                             }
                             else if (auto* L = dyn_cast<LoadInst>(GU))
@@ -677,22 +1185,12 @@ namespace ctrace::stack::analysis
                                 report.arraySize = arraySize;
                                 report.isWrite = false;
                                 report.indexIsConstant = false;
+                                report.storageClass = storageClass;
                                 report.inst = L;
                                 report.isLowerBoundViolation = true;
                                 report.lowerBound = R.lower;
                                 report.aliasPathVec = aliasPath;
-                                if (!aliasPath.empty())
-                                {
-                                    std::reverse(aliasPath.begin(), aliasPath.end());
-                                    std::string chain;
-                                    for (size_t i = 0; i < aliasPath.size(); ++i)
-                                    {
-                                        chain += aliasPath[i];
-                                        if (i + 1 < aliasPath.size())
-                                            chain += " -> ";
-                                    }
-                                    report.aliasPath = chain;
-                                }
+                                report.aliasPath = buildAliasPathString(aliasPath);
                                 out.push_back(std::move(report));
                             }
                         }
