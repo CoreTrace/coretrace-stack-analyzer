@@ -24,3 +24,7 @@ int main(void)
 
     return 0;
 }
+
+// at line 21, column 5
+// [ !!Warn ] potential UB: invalid base reconstruction via offsetof/container_of
+// [!!!Error] derived pointer points OUTSIDE the valid object range
