@@ -13,3 +13,7 @@ int read_after_pointer_redirect(void)
 }
 
 // not contains: potential read of uninitialized local variable 'uninit'
+
+// at line 8, column 1
+// [ !!Warn ] local variable 'uninit' is never initialized
+// ↳ declared without initializer and no definite write was found in this function
