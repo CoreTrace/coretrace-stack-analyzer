@@ -528,10 +528,33 @@ def _has_positional_input_arg(args) -> bool:
 def _effective_analyzer_args(args):
     """
     Merge optional runner-level analyzer args for invocations that analyze inputs.
+    Keep runner-provided compile overrides at the end so they have highest
+    precedence against compile database flags and per-check compile args.
     """
     base = list(args)
     if RUN_CONFIG.extra_analyzer_args and _has_positional_input_arg(base):
-        return [*RUN_CONFIG.extra_analyzer_args, *base]
+        prefix_args = []
+        trailing_compile_override_args = []
+        extras = list(RUN_CONFIG.extra_analyzer_args)
+        i = 0
+        while i < len(extras):
+            token = extras[i]
+            if token == "--compile-arg":
+                trailing_compile_override_args.append(token)
+                if i + 1 < len(extras):
+                    trailing_compile_override_args.append(extras[i + 1])
+                    i += 2
+                    continue
+                i += 1
+                continue
+            if token.startswith("--compile-arg="):
+                trailing_compile_override_args.append(token)
+                i += 1
+                continue
+            prefix_args.append(token)
+            i += 1
+
+        return [*prefix_args, *base, *trailing_compile_override_args]
     return base
 
 
