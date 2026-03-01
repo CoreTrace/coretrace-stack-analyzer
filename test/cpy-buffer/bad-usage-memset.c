@@ -30,3 +30,6 @@ int main(void)
 //   [!]ConstParameterNotModified.Pointer: parameter 'src' in function 'foo' is never used to modify the pointed object
 //        current type: char *src
 //        suggested type: const char *src
+
+// at line 10, column 5
+// [ !!Warn ] potential stack buffer overflow in memset on variable 'buf'
