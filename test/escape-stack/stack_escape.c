@@ -71,3 +71,36 @@ int main(void)
     store_in_global_field();
     return 0;
 }
+
+// at line 13, column 1
+// [ !!Warn ] local variable 'buf' is never initialized
+
+// at line 14, column 5
+// [ !!Warn ] stack pointer escape: address of variable 'buf' escapes this function
+
+// at line 19, column 1
+// [ !!Warn ] local variable 'buf' is never initialized
+
+// at line 20, column 11
+// [ !!Warn ] stack pointer escape: address of variable 'buf' escapes this function
+
+// at line 25, column 1
+// [ !!Warn ] local variable 'buf' is never initialized
+
+// at line 26, column 9
+// [ !!Warn ] stack pointer escape: address of variable 'buf' escapes this function
+
+// at line 31, column 1
+// [ !!Warn ] local variable 'buf' is never initialized
+
+// at line 32, column 10
+// [ !!Warn ] stack pointer escape: address of variable 'buf' escapes this function
+
+// at line 43, column 1
+// [ !!Warn ] local variable 'buf' is never initialized
+
+// at line 44, column 5
+// [ !!Warn ] stack pointer escape: address of variable 'buf' escapes this function
+
+// at line 57, column 1
+// [ !!Warn ] local variable 'buf' is never initialized
