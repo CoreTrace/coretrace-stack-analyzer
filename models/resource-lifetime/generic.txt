@@ -5,11 +5,15 @@
 
 # Generic out-param handle pattern
 acquire_out acquire_handle 0 GenericHandle
+acquire_ret acquire_handle GenericHandle
 release_arg release_handle 0 GenericHandle
 
 # C heap allocation
 acquire_ret malloc HeapAlloc
 release_arg free 0 HeapAlloc
+
+# C++ ABI demangler allocates a heap buffer (freed with free()).
+acquire_ret *__cxa_demangle* HeapAlloc
 
 # C++ heap allocation (demangled names contain spaces, so use glob patterns)
 acquire_ret operator*new* CppHeap
