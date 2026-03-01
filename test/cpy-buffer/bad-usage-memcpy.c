@@ -22,3 +22,9 @@ int main(void)
 // // at line 5, column 1
 // // [ !!Warn ] local variable 'buf' is never initialized
 // //          ↳ declared without initializer and no definite write was found in this function
+
+// at line 6, column 5
+// [ !!Warn ] potential stack buffer overflow in memcpy on variable 'buf'
+
+// at line 5, column 1
+// [ !!Warn ] local variable 'buf' is never initialized
