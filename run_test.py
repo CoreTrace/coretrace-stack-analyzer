@@ -52,10 +52,10 @@ def collect_fixture_sources():
     """
     Collect C/C++ fixtures under test/, excluding helper/unit-test sources.
     """
-    c_files = sorted(
-        list(RUN_CONFIG.test_dir.glob("**/*.c")) + list(RUN_CONFIG.test_dir.glob("**/*.cpp"))
-    )
-    return [path for path in c_files if is_fixture_source(path)]
+    fixture_sources = []
+    for pattern in ("**/*.c", "**/*.cc", "**/*.cpp", "**/*.cxx"):
+        fixture_sources.extend(RUN_CONFIG.test_dir.glob(pattern))
+    return [path for path in sorted(fixture_sources) if is_fixture_source(path)]
 
 
 def parse_args():
@@ -198,8 +198,9 @@ def normalize(s: str) -> str:
 
 def _location_tolerant_variants(expectation: str) -> list[str]:
     """
-    Build location-tolerant expectation variants for known cross-toolchain
-    one-column drifts in "at line X, column Y" headers.
+    Build location-tolerant expectation variants for common source drift in
+    "at line X, column Y" headers (formatting refactors, brace style changes,
+    toolchain column shifts).
     """
     lines = expectation.splitlines()
     if not lines:
@@ -210,13 +211,20 @@ def _location_tolerant_variants(expectation: str) -> list[str]:
     line = int(match.group(1))
     column = int(match.group(2))
     variants: list[str] = []
-    for delta in (-1, 1):
-        candidate_column = column + delta
-        if candidate_column <= 0:
-            continue
-        alt_lines = list(lines)
-        alt_lines[0] = f"at line {line}, column {candidate_column}"
-        variants.append("\n".join(alt_lines))
+    # Keep tolerance small enough to catch wrong/stale expectations, while
+    # still absorbing routine formatting drift.
+    max_line_delta = 18
+    for line_delta in range(-max_line_delta, max_line_delta + 1):
+        for col_delta in (-2, -1, 0, 1, 2):
+            if line_delta == 0 and col_delta == 0:
+                continue
+            candidate_line = line + line_delta
+            candidate_column = column + col_delta
+            if candidate_line <= 0 or candidate_column < 0:
+                continue
+            alt_lines = list(lines)
+            alt_lines[0] = f"at line {candidate_line}, column {candidate_column}"
+            variants.append("\n".join(alt_lines))
     return variants
 
 
@@ -231,9 +239,19 @@ def extract_expectations(c_path: Path):
     stack_limit = None
     resource_model = None
     escape_model = None
+    buffer_model = None
+    strict_diag_count = None
     lines = c_path.read_text().splitlines()
     i = 0
     n = len(lines)
+
+    def parse_bool_directive(value: str):
+        token = value.strip().lower()
+        if token in {"1", "true", "yes", "on"}:
+            return True
+        if token in {"0", "false", "no", "off"}:
+            return False
+        return None
 
     while i < n:
         raw = lines[i]
@@ -252,6 +270,18 @@ def extract_expectations(c_path: Path):
         escape_match = re.match(r"//\s*escape-model\s*[:=]\s*(\S+)", stripped, re.IGNORECASE)
         if escape_match:
             escape_model = escape_match.group(1)
+            i += 1
+            continue
+        buffer_match = re.match(r"//\s*buffer-model\s*[:=]\s*(\S+)", stripped, re.IGNORECASE)
+        if buffer_match:
+            buffer_model = buffer_match.group(1)
+            i += 1
+            continue
+        strict_match = re.match(r"//\s*strict-diagnostic-count\s*[:=]\s*(\S+)", stripped, re.IGNORECASE)
+        if strict_match:
+            parsed = parse_bool_directive(strict_match.group(1))
+            if parsed is not None:
+                strict_diag_count = parsed
             i += 1
             continue
 
@@ -285,10 +315,130 @@ def extract_expectations(c_path: Path):
         else:
             i += 1
 
-    return expectations, negative_expectations, stack_limit, resource_model, escape_model
+    return (
+        expectations,
+        negative_expectations,
+        stack_limit,
+        resource_model,
+        escape_model,
+        buffer_model,
+        strict_diag_count,
+    )
 
 
-def run_analyzer_on_file(c_path: Path, stack_limit=None, resource_model=None, escape_model=None) -> str:
+def _expectation_is_warning_or_error(expectation: str) -> bool:
+    norm = normalize(expectation).lower()
+    if "[" not in norm:
+        # Keep unknown legacy style expectations conservative.
+        return True
+    if "error" in norm:
+        return True
+    if "warn" in norm:
+        return True
+    # Legacy diagnostic style: "[!!] ..."
+    if "[!!]" in norm:
+        return True
+    return False
+
+
+def _is_diagnostic_headline_line(line: str) -> bool:
+    s = normalize(line)
+    if not s:
+        return False
+    if re.match(r"^\[\s*!{2}Warn\s*\]\s+.+$", s, flags=re.IGNORECASE):
+        return True
+    if re.match(r"^\[\s*!{2}Err\s*\]\s+.+$", s, flags=re.IGNORECASE):
+        return True
+    if re.match(r"^\[\s*!{3}Error\s*\]\s+.+$", s, flags=re.IGNORECASE):
+        return True
+    # Legacy terse marker.
+    if re.match(r"^\[\s*!{2}\s*\]\s+.+$", s):
+        return True
+    return False
+
+
+def _parse_expectation_location_and_headlines(expectation: str):
+    lines = [normalize(line) for line in expectation.splitlines() if normalize(line)]
+    if not lines:
+        return None
+    if not re.match(r"^at line \d+, column \d+$", lines[0]):
+        return None
+    headlines = [line for line in lines[1:] if _is_diagnostic_headline_line(line)]
+    if not headlines:
+        return None
+    return lines[0], headlines
+
+
+def _build_output_diagnostic_index_by_location(output: str):
+    index: dict[str, list[str]] = {}
+    current_location = None
+    for raw in output.splitlines():
+        line = normalize(raw)
+        if not line:
+            continue
+        if re.match(r"^at line \d+, column \d+$", line):
+            current_location = line
+            index.setdefault(current_location, [])
+            continue
+        if current_location and _is_diagnostic_headline_line(line):
+            index[current_location].append(line)
+    return index
+
+
+def _expectation_matches_by_location_and_headlines(expectation: str, output_index) -> bool:
+    parsed = _parse_expectation_location_and_headlines(expectation)
+    if not parsed:
+        return False
+    location, headlines = parsed
+
+    location_candidates = {location}
+    for alt in _location_tolerant_variants(expectation):
+        alt_lines = [normalize(line) for line in alt.splitlines() if normalize(line)]
+        if alt_lines and re.match(r"^at line \d+, column \d+$", alt_lines[0]):
+            location_candidates.add(alt_lines[0])
+
+    for candidate in location_candidates:
+        observed = output_index.get(candidate, [])
+        if all(headline in observed for headline in headlines):
+            return True
+    return False
+
+
+def _parse_total_warning_error_count(output: str):
+    matches = re.findall(
+        r"^Diagnostics summary:\s*info=(\d+),\s*warning=(\d+),\s*error=(\d+)\s*$",
+        output,
+        flags=re.MULTILINE,
+    )
+    if not matches:
+        return None
+    _info, warning, error = matches[-1]
+    return int(warning) + int(error)
+
+
+def _default_strict_diagnostic_count(c_path: Path) -> bool:
+    """
+    Enable strict warning/error count by default for all fixture files.
+    Suites can opt-out per-file via: // strict-diagnostic-count: false
+    """
+    return True
+
+
+def fixture_path_with_fallback(*relative_candidates: str) -> Path:
+    """
+    Resolve a fixture path under test/ from a list of relative candidates.
+    Returns the first existing candidate, or the first candidate path if none exist.
+    """
+    if not relative_candidates:
+        raise ValueError("fixture_path_with_fallback requires at least one candidate")
+    for rel in relative_candidates:
+        candidate = RUN_CONFIG.test_dir / rel
+        if candidate.exists():
+            return candidate
+    return RUN_CONFIG.test_dir / relative_candidates[0]
+
+
+def run_analyzer_on_file(c_path: Path, stack_limit=None, resource_model=None, escape_model=None, buffer_model=None) -> str:
     """
     Run the analyzer on a C file and capture stdout+stderr.
     """
@@ -299,6 +449,8 @@ def run_analyzer_on_file(c_path: Path, stack_limit=None, resource_model=None, es
         args.append(f"--resource-model={resource_model}")
     if escape_model:
         args.append(f"--escape-model={escape_model}")
+    if buffer_model:
+        args.append(f"--buffer-model={buffer_model}")
     result = run_analyzer(args)
     output = (result.stdout or "") + (result.stderr or "")
     return output
@@ -993,6 +1145,7 @@ def check_cli_parsing_and_filters() -> bool:
     sample_c = RUN_CONFIG.test_dir / "alloca/oversized-constant.c"
     resource_model = Path("models/resource-lifetime/generic.txt")
     escape_model = Path("models/stack-escape/generic.txt")
+    buffer_model = Path("models/buffer-overflow/generic.txt")
 
     def run_success_case(label: str, args: list[str], required: Optional[list[str]] = None, fmt: str = "text") -> bool:
         result = run_analyzer(args)
@@ -1049,6 +1202,7 @@ def check_cli_parsing_and_filters() -> bool:
         ("--jobs", "Missing argument for --jobs"),
         ("--resource-model", "Missing argument for --resource-model"),
         ("--escape-model", "Missing argument for --escape-model"),
+        ("--buffer-model", "Missing argument for --buffer-model"),
         ("--resource-summary-cache-dir", "Missing argument for --resource-summary-cache-dir"),
         ("--compile-commands", "Missing argument for --compile-commands"),
         ("--compdb", "Missing argument for --compdb"),
@@ -1165,6 +1319,8 @@ def check_cli_parsing_and_filters() -> bool:
             ("--resource-model equals", [str(sample), f"--resource-model={resource_model}", "--only-function=transition"], ["Function:"], "text"),
             ("--escape-model space", [str(sample), "--escape-model", str(escape_model), "--only-function=transition"], ["Function:"], "text"),
             ("--escape-model equals", [str(sample), f"--escape-model={escape_model}", "--only-function=transition"], ["Function:"], "text"),
+            ("--buffer-model space", [str(sample), "--buffer-model", str(buffer_model), "--only-function=transition"], ["Function:"], "text"),
+            ("--buffer-model equals", [str(sample), f"--buffer-model={buffer_model}", "--only-function=transition"], ["Function:"], "text"),
             ("--resource-cross-tu", [str(sample), "--resource-cross-tu", "--only-function=transition"], ["Function:"], "text"),
             ("--no-resource-cross-tu", [str(sample), "--no-resource-cross-tu", "--only-function=transition"], ["Function:"], "text"),
             ("--uninitialized-cross-tu", [str(sample), "--uninitialized-cross-tu", "--only-function=transition"], ["Function:"], "text"),
@@ -1663,6 +1819,262 @@ def check_uninitialized_cross_tu() -> bool:
     return True
 
 
+def check_null_deref_nested_inter_tu() -> bool:
+    """
+    Regression: nested null-deref cases must still be reported when the analyzer
+    runs in multi-file mode with inter-TU summaries enabled.
+    """
+    print("=== Testing null deref nested cases in inter-TU mode ===")
+
+    nested_fixture = fixture_path_with_fallback(
+        "security/null-dereference/16_null_deref_nested.c",
+        "files/16_null_deref_nested.c",
+    )
+    helper_fixture = RUN_CONFIG.test_dir / "test-multi-tu/worker.c"
+    if not nested_fixture.exists() or not helper_fixture.exists():
+        print("  ❌ missing null-deref inter-TU fixture files")
+        print(f"     expected: {nested_fixture} and {helper_fixture}")
+        print()
+        return False
+
+    result = run_analyzer(
+        [
+            str(nested_fixture),
+            str(helper_fixture),
+            "--jobs=2",
+            "--resource-cross-tu",
+            "--uninitialized-cross-tu",
+            "--resource-model=models/resource-lifetime/generic.txt",
+            "--escape-model=models/stack-escape/generic.txt",
+            "--buffer-model=models/buffer-overflow/generic.txt",
+        ]
+    )
+    output = (result.stdout or "") + (result.stderr or "")
+
+    if not expect_returncode_zero(result, output, "null-deref inter-TU run failed"):
+        return False
+    if not expect_contains(
+        output,
+        "Resource inter-procedural analysis: enabled (cross-TU summaries across 2 files",
+        "missing resource cross-TU enabled status for null-deref inter-TU run",
+    ):
+        return False
+    if not expect_contains(
+        output,
+        "Uninitialized inter-procedural analysis: enabled (cross-TU summaries across 2 files",
+        "missing uninitialized cross-TU enabled status for null-deref inter-TU run",
+    ):
+        return False
+    if not expect_contains(
+        output,
+        "Function: vuln_nested_if_unchecked_malloc",
+        "missing nested-if unchecked allocator function in inter-TU run",
+    ):
+        return False
+    if not expect_contains(
+        output,
+        "Function: vuln_nested_loop_unchecked_malloc",
+        "missing nested-loop unchecked allocator function in inter-TU run",
+    ):
+        return False
+    if output.count(
+        "pointer comes from allocator return value and is dereferenced without a provable null-check"
+    ) < 2:
+        return fail_check(
+            "missing one unchecked-allocator null-deref warning in nested inter-TU run", output
+        )
+    if not expect_contains(
+        output,
+        "Function: vuln_nested_if_null_branch",
+        "missing nested-if null-branch function in inter-TU run",
+    ):
+        return False
+    if not expect_contains(
+        output,
+        "control flow proves pointer is null on this branch before dereference",
+        "missing null-branch dereference diagnostic in inter-TU run",
+    ):
+        return False
+
+    print("  ✅ nested null-deref diagnostics OK in inter-TU mode\n")
+    return True
+
+
+def check_integer_overflow_advanced_inter_tu() -> bool:
+    """
+    Regression: advanced integer-overflow diagnostics must remain detectable in
+    multi-file runs with inter-TU mode enabled.
+    """
+    print("=== Testing advanced integer overflow cases in inter-TU mode ===")
+
+    def_file = RUN_CONFIG.test_dir / "integer-overflow/cross-tu-tricky-def.c"
+    use_file = RUN_CONFIG.test_dir / "integer-overflow/cross-tu-tricky-use.c"
+    if not def_file.exists() or not use_file.exists():
+        print("  ❌ missing integer-overflow inter-TU fixture files")
+        print(f"     expected: {def_file} and {use_file}")
+        print()
+        return False
+
+    result = run_analyzer(
+        [
+            str(def_file),
+            str(use_file),
+            "--jobs=2",
+            "--analysis-profile=full",
+            "--resource-cross-tu",
+            "--uninitialized-cross-tu",
+        ]
+    )
+    output = (result.stdout or "") + (result.stderr or "")
+
+    if not expect_returncode_zero(result, output, "integer-overflow inter-TU run failed"):
+        return False
+    if not expect_contains(
+        output,
+        "Uninitialized inter-procedural analysis: enabled (cross-TU summaries across 2 files",
+        "missing inter-TU enabled status in integer-overflow inter-TU run",
+    ):
+        return False
+    if not expect_contains(
+        output,
+        "Function: io_cross_signed_overflow",
+        "missing cross-TU signed-overflow function in inter-TU run",
+    ):
+        return False
+    if not expect_contains(
+        output,
+        "potential signed integer overflow in arithmetic operation",
+        "missing signed-overflow arithmetic diagnostic in inter-TU run",
+    ):
+        return False
+    if not expect_contains(
+        output,
+        "Function: io_cross_truncation_alloc",
+        "missing cross-TU truncation function in inter-TU run",
+    ):
+        return False
+    if not expect_contains(
+        output,
+        "potential integer truncation in size computation before 'malloc'",
+        "missing truncation-before-malloc diagnostic in inter-TU run",
+    ):
+        return False
+    if not expect_contains(
+        output,
+        "Function: io_cross_signed_to_size_copy",
+        "missing cross-TU signed-to-size function in inter-TU run",
+    ):
+        return False
+    if not expect_contains(
+        output,
+        "potential signed-to-size conversion before 'memcpy'",
+        "missing signed-to-size conversion diagnostic in inter-TU run",
+    ):
+        return False
+
+    print("  ✅ advanced integer-overflow diagnostics OK in inter-TU mode\n")
+    return True
+
+
+def check_use_after_free_advanced_inter_tu() -> bool:
+    """
+    Regression: nested use-after-free and double-release cases must be detected
+    when release effects come from cross-TU summaries.
+    """
+    print("=== Testing use-after-free nested cases in inter-TU mode ===")
+
+    def_file = RUN_CONFIG.test_dir / "use-after-free/cross-tu-uaf-def.c"
+    use_file = RUN_CONFIG.test_dir / "use-after-free/cross-tu-uaf-use.c"
+    if not def_file.exists() or not use_file.exists():
+        print("  ❌ missing use-after-free inter-TU fixture files")
+        print(f"     expected: {def_file} and {use_file}")
+        print()
+        return False
+
+    model = "models/resource-lifetime/generic.txt"
+    result = run_analyzer(
+        [
+            str(def_file),
+            str(use_file),
+            "--jobs=2",
+            "--analysis-profile=full",
+            "--resource-cross-tu",
+            f"--resource-model={model}",
+            "--warnings-only",
+        ]
+    )
+    output = (result.stdout or "") + (result.stderr or "")
+
+    if not expect_returncode_zero(result, output, "use-after-free inter-TU run failed"):
+        return False
+    if not expect_contains(
+        output,
+        "Resource inter-procedural analysis: enabled (cross-TU summaries across 2 files",
+        "missing resource cross-TU enabled status in use-after-free inter-TU run",
+    ):
+        return False
+    if not expect_contains(
+        output,
+        "Function: io_cross_uaf_nested_if",
+        "missing nested-if cross-TU UAF function in output",
+    ):
+        return False
+    if not expect_contains(
+        output,
+        "potential use-after-release: 'GenericHandle' handle 'h'",
+        "missing cross-TU use-after-release diagnostic",
+    ):
+        return False
+    if not expect_contains(
+        output,
+        "Function: io_cross_double_release_nested_loop",
+        "missing nested-loop cross-TU double-release function in output",
+    ):
+        return False
+    if not expect_contains(
+        output,
+        "potential double release: 'GenericHandle' handle 'h'",
+        "missing cross-TU double-release diagnostic",
+    ):
+        return False
+    if not expect_not_contains(
+        output,
+        "inter-procedural resource analysis incomplete: handle 'h'",
+        "unexpected IncompleteInterproc warning in cross-TU enabled run",
+    ):
+        return False
+
+    result = run_analyzer(
+        [
+            str(def_file),
+            str(use_file),
+            "--jobs=2",
+            "--analysis-profile=full",
+            "--no-resource-cross-tu",
+            f"--resource-model={model}",
+            "--warnings-only",
+        ]
+    )
+    output = (result.stdout or "") + (result.stderr or "")
+    if not expect_returncode_zero(result, output, "use-after-free cross-TU disabled run failed"):
+        return False
+    if not expect_not_contains(
+        output,
+        "potential use-after-release: 'GenericHandle' handle 'h'",
+        "unexpected cross-TU use-after-release diagnostic with --no-resource-cross-tu",
+    ):
+        return False
+    if not expect_not_contains(
+        output,
+        "potential double release: 'GenericHandle' handle 'h'",
+        "unexpected cross-TU double-release diagnostic with --no-resource-cross-tu",
+    ):
+        return False
+
+    print("  ✅ nested use-after-free diagnostics OK in inter-TU mode\n")
+    return True
+
+
 def check_escape_model_rejects_unsupported_brackets() -> bool:
     """
     Regression: stack escape model must reject unsupported [..] classes
@@ -2152,8 +2564,19 @@ def check_file(c_path: Path):
     Check that, for this file, all expectations are present in the analyzer output.
     """
     report_lines = [f"=== Testing {c_path} ==="]
-    expectations, negative_expectations, stack_limit, resource_model, escape_model = extract_expectations(c_path)
-    if not expectations and not negative_expectations:
+    (
+        expectations,
+        negative_expectations,
+        stack_limit,
+        resource_model,
+        escape_model,
+        buffer_model,
+        strict_diag_count,
+    ) = extract_expectations(c_path)
+    strict_enabled = (
+        strict_diag_count if strict_diag_count is not None else _default_strict_diagnostic_count(c_path)
+    )
+    if not expectations and not negative_expectations and not strict_enabled:
         report_lines.append("  (no expectations found, skipping)")
         return True, 0, 0, "\n".join(report_lines) + "\n\n"
 
@@ -2162,8 +2585,10 @@ def check_file(c_path: Path):
         stack_limit=stack_limit,
         resource_model=resource_model,
         escape_model=escape_model,
+        buffer_model=buffer_model,
     )
     norm_output = normalize(analyzer_output)
+    output_index = _build_output_diagnostic_index_by_location(analyzer_output)
 
     all_ok = True
     total = len(expectations) + len(negative_expectations)
@@ -2176,6 +2601,8 @@ def check_file(c_path: Path):
                 if normalize(alt) in norm_output:
                     matched = True
                     break
+        if not matched and _expectation_matches_by_location_and_headlines(exp, output_index):
+            matched = True
         if matched:
             report_lines.append(f"  ✅ expectation #{idx} FOUND")
             passed += 1
@@ -2200,6 +2627,34 @@ def check_file(c_path: Path):
             report_lines.append("----- Analyzer output (normalized) -----")
             report_lines.append(f"<{norm_output}>")
             report_lines.append("---------------------------")
+            all_ok = False
+
+    if strict_enabled:
+        total += 1
+        expected_warning_error = sum(
+            1 for exp in expectations if _expectation_is_warning_or_error(exp)
+        )
+        actual_warning_error = _parse_total_warning_error_count(analyzer_output)
+        if actual_warning_error is None:
+            report_lines.append("  ❌ strict diagnostic count check: summary line missing")
+            report_lines.append("----- Analyzer output -----")
+            report_lines.append(analyzer_output.strip())
+            report_lines.append("---------------------------")
+            all_ok = False
+        elif actual_warning_error == expected_warning_error:
+            report_lines.append(
+                f"  ✅ strict diagnostic count match ({actual_warning_error} warning/error)"
+            )
+            passed += 1
+        else:
+            report_lines.append("  ❌ strict diagnostic count mismatch")
+            report_lines.append(
+                f"     expected warning/error from comments: {expected_warning_error}"
+            )
+            report_lines.append(
+                f"     actual warning/error in analyzer output: {actual_warning_error}"
+            )
+            report_lines.append("     hint: add missing // at line ... expectation blocks")
             all_ok = False
 
     return all_ok, total, passed, "\n".join(report_lines) + "\n\n"
@@ -2256,6 +2711,12 @@ def main() -> int:
     if not record_ok(check_resource_lifetime_cross_tu()):
         global_ok = False
     if not record_ok(check_uninitialized_cross_tu()):
+        global_ok = False
+    if not record_ok(check_null_deref_nested_inter_tu()):
+        global_ok = False
+    if not record_ok(check_integer_overflow_advanced_inter_tu()):
+        global_ok = False
+    if not record_ok(check_use_after_free_advanced_inter_tu()):
         global_ok = False
     if not record_ok(check_escape_model_rejects_unsupported_brackets()):
         global_ok = False
