@@ -8,3 +8,6 @@ char* leak_through_slot(void)
 // at line 5, column 5
 // [ !!Warn ] stack pointer escape: address of variable 'buf' escapes this function
 //          ↳ escape via return statement (pointer to stack returned to caller)
+
+// at line 3, column 1
+// [ !!Warn ] local variable 'buf' is never initialized
