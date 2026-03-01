@@ -47,6 +47,16 @@ namespace ctrace::stack::analysis
         {
             if (!name.empty() && name.front() == '\1')
                 name = name.drop_front();
+            if (name.starts_with("__builtin_"))
+                name = name.drop_front(10);
+            if (name.starts_with("builtin_"))
+                name = name.drop_front(8);
+            while (name.starts_with("_"))
+                name = name.drop_front();
+            if (name.starts_with("__builtin_"))
+                name = name.drop_front(10);
+            if (name.starts_with("builtin_"))
+                name = name.drop_front(8);
             while (name.starts_with("_"))
                 name = name.drop_front();
 

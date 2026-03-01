@@ -2023,8 +2023,7 @@ namespace ctrace::stack::analysis
             {
                 return false;
             }
-            if (CB.paramHasAttr(argIdx, llvm::Attribute::WriteOnly))
-                return true;
+            const bool hasDirectWriteOnlyAttr = CB.paramHasAttr(argIdx, llvm::Attribute::WriteOnly);
 
             if (isKnownAlwaysWritingDeclarationArg(CB, *callee, argIdx))
                 return true;
@@ -2033,7 +2032,8 @@ namespace ctrace::stack::analysis
                 return false;
             if (!callee->getReturnType()->isVoidTy() && !declarationCallReturnIsControlChecked(CB))
             {
-                return false;
+                if (!hasDirectWriteOnlyAttr)
+                    return false;
             }
 
             if (argIdx >= callee->arg_size())
@@ -2045,8 +2045,18 @@ namespace ctrace::stack::analysis
             {
                 return false;
             }
-            if (attrs.hasParamAttr(argIdx, llvm::Attribute::WriteOnly))
-                return true;
+            const bool hasDeclWriteOnlyAttr =
+                attrs.hasParamAttr(argIdx, llvm::Attribute::WriteOnly);
+            if (hasDirectWriteOnlyAttr || hasDeclWriteOnlyAttr)
+            {
+                // C library headers differ across platforms (and fortify modes) in how
+                // aggressively they annotate pointer params as writeonly. For non-void
+                // unchecked-return APIs (e.g. strcpy/memcpy), avoid relying solely on
+                // these attrs to keep diagnostics stable across toolchains.
+                if (callee->getReturnType()->isVoidTy() || declarationCallReturnIsControlChecked(CB))
+                    return true;
+                return false;
+            }
 
             return true;
         }

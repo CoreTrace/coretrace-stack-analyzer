@@ -3,6 +3,7 @@ import argparse
 import contextlib
 import importlib.util
 import io
+import shlex
 import sys
 import subprocess
 import json
@@ -30,6 +31,7 @@ class TestRunConfig:
     cache_dir: Path = DEFAULT_CACHE_DIR
     jobs: int = 1
     cache_enabled: bool = True
+    extra_analyzer_args: tuple[str, ...] = ()
 
 
 RUN_CONFIG = TestRunConfig()
@@ -39,7 +41,7 @@ _MEM_CACHE = {}
 # Prevents nested ThreadPoolExecutor creation (N² process explosion).
 _PARALLEL_PHASE = False
 
-# ── Pre-compiled regex patterns for hot paths ────────────────────────────────
+# Pre-compiled regex patterns for hot paths
 _RE_LOCATION = re.compile(r"\s*at line (\d+), column (\d+)\s*$")
 _RE_LOCATION_STRICT = re.compile(r"^at line \d+, column \d+$")
 _RE_FORTIFIED = re.compile(r"__([A-Za-z0-9_]+)_chk\b")
@@ -58,7 +60,7 @@ _RE_BUFFER_MODEL = re.compile(r"//\s*buffer-model\s*[:=]\s*(\S+)", re.IGNORECASE
 _RE_STRICT_DIAG = re.compile(r"//\s*strict-diagnostic-count\s*[:=]\s*(\S+)", re.IGNORECASE)
 
 
-# ── Thread-safe stdout dispatcher for parallel check execution ───────────────
+# Thread-safe stdout dispatcher for parallel check execution
 class _ThreadDispatchStdout:
     """Route print() output to per-thread buffers when in parallel mode."""
 
@@ -134,6 +136,15 @@ def parse_args():
         "--clear-cache",
         action="store_true",
         help="Delete cache directory before running tests.",
+    )
+    parser.add_argument(
+        "--analyzer-arg",
+        action="append",
+        default=[],
+        help=(
+            "Extra argument forwarded to analyzer invocations that process source inputs. "
+            "Repeatable."
+        ),
     )
     return parser.parse_args()
 
@@ -504,12 +515,33 @@ def run_analyzer_on_file(c_path: Path, stack_limit=None, resource_model=None, es
     return output
 
 
+def _has_positional_input_arg(args) -> bool:
+    """
+    Return True when args appear to include at least one positional input path.
+    """
+    for arg in args:
+        if not arg.startswith("-"):
+            return True
+    return False
+
+
+def _effective_analyzer_args(args):
+    """
+    Merge optional runner-level analyzer args for invocations that analyze inputs.
+    """
+    base = list(args)
+    if RUN_CONFIG.extra_analyzer_args and _has_positional_input_arg(base):
+        return [*RUN_CONFIG.extra_analyzer_args, *base]
+    return base
+
+
 def run_analyzer(args) -> subprocess.CompletedProcess:
     """
     Run analyzer with custom args and return the CompletedProcess.
     """
-    cmd = [str(RUN_CONFIG.analyzer)] + args
-    key = _cache_key_for_args(args)
+    effective_args = _effective_analyzer_args(args)
+    cmd = [str(RUN_CONFIG.analyzer)] + effective_args
+    key = _cache_key_for_args(effective_args)
 
     with _CACHE_LOCK:
         in_memory = _MEM_CACHE.get(key)
@@ -548,7 +580,7 @@ def run_analyzer_uncached(args) -> subprocess.CompletedProcess:
     Run analyzer with custom args and bypass run_test.py cache layer.
     Useful for checks that assert filesystem side effects.
     """
-    cmd = [str(RUN_CONFIG.analyzer)] + args
+    cmd = [str(RUN_CONFIG.analyzer)] + _effective_analyzer_args(args)
     return subprocess.run(cmd, capture_output=True, text=True)
 
 
@@ -2735,6 +2767,8 @@ def main() -> int:
     RUN_CONFIG.jobs = max(1, cli.jobs)
     RUN_CONFIG.cache_enabled = not cli.no_cache
     RUN_CONFIG.cache_dir = Path(cli.cache_dir)
+    env_extra_args = shlex.split(os.environ.get("CORETRACE_RUN_TEST_EXTRA_ANALYZER_ARGS", ""))
+    RUN_CONFIG.extra_analyzer_args = tuple([*cli.analyzer_arg, *env_extra_args])
 
     if cli.clear_cache and RUN_CONFIG.cache_dir.exists():
         shutil.rmtree(RUN_CONFIG.cache_dir, ignore_errors=True)

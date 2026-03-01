@@ -31,7 +31,7 @@ jobs:
         # (changelog, merge-base) should override with their own fetch.
         fetch-depth: 1
 
-    # ── Linux: install toolchain + accelerators ──────────────────────
+    # Linux: install toolchain + accelerators
     - name: Install dependencies (Linux)
       if: runner.os == 'Linux'
       run: |
@@ -46,7 +46,7 @@ jobs:
         echo "LLVM_DIR=/usr/lib/llvm-20/lib/cmake/llvm" >> $GITHUB_ENV
         echo "Clang_DIR=/usr/lib/llvm-20/lib/cmake/clang" >> $GITHUB_ENV
 
-    # ── macOS: install toolchain ─────────────────────────────────────
+    # macOS: install toolchain
     - name: Install dependencies (macOS)
       if: runner.os == 'macOS'
       run: |
@@ -55,7 +55,7 @@ jobs:
         echo "Clang_DIR=$(brew --prefix llvm@20)/lib/cmake/clang" >> $GITHUB_ENV
         echo "$(brew --prefix llvm@20)/bin" >> $GITHUB_PATH
 
-    # ── ccache: restore + configure ──────────────────────────────────
+    # ccache: restore + configure
     - name: Restore ccache
       uses: actions/cache@v4
       with:
@@ -72,7 +72,7 @@ jobs:
         ccache --set-config=compression=true
         ccache -z
 
-    # ── FetchContent cache (sources only) ────────────────────────────
+    # FetchContent cache (sources only)
     - name: Restore FetchContent sources
       uses: actions/cache@v4
       with:
@@ -83,7 +83,7 @@ jobs:
         restore-keys: |
           fetchcontent-${{ runner.os }}-llvm20-
 
-    # ── Configure ────────────────────────────────────────────────────
+    # Configure
     - name: Configure
       run: |
         cmake -S . -B build -G Ninja \
@@ -96,7 +96,7 @@ jobs:
           -DBUILD_TESTS=OFF \
           ${{ runner.os == 'Linux' && '-DCMAKE_EXE_LINKER_FLAGS=-fuse-ld=lld -DCMAKE_SHARED_LINKER_FLAGS=-fuse-ld=lld' || '' }}
 
-    # ── Build ────────────────────────────────────────────────────────
+    # Build
     - name: Build
       run: cmake --build build --config Release
 
@@ -104,15 +104,21 @@ jobs:
       if: always()
       run: ccache -s
 
-    # ── Tests ────────────────────────────────────────────────────────
+    # Tests
     - name: Test Stack Usage Analyzer
       timeout-minutes: 45
       run: |
         TEST_JOBS="$(python3 -c 'import os; print(max(1, min(8, os.cpu_count() or 1)))')"
         echo "Running run_test.py with ${TEST_JOBS} job(s)"
-        python3 -u run_test.py --jobs="${TEST_JOBS}"
+        EXTRA_ANALYZER_ARGS=""
+        if [ "${RUNNER_OS}" = "Linux" ]; then
+          EXTRA_ANALYZER_ARGS="--compile-arg=-include --compile-arg=stdint.h --compile-arg=-Wno-error=implicit-function-declaration"
+          echo "Using Linux test analyzer args: ${EXTRA_ANALYZER_ARGS}"
+        fi
+        CORETRACE_RUN_TEST_EXTRA_ANALYZER_ARGS="${EXTRA_ANALYZER_ARGS}" \
+          python3 -u run_test.py --jobs="${TEST_JOBS}"
 
-    # ── Self-analysis (Linux only) ───────────────────────────────────
+    # Self-analysis (Linux only)
     - name: Self-analysis (analyze own source code)
       if: runner.os == 'Linux'
       run: |
