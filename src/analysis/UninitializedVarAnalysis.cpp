@@ -2053,7 +2053,8 @@ namespace ctrace::stack::analysis
                 // aggressively they annotate pointer params as writeonly. For non-void
                 // unchecked-return APIs (e.g. strcpy/memcpy), avoid relying solely on
                 // these attrs to keep diagnostics stable across toolchains.
-                if (callee->getReturnType()->isVoidTy() || declarationCallReturnIsControlChecked(CB))
+                if (callee->getReturnType()->isVoidTy() ||
+                    declarationCallReturnIsControlChecked(CB))
                     return true;
                 return false;
             }
