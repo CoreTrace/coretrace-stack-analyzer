@@ -128,3 +128,6 @@ int runWithStrategies(int mode)
 // not contains: stack pointer escape: address of variable 'plan' escapes this function
 // not contains: stack pointer escape: address of variable 'results' escapes this function
 // not contains: stack pointer escape: address of variable 'executionStatus' escapes this function
+
+// at line 76, column 49
+// [ !!Warn ] potential signed integer overflow in arithmetic operation
