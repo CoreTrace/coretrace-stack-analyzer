@@ -5,15 +5,21 @@
 
 #include "analysis/AllocaUsage.hpp"
 #include "analysis/ConstParamAnalysis.hpp"
+#include "analysis/CommandInjectionAnalysis.hpp"
 #include "analysis/DuplicateIfCondition.hpp"
 #include "analysis/DynamicAlloca.hpp"
+#include "analysis/IntegerOverflowAnalysis.hpp"
 #include "analysis/InvalidBaseReconstruction.hpp"
 #include "analysis/MemIntrinsicOverflow.hpp"
+#include "analysis/NullDerefAnalysis.hpp"
+#include "analysis/OOBReadAnalysis.hpp"
 #include "analysis/ResourceLifetimeAnalysis.hpp"
 #include "analysis/SizeMinusKWrites.hpp"
 #include "analysis/StackBufferAnalysis.hpp"
 #include "analysis/StackComputation.hpp"
 #include "analysis/StackPointerEscape.hpp"
+#include "analysis/TOCTOUAnalysis.hpp"
+#include "analysis/TypeConfusionAnalysis.hpp"
 #include "analysis/UninitializedVarAnalysis.hpp"
 #include "passes/ModulePasses.hpp"
 
@@ -130,9 +136,19 @@ namespace ctrace::stack::analyzer
                              { return state.prepared->ctx.shouldAnalyze(F); };
                              const llvm::DataLayout& dataLayout = *state.prepared->ctx.dataLayout;
                              const std::vector<analysis::MemIntrinsicIssue> issues =
-                                 analysis::analyzeMemIntrinsicOverflows(state.mod, dataLayout,
-                                                                        shouldAnalyze);
+                                 analysis::analyzeMemIntrinsicOverflows(
+                                     state.mod, dataLayout, shouldAnalyze,
+                                     state.config.bufferModelPath);
                              appendMemIntrinsicDiagnostics(state.result, issues);
+                         }});
+
+        steps.push_back({"Integer overflows", [](PipelineData& state)
+                         {
+                             auto shouldAnalyze = [&](const llvm::Function& F) -> bool
+                             { return state.prepared->ctx.shouldAnalyze(F); };
+                             const std::vector<analysis::IntegerOverflowIssue> issues =
+                                 analysis::analyzeIntegerOverflows(state.mod, shouldAnalyze);
+                             appendIntegerOverflowDiagnostics(state.result, issues);
                          }});
 
         steps.push_back({"Size-minus-k writes", [](PipelineData& state)
@@ -204,6 +220,54 @@ namespace ctrace::stack::analyzer
                              const std::vector<analysis::ConstParamIssue> issues =
                                  analysis::analyzeConstParams(state.mod, shouldAnalyze);
                              appendConstParamDiagnostics(state.result, issues);
+                         }});
+
+        steps.push_back({"Null pointer dereferences", [](PipelineData& state)
+                         {
+                             auto shouldAnalyze = [&](const llvm::Function& F) -> bool
+                             { return state.prepared->ctx.shouldAnalyze(F); };
+                             const std::vector<analysis::NullDerefIssue> issues =
+                                 analysis::analyzeNullDereferences(state.mod, shouldAnalyze);
+                             appendNullDerefDiagnostics(state.result, issues);
+                         }});
+
+        steps.push_back({"Out-of-bounds reads", [](PipelineData& state)
+                         {
+                             auto shouldAnalyze = [&](const llvm::Function& F) -> bool
+                             { return state.prepared->ctx.shouldAnalyze(F); };
+                             const llvm::DataLayout& dataLayout = *state.prepared->ctx.dataLayout;
+                             const std::vector<analysis::OOBReadIssue> issues =
+                                 analysis::analyzeOOBReads(state.mod, dataLayout, shouldAnalyze);
+                             appendOOBReadDiagnostics(state.result, issues);
+                         }});
+
+        steps.push_back({"Command injection", [](PipelineData& state)
+                         {
+                             auto shouldAnalyze = [&](const llvm::Function& F) -> bool
+                             { return state.prepared->ctx.shouldAnalyze(F); };
+                             const std::vector<analysis::CommandInjectionIssue> issues =
+                                 analysis::analyzeCommandInjection(state.mod, shouldAnalyze);
+                             appendCommandInjectionDiagnostics(state.result, issues);
+                         }});
+
+        steps.push_back({"TOCTOU", [](PipelineData& state)
+                         {
+                             auto shouldAnalyze = [&](const llvm::Function& F) -> bool
+                             { return state.prepared->ctx.shouldAnalyze(F); };
+                             const std::vector<analysis::TOCTOUIssue> issues =
+                                 analysis::analyzeTOCTOU(state.mod, shouldAnalyze);
+                             appendTOCTOUDiagnostics(state.result, issues);
+                         }});
+
+        steps.push_back({"Type confusion", [](PipelineData& state)
+                         {
+                             auto shouldAnalyze = [&](const llvm::Function& F) -> bool
+                             { return state.prepared->ctx.shouldAnalyze(F); };
+                             const llvm::DataLayout& dataLayout = *state.prepared->ctx.dataLayout;
+                             const std::vector<analysis::TypeConfusionIssue> issues =
+                                 analysis::analyzeTypeConfusions(state.mod, dataLayout,
+                                                                 shouldAnalyze);
+                             appendTypeConfusionDiagnostics(state.result, issues);
                          }});
 
         steps.push_back({"Resource lifetime", [](PipelineData& state)
