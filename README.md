@@ -222,6 +222,7 @@ Ready-to-adapt workflow examples:
 --include-compdb-deps includes `_deps` entries when inputs are auto-discovered from compile_commands.json
 --jobs=<N> parallel jobs for multi-file loading/analysis and cross-TU resource summary build (default: 1)
 --escape-model=<path> loads external noescape rules for stack pointer escape analysis (`noescape_arg`)
+--buffer-model=<path> loads external buffer write rules for copy/string overflow checks (`bounded_write`/`unbounded_write`)
 --resource-model=<path> loads external acquire/release rules for generic resource lifetime checks
 --resource-cross-tu enables cross-TU resource summaries for resource lifetime analysis (default: on)
 --no-resource-cross-tu disables cross-TU resource summaries
@@ -527,6 +528,34 @@ For test files, `run_test.py` supports per-file selection with:
 
 ---
 
+Buffer write API contracts (`--buffer-model=<path>`)
+
+- Why this exists:
+  - Many overflow-prone APIs are project-specific wrappers (`copy_bytes`, `my_strcpy`, etc.).
+  - Encoding these contracts in a model avoids hardcoding function names in analyzer code.
+  - You can model both bounded writes (explicit length arg) and unbounded writes.
+
+Model format (`--buffer-model=<path>`):
+
+```text
+bounded_write <function-pattern> <dst-arg-index> <size-arg-index>
+unbounded_write <function-pattern> <dst-arg-index>
+```
+
+Example model:
+
+```text
+bounded_write memcpy 0 2
+bounded_write strncpy 0 2
+unbounded_write strcpy 0
+unbounded_write strcat 0
+```
+
+For test files, `run_test.py` supports per-file selection with:
+`// buffer-model: <path>`.
+
+---
+
 Actually done:
 
 - 1. Multi-file CLI inputs with deterministic ordering and aggregated output.
@@ -535,7 +564,7 @@ Actually done:
 - 4. Compile args passthrough: `-I`, `-D`, `--compile-arg`.
 - 5. Dynamic alloca / VLA detection, including user-controlled sizes, upper-bound inference, and recursion-aware severity (errors for infinite recursion or oversized allocations, warnings for other dynamic sizes).
 - 6. Deriving human-friendly names for unnamed allocas in diagnostics.
-- 7. Detection of memcpy/memset overflows on stack buffers.
+- 7. Detection of stack buffer overflows in memory/string write APIs (built-in + model-driven).
 - 8. Warning when a function performs multiple stores into the same stack buffer.
 - 9. Deeper traversal analysis: constraint propagation.
 - 10. Detection of deep indirection in aliasing.
