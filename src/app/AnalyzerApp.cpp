@@ -431,6 +431,7 @@ struct LoadedInputModule
     std::string filename;
     std::unique_ptr<llvm::LLVMContext> context;
     std::unique_ptr<llvm::Module> module;
+    std::vector<Diagnostic> frontendDiagnostics;
 };
 
 using AnalysisEntry = std::pair<std::string, AnalysisResult>;
@@ -730,7 +731,8 @@ static AppStatus analyzeWithSharedModuleLoading(const std::vector<std::string>& 
             loadErrors[index] = std::move(err);
             return;
         }
-        loadedModules[index] = {inputFilename, std::move(moduleContext), std::move(load.module)};
+        loadedModules[index] = {inputFilename, std::move(moduleContext), std::move(load.module),
+                                std::move(load.frontendDiagnostics)};
         loadSucceeded[index] = 1;
     };
 
@@ -793,6 +795,11 @@ static AppStatus analyzeWithSharedModuleLoading(const std::vector<std::string>& 
     for (auto& loaded : loadedModules)
     {
         AnalysisResult result = analyzeModule(*loaded.module, cfg);
+        if (!loaded.frontendDiagnostics.empty())
+        {
+            result.diagnostics.insert(result.diagnostics.end(), loaded.frontendDiagnostics.begin(),
+                                      loaded.frontendDiagnostics.end());
+        }
         stampResultFilePaths(result, loaded.filename);
         const std::string emptyMsg = noFunctionMessage(result, loaded.filename, hasFilter);
         if (!emptyMsg.empty())
@@ -836,6 +843,12 @@ static AppStatus analyzeWithoutSharedModuleLoading(const std::vector<std::string
             }
 
             AnalysisResult result = analyzeModule(*load.module, cfg);
+            if (!load.frontendDiagnostics.empty())
+            {
+                result.diagnostics.insert(result.diagnostics.end(),
+                                          load.frontendDiagnostics.begin(),
+                                          load.frontendDiagnostics.end());
+            }
             stampResultFilePaths(result, inputFilename);
             const std::string emptyMsg = noFunctionMessage(result, inputFilename, hasFilter);
             if (!emptyMsg.empty())
@@ -893,6 +906,12 @@ static AppStatus analyzeWithoutSharedModuleLoading(const std::vector<std::string
                     }
 
                     AnalysisResult result = analyzeModule(*load.module, cfg);
+                    if (!load.frontendDiagnostics.empty())
+                    {
+                        result.diagnostics.insert(result.diagnostics.end(),
+                                                  load.frontendDiagnostics.begin(),
+                                                  load.frontendDiagnostics.end());
+                    }
                     stampResultFilePaths(result, inputFilename);
                     slots[index].noFunctionMsg =
                         noFunctionMessage(result, inputFilename, hasFilter);
