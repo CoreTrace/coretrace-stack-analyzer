@@ -1996,6 +1996,59 @@ namespace ctrace::stack::analysis
                    isLikelyStatusOutParamDeclarationArg(CB, callee, argIdx);
         }
 
+        static llvm::StringRef normalizeDeclarationCalleeName(llvm::StringRef name)
+        {
+            if (!name.empty() && name.front() == '\1')
+                name = name.drop_front();
+            if (name.starts_with("__builtin_"))
+                name = name.drop_front(10);
+            if (name.starts_with("builtin_"))
+                name = name.drop_front(8);
+            while (name.starts_with("_"))
+                name = name.drop_front();
+
+            const std::size_t dollarPos = name.find('$');
+            if (dollarPos != llvm::StringRef::npos)
+                name = name.take_front(dollarPos);
+            return name;
+        }
+
+        static bool isKnownUnboundedCStringWriteDeclArg(const llvm::Function& callee,
+                                                        unsigned argIdx)
+        {
+            if (argIdx != 0)
+                return false;
+
+            const llvm::StringRef name = normalizeDeclarationCalleeName(callee.getName());
+            return name == "strcpy" || name == "strcpy_chk" || name == "strcat" ||
+                   name == "strcat_chk" || name == "stpcpy" || name == "stpcpy_chk" ||
+                   name == "gets" || name == "sprintf" || name == "vsprintf";
+        }
+
+        static bool callOriginLooksLikeCSource(const llvm::CallBase& CB)
+        {
+            const llvm::DebugLoc dl = CB.getDebugLoc();
+            if (!dl)
+                return false;
+            const llvm::DILocalScope* scope =
+                llvm::dyn_cast_or_null<llvm::DILocalScope>(dl.getScope());
+            if (!scope)
+                return false;
+            const llvm::DIFile* file = scope->getFile();
+            if (!file)
+            {
+                const llvm::DISubprogram* sp = scope->getSubprogram();
+                file = sp ? sp->getFile() : nullptr;
+            }
+            if (!file)
+                return false;
+
+            std::string filename = file->getFilename().str();
+            std::transform(filename.begin(), filename.end(), filename.begin(),
+                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            return filename.size() >= 2 && filename.ends_with(".c");
+        }
+
         static bool declarationCallArgMayWriteThrough(const llvm::CallBase& CB,
                                                       const llvm::Function* callee, unsigned argIdx)
         {
@@ -2016,6 +2069,15 @@ namespace ctrace::stack::analysis
             {
                 if (argIdx == sink->pointerArgIndex)
                     return false;
+            }
+
+            // Keep unbounded C-string writes conservative: these calls do not provide a
+            // trustworthy destination length and should not silently suppress
+            // "never initialized" diagnostics.
+            if (isKnownUnboundedCStringWriteDeclArg(*callee, argIdx) &&
+                callOriginLooksLikeCSource(CB))
+            {
+                return false;
             }
 
             if (CB.paramHasAttr(argIdx, llvm::Attribute::ReadOnly) ||
@@ -2062,6 +2124,55 @@ namespace ctrace::stack::analysis
             return true;
         }
 
+        static bool tryApplyBoundedMemTransferDeclarationWriteEffects(
+            const llvm::CallBase& CB, const llvm::Function* callee,
+            const TrackedObjectContext& tracked, const llvm::DataLayout& DL,
+            InitRangeState& initialized, llvm::BitVector* writeSeen,
+            FunctionSummary* currentSummary)
+        {
+            if (!callee || !callee->isDeclaration())
+                return false;
+
+            const llvm::StringRef calleeName = normalizeDeclarationCalleeName(callee->getName());
+            const bool isMemcpyLike =
+                calleeName == "memcpy" || calleeName == "memcpy_chk" ||
+                calleeName == "memmove" || calleeName == "memmove_chk";
+            if (!isMemcpyLike)
+                return false;
+            if (CB.arg_size() <= 2)
+                return false;
+
+            const auto* sizeConst = llvm::dyn_cast<llvm::ConstantInt>(CB.getArgOperand(2));
+            if (!sizeConst)
+                return false;
+            const std::uint64_t writeSize = sizeConst->getZExtValue();
+            if (writeSize == 0)
+                return false;
+
+            const llvm::Value* dest = CB.getArgOperand(0);
+            unsigned objectIdx = 0;
+            std::uint64_t baseOffset = 0;
+            bool hasConstOffset = false;
+            if (!resolveTrackedObjectBase(dest, tracked, DL, objectIdx, baseOffset,
+                                          hasConstOffset) ||
+                !hasConstOffset)
+            {
+                return false;
+            }
+
+            const TrackedMemoryObject& obj = tracked.objects[objectIdx];
+            if (obj.sizeBytes == 0)
+                return false;
+            if (baseOffset >= obj.sizeBytes)
+                return false;
+            if (writeSize > obj.sizeBytes - baseOffset)
+                return false;
+
+            markKnownWriteOnPointerOperand(dest, tracked, DL, initialized, writeSeen,
+                                           currentSummary, writeSize);
+            return true;
+        }
+
         static void applyExternalDeclarationCallWriteEffects(const llvm::CallBase& CB,
                                                              const llvm::Function* callee,
                                                              const TrackedObjectContext& tracked,
@@ -2072,6 +2183,12 @@ namespace ctrace::stack::analysis
         {
             if (!callee || !callee->isDeclaration())
                 return;
+
+            if (tryApplyBoundedMemTransferDeclarationWriteEffects(
+                    CB, callee, tracked, DL, initialized, writeSeen, currentSummary))
+            {
+                return;
+            }
 
             for (unsigned argIdx = 0; argIdx < CB.arg_size(); ++argIdx)
             {
@@ -2774,8 +2891,8 @@ namespace ctrace::stack::analysis
                 if (len && len->isZero())
                     return;
 
-                bool isInitWrite =
-                    llvm::isa<llvm::MemSetInst>(MI) || llvm::isa<llvm::MemTransferInst>(MI);
+                const bool isMemTransfer = llvm::isa<llvm::MemTransferInst>(MI);
+                const bool isInitWrite = llvm::isa<llvm::MemSetInst>(MI) || isMemTransfer;
                 if (!isInitWrite)
                     return;
 
@@ -2902,6 +3019,15 @@ namespace ctrace::stack::analysis
                     if (resolveAccessFromPointer(MI->getDest(), writeSize, tracked, DL, access))
                     {
                         const TrackedMemoryObject& obj = tracked.objects[access.objectIdx];
+                        if (isMemTransfer && obj.sizeBytes > 0 &&
+                            (access.end - access.begin) != writeSize)
+                        {
+                            // For memcpy/memmove, clipped ranges indicate a potential
+                            // out-of-bounds length; do not mark full initialization from
+                            // an unsafe transfer.
+                            return;
+                        }
+
                         addRange(initialized[access.objectIdx], access.begin, access.end);
                         if (isAllocaObject(obj))
                         {
@@ -2915,6 +3041,13 @@ namespace ctrace::stack::analysis
                         }
                         return;
                     }
+                }
+
+                if (isMemTransfer)
+                {
+                    // Unknown-size or unresolved memcpy/memmove destinations are not modeled
+                    // as definitive initialization.
+                    return;
                 }
 
                 unsigned objectIdx = 0;
