@@ -16,7 +16,14 @@ void vuln_gets(void)
 {
     char buf[64];
     printf("Input: ");
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic warning "-Wimplicit-function-declaration"
+#endif
     gets(buf); /* CWE-676: aucune limite de taille, overflow garanti */
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#endif
     printf("Got: %s\n", buf);
 }
 
