@@ -111,10 +111,6 @@ jobs:
         TEST_JOBS="$(python3 -c 'import os; print(max(1, min(8, os.cpu_count() or 1)))')"
         echo "Running run_test.py with ${TEST_JOBS} job(s)"
         EXTRA_ANALYZER_ARGS=""
-        if [ "${RUNNER_OS}" = "Linux" ]; then
-          EXTRA_ANALYZER_ARGS="--compile-arg=-fno-builtin --compile-arg=-include --compile-arg=stdint.h --compile-arg=-Wno-error=implicit-function-declaration"
-          echo "Using Linux test analyzer args: ${EXTRA_ANALYZER_ARGS}"
-        fi
         CORETRACE_RUN_TEST_EXTRA_ANALYZER_ARGS="${EXTRA_ANALYZER_ARGS}" \
           python3 -u run_test.py --jobs="${TEST_JOBS}"
 
