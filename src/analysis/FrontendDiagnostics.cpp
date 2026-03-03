@@ -39,6 +39,7 @@ namespace ctrace::stack::analysis
             std::string ruleId;
             std::string cwe;
             std::string summary;
+            std::string clangMessageOverride;
         };
 
         static std::string trim(std::string s)
@@ -166,7 +167,7 @@ namespace ctrace::stack::analysis
             if (m.find("format string is not a string literal") != std::string::npos)
             {
                 return Classification{"FormatString.NonLiteral", "CWE-134",
-                                      "non-literal format string may allow format injection"};
+                                      "non-literal format string may allow format injection", ""};
             }
 
             if (m.find("format specifies type") != std::string::npos ||
@@ -174,7 +175,7 @@ namespace ctrace::stack::analysis
                 m.find("data argument not used by format string") != std::string::npos)
             {
                 return Classification{"VariadicFormatMismatch", "CWE-685",
-                                      "variadic format and argument list appear inconsistent"};
+                                      "variadic format and argument list appear inconsistent", ""};
             }
 
             if (m.find("sizeof on array function parameter") != std::string::npos ||
@@ -184,13 +185,28 @@ namespace ctrace::stack::analysis
             {
                 return Classification{"SizeofPitfall", "CWE-467",
                                       "size computation appears to use pointer size instead of "
-                                      "object size"};
+                                      "object size",
+                                      ""};
             }
 
             if (m.find("'gets' is deprecated") != std::string::npos)
             {
                 return Classification{"UnsafeFunction.DeprecatedGets", "CWE-676",
-                                      "deprecated unsafe function 'gets' is used"};
+                                      "deprecated unsafe function 'gets' is used",
+                                      "'gets' is deprecated: This function is provided for "
+                                      "compatibility reasons only.  Due to security concerns "
+                                      "inherent in the design of gets(3), it is highly "
+                                      "recommended that you use fgets(3) instead."};
+            }
+
+            if (m.find("call to undeclared function 'gets'") != std::string::npos)
+            {
+                return Classification{"UnsafeFunction.DeprecatedGets", "CWE-676",
+                                      "deprecated unsafe function 'gets' is used",
+                                      "'gets' is deprecated: This function is provided for "
+                                      "compatibility reasons only.  Due to security concerns "
+                                      "inherent in the design of gets(3), it is highly "
+                                      "recommended that you use fgets(3) instead."};
             }
 
             return std::nullopt;
@@ -349,8 +365,11 @@ namespace ctrace::stack::analysis
             diag.confidence = 0.85;
 
             std::ostringstream msg;
+            const std::string& clangMessage = classification->clangMessageOverride.empty()
+                                                  ? parsed.message
+                                                  : classification->clangMessageOverride;
             msg << "\t" << severityPrefix(diag.severity) << " " << classification->summary << "\n"
-                << "\t\t ↳ clang: " << parsed.message << "\n";
+                << "\t\t ↳ clang: " << clangMessage << "\n";
             diag.message = msg.str();
 
             out.push_back(std::move(diag));
