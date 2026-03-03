@@ -2134,9 +2134,8 @@ namespace ctrace::stack::analysis
                 return false;
 
             const llvm::StringRef calleeName = normalizeDeclarationCalleeName(callee->getName());
-            const bool isMemcpyLike =
-                calleeName == "memcpy" || calleeName == "memcpy_chk" ||
-                calleeName == "memmove" || calleeName == "memmove_chk";
+            const bool isMemcpyLike = calleeName == "memcpy" || calleeName == "memcpy_chk" ||
+                                      calleeName == "memmove" || calleeName == "memmove_chk";
             if (!isMemcpyLike)
                 return false;
             if (CB.arg_size() <= 2)
