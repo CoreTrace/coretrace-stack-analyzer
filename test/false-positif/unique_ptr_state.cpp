@@ -22,3 +22,6 @@ int main(void)
 }
 
 // not contains: stack pointer escape
+
+// at line 13, column 1
+// [ !!Warn ] local variable 'buf' is never initialized

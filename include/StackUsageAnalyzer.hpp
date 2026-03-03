@@ -63,6 +63,7 @@ namespace ctrace::stack
         bool dumpIRIsDir = false;
         bool demangle = false;
         std::string escapeModelPath;
+        std::string bufferModelPath;
         std::string resourceModelPath;
         bool resourceCrossTU = true;
         std::string resourceSummaryCacheDir = ".cache/resource-lifetime";
@@ -143,12 +144,18 @@ namespace ctrace::stack
         DuplicateIfCondition = 13,
         UninitializedLocalRead = 14,
         StackFrameTooLarge = 15,
-        ResourceLifetimeIssue = 16
+        ResourceLifetimeIssue = 16,
+        NullPointerDereference = 17,
+        CommandInjection = 18,
+        TOCTOURace = 19,
+        IntegerOverflow = 20,
+        TypeConfusion = 21,
+        OutOfBoundsRead = 22
     };
 
     template <> struct EnumTraits<DescriptiveErrorCode>
     {
-        static constexpr std::array<std::string_view, 17> names = {"None",
+        static constexpr std::array<std::string_view, 23> names = {"None",
                                                                    "StackBufferOverflow",
                                                                    "NegativeStackIndex",
                                                                    "VLAUsage",
@@ -164,7 +171,13 @@ namespace ctrace::stack
                                                                    "DuplicateIfCondition",
                                                                    "UninitializedLocalRead",
                                                                    "StackFrameTooLarge",
-                                                                   "ResourceLifetimeIssue"};
+                                                                   "ResourceLifetimeIssue",
+                                                                   "NullPointerDereference",
+                                                                   "CommandInjection",
+                                                                   "TOCTOURace",
+                                                                   "IntegerOverflow",
+                                                                   "TypeConfusion",
+                                                                   "OutOfBoundsRead"};
     };
 
     /*

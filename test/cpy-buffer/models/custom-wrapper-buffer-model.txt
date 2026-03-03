@@ -1,0 +1,5 @@
+# Wrapper-specific rules used by regression fixtures.
+
+bounded_write custom_memcpy_wrapper 0 2
+bounded_write custom_memset_wrapper 0 2
+bounded_write custom_memmove_wrapper 0 2

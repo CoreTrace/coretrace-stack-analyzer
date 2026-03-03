@@ -11,3 +11,27 @@ int main(void)
 
     return 0;
 }
+
+// at line 5, column 1
+// [ !!Warn ] local variable 'test0' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 6, column 1
+// [ !!Warn ] local variable 'test1' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 7, column 1
+// [ !!Warn ] local variable 'test2' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 8, column 1
+// [ !!Warn ] local variable 'test3' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 9, column 1
+// [ !!Warn ] local variable 'test4' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function
+
+// at line 10, column 1
+// [ !!Warn ] local variable 'test5' is never initialized
+//          ↳ declared without initializer and no definite write was found in this function

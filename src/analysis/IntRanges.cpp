@@ -97,11 +97,6 @@ namespace ctrace::stack::analysis
                             hasUB = true;
                             ub = c;
                             break;
-                        case ICmpInst::ICMP_NE:
-                            // approximation: V != C  => V <= C (very conservative)
-                            hasUB = true;
-                            ub = c;
-                            break;
                         default:
                             break;
                         }
@@ -130,10 +125,6 @@ namespace ctrace::stack::analysis
                         case ICmpInst::ICMP_EQ: // C == V => [C, C]
                             hasLB = true;
                             lb = c;
-                            hasUB = true;
-                            ub = c;
-                            break;
-                        case ICmpInst::ICMP_NE:
                             hasUB = true;
                             ub = c;
                             break;
@@ -173,10 +164,6 @@ namespace ctrace::stack::analysis
                             hasUB = true;
                             ub = c;
                             break;
-                        case ICmpInst::ICMP_NE:
-                            hasUB = true;
-                            ub = c;
-                            break;
                         default:
                             break;
                         }
@@ -207,10 +194,6 @@ namespace ctrace::stack::analysis
                             hasUB = true;
                             ub = c;
                             break;
-                        case ICmpInst::ICMP_NE:
-                            hasUB = true;
-                            ub = c;
-                            break;
                         default:
                             break;
                         }
@@ -222,7 +205,7 @@ namespace ctrace::stack::analysis
                 // Choose the predicate group
                 if (pred == ICmpInst::ICMP_SLT || pred == ICmpInst::ICMP_SLE ||
                     pred == ICmpInst::ICMP_SGT || pred == ICmpInst::ICMP_SGE ||
-                    pred == ICmpInst::ICMP_EQ || pred == ICmpInst::ICMP_NE)
+                    pred == ICmpInst::ICMP_EQ)
                 {
                     updateForSigned(valueIsOp0);
                 }

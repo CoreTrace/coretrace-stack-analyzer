@@ -17,3 +17,7 @@ int cross_tu_read_after_wrapper(void)
     fill_wrapper_cross_tu(&props);
     return value;
 }
+
+// at line 18, column 12
+// [ !!Warn ] potential read of uninitialized local variable 'value'
+//          ↳ this load may execute before any definite initialization on all control-flow paths

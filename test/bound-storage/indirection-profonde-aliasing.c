@@ -56,3 +56,10 @@ int main(void)
     char buf[n]; // alloca variable
     return 0;
 }
+
+// at line 56, column 5
+// [ !!Warn ] dynamic alloca on the stack for variable 'vla'
+
+// at line 13, column 5
+// [ !!Warn ] potential UB: invalid base reconstruction via offsetof/container_of
+// [!!!Error] derived pointer points OUTSIDE the valid object range

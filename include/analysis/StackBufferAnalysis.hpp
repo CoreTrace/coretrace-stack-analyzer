@@ -16,6 +16,12 @@ namespace llvm
 
 namespace ctrace::stack::analysis
 {
+    enum class BufferStorageClass
+    {
+        Stack,
+        Global,
+    };
+
     struct StackBufferOverflowIssue
     {
         std::string funcName;
@@ -24,6 +30,7 @@ namespace ctrace::stack::analysis
         StackSize indexOrUpperBound = 0; // used for upper bounds (UB) or constant index
         bool isWrite = false;
         bool indexIsConstant = false;
+        BufferStorageClass storageClass = BufferStorageClass::Stack;
         const llvm::Instruction* inst = nullptr;
 
         // Violation based on a lower bound (index potentially negative)

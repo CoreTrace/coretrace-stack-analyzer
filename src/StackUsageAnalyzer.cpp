@@ -35,6 +35,11 @@ namespace ctrace::stack
 
         const auto analyzeStart = Clock::now();
         AnalysisResult result = analyzeModule(*load.module, config);
+        if (!load.frontendDiagnostics.empty())
+        {
+            result.diagnostics.insert(result.diagnostics.end(), load.frontendDiagnostics.begin(),
+                                      load.frontendDiagnostics.end());
+        }
         if (config.timing)
         {
             const auto analyzeEnd = Clock::now();

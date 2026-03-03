@@ -9,6 +9,9 @@ on:
       - "**"
   workflow_dispatch:
 
+env:
+  CCACHE_DIR: ${{ github.workspace }}/.ccache
+
 jobs:
   build:
     name: Build on ${{ matrix.os }}
@@ -22,15 +25,19 @@ jobs:
         os: [ubuntu-latest, macos-latest]
 
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
       with:
-        fetch-depth: 0
+        # Shallow clone is enough for building. Steps that need history
+        # (changelog, merge-base) should override with their own fetch.
+        fetch-depth: 1
 
+    # Linux: install toolchain + accelerators
     - name: Install dependencies (Linux)
       if: runner.os == 'Linux'
       run: |
         sudo apt-get update
-        sudo apt-get install -y build-essential cmake python3
+        sudo apt-get install -y build-essential cmake python3 \
+          ninja-build ccache lld
         # Install LLVM and Clang 20
         wget -O - https://apt.llvm.org/llvm-snapshot.gpg.key | sudo apt-key add -
         sudo apt-add-repository "deb http://apt.llvm.org/jammy/ llvm-toolchain-jammy-20 main"
@@ -39,38 +46,75 @@ jobs:
         echo "LLVM_DIR=/usr/lib/llvm-20/lib/cmake/llvm" >> $GITHUB_ENV
         echo "Clang_DIR=/usr/lib/llvm-20/lib/cmake/clang" >> $GITHUB_ENV
 
+    # macOS: install toolchain
     - name: Install dependencies (macOS)
       if: runner.os == 'macOS'
       run: |
-        brew install cmake python llvm@20
+        brew install cmake python llvm@20 ninja ccache
         echo "LLVM_DIR=$(brew --prefix llvm@20)/lib/cmake/llvm" >> $GITHUB_ENV
         echo "Clang_DIR=$(brew --prefix llvm@20)/lib/cmake/clang" >> $GITHUB_ENV
         echo "$(brew --prefix llvm@20)/bin" >> $GITHUB_PATH
 
-    - name: Configure via build.sh (quick)
+    # ccache: restore + configure
+    - name: Restore ccache
+      uses: actions/cache@v4
+      with:
+        path: ${{ env.CCACHE_DIR }}
+        key: ccache-${{ runner.os }}-${{ github.ref_name }}-${{ hashFiles('CMakeLists.txt', 'src/**', 'include/**') }}
+        restore-keys: |
+          ccache-${{ runner.os }}-${{ github.ref_name }}-
+          ccache-${{ runner.os }}-
+
+    - name: Configure ccache
       run: |
-        ./build.sh --build-dir build-script --type Release --configure-only
+        ccache --set-config=cache_dir=${{ env.CCACHE_DIR }}
+        ccache --set-config=max_size=500M
+        ccache --set-config=compression=true
+        ccache -z
 
-    - name: Configure and Build (Linux/macOS)
-      if: runner.os == 'Linux' || runner.os == 'macOS'
+    # FetchContent cache (sources only)
+    - name: Restore FetchContent sources
+      uses: actions/cache@v4
+      with:
+        path: |
+          build/_deps/cc-src
+          build/_deps/coretrace-logger-src
+        key: fetchcontent-${{ runner.os }}-llvm20-${{ hashFiles('CMakeLists.txt', 'cmake/**') }}
+        restore-keys: |
+          fetchcontent-${{ runner.os }}-llvm20-
+
+    # Configure
+    - name: Configure
       run: |
-        mkdir -p build && cd build
-        cmake .. -DCMAKE_BUILD_TYPE=Release \
-                -DLLVM_DIR=${{ env.LLVM_DIR }} \
-                -DClang_DIR=${{ env.Clang_DIR }} \
-                -DUSE_SHARED_LIB=OFF \
-                -DBUILD_TESTS=OFF
+        cmake -S . -B build -G Ninja \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DLLVM_DIR=${{ env.LLVM_DIR }} \
+          -DClang_DIR=${{ env.Clang_DIR }} \
+          -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+          -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+          -DUSE_SHARED_LIB=OFF \
+          -DBUILD_TESTS=OFF \
+          ${{ runner.os == 'Linux' && '-DCMAKE_EXE_LINKER_FLAGS=-fuse-ld=lld -DCMAKE_SHARED_LINKER_FLAGS=-fuse-ld=lld' || '' }}
 
-        cmake --build . --config Release
+    # Build
+    - name: Build
+      run: cmake --build build --config Release
 
-    - name: Test Stack Usage Analyzer (Linux/macOS)
-      if: runner.os == 'Linux' || runner.os == 'macOS'
+    - name: Show ccache stats
+      if: always()
+      run: ccache -s
+
+    # Tests
+    - name: Test Stack Usage Analyzer
       timeout-minutes: 45
       run: |
         TEST_JOBS="$(python3 -c 'import os; print(max(1, min(8, os.cpu_count() or 1)))')"
         echo "Running run_test.py with ${TEST_JOBS} job(s)"
-        python3 -u run_test.py --jobs="${TEST_JOBS}"
+        EXTRA_ANALYZER_ARGS=""
+        CORETRACE_RUN_TEST_EXTRA_ANALYZER_ARGS="${EXTRA_ANALYZER_ARGS}" \
+          python3 -u run_test.py --jobs="${TEST_JOBS}"
 
+    # Self-analysis (Linux only)
     - name: Self-analysis (analyze own source code)
       if: runner.os == 'Linux'
       run: |

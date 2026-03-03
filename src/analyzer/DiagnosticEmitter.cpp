@@ -373,7 +373,11 @@ namespace ctrace::stack::analyzer
             else
             {
                 builder.errCode(DescriptiveErrorCode::StackBufferOverflow);
-                body << "\t[ !!Warn ] potential stack buffer overflow on variable '"
+                const bool isGlobalStorage =
+                    issue.storageClass == analysis::BufferStorageClass::Global;
+                body << "\t[ !!Warn ] potential "
+                     << (isGlobalStorage ? "buffer overflow on global variable '"
+                                         : "stack buffer overflow on variable '")
                      << issue.varName << "' (size " << issue.arraySize << ")\n";
                 if (!issue.aliasPath.empty())
                     body << "\t\t ↳ alias path: " << issue.aliasPath << "\n";
@@ -542,7 +546,16 @@ namespace ctrace::stack::analyzer
                  << " potential stack buffer overflow in " << issue.intrinsicName
                  << " on variable '" << issue.varName << "'\n";
             body << "\t\t ↳ destination stack buffer size: " << issue.destSizeBytes << " bytes\n";
-            body << "\t\t ↳ requested " << issue.lengthBytes << " bytes to be copied/initialized\n";
+            if (issue.hasExplicitLength)
+            {
+                body << "\t\t ↳ requested " << issue.lengthBytes
+                     << " bytes to be copied/initialized\n";
+            }
+            else
+            {
+                body << "\t\t ↳ this API has no explicit size argument; "
+                        "destination fit cannot be proven statically\n";
+            }
 
             DiagnosticBuilder builder;
             builder.function(issue.funcName)
@@ -585,6 +598,67 @@ namespace ctrace::stack::analyzer
                 .errCode(DescriptiveErrorCode::SizeMinusOneWrite)
                 .location(loc)
                 .message(body.str());
+            result.diagnostics.push_back(builder.build());
+        }
+    }
+
+    void appendIntegerOverflowDiagnostics(AnalysisResult& result,
+                                          const std::vector<analysis::IntegerOverflowIssue>& issues)
+    {
+        for (const auto& issue : issues)
+        {
+            const ResolvedLocation loc = resolveFromInstruction(issue.inst, true);
+
+            DiagnosticBuilder builder;
+            builder.function(issue.funcName)
+                .filePath(issue.filePath)
+                .severity(DiagnosticSeverity::Warning)
+                .errCode(DescriptiveErrorCode::IntegerOverflow)
+                .location(loc)
+                .confidence(0.70);
+
+            std::ostringstream body;
+            switch (issue.kind)
+            {
+            case analysis::IntegerOverflowIssueKind::ArithmeticInSizeComputation:
+                builder.ruleId("IntegerOverflow.SizeComputation").cwe("CWE-190");
+                body << "\t" << prefixForSeverity(DiagnosticSeverity::Warning)
+                     << " potential integer overflow in size computation before '" << issue.sinkName
+                     << "'\n";
+                body << kDiagIndentArrow << "operation: " << issue.operation << "\n";
+                body << kDiagIndentArrow
+                     << "overflowed size may under-allocate memory or make bounds checks unsound\n";
+                break;
+            case analysis::IntegerOverflowIssueKind::SignedToUnsignedSize:
+                builder.ruleId("IntegerConversion.SignedToSize").cwe("CWE-195");
+                body << "\t" << prefixForSeverity(DiagnosticSeverity::Warning)
+                     << " potential signed-to-size conversion before '" << issue.sinkName << "'\n";
+                body << kDiagIndentArrow
+                     << "a possibly negative signed value is converted to an unsigned length\n";
+                body
+                    << kDiagIndentArrow
+                    << "this can become a very large size value and trigger out-of-bounds access\n";
+                break;
+            case analysis::IntegerOverflowIssueKind::TruncationInSizeComputation:
+                builder.ruleId("IntegerTruncation.SizeComputation").cwe("CWE-197");
+                body << "\t" << prefixForSeverity(DiagnosticSeverity::Warning)
+                     << " potential integer truncation in size computation before '"
+                     << issue.sinkName << "'\n";
+                body << kDiagIndentArrow
+                     << "narrowing conversion may drop high bits and produce a smaller buffer "
+                        "size\n";
+                break;
+            case analysis::IntegerOverflowIssueKind::SignedArithmeticOverflow:
+                builder.ruleId("IntegerOverflow.SignedArithmetic").cwe("CWE-190");
+                body << "\t" << prefixForSeverity(DiagnosticSeverity::Warning)
+                     << " potential signed integer overflow in arithmetic operation\n";
+                body << kDiagIndentArrow << "operation: " << issue.operation << "\n";
+                body << kDiagIndentArrow
+                     << "result is returned without a provable non-overflow bound\n";
+                break;
+            }
+
+            builder.message(body.str());
             result.diagnostics.push_back(builder.build());
         }
     }
@@ -672,6 +746,9 @@ namespace ctrace::stack::analyzer
             }
 
             std::ostringstream body;
+            std::string ruleId = "UninitializedLocalRead";
+            std::string cwe = "CWE-457";
+            double confidence = 0.90;
             if (issue.kind == analysis::UninitializedLocalIssueKind::ReadBeforeDefiniteInit)
             {
                 body << "\t[ !!Warn ] potential read of uninitialized local variable '"
@@ -689,8 +766,24 @@ namespace ctrace::stack::analyzer
                     body << " in '" << issue.calleeName << "'";
                 body << "\n";
             }
+            else if (issue.kind ==
+                     analysis::UninitializedLocalIssueKind::ExposedUninitializedBytesViaSink)
+            {
+                ruleId = "InformationExposure.UninitializedStackBytes";
+                cwe = "CWE-200";
+                confidence = 0.80;
+                body << "\t[ !!Warn ] potential information leak: local variable '" << issue.varName
+                     << "' may expose uninitialized bytes through external sink";
+                if (!issue.calleeName.empty())
+                    body << " '" << issue.calleeName << "'";
+                body << "\n";
+                body << "\t\t ↳ transmitted range is not fully initialized on all control-flow "
+                        "paths\n";
+            }
             else
             {
+                ruleId = "UninitializedLocalVariable";
+                confidence = 0.75;
                 body << "\t[ !!Warn ] local variable '" << issue.varName
                      << "' is never initialized\n";
                 body << "\t\t ↳ declared without initializer and no definite write was found "
@@ -706,17 +799,7 @@ namespace ctrace::stack::analyzer
             if (haveLoc)
                 builder.lineColumn(line, column);
 
-            builder
-                .ruleId(
-                    (issue.kind == analysis::UninitializedLocalIssueKind::ReadBeforeDefiniteInit ||
-                     issue.kind ==
-                         analysis::UninitializedLocalIssueKind::ReadBeforeDefiniteInitViaCall)
-                        ? "UninitializedLocalRead"
-                        : "UninitializedLocalVariable")
-                .confidence((issue.kind == analysis::UninitializedLocalIssueKind::NeverInitialized)
-                                ? 0.75
-                                : 0.90)
-                .cwe("CWE-457");
+            builder.ruleId(ruleId).confidence(confidence).cwe(cwe);
 
             result.diagnostics.push_back(builder.build());
         }
@@ -890,6 +973,197 @@ namespace ctrace::stack::analyzer
     }
 
     void
+    appendCommandInjectionDiagnostics(AnalysisResult& result,
+                                      const std::vector<analysis::CommandInjectionIssue>& issues)
+    {
+        for (const auto& issue : issues)
+        {
+            const ResolvedLocation loc = resolveFromInstruction(issue.inst, true);
+
+            std::ostringstream body;
+            body << "\t" << prefixForSeverity(DiagnosticSeverity::Warning)
+                 << " potential command injection: non-literal command reaches '" << issue.sinkName
+                 << "'\n";
+            body << kDiagIndentArrow
+                 << "the command argument is not a compile-time string literal\n";
+            body << kDiagIndentArrow
+                 << "validate/sanitize external input or avoid shell command composition\n";
+
+            DiagnosticBuilder builder;
+            builder.function(issue.funcName)
+                .filePath(issue.filePath)
+                .severity(DiagnosticSeverity::Warning)
+                .errCode(DescriptiveErrorCode::CommandInjection)
+                .ruleId("CommandInjection.NonLiteralCommand")
+                .cwe("CWE-78")
+                .confidence(0.70)
+                .location(loc)
+                .message(body.str());
+            result.diagnostics.push_back(builder.build());
+        }
+    }
+
+    void appendTOCTOUDiagnostics(AnalysisResult& result,
+                                 const std::vector<analysis::TOCTOUIssue>& issues)
+    {
+        for (const auto& issue : issues)
+        {
+            const ResolvedLocation loc = resolveFromInstruction(issue.inst, true);
+
+            std::ostringstream body;
+            body << "\t" << prefixForSeverity(DiagnosticSeverity::Warning)
+                 << " potential TOCTOU race: path checked with '" << issue.checkApi
+                 << "' then used with '" << issue.useApi << "'\n";
+            body << kDiagIndentArrow
+                 << "the file target may change between check and use operations\n";
+            body << kDiagIndentArrow
+                 << "prefer descriptor-based validation (open + fstat) on the same handle\n";
+
+            DiagnosticBuilder builder;
+            builder.function(issue.funcName)
+                .filePath(issue.filePath)
+                .severity(DiagnosticSeverity::Warning)
+                .errCode(DescriptiveErrorCode::TOCTOURace)
+                .ruleId("TOCTOU.PathCheckThenUse")
+                .cwe("CWE-367")
+                .confidence(0.70)
+                .location(loc)
+                .message(body.str());
+            result.diagnostics.push_back(builder.build());
+        }
+    }
+
+    void appendNullDerefDiagnostics(AnalysisResult& result,
+                                    const std::vector<analysis::NullDerefIssue>& issues)
+    {
+        for (const auto& issue : issues)
+        {
+            const ResolvedLocation loc = resolveFromInstruction(issue.inst, true);
+
+            DiagnosticSeverity severity = DiagnosticSeverity::Error;
+            double confidence = 0.75;
+            std::ostringstream body;
+            body << "\t" << prefixForSeverity(DiagnosticSeverity::Error)
+                 << " potential null pointer dereference on '" << issue.pointerName << "'\n";
+
+            switch (issue.kind)
+            {
+            case analysis::NullDerefIssueKind::DirectNullPointer:
+                body << kDiagIndentArrow
+                     << "the dereferenced pointer is directly null at this instruction\n";
+                break;
+            case analysis::NullDerefIssueKind::NullBranchDereference:
+                body << kDiagIndentArrow
+                     << "control flow proves pointer is null on this branch before dereference\n";
+                break;
+            case analysis::NullDerefIssueKind::NullStoredInLocalSlot:
+                body << kDiagIndentArrow
+                     << "a preceding local-slot store sets the pointer to null before use\n";
+                break;
+            case analysis::NullDerefIssueKind::UncheckedAllocatorResult:
+                severity = DiagnosticSeverity::Warning;
+                confidence = 0.70;
+                body.str("");
+                body.clear();
+                body << "\t" << prefixForSeverity(DiagnosticSeverity::Warning)
+                     << " potential null pointer dereference on '" << issue.pointerName << "'\n";
+                body << kDiagIndentArrow
+                     << "pointer comes from allocator return value and is dereferenced without a "
+                        "provable null-check\n";
+                break;
+            }
+
+            DiagnosticBuilder builder;
+            builder.function(issue.funcName)
+                .filePath(issue.filePath)
+                .severity(severity)
+                .errCode(DescriptiveErrorCode::NullPointerDereference)
+                .ruleId("NullPointerDereference")
+                .cwe("CWE-476")
+                .confidence(confidence)
+                .location(loc)
+                .message(body.str());
+            result.diagnostics.push_back(builder.build());
+        }
+    }
+
+    void appendTypeConfusionDiagnostics(AnalysisResult& result,
+                                        const std::vector<analysis::TypeConfusionIssue>& issues)
+    {
+        for (const auto& issue : issues)
+        {
+            const ResolvedLocation loc = resolveFromInstruction(issue.inst, true);
+
+            std::ostringstream body;
+            body << "\t" << prefixForSeverity(DiagnosticSeverity::Warning)
+                 << " potential type confusion: incompatible struct views on the same pointer\n";
+            body << kDiagIndentArrow << "smaller observed view: '" << issue.smallerViewType << "' ("
+                 << issue.smallerViewSizeBytes << " bytes)\n";
+            body << kDiagIndentArrow << "accessed view: '" << issue.accessedViewType
+                 << "' at byte offset " << issue.accessOffsetBytes << "\n";
+            body << kDiagIndentArrow
+                 << "field access may read/write outside the actual object layout\n";
+
+            DiagnosticBuilder builder;
+            builder.function(issue.funcName)
+                .filePath(issue.filePath)
+                .severity(DiagnosticSeverity::Warning)
+                .errCode(DescriptiveErrorCode::TypeConfusion)
+                .ruleId("TypeConfusion.IncompatibleStructView")
+                .cwe("CWE-843")
+                .confidence(0.65)
+                .location(loc)
+                .message(body.str());
+            result.diagnostics.push_back(builder.build());
+        }
+    }
+
+    void appendOOBReadDiagnostics(AnalysisResult& result,
+                                  const std::vector<analysis::OOBReadIssue>& issues)
+    {
+        for (const auto& issue : issues)
+        {
+            const ResolvedLocation loc = resolveFromInstruction(issue.inst, true);
+
+            DiagnosticBuilder builder;
+            builder.function(issue.funcName)
+                .filePath(issue.filePath)
+                .severity(DiagnosticSeverity::Warning)
+                .errCode(DescriptiveErrorCode::OutOfBoundsRead)
+                .location(loc)
+                .confidence(0.70)
+                .cwe("CWE-125");
+
+            std::ostringstream body;
+            if (issue.kind == analysis::OOBReadIssueKind::MissingNullTerminator)
+            {
+                builder.ruleId("OutOfBoundsRead.MissingNullTerminator");
+                body << "\t" << prefixForSeverity(DiagnosticSeverity::Warning)
+                     << " potential out-of-bounds read: string buffer '" << issue.bufferName
+                     << "' may be missing a null terminator before '" << issue.apiName << "'\n";
+                body << kDiagIndentArrow << "buffer size: " << issue.bufferSizeBytes
+                     << " bytes, last write size: " << issue.writeSizeBytes << " bytes\n";
+                body << kDiagIndentArrow
+                     << "unterminated strings can make read APIs scan past buffer bounds\n";
+            }
+            else
+            {
+                builder.ruleId("OutOfBoundsRead.HeapIndex");
+                body << "\t" << prefixForSeverity(DiagnosticSeverity::Warning)
+                     << " potential out-of-bounds read on heap buffer '" << issue.bufferName
+                     << "' via unchecked index\n";
+                body << kDiagIndentArrow << "inferred heap capacity: " << issue.capacityElements
+                     << " element(s)\n";
+                body << kDiagIndentArrow
+                     << "index value is not proven to be within [0, capacity-1]\n";
+            }
+
+            builder.message(body.str());
+            result.diagnostics.push_back(builder.build());
+        }
+    }
+
+    void
     appendResourceLifetimeDiagnostics(AnalysisResult& result,
                                       const std::vector<analysis::ResourceLifetimeIssue>& issues)
     {
@@ -953,6 +1227,26 @@ namespace ctrace::stack::analyzer
                 body << kDiagIndentArrow
                      << "include callee definitions in inputs or extend --resource-model to "
                         "improve precision\n";
+                break;
+            case analysis::ResourceLifetimeIssueKind::UseAfterRelease:
+                builder.severity(DiagnosticSeverity::Error)
+                    .ruleId("ResourceLifetime.UseAfterRelease")
+                    .cwe("CWE-416");
+                body << "\t" << prefixForSeverity(DiagnosticSeverity::Error)
+                     << " potential use-after-release: '" << issue.resourceKind << "' handle '"
+                     << issue.handleName << "' is used after a release in this function\n";
+                body << kDiagIndentArrow
+                     << "a later dereference/call argument use may access invalid memory\n";
+                break;
+            case analysis::ResourceLifetimeIssueKind::ReleasedHandleEscapes:
+                builder.severity(DiagnosticSeverity::Warning)
+                    .ruleId("ResourceLifetime.ReleasedHandleEscapes")
+                    .cwe("CWE-416");
+                body << "\t" << prefixForSeverity(DiagnosticSeverity::Warning)
+                     << " released handle derived from '" << issue.handleName
+                     << "' may escape through a returned owner object\n";
+                body << kDiagIndentArrow
+                     << "caller-visible object may contain dangling pointer state\n";
                 break;
             }
 

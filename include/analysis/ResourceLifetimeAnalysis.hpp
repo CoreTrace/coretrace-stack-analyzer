@@ -46,7 +46,9 @@ namespace ctrace::stack::analysis
         MissingRelease,
         DoubleRelease,
         MissingDestructorRelease,
-        IncompleteInterproc
+        IncompleteInterproc,
+        UseAfterRelease,
+        ReleasedHandleEscapes
     };
 
     struct ResourceLifetimeIssue

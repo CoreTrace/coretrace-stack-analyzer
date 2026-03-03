@@ -14,3 +14,7 @@ int resource_lifetime_release_without_acquire_still_errors(VkDevice device)
 // not contains: inter-procedural resource analysis incomplete: handle 'stagingBuffer'
 // at line 10, column 5
 // [!!!Error] potential double release: 'VkBuffer' handle 'stagingBuffer' is released without a matching acquire in this function
+
+// at line 10, column 29
+// [ !!Warn ] potential read of uninitialized local variable 'stagingBuffer'
+//          ↳ this load may execute before any definite initialization on all control-flow paths

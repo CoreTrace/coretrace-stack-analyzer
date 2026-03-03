@@ -12,3 +12,7 @@ int main(void)
 
     return 0;
 }
+
+// at line 11, column 1
+// [ !!Warn ] local variable 'test' is never initialized
+//             ↳ declared without initializer and no definite write was found in this function

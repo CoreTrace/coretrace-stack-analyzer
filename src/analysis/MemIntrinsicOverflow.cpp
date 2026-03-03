@@ -1,5 +1,7 @@
 #include "analysis/MemIntrinsicOverflow.hpp"
+#include "analysis/BufferWriteModel.hpp"
 
+#include <iostream>
 #include <optional>
 
 #include <llvm/IR/Constants.h>
@@ -16,6 +18,15 @@ namespace ctrace::stack::analysis
 {
     namespace
     {
+        struct ResolvedSink
+        {
+            bool valid = false;
+            bool hasExplicitLength = false;
+            unsigned destArgIndex = 0;
+            unsigned sizeArgIndex = 0;
+            std::string displayName;
+        };
+
         static std::optional<StackSize> getAllocaTotalSizeBytes(const llvm::AllocaInst* AI,
                                                                 const llvm::DataLayout& DL)
         {
@@ -38,8 +49,132 @@ namespace ctrace::stack::analysis
             return std::nullopt;
         }
 
+        static llvm::Function* resolveDirectCallee(llvm::CallBase* CB)
+        {
+            using namespace llvm;
+            if (!CB)
+                return nullptr;
+            if (Function* direct = CB->getCalledFunction())
+                return direct;
+            Value* callee = CB->getCalledOperand();
+            if (!callee)
+                return nullptr;
+            return dyn_cast<Function>(callee->stripPointerCasts());
+        }
+
+        static ResolvedSink resolveBuiltInSink(llvm::CallBase* CB)
+        {
+            using namespace llvm;
+            ResolvedSink sink;
+            if (!CB)
+                return sink;
+
+            if (auto* II = dyn_cast<IntrinsicInst>(CB))
+            {
+                switch (II->getIntrinsicID())
+                {
+                case Intrinsic::memcpy:
+                    sink.valid = true;
+                    sink.hasExplicitLength = true;
+                    sink.destArgIndex = 0;
+                    sink.sizeArgIndex = 2;
+                    sink.displayName = "memcpy";
+                    return sink;
+                case Intrinsic::memset:
+                    sink.valid = true;
+                    sink.hasExplicitLength = true;
+                    sink.destArgIndex = 0;
+                    sink.sizeArgIndex = 2;
+                    sink.displayName = "memset";
+                    return sink;
+                case Intrinsic::memmove:
+                    sink.valid = true;
+                    sink.hasExplicitLength = true;
+                    sink.destArgIndex = 0;
+                    sink.sizeArgIndex = 2;
+                    sink.displayName = "memmove";
+                    return sink;
+                default:
+                    break;
+                }
+            }
+
+            Function* callee = resolveDirectCallee(CB);
+            if (!callee)
+                return sink;
+
+            StringRef calleeName = callee->getName();
+            if (calleeName == "memcpy" || calleeName == "__memcpy_chk")
+            {
+                sink.valid = true;
+                sink.hasExplicitLength = true;
+                sink.destArgIndex = 0;
+                sink.sizeArgIndex = 2;
+                sink.displayName = "memcpy";
+                return sink;
+            }
+            if (calleeName == "memset" || calleeName == "__memset_chk")
+            {
+                sink.valid = true;
+                sink.hasExplicitLength = true;
+                sink.destArgIndex = 0;
+                sink.sizeArgIndex = 2;
+                sink.displayName = "memset";
+                return sink;
+            }
+            if (calleeName == "memmove" || calleeName == "__memmove_chk")
+            {
+                sink.valid = true;
+                sink.hasExplicitLength = true;
+                sink.destArgIndex = 0;
+                sink.sizeArgIndex = 2;
+                sink.displayName = "memmove";
+                return sink;
+            }
+
+            return sink;
+        }
+
+        static ResolvedSink resolveModelSink(llvm::CallBase* CB, const BufferWriteModel* model,
+                                             BufferWriteRuleMatcher* matcher)
+        {
+            ResolvedSink sink;
+            if (!CB || !model || !matcher)
+                return sink;
+
+            llvm::Function* callee = resolveDirectCallee(CB);
+            if (!callee)
+                return sink;
+
+            const BufferWriteRule* rule =
+                matcher->findMatchingRule(*model, *callee, CB->arg_size());
+            if (!rule)
+                return sink;
+
+            sink.valid = true;
+            sink.hasExplicitLength = (rule->kind == BufferWriteRuleKind::BoundedWrite);
+            sink.destArgIndex = rule->destArgIndex;
+            sink.sizeArgIndex = rule->sizeArgIndex;
+            sink.displayName = callee->getName().str();
+            return sink;
+        }
+
+        static const llvm::AllocaInst* resolveStackDestinationAlloca(llvm::Value* destinationPtr)
+        {
+            using namespace llvm;
+            if (!destinationPtr)
+                return nullptr;
+
+            const Value* cur = destinationPtr->stripPointerCasts();
+            if (auto* GEP = dyn_cast<GetElementPtrInst>(cur))
+                cur = GEP->getPointerOperand();
+            return dyn_cast<AllocaInst>(cur);
+        }
+
         static void analyzeMemIntrinsicOverflowsInFunction(llvm::Function& F,
                                                            const llvm::DataLayout& DL,
+                                                           const BufferWriteModel* externalModel,
+                                                           BufferWriteRuleMatcher* ruleMatcher,
                                                            std::vector<MemIntrinsicIssue>& out)
         {
             using namespace llvm;
@@ -55,63 +190,20 @@ namespace ctrace::stack::analysis
                     if (!CB)
                         continue;
 
-                    Function* callee = CB->getCalledFunction();
-                    if (!callee)
+                    ResolvedSink sink = resolveBuiltInSink(CB);
+                    const ResolvedSink modeledSink =
+                        resolveModelSink(CB, externalModel, ruleMatcher);
+                    if (modeledSink.valid)
+                        sink = modeledSink;
+
+                    if (!sink.valid)
                         continue;
 
-                    StringRef name = callee->getName();
-
-                    enum class MemKind
-                    {
-                        None,
-                        MemCpy,
-                        MemSet,
-                        MemMove
-                    };
-                    auto classifyByName = [&](StringRef calleeName) -> MemKind
-                    {
-                        if (calleeName == "memcpy" || calleeName.contains("memcpy"))
-                            return MemKind::MemCpy;
-                        if (calleeName == "memset" || calleeName.contains("memset"))
-                            return MemKind::MemSet;
-                        if (calleeName == "memmove" || calleeName.contains("memmove"))
-                            return MemKind::MemMove;
-                        return MemKind::None;
-                    };
-
-                    MemKind kind = [&]() -> MemKind
-                    {
-                        if (auto* II = dyn_cast<IntrinsicInst>(CB))
-                        {
-                            switch (II->getIntrinsicID())
-                            {
-                            case Intrinsic::memcpy:
-                                return MemKind::MemCpy;
-                            case Intrinsic::memset:
-                                return MemKind::MemSet;
-                            case Intrinsic::memmove:
-                                return MemKind::MemMove;
-                            default:
-                                break;
-                            }
-                        }
-                        return classifyByName(name);
-                    }();
-
-                    if (kind == MemKind::None)
+                    if (CB->arg_size() <= sink.destArgIndex)
                         continue;
 
-                    if (CB->arg_size() < 3)
-                        continue;
-
-                    Value* dest = CB->getArgOperand(0);
-
-                    const Value* cur = dest->stripPointerCasts();
-                    if (auto* GEP = dyn_cast<GetElementPtrInst>(cur))
-                    {
-                        cur = GEP->getPointerOperand();
-                    }
-                    const AllocaInst* AI = dyn_cast<AllocaInst>(cur);
+                    Value* dest = CB->getArgOperand(sink.destArgIndex);
+                    const AllocaInst* AI = resolveStackDestinationAlloca(dest);
                     if (!AI)
                         continue;
 
@@ -120,35 +212,31 @@ namespace ctrace::stack::analysis
                         continue;
                     StackSize destBytes = *maybeSize;
 
-                    Value* lenV = CB->getArgOperand(2);
-                    auto* lenC = dyn_cast<ConstantInt>(lenV);
-                    if (!lenC)
-                        continue;
-
-                    uint64_t len = lenC->getZExtValue();
-                    if (len <= destBytes)
-                        continue;
-
                     MemIntrinsicIssue issue;
                     issue.funcName = F.getName().str();
                     issue.varName = AI->hasName() ? AI->getName().str() : std::string("<unnamed>");
                     issue.destSizeBytes = destBytes;
-                    issue.lengthBytes = len;
                     issue.inst = &I;
+                    issue.intrinsicName = sink.displayName;
 
-                    switch (kind)
+                    if (sink.hasExplicitLength)
                     {
-                    case MemKind::MemCpy:
-                        issue.intrinsicName = "memcpy";
-                        break;
-                    case MemKind::MemSet:
-                        issue.intrinsicName = "memset";
-                        break;
-                    case MemKind::MemMove:
-                        issue.intrinsicName = "memmove";
-                        break;
-                    default:
-                        break;
+                        if (CB->arg_size() <= sink.sizeArgIndex)
+                            continue;
+                        Value* lenV = CB->getArgOperand(sink.sizeArgIndex);
+                        auto* lenC = dyn_cast<ConstantInt>(lenV);
+                        if (!lenC)
+                            continue;
+
+                        const uint64_t len = lenC->getZExtValue();
+                        if (len <= destBytes)
+                            continue;
+                        issue.lengthBytes = len;
+                        issue.hasExplicitLength = true;
+                    }
+                    else
+                    {
+                        issue.hasExplicitLength = false;
                     }
 
                     out.push_back(std::move(issue));
@@ -159,8 +247,25 @@ namespace ctrace::stack::analysis
 
     std::vector<MemIntrinsicIssue>
     analyzeMemIntrinsicOverflows(llvm::Module& mod, const llvm::DataLayout& DL,
-                                 const std::function<bool(const llvm::Function&)>& shouldAnalyze)
+                                 const std::function<bool(const llvm::Function&)>& shouldAnalyze,
+                                 const std::string& bufferModelPath)
     {
+        BufferWriteModel externalModel;
+        BufferWriteRuleMatcher ruleMatcher;
+        const BufferWriteModel* externalModelPtr = nullptr;
+        if (!bufferModelPath.empty())
+        {
+            std::string parseError;
+            if (!parseBufferWriteModel(bufferModelPath, externalModel, parseError))
+            {
+                std::cerr << "Buffer model load error: " << parseError << "\n";
+            }
+            else
+            {
+                externalModelPtr = &externalModel;
+            }
+        }
+
         std::vector<MemIntrinsicIssue> issues;
         for (llvm::Function& F : mod)
         {
@@ -168,7 +273,7 @@ namespace ctrace::stack::analysis
                 continue;
             if (!shouldAnalyze(F))
                 continue;
-            analyzeMemIntrinsicOverflowsInFunction(F, DL, issues);
+            analyzeMemIntrinsicOverflowsInFunction(F, DL, externalModelPtr, &ruleMatcher, issues);
         }
         return issues;
     }

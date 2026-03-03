@@ -50,6 +50,7 @@ namespace ctrace::stack::analysis
     {
         ReadBeforeDefiniteInit,
         ReadBeforeDefiniteInitViaCall,
+        ExposedUninitializedBytesViaSink,
         NeverInitialized
     };
 

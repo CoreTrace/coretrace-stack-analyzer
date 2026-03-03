@@ -94,46 +94,57 @@ Notes:
 - If no compile database is found, it can fallback to git-tracked sources
   (`inputs-from-git-fallback`, enabled by default).
 
-### Docker image for registry-based CI
+### Docker image for local and CI workflows
 
-When you want a reusable analyzer image in CI (instead of rebuilding the tool each run),
-build and publish:
-- `Dockerfile`: analyzer runtime image with sensible defaults for full-repo analysis.
-- `Dockerfile.ci`: CI gate image (entrypoint = `run_code_analysis.py`).
+`Dockerfile` is multi-target and supports three modes:
 
-Default behavior of `Dockerfile` runtime entrypoint:
-- auto-detect `compile_commands.json` from `/workspace/build/compile_commands.json`
-  (fallback: `/workspace/compile_commands.json`)
-- `--analysis-profile=fast`
-- `--compdb-fast` (drops heavy/platform-specific compile flags from compile DB)
-- `--resource-summary-cache-memory-only`
-- `--resource-model=/models/resource-lifetime/generic.txt`
-- if `compile_commands.json` contains stale absolute paths (e.g. `/tmp/evan/...`)
-  while the repo is mounted at `/workspace`, a compatibility symlink is created
-  automatically when safe (so analysis can still run without extra Docker flags)
-
-Runtime image is intentionally analyzer-only (toolchain/runtime + analyzer models).
-Project-specific SDKs/headers must be installed in the target CI job or in a derived image.
-
-Simple local run (analyze whole repo from compile database):
+1. `dev` mode (interactive toolchain container, no prebuild)
 ```zsh
-docker build -t coretrace-stack-analyzer .
-docker run --rm -v "$PWD:/workspace" coretrace-stack-analyzer
+docker build --target dev -t coretrace-stack-analyzer:dev .
+docker run --rm -it -v "$PWD:/repo" -w /repo coretrace-stack-analyzer:dev
+```
+Use this mode when you want to run `cmake`, `ctest`, `run_test.py`, or debug locally inside a Linux environment.
+
+2. `builder` mode (compile artifacts)
+```zsh
+docker build --target builder -t coretrace-stack-analyzer:builder .
+docker create --name coretrace-builder coretrace-stack-analyzer:builder
+docker cp coretrace-builder:/repo/build/stack_usage_analyzer ./build/stack_usage_analyzer
+docker rm coretrace-builder
+```
+Use this mode in CI when you only need the built analyzer binary (or build artifacts) and not the runtime wrapper.
+
+3. `runtime` mode (production analyzer container)
+```zsh
+docker build --target runtime -t coretrace-stack-analyzer:runtime .
+docker run --rm -v "$PWD:/workspace" coretrace-stack-analyzer:runtime
 ```
 
-Override defaults:
+Default behavior of runtime entrypoint (`scripts/docker/coretrace_entrypoint.py`):
+- auto-detect `compile_commands.json` from `/workspace/build/compile_commands.json`,
+  then `/workspace/compile_commands.json`, then recursive search under `/workspace`
+- add `--analysis-profile=fast` unless already set
+- add `--compdb-fast` by default (can be disabled with `CORETRACE_COMPDB_FAST=0`)
+- add `--resource-summary-cache-memory-only` unless a resource cache option is already set
+- add `--resource-model=/models/resource-lifetime/generic.txt` when present
+- optionally create a compatibility symlink for stale absolute build paths in compile DB,
+  restricted by `CORETRACE_COMPAT_SYMLINK_ALLOWED_ROOTS` (default: `/tmp:/var/tmp`)
+
+Override defaults in runtime mode:
 ```zsh
-docker run --rm -v "$PWD:/workspace" coretrace-stack-analyzer \
+docker run --rm -v "$PWD:/workspace" coretrace-stack-analyzer:runtime \
   --analysis-profile=full \
   --warnings-only
 ```
 
-Bypass defaults entirely:
+Bypass wrapper defaults entirely:
 ```zsh
-docker run --rm -v "$PWD:/workspace" coretrace-stack-analyzer --raw --help
+docker run --rm -v "$PWD:/workspace" coretrace-stack-analyzer:runtime --raw --help
 ```
 
-Build and push:
+For registry-based policy gating, `Dockerfile.ci` is still available (entrypoint = `run_code_analysis.py`).
+
+Build and push CI image:
 ```zsh
 docker build -f Dockerfile.ci \
   --build-arg VERSION=0.1.0 \
@@ -143,7 +154,7 @@ docker build -f Dockerfile.ci \
 docker push ghcr.io/<org>/coretrace-stack-analyzer-ci:0.1.0
 ```
 
-Run in CI (entrypoint already targets `run_code_analysis.py`):
+Run CI image:
 ```zsh
 docker run --rm \
   -u "$(id -u):$(id -g)" \
@@ -222,6 +233,7 @@ Ready-to-adapt workflow examples:
 --include-compdb-deps includes `_deps` entries when inputs are auto-discovered from compile_commands.json
 --jobs=<N> parallel jobs for multi-file loading/analysis and cross-TU resource summary build (default: 1)
 --escape-model=<path> loads external noescape rules for stack pointer escape analysis (`noescape_arg`)
+--buffer-model=<path> loads external buffer write rules for copy/string overflow checks (`bounded_write`/`unbounded_write`)
 --resource-model=<path> loads external acquire/release rules for generic resource lifetime checks
 --resource-cross-tu enables cross-TU resource summaries for resource lifetime analysis (default: on)
 --no-resource-cross-tu disables cross-TU resource summaries
@@ -527,6 +539,34 @@ For test files, `run_test.py` supports per-file selection with:
 
 ---
 
+Buffer write API contracts (`--buffer-model=<path>`)
+
+- Why this exists:
+  - Many overflow-prone APIs are project-specific wrappers (`copy_bytes`, `my_strcpy`, etc.).
+  - Encoding these contracts in a model avoids hardcoding function names in analyzer code.
+  - You can model both bounded writes (explicit length arg) and unbounded writes.
+
+Model format (`--buffer-model=<path>`):
+
+```text
+bounded_write <function-pattern> <dst-arg-index> <size-arg-index>
+unbounded_write <function-pattern> <dst-arg-index>
+```
+
+Example model:
+
+```text
+bounded_write memcpy 0 2
+bounded_write strncpy 0 2
+unbounded_write strcpy 0
+unbounded_write strcat 0
+```
+
+For test files, `run_test.py` supports per-file selection with:
+`// buffer-model: <path>`.
+
+---
+
 Actually done:
 
 - 1. Multi-file CLI inputs with deterministic ordering and aggregated output.
@@ -535,7 +575,7 @@ Actually done:
 - 4. Compile args passthrough: `-I`, `-D`, `--compile-arg`.
 - 5. Dynamic alloca / VLA detection, including user-controlled sizes, upper-bound inference, and recursion-aware severity (errors for infinite recursion or oversized allocations, warnings for other dynamic sizes).
 - 6. Deriving human-friendly names for unnamed allocas in diagnostics.
-- 7. Detection of memcpy/memset overflows on stack buffers.
+- 7. Detection of stack buffer overflows in memory/string write APIs (built-in + model-driven).
 - 8. Warning when a function performs multiple stores into the same stack buffer.
 - 9. Deeper traversal analysis: constraint propagation.
 - 10. Detection of deep indirection in aliasing.

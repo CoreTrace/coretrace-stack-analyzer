@@ -27,7 +27,7 @@ int main(void)
     // at line 34, column 18
     // [ !!Warn ] potential stack buffer overflow on variable 'test1' (size 10)
     // ↳ alias path: test1
-    // ↳ index variable may go up to 10 (array last valid index: 9)
+    // ↳ index variable may go up to 11 (array last valid index: 9)
     // ↳ (this is a write access)
     char test2[10];
     if (i > 10)
@@ -35,3 +35,6 @@ int main(void)
 
     return 0;
 }
+
+// at line 32, column 1
+// [ !!Warn ] local variable 'test2' is never initialized

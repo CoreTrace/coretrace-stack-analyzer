@@ -24,3 +24,6 @@ int main(void)
 {
     return rec(4);
 }
+
+// at line 20, column 14
+// [ !!Warn ] potential signed integer overflow in arithmetic operation

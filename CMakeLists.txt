@@ -68,14 +68,20 @@ set(STACK_ANALYZER_SOURCES
     src/analysis/AnalyzerUtils.cpp
     src/analysis/CompileCommands.cpp
     src/analysis/ConstParamAnalysis.cpp
+    src/analysis/CommandInjectionAnalysis.cpp
     src/analysis/DuplicateIfCondition.cpp
     src/analysis/DynamicAlloca.cpp
+    src/analysis/BufferWriteModel.cpp
+    src/analysis/FrontendDiagnostics.cpp
     src/analysis/FunctionFilter.cpp
     src/analysis/IRValueUtils.cpp
     src/analysis/IntRanges.cpp
+    src/analysis/IntegerOverflowAnalysis.cpp
     src/analysis/InputPipeline.cpp
     src/analysis/InvalidBaseReconstruction.cpp
     src/analysis/MemIntrinsicOverflow.cpp
+    src/analysis/NullDerefAnalysis.cpp
+    src/analysis/OOBReadAnalysis.cpp
     src/analysis/ResourceLifetimeAnalysis.cpp
     src/analysis/Reachability.cpp
     src/analysis/SizeMinusKWrites.cpp
@@ -84,6 +90,8 @@ set(STACK_ANALYZER_SOURCES
     src/analysis/StackPointerEscape.cpp
     src/analysis/StackPointerEscapeModel.cpp
     src/analysis/StackPointerEscapeResolver.cpp
+    src/analysis/TOCTOUAnalysis.cpp
+    src/analysis/TypeConfusionAnalysis.cpp
     src/analysis/UninitializedVarAnalysis.cpp
     src/report/ReportSerialization.cpp
     src/mangle.cpp

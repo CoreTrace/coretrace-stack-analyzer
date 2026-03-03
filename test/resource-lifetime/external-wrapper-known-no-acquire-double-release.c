@@ -18,3 +18,6 @@ int external_wrapper_known_no_acquire_double_release(void)
 
 // at line 15, column 5
 // [!!!Error] potential double release: 'GenericHandle' handle 'h' is released without a matching acquire in this function
+
+// at line 15, column 20
+// [ !!Warn ] potential read of uninitialized local variable 'h'

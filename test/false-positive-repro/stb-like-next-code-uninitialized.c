@@ -55,3 +55,9 @@ int fp_stb_like_next_code_uninitialized(Huff* z, const u8* sizelist, int num)
 
 // at line 22, column 9
 // [ !!Warn ] potential read of uninitialized local variable 'sizes'
+
+// at line 30, column 24
+// [ !!Warn ] potential read of uninitialized local variable 'sizes'
+
+// at line 33, column 14
+// [ !!Warn ] potential read of uninitialized local variable 'sizes'

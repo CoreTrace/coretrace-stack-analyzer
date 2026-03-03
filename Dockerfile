@@ -1,31 +1,39 @@
 # =============================================================================
-# CoreTrace Stack Analyzer — Production Docker Image
+# CoreTrace Stack Analyzer — Docker Image
 # =============================================================================
-# Multi-stage build: builds the analyzer, then creates a slim runtime image.
+# This Dockerfile supports 3 user-facing targets:
+#   - dev:
+#       toolchain + repo checkout, no build; default command is an interactive shell.
+#       Use it to run cmake/build/tests manually.
+#   - builder:
+#       compiles the analyzer into /repo/build/stack_usage_analyzer.
+#       Use it in CI or to extract binaries/artifacts.
+#   - runtime:
+#       production image with analyzer + models + Docker entrypoint wrapper.
+#       Default workdir is /workspace and entrypoint auto-resolves compile_commands.json.
 #
-# Default runtime behavior (via entrypoint wrapper):
-# - auto-detect /workspace/build/compile_commands.json (fallback: /workspace/compile_commands.json)
-# - --analysis-profile=fast
-# - --compdb-fast
-# - --resource-summary-cache-memory-only
-# - --resource-model=/models/resource-lifetime/generic.txt
+# Typical commands:
+#   # 1) Dev mode (interactive)
+#   docker build --target dev -t coretrace-stack-analyzer:dev .
+#   docker run --rm -it -v "$PWD:/repo" -w /repo coretrace-stack-analyzer:dev
 #
-# Usage:
-#   docker build -t coretrace-stack-analyzer .
-#   docker run --rm -v $(pwd):/workspace coretrace-stack-analyzer
+#   # 2) Builder mode (compile artifacts)
+#   docker build --target builder -t coretrace-stack-analyzer:builder .
+#   docker create --name coretrace-builder coretrace-stack-analyzer:builder
+#   docker cp coretrace-builder:/repo/build/stack_usage_analyzer ./build/stack_usage_analyzer
+#   docker rm coretrace-builder
 #
-# Override defaults with explicit args:
-#   docker run --rm -v $(pwd):/workspace coretrace-stack-analyzer \
-#       --analysis-profile=full --resource-model=/models/resource-lifetime/generic.txt
-#
-# Bypass defaults completely:
-#   docker run --rm -v $(pwd):/workspace coretrace-stack-analyzer --raw --help
+#   # 3) Runtime mode (analyze project from compile_commands.json)
+#   docker build --target runtime -t coretrace-stack-analyzer:runtime .
+#   docker run --rm -v "$PWD:/workspace" coretrace-stack-analyzer:runtime
+#   # pass --raw to bypass wrapper defaults:
+#   docker run --rm -v "$PWD:/workspace" coretrace-stack-analyzer:runtime --raw --help
 # =============================================================================
 
 # ---------------------------------------------------------------------------
-# Stage 1: Build
+# Stage 0: Base (toolchain + build deps)
 # ---------------------------------------------------------------------------
-FROM ubuntu:24.04 AS builder
+FROM ubuntu:24.04 AS base
 
 ARG DEBIAN_FRONTEND=noninteractive
 ARG LLVM_VERSION=20
@@ -52,6 +60,25 @@ RUN curl -fsSL https://apt.llvm.org/llvm.sh -o /tmp/llvm.sh \
     && apt-get install -y --no-install-recommends libclang-${LLVM_VERSION}-dev \
     && rm -rf /var/lib/apt/lists/*
 
+# Make sure LLVM shared libs are found at runtime (useful for dev builds too)
+ENV LD_LIBRARY_PATH=/usr/lib/llvm-${LLVM_VERSION}/lib
+
+# ---------------------------------------------------------------------------
+# Stage 1: Dev (deps + repo, no build)
+# ---------------------------------------------------------------------------
+FROM base AS dev
+
+WORKDIR /repo
+COPY . /repo
+
+# Default: interactive shell so you can build/test manually
+CMD ["bash"]
+
+# ---------------------------------------------------------------------------
+# Stage 2: Build (produces binaries)
+# ---------------------------------------------------------------------------
+FROM base AS builder
+
 WORKDIR /repo
 COPY . /repo
 
@@ -65,14 +92,14 @@ RUN cmake -S . -B build -G Ninja \
     && cmake --build build -j"$(nproc)"
 
 # ---------------------------------------------------------------------------
-# Stage 2: Runtime (slim)
+# Stage 3: Runtime (prod)
 # ---------------------------------------------------------------------------
-FROM ubuntu:24.04
+FROM ubuntu:24.04 AS runtime
 
 ARG DEBIAN_FRONTEND=noninteractive
 ARG LLVM_VERSION=20
 
-# Install only the runtime libraries needed by the analyzer binary
+# Install only what is needed to run (and to support the entrypoint script)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
@@ -97,7 +124,6 @@ COPY --from=builder /repo/models /models
 
 RUN chmod +x /usr/local/bin/coretrace-entrypoint.py
 
-# Make sure the binary can find LLVM shared libs
 ENV LD_LIBRARY_PATH=/usr/lib/llvm-${LLVM_VERSION}/lib
 
 WORKDIR /workspace
