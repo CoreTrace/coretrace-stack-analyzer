@@ -86,6 +86,27 @@ namespace ctrace::stack::analysis
             return std::nullopt;
         }
 
+        static std::optional<SizeSink> resolveIntrinsicSizeSink(const llvm::CallBase& call)
+        {
+            const auto* II = llvm::dyn_cast<llvm::IntrinsicInst>(&call);
+            if (!II)
+                return std::nullopt;
+
+            switch (II->getIntrinsicID())
+            {
+            case llvm::Intrinsic::memcpy:
+                return SizeSink{"memcpy", 2u};
+            case llvm::Intrinsic::memmove:
+                return SizeSink{"memmove", 2u};
+            case llvm::Intrinsic::memset:
+                return SizeSink{"memset", 2u};
+            default:
+                break;
+            }
+
+            return std::nullopt;
+        }
+
         static const llvm::StoreInst* findUniqueStoreToSlot(const llvm::AllocaInst& slot)
         {
             const llvm::StoreInst* uniqueStore = nullptr;
@@ -643,13 +664,17 @@ namespace ctrace::stack::analysis
                     if (!call)
                         continue;
 
-                    const llvm::Function* callee = getDirectCallee(*call);
-                    if (!callee)
-                        continue;
+                    std::optional<SizeSink> sink = resolveIntrinsicSizeSink(*call);
+                    llvm::StringRef sinkName;
+                    if (!sink)
+                    {
+                        const llvm::Function* callee = getDirectCallee(*call);
+                        if (!callee)
+                            continue;
+                        sinkName = canonicalCalleeName(callee->getName());
+                    }
 
-                    const llvm::StringRef sinkName = canonicalCalleeName(callee->getName());
-
-                    if (sinkName == "calloc" && call->arg_size() >= 2)
+                    if (!sink && sinkName == "calloc" && call->arg_size() >= 2)
                     {
                         const llvm::Value* count = call->getArgOperand(0);
                         const llvm::Value* elemSize = call->getArgOperand(1);
@@ -670,7 +695,8 @@ namespace ctrace::stack::analysis
                         }
                     }
 
-                    const std::optional<SizeSink> sink = resolveSizeSink(sinkName);
+                    if (!sink)
+                        sink = resolveSizeSink(sinkName);
                     if (!sink || sink->sizeArgIndex >= call->arg_size())
                         continue;
 
