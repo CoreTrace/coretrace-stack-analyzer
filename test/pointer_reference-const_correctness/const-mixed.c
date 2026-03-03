@@ -3,6 +3,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <limits.h>
+#include <stdint.h>
 
 // at line 11, column 0
 // [ !Info! ] ConstParameterNotModified.Pointer: parameter 'values' in function 'print_sum' is never used to modify the pointed object
