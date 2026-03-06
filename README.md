@@ -231,7 +231,7 @@ Ready-to-adapt workflow examples:
 --compdb=<path> alias for --compile-commands
 --compdb-fast drops heavy build flags for faster analysis
 --include-compdb-deps includes `_deps` entries when inputs are auto-discovered from compile_commands.json
---jobs=<N> parallel jobs for multi-file loading/analysis and cross-TU resource summary build (default: 1)
+--jobs=<N|auto> parallel jobs for multi-file loading/analysis and cross-TU resource summary build (default: 1)
 --escape-model=<path> loads external noescape rules for stack pointer escape analysis (`noescape_arg`)
 --buffer-model=<path> loads external buffer write rules for copy/string overflow checks (`bounded_write`/`unbounded_write`)
 --resource-model=<path> loads external acquire/release rules for generic resource lifetime checks
@@ -240,6 +240,15 @@ Ready-to-adapt workflow examples:
 --resource-summary-cache-dir=<path> sets cache directory for cross-TU resource summaries (default: .cache/resource-lifetime)
 --resource-summary-cache-memory-only keeps cross-TU summary cache in memory only (process-local, no files)
 --timing prints compile/analysis timings to stderr
+--config=<path> loads optional key=value config file (CLI flags override config values)
+--print-effective-config prints resolved runtime config to stderr
+--smt=on|off enables or disables SMT-assisted reasoning (default: off)
+--smt-backend=<name> selects primary backend (interval|z3|cvc5)
+--smt-secondary-backend=<name> selects secondary backend for coupled modes
+--smt-mode=<mode> selects solver mode (single|portfolio|cross-check|dual-consensus)
+--smt-timeout-ms=<N> sets per-query timeout budget in milliseconds
+--smt-budget-nodes=<N> sets per-query complexity budget
+--smt-rules=<csv> restricts SMT to selected rule ids (example: recursion,integer-overflow)
 --dump-ir=<path> writes LLVM IR to a file (or directory for multiple inputs)
 -I<dir> or -I <dir> adds an include directory
 -D<name>[=value] or -D <name>[=value] defines a macro
@@ -258,9 +267,148 @@ To generate `compile_commands.json` with CMake, configure with
 
 If analysis feels slow, `--compdb-fast` disables heavy flags (optimizations,
 sanitizers, profiling) while keeping include paths and macros.
-For multi-file runs, `--jobs=<N>` parallelizes input loading; with resource lifetime cross-TU enabled it also parallelizes summary construction.
+For multi-file runs, `--jobs=<N|auto>` parallelizes input loading; with cross-TU enabled it also parallelizes summary construction.
 When inputs are auto-discovered from `compile_commands.json`, `_deps` entries are skipped by default
 to keep analysis focused on project code; use `--include-compdb-deps` to opt back in.
+
+### Optional config file (`--config`)
+
+You can centralize common options in a config file and still override them from CLI.
+
+Priority order:
+1. CLI flags
+2. Config file values
+3. Built-in defaults
+
+Format: flat `key=value` entries (no sections).
+
+Supported keys:
+- `resource-model`
+- `escape-model`
+- `buffer-model`
+- `compile-commands` (or `compdb`)
+- `analysis-profile`
+- `jobs` (`N` or `auto`)
+- `timing`
+- `warnings-only`
+- `quiet`
+- `demangle`
+- `include-compdb-deps`
+- `smt`
+- `smt-backend`
+- `smt-secondary-backend`
+- `smt-mode`
+- `smt-timeout-ms`
+- `smt-budget-nodes`
+- `smt-rules`
+- `resource-cross-tu`
+- `uninitialized-cross-tu`
+- `resource-summary-cache-dir`
+- `resource-summary-cache-memory-only`
+
+Example file:
+
+```text
+resource-model=models/resource-lifetime/generic.txt
+escape-model=models/stack-escape/generic.txt
+buffer-model=models/buffer-overflow/generic.txt
+compile-commands=build/compile_commands.json
+analysis-profile=full
+jobs=auto
+smt=on
+smt-backend=z3
+smt-rules=recursion,integer-overflow,size-minus-k,stack-buffer,oob-read
+```
+
+Usage:
+
+```zsh
+./build/stack_usage_analyzer --config=.ctrace-analyzer.cfg --print-effective-config
+./build/stack_usage_analyzer --config=.ctrace-analyzer.cfg --smt=off
+```
+
+Note:
+- Relative paths in config are resolved from the config file directory.
+
+### SMT solver usage (Z3-style backend)
+
+Build configuration:
+
+```zsh
+# Auto-detect Z3 (default: ENABLE_Z3_BACKEND=ON)
+cmake -S . -B build -DFETCHCONTENT_UPDATES_DISCONNECTED=ON
+cmake --build build -j4
+
+# Force-disable optional Z3 backend
+cmake -S . -B build -DENABLE_Z3_BACKEND=OFF
+cmake --build build -j4
+
+# Force-enable optional Z3 backend (requires Z3 installed)
+cmake -S . -B build -DENABLE_Z3_BACKEND=ON
+cmake --build build -j4
+```
+
+Check available SMT options:
+
+```zsh
+./build/stack_usage_analyzer --help | rg smt
+```
+
+Minimal runtime commands:
+
+```zsh
+# Baseline (SMT disabled)
+./build/stack_usage_analyzer test/recursion/c/infinite-recursion.c --smt=off --format=json
+
+# Enable SMT with interval backend only
+./build/stack_usage_analyzer test/recursion/c/infinite-recursion.c --smt=on --smt-backend=interval --smt-rules=recursion --format=json
+
+# Enable SMT with Z3 primary backend
+./build/stack_usage_analyzer test/recursion/c/infinite-recursion.c --smt=on --smt-backend=z3 --smt-rules=recursion --format=json
+```
+
+Solver modes:
+
+```zsh
+# single: run only primary backend
+./build/stack_usage_analyzer test/recursion/c/infinite-recursion.c --smt=on --smt-backend=z3 --smt-mode=single --smt-rules=recursion
+
+# portfolio: run multiple backends and aggregate
+./build/stack_usage_analyzer test/recursion/c/infinite-recursion.c --smt=on --smt-backend=z3 --smt-secondary-backend=interval --smt-mode=portfolio --smt-rules=recursion
+
+# cross-check: run secondary backend only if primary is inconclusive
+./build/stack_usage_analyzer test/recursion/c/infinite-recursion.c --smt=on --smt-backend=z3 --smt-secondary-backend=interval --smt-mode=cross-check --smt-rules=recursion
+
+# dual-consensus: strict agreement strategy across configured backends
+./build/stack_usage_analyzer test/recursion/c/infinite-recursion.c --smt=on --smt-backend=z3 --smt-secondary-backend=interval --smt-mode=dual-consensus --smt-rules=recursion
+```
+
+Budget and timeout tuning:
+
+```zsh
+./build/stack_usage_analyzer test/recursion/c/infinite-recursion.c \
+  --smt=on \
+  --smt-backend=z3 \
+  --smt-rules=recursion,integer-overflow,size-minus-k,stack-buffer,oob-read \
+  --smt-timeout-ms=80 \
+  --smt-budget-nodes=20000
+```
+
+Currently integrated SMT rule ids:
+- `recursion`
+- `integer-overflow`
+- `size-minus-k`
+- `stack-buffer`
+- `oob-read`
+
+Notes:
+- If a backend is unavailable in the current build, the analyzer keeps conservative behavior and falls back to baseline reasoning for SMT-integrated rules.
+- `--smt-rules=recursion` is still recommended to roll out SMT gradually.
+- `type-confusion` currently uses deterministic layout refinement (no solver query).
+- `run_test.py` runs two passes per fixture by default:
+  1. baseline pass (no extra SMT args),
+  2. dedicated SMT+Z3 pass with `--smt=on --smt-backend=z3 --smt-mode=single` and all integrated SMT rule ids.
+  The dedicated SMT pass is skipped if explicit `--smt*` args are already provided to the runner via `--analyzer-arg`.
 
 ### Analysis profiles (`fast` vs `full`)
 
