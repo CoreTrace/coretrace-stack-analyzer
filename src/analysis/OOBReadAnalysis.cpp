@@ -2,7 +2,10 @@
 
 #include "analysis/AnalyzerUtils.hpp"
 #include "analysis/IntRanges.hpp"
+#include "analysis/smt/SmtEncoding.hpp"
+#include "analysis/smt/SmtRefinement.hpp"
 
+#include <limits>
 #include <map>
 #include <optional>
 #include <string>
@@ -24,6 +27,8 @@ namespace ctrace::stack::analysis
 {
     namespace
     {
+        using SmtFeasibility = smt::SmtFeasibility;
+
         enum class RecentWriteKind
         {
             Unknown,
@@ -302,13 +307,87 @@ namespace ctrace::stack::analysis
 
             return std::nullopt;
         }
+
+        class OOBReadConstraintEvaluator final : public smt::SmtConstraintEvaluator
+        {
+          public:
+            explicit OOBReadConstraintEvaluator(const AnalysisConfig& config)
+                : smt::SmtConstraintEvaluator(config, "oob-read")
+            {
+            }
+
+            SmtFeasibility
+            isNegativeIndexFeasible(const std::map<const llvm::Value*, IntRange>& ranges,
+                                    const llvm::Value& indexExpr,
+                                    const llvm::Instruction* contextInst) const
+            {
+                return smt::SmtConstraintEvaluator::evaluateQuery(
+                    smt::encodeSignedComparisonFeasibility(
+                        ranges, indexExpr, -1, false, contextInst));
+            }
+
+            SmtFeasibility
+            isUpperOverflowFeasible(const std::map<const llvm::Value*, IntRange>& ranges,
+                                    const llvm::Value& indexExpr, std::uint64_t limitExclusive,
+                                    const llvm::Instruction* contextInst) const
+            {
+                if (limitExclusive == 0 ||
+                    limitExclusive > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()))
+                {
+                    return SmtFeasibility::Inconclusive;
+                }
+
+                const std::int64_t upperInclusive =
+                    static_cast<std::int64_t>(limitExclusive - 1);
+                return smt::SmtConstraintEvaluator::evaluateQuery(
+                    smt::encodeSignedComparisonFeasibility(
+                        ranges, indexExpr, upperInclusive, true, contextInst));
+            }
+        };
+
+        static bool isHeapIndexViolationInfeasibleBySmt(
+            const OOBReadConstraintEvaluator& evaluator,
+            const std::map<const llvm::Value*, IntRange>& baseRanges, const llvm::Value* indexExpr,
+            std::uint64_t capacity, const llvm::Instruction& accessInst)
+        {
+            if (!indexExpr || !indexExpr->getType()->isIntegerTy())
+                return false;
+
+            std::map<const llvm::Value*, IntRange> queryRanges;
+            if (const auto range = lookupRange(indexExpr, baseRanges))
+            {
+                queryRanges[indexExpr] = *range;
+            }
+            if (queryRanges.empty())
+                return false;
+
+            if (evaluator.isNegativeIndexFeasible(queryRanges, *indexExpr, &accessInst) !=
+                SmtFeasibility::Infeasible)
+            {
+                return false;
+            }
+
+            return evaluator.isUpperOverflowFeasible(queryRanges, *indexExpr, capacity,
+                                                     &accessInst) ==
+                   SmtFeasibility::Infeasible;
+        }
     } // namespace
 
     std::vector<OOBReadIssue>
     analyzeOOBReads(llvm::Module& mod, const llvm::DataLayout& dataLayout,
                     const std::function<bool(const llvm::Function&)>& shouldAnalyze)
     {
+        AnalysisConfig defaultConfig;
+        return analyzeOOBReads(mod, dataLayout, shouldAnalyze, defaultConfig);
+    }
+
+    std::vector<OOBReadIssue>
+    analyzeOOBReads(llvm::Module& mod, const llvm::DataLayout& dataLayout,
+                    const std::function<bool(const llvm::Function&)>& shouldAnalyze,
+                    const AnalysisConfig& config)
+    {
         std::vector<OOBReadIssue> issues;
+        const OOBReadConstraintEvaluator evaluator(config);
 
         for (llvm::Function& function : mod)
         {
@@ -547,6 +626,19 @@ namespace ctrace::stack::analysis
 
                     if (!suspicious)
                         continue;
+
+                    if (!llvm::isa<llvm::ConstantInt>(indexValue))
+                    {
+                        const llvm::Value* queryIndex = indexValue;
+                        while (const auto* cast = llvm::dyn_cast<llvm::CastInst>(queryIndex))
+                            queryIndex = cast->getOperand(0);
+
+                        if (isHeapIndexViolationInfeasibleBySmt(evaluator, ranges, queryIndex,
+                                                                capacity, inst))
+                        {
+                            continue;
+                        }
+                    }
 
                     OOBReadIssue issue;
                     issue.funcName = function.getName().str();
