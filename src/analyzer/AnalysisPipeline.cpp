@@ -8,6 +8,7 @@
 #include "analysis/CommandInjectionAnalysis.hpp"
 #include "analysis/DuplicateIfCondition.hpp"
 #include "analysis/DynamicAlloca.hpp"
+#include "analysis/GlobalReadBeforeWriteAnalysis.hpp"
 #include "analysis/IntegerOverflowAnalysis.hpp"
 #include "analysis/InvalidBaseReconstruction.hpp"
 #include "analysis/MemIntrinsicOverflow.hpp"
@@ -147,7 +148,8 @@ namespace ctrace::stack::analyzer
                              auto shouldAnalyze = [&](const llvm::Function& F) -> bool
                              { return state.prepared->ctx.shouldAnalyze(F); };
                              const std::vector<analysis::IntegerOverflowIssue> issues =
-                                 analysis::analyzeIntegerOverflows(state.mod, shouldAnalyze);
+                                 analysis::analyzeIntegerOverflows(state.mod, shouldAnalyze,
+                                                                    state.config);
                              appendIntegerOverflowDiagnostics(state.result, issues);
                          }});
 
@@ -158,7 +160,7 @@ namespace ctrace::stack::analyzer
                              const llvm::DataLayout& dataLayout = *state.prepared->ctx.dataLayout;
                              const std::vector<analysis::SizeMinusKWriteIssue> issues =
                                  analysis::analyzeSizeMinusKWrites(state.mod, dataLayout,
-                                                                   shouldAnalyze);
+                                                                   shouldAnalyze, state.config);
                              appendSizeMinusKDiagnostics(state.result, issues);
                          }});
 
@@ -190,6 +192,15 @@ namespace ctrace::stack::analyzer
                                      state.mod, shouldAnalyze,
                                      state.config.uninitializedSummaryIndex.get());
                              appendUninitializedLocalReadDiagnostics(state.result, issues);
+                         }});
+
+        steps.push_back({"Global reads before writes", [](PipelineData& state)
+                         {
+                             auto shouldAnalyze = [&](const llvm::Function& F) -> bool
+                             { return state.prepared->ctx.shouldAnalyze(F); };
+                             const std::vector<analysis::GlobalReadBeforeWriteIssue> issues =
+                                 analysis::analyzeGlobalReadBeforeWrites(state.mod, shouldAnalyze);
+                             appendGlobalReadBeforeWriteDiagnostics(state.result, issues);
                          }});
 
         steps.push_back({"Invalid base reconstructions", [](PipelineData& state)
@@ -237,7 +248,8 @@ namespace ctrace::stack::analyzer
                              { return state.prepared->ctx.shouldAnalyze(F); };
                              const llvm::DataLayout& dataLayout = *state.prepared->ctx.dataLayout;
                              const std::vector<analysis::OOBReadIssue> issues =
-                                 analysis::analyzeOOBReads(state.mod, dataLayout, shouldAnalyze);
+                                 analysis::analyzeOOBReads(state.mod, dataLayout, shouldAnalyze,
+                                                           state.config);
                              appendOOBReadDiagnostics(state.result, issues);
                          }});
 
@@ -266,7 +278,7 @@ namespace ctrace::stack::analyzer
                              const llvm::DataLayout& dataLayout = *state.prepared->ctx.dataLayout;
                              const std::vector<analysis::TypeConfusionIssue> issues =
                                  analysis::analyzeTypeConfusions(state.mod, dataLayout,
-                                                                 shouldAnalyze);
+                                                                 shouldAnalyze, state.config);
                              appendTypeConfusionDiagnostics(state.result, issues);
                          }});
 
