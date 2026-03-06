@@ -1,8 +1,15 @@
 #include "analysis/SizeMinusKWrites.hpp"
 
+#include "analysis/IntRanges.hpp"
+#include "analysis/smt/SmtEncoding.hpp"
+#include "analysis/smt/SmtRefinement.hpp"
+
+#include <map>
 #include <optional>
+#include <utility>
 
 #include <llvm/ADT/DenseMap.h>
+#include <llvm/ADT/SmallPtrSet.h>
 #include <llvm/Analysis/AssumptionCache.h>
 #include <llvm/Analysis/LazyValueInfo.h>
 #include <llvm/Analysis/TargetLibraryInfo.h>
@@ -57,6 +64,85 @@ namespace ctrace::stack::analysis
 
         using SizeMinusKSummaryMap =
             llvm::DenseMap<const llvm::Function*, std::vector<SizeMinusKSink>>;
+
+        using SmtFeasibility = smt::SmtFeasibility;
+
+        class SizeMinusKConstraintEvaluator final : public smt::SmtConstraintEvaluator
+        {
+          public:
+            explicit SizeMinusKConstraintEvaluator(const AnalysisConfig& config)
+                : smt::SmtConstraintEvaluator(config, "size-minus-k")
+            {
+            }
+
+            SmtFeasibility
+            isSignedLessEqualFeasible(const std::map<const llvm::Value*, IntRange>& ranges,
+                                      const llvm::Value& lhs, std::int64_t rhsConstant,
+                                      const llvm::Instruction* contextInst) const
+            {
+                return smt::SmtConstraintEvaluator::evaluateQuery(
+                    smt::encodeSignedComparisonFeasibility(
+                    ranges, lhs, rhsConstant, false, contextInst));
+            }
+        };
+
+        static bool isUsableRangeForSmt(const IntRange& range)
+        {
+            // Conservative policy for value-local SMT refinement in this analysis:
+            // accept only fully bounded ranges to avoid path-insensitive one-sided
+            // bounds suppressing valid diagnostics.
+            if (!range.hasLower || !range.hasUpper)
+                return false;
+            if (range.lower > range.upper)
+                return false;
+            return true;
+        }
+
+        static std::optional<IntRange> resolveSmtRangeRecursive(
+            const llvm::Value* value, const std::map<const llvm::Value*, IntRange>& ranges,
+            llvm::SmallPtrSetImpl<const llvm::Value*>& visited, unsigned depth)
+        {
+            if (!value || depth > 16)
+                return std::nullopt;
+            if (!visited.insert(value).second)
+                return std::nullopt;
+
+            if (auto it = ranges.find(value); it != ranges.end() && isUsableRangeForSmt(it->second))
+                return it->second;
+
+            if (const auto* load = llvm::dyn_cast<llvm::LoadInst>(value))
+            {
+                const llvm::Value* slot = load->getPointerOperand();
+                if (auto slotIt = ranges.find(slot);
+                    slotIt != ranges.end() && isUsableRangeForSmt(slotIt->second))
+                {
+                    return slotIt->second;
+                }
+            }
+
+            if (const auto* cast = llvm::dyn_cast<llvm::CastInst>(value))
+                return resolveSmtRangeRecursive(cast->getOperand(0), ranges, visited, depth + 1);
+
+            return std::nullopt;
+        }
+
+        static std::map<const llvm::Value*, IntRange>
+        buildValueQueryRanges(const llvm::Value& value,
+                              const std::map<const llvm::Value*, IntRange>& ranges)
+        {
+            std::map<const llvm::Value*, IntRange> queryRanges;
+            if (!value.getType()->isIntegerTy())
+                return queryRanges;
+
+            llvm::SmallPtrSet<const llvm::Value*, 8> visited;
+            if (const std::optional<IntRange> knownRange =
+                    resolveSmtRangeRecursive(&value, ranges, visited, 0))
+            {
+                queryRanges[&value] = *knownRange;
+            }
+
+            return queryRanges;
+        }
 
         template <typename Canonicalize>
         static SizeMinusKMatch matchSizeMinusK(llvm::Value* v, Canonicalize canonicalize)
@@ -347,12 +433,15 @@ namespace ctrace::stack::analysis
 
         static void analyzeSizeMinusKWritesInFunction(llvm::Function& F, const llvm::DataLayout& DL,
                                                       const SizeMinusKSummaryMap& summaries,
+                                                      const SizeMinusKConstraintEvaluator& evaluator,
                                                       std::vector<SizeMinusKWriteIssue>& out)
         {
             using namespace llvm;
 
             if (F.isDeclaration())
                 return;
+
+            const std::map<const llvm::Value*, IntRange> ranges = computeIntRangesFromICmps(F);
 
             AssumptionCache AC(F);
             LazyValueInfo LVI(&AC, &DL);
@@ -398,6 +487,18 @@ namespace ctrace::stack::analysis
                 issue.hasPointerDest = hasPtrDest;
                 issue.ptrNonNull = hasPtrDest ? isNonNullAt(dest, at, LVI) : true;
                 issue.sizeAboveK = isGreaterThanAt(sizeBase, k, at, LVI);
+                if (!issue.sizeAboveK && sizeBase && sizeBase->getType()->isIntegerTy())
+                {
+                    const std::map<const llvm::Value*, IntRange> queryRanges =
+                        buildValueQueryRanges(*sizeBase, ranges);
+                    if (!queryRanges.empty())
+                    {
+                        const SmtFeasibility sizeAtMostKFeasible =
+                            evaluator.isSignedLessEqualFeasible(queryRanges, *sizeBase, k, at);
+                        if (sizeAtMostKFeasible == SmtFeasibility::Infeasible)
+                            issue.sizeAboveK = true;
+                    }
+                }
                 issue.k = k;
                 issue.inst = at;
                 if (!issue.ptrNonNull || !issue.sizeAboveK)
@@ -473,8 +574,18 @@ namespace ctrace::stack::analysis
     analyzeSizeMinusKWrites(llvm::Module& mod, const llvm::DataLayout& DL,
                             const std::function<bool(const llvm::Function&)>& shouldAnalyzeFunction)
     {
+        AnalysisConfig defaultConfig;
+        return analyzeSizeMinusKWrites(mod, DL, shouldAnalyzeFunction, defaultConfig);
+    }
+
+    std::vector<SizeMinusKWriteIssue> analyzeSizeMinusKWrites(
+        llvm::Module& mod, const llvm::DataLayout& DL,
+        const std::function<bool(const llvm::Function&)>& shouldAnalyzeFunction,
+        const AnalysisConfig& config)
+    {
         SizeMinusKSummaryMap summaries = buildSizeMinusKSummaries(mod);
         std::vector<SizeMinusKWriteIssue> issues;
+        const SizeMinusKConstraintEvaluator evaluator(config);
 
         for (llvm::Function& F : mod)
         {
@@ -482,7 +593,7 @@ namespace ctrace::stack::analysis
                 continue;
             if (!shouldAnalyzeFunction(F))
                 continue;
-            analyzeSizeMinusKWritesInFunction(F, DL, summaries, issues);
+            analyzeSizeMinusKWritesInFunction(F, DL, summaries, evaluator, issues);
         }
 
         return issues;
