@@ -2,12 +2,15 @@
 
 #include "analysis/AnalyzerUtils.hpp"
 #include "analysis/IntRanges.hpp"
+#include "analysis/smt/SmtEncoding.hpp"
+#include "analysis/smt/SmtRefinement.hpp"
 
 #include <algorithm>
 #include <cstdint>
 #include <limits>
 #include <map>
 #include <optional>
+#include <utility>
 
 #include <llvm/ADT/SmallPtrSet.h>
 #include <llvm/ADT/StringRef.h>
@@ -31,6 +34,58 @@ namespace ctrace::stack::analysis
         {
             IntegerOverflowIssueKind kind;
             std::string operation;
+            const llvm::Value* relatedValue = nullptr;
+            const llvm::BinaryOperator* arithmeticOp = nullptr;
+            unsigned truncTargetBitWidth = 0;
+        };
+
+        using SmtFeasibility = smt::SmtFeasibility;
+
+        class IntegerOverflowConstraintEvaluator final : public smt::SmtConstraintEvaluator
+        {
+          public:
+            explicit IntegerOverflowConstraintEvaluator(const AnalysisConfig& config)
+                : smt::SmtConstraintEvaluator(config, "integer-overflow")
+            {
+            }
+
+            SmtFeasibility
+            isSignedOverflowFeasible(const std::map<const llvm::Value*, IntRange>& ranges,
+                                     const llvm::BinaryOperator& binary,
+                                     const llvm::Instruction* contextInst) const
+            {
+                return smt::SmtConstraintEvaluator::evaluateQuery(
+                    smt::encodeSignedOverflowFeasibility(ranges, binary, contextInst));
+            }
+
+            SmtFeasibility
+            isUnsignedOverflowFeasible(const std::map<const llvm::Value*, IntRange>& ranges,
+                                       const llvm::BinaryOperator& binary,
+                                       const llvm::Instruction* contextInst) const
+            {
+                return smt::SmtConstraintEvaluator::evaluateQuery(
+                    smt::encodeUnsignedOverflowFeasibility(ranges, binary, contextInst));
+            }
+
+            SmtFeasibility
+            isSignedGreaterThanFeasible(const std::map<const llvm::Value*, IntRange>& ranges,
+                                        const llvm::Value& lhs, std::int64_t rhsConstant,
+                                        const llvm::Instruction* contextInst) const
+            {
+                return smt::SmtConstraintEvaluator::evaluateQuery(
+                    smt::encodeSignedComparisonFeasibility(
+                    ranges, lhs, rhsConstant, true, contextInst));
+            }
+
+            SmtFeasibility
+            isSignedLessEqualFeasible(const std::map<const llvm::Value*, IntRange>& ranges,
+                                      const llvm::Value& lhs, std::int64_t rhsConstant,
+                                      const llvm::Instruction* contextInst) const
+            {
+                return smt::SmtConstraintEvaluator::evaluateQuery(
+                    smt::encodeSignedComparisonFeasibility(
+                    ranges, lhs, rhsConstant, false, contextInst));
+            }
         };
 
         static const llvm::Function* getDirectCallee(const llvm::CallBase& call)
@@ -512,7 +567,10 @@ namespace ctrace::stack::analysis
                 if (isPotentiallyLossyTruncation(*trunc, ranges))
                 {
                     return RiskSummary{IntegerOverflowIssueKind::TruncationInSizeComputation,
-                                       "trunc"};
+                                       "trunc",
+                                       trunc->getOperand(0),
+                                       nullptr,
+                                       trunc->getType()->getIntegerBitWidth()};
                 }
                 return classifySizeOperandRecursive(trunc->getOperand(0), ranges, visited,
                                                     depth + 1);
@@ -523,7 +581,8 @@ namespace ctrace::stack::analysis
                 const llvm::Value* source = sext->getOperand(0);
                 if (dependsOnFunctionArgument(source) && !hasKnownNonNegativeRange(source, ranges))
                 {
-                    return RiskSummary{IntegerOverflowIssueKind::SignedToUnsignedSize, "sext"};
+                    return RiskSummary{
+                        IntegerOverflowIssueKind::SignedToUnsignedSize, "sext", source};
                 }
                 return classifySizeOperandRecursive(source, ranges, visited, depth + 1);
             }
@@ -547,7 +606,10 @@ namespace ctrace::stack::analysis
                     if (!bothConstants && dependsOnFunctionArgument(binary))
                     {
                         return RiskSummary{IntegerOverflowIssueKind::ArithmeticInSizeComputation,
-                                           binary->getOpcodeName()};
+                                           binary->getOpcodeName(),
+                                           binary,
+                                           binary,
+                                           0};
                     }
                     break;
                 }
@@ -575,7 +637,8 @@ namespace ctrace::stack::analysis
                                 IntegerOverflowIssueKind::ArithmeticInSizeComputation,
                                 intrinsic->getCalledFunction()
                                     ? intrinsic->getCalledFunction()->getName().str()
-                                    : "with.overflow"};
+                                    : "with.overflow",
+                                aggregate};
                         default:
                             break;
                         }
@@ -623,13 +686,126 @@ namespace ctrace::stack::analysis
             llvm::SmallPtrSet<const llvm::Value*, 32> visited;
             return classifySizeOperandRecursive(value, ranges, visited, 0);
         }
+
+        static bool isUsableRangeForSmt(const IntRange& range)
+        {
+            // Conservative policy for value-local SMT refinement in this analysis:
+            // accept only fully bounded ranges to avoid path-insensitive one-sided
+            // bounds suppressing valid diagnostics.
+            if (!range.hasLower || !range.hasUpper)
+                return false;
+            if (range.lower > range.upper)
+                return false;
+            return true;
+        }
+
+        static void addLocalRangeForSmt(std::map<const llvm::Value*, IntRange>& queryRanges,
+                                        const llvm::Value* queryValue,
+                                        const std::map<const llvm::Value*, IntRange>& ranges)
+        {
+            if (!queryValue || !queryValue->getType() || !queryValue->getType()->isIntegerTy())
+                return;
+
+            const std::optional<IntRange> knownRange = resolveKnownRange(queryValue, ranges);
+            if (!knownRange || !isUsableRangeForSmt(*knownRange))
+                return;
+
+            queryRanges[queryValue] = *knownRange;
+        }
+
+        static std::map<const llvm::Value*, IntRange> buildValueQueryRanges(
+            const llvm::Value& queryValue, const std::map<const llvm::Value*, IntRange>& ranges)
+        {
+            std::map<const llvm::Value*, IntRange> queryRanges;
+            addLocalRangeForSmt(queryRanges, &queryValue, ranges);
+            return queryRanges;
+        }
+
+        static std::map<const llvm::Value*, IntRange> buildArithmeticQueryRanges(
+            const llvm::BinaryOperator& operation,
+            const std::map<const llvm::Value*, IntRange>& ranges)
+        {
+            std::map<const llvm::Value*, IntRange> queryRanges;
+            addLocalRangeForSmt(queryRanges, operation.getOperand(0), ranges);
+            addLocalRangeForSmt(queryRanges, operation.getOperand(1), ranges);
+            addLocalRangeForSmt(queryRanges, &operation, ranges);
+            return queryRanges;
+        }
+
+        static bool shouldSuppressRiskWithSmt(
+            const IntegerOverflowConstraintEvaluator& evaluator,
+            const std::map<const llvm::Value*, IntRange>& ranges, const RiskSummary& risk,
+            const llvm::Instruction& contextInst)
+        {
+            switch (risk.kind)
+            {
+            case IntegerOverflowIssueKind::ArithmeticInSizeComputation:
+                if (risk.arithmeticOp)
+                {
+                    const std::map<const llvm::Value*, IntRange> queryRanges =
+                        buildArithmeticQueryRanges(*risk.arithmeticOp, ranges);
+                    if (queryRanges.empty())
+                        return false;
+                    return evaluator.isUnsignedOverflowFeasible(queryRanges, *risk.arithmeticOp,
+                                                                &contextInst) ==
+                           SmtFeasibility::Infeasible;
+                }
+                return false;
+            case IntegerOverflowIssueKind::SignedToUnsignedSize:
+                if (risk.relatedValue && risk.relatedValue->getType()->isIntegerTy())
+                {
+                    const std::map<const llvm::Value*, IntRange> queryRanges =
+                        buildValueQueryRanges(*risk.relatedValue, ranges);
+                    if (queryRanges.empty())
+                        return false;
+                    return evaluator.isSignedLessEqualFeasible(queryRanges, *risk.relatedValue, -1,
+                                                               &contextInst) ==
+                           SmtFeasibility::Infeasible;
+                }
+                return false;
+            case IntegerOverflowIssueKind::TruncationInSizeComputation:
+            {
+                if (!risk.relatedValue || !risk.relatedValue->getType()->isIntegerTy())
+                    return false;
+                if (risk.truncTargetBitWidth == 0 || risk.truncTargetBitWidth >= 63)
+                    return false;
+
+                const std::map<const llvm::Value*, IntRange> queryRanges =
+                    buildValueQueryRanges(*risk.relatedValue, ranges);
+                if (queryRanges.empty())
+                    return false;
+                const std::int64_t truncMax = (std::int64_t{1} << risk.truncTargetBitWidth) - 1;
+                const SmtFeasibility negativeFeasible =
+                    evaluator.isSignedLessEqualFeasible(queryRanges, *risk.relatedValue, -1,
+                                                        &contextInst);
+                const SmtFeasibility aboveMaxFeasible =
+                    evaluator.isSignedGreaterThanFeasible(queryRanges, *risk.relatedValue, truncMax,
+                                                          &contextInst);
+                return negativeFeasible == SmtFeasibility::Infeasible &&
+                       aboveMaxFeasible == SmtFeasibility::Infeasible;
+            }
+            case IntegerOverflowIssueKind::SignedArithmeticOverflow:
+                return false;
+            }
+            return false;
+        }
     } // namespace
 
     std::vector<IntegerOverflowIssue>
     analyzeIntegerOverflows(llvm::Module& mod,
                             const std::function<bool(const llvm::Function&)>& shouldAnalyze)
     {
+        AnalysisConfig defaultConfig;
+        return analyzeIntegerOverflows(mod, shouldAnalyze, defaultConfig);
+    }
+
+    std::vector<IntegerOverflowIssue>
+    analyzeIntegerOverflows(llvm::Module& mod,
+                            const std::function<bool(const llvm::Function&)>& shouldAnalyze,
+                            const AnalysisConfig& config)
+    {
         std::vector<IntegerOverflowIssue> issues;
+        IntegerOverflowConstraintEvaluator evaluator(config);
 
         for (llvm::Function& function : mod)
         {
@@ -649,6 +825,15 @@ namespace ctrace::stack::analysis
                             reachesReturn(binary) && dependsOnFunctionArgument(binary) &&
                             !provenNoSignedOverflowByRanges(*binary, ranges))
                         {
+                            const std::map<const llvm::Value*, IntRange> queryRanges =
+                                buildArithmeticQueryRanges(*binary, ranges);
+                            if (!queryRanges.empty() &&
+                                evaluator.isSignedOverflowFeasible(queryRanges, *binary, &inst) ==
+                                SmtFeasibility::Infeasible)
+                            {
+                                continue;
+                            }
+
                             IntegerOverflowIssue issue;
                             issue.funcName = function.getName().str();
                             issue.filePath = getFunctionSourcePath(function);
@@ -704,6 +889,8 @@ namespace ctrace::stack::analysis
                     const std::optional<RiskSummary> risk =
                         classifySizeOperand(sizeOperand, ranges);
                     if (!risk)
+                        continue;
+                    if (shouldSuppressRiskWithSmt(evaluator, ranges, *risk, inst))
                         continue;
 
                     IntegerOverflowIssue issue;
