@@ -21,10 +21,12 @@ namespace ctrace::stack::cli
         std::vector<std::string> inputFilenames;
         OutputFormat outputFormat = OutputFormat::Human;
         std::string sarifBaseDir;
+        std::string configPath;
         std::string compileCommandsPath;
         bool compileCommandsExplicit = false;
         bool analysisProfileExplicit = false;
         bool includeCompdbDeps = false;
+        bool printEffectiveConfig = false;
         bool verbose = false;
     };
 
