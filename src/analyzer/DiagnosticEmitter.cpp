@@ -805,6 +805,38 @@ namespace ctrace::stack::analyzer
         }
     }
 
+    void appendGlobalReadBeforeWriteDiagnostics(
+        AnalysisResult& result, const std::vector<analysis::GlobalReadBeforeWriteIssue>& issues)
+    {
+        for (const auto& issue : issues)
+        {
+            const ResolvedLocation readLoc = resolveFromInstruction(issue.readInst, true);
+            const ResolvedLocation firstWriteLoc = resolveFromInstruction(issue.firstWriteInst, true);
+
+            std::ostringstream body;
+            body << "\t[ !!Warn ] potential read of global buffer '" << issue.globalName
+                 << "' before first write in this function\n";
+            body << "\t\t ↳ this buffer has static zero initialization; read is defined but may "
+                    "indicate stale/default-state use\n";
+            if (firstWriteLoc.hasLocation)
+            {
+                body << "\t\t ↳ first write appears later at line " << firstWriteLoc.line
+                     << ", column " << firstWriteLoc.column << "\n";
+            }
+
+            DiagnosticBuilder builder;
+            builder.function(issue.funcName)
+                .severity(DiagnosticSeverity::Warning)
+                .errCode(DescriptiveErrorCode::GlobalReadBeforeWrite)
+                .ruleId("GlobalReadBeforeWrite")
+                .cwe("CWE-665")
+                .confidence(0.60)
+                .location(readLoc)
+                .message(body.str());
+            result.diagnostics.push_back(builder.build());
+        }
+    }
+
     void appendInvalidBaseReconstructionDiagnostics(
         AnalysisResult& result, const std::vector<analysis::InvalidBaseReconstructionIssue>& issues)
     {
