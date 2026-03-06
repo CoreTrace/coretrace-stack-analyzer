@@ -497,7 +497,14 @@ def fixture_path_with_fallback(*relative_candidates: str) -> Path:
     return RUN_CONFIG.test_dir / relative_candidates[0]
 
 
-def run_analyzer_on_file(c_path: Path, stack_limit=None, resource_model=None, escape_model=None, buffer_model=None) -> str:
+def run_analyzer_on_file(
+    c_path: Path,
+    stack_limit=None,
+    resource_model=None,
+    escape_model=None,
+    buffer_model=None,
+    extra_args: tuple[str, ...] = (),
+) -> str:
     """
     Run the analyzer on a C file and capture stdout+stderr.
     """
@@ -510,9 +517,32 @@ def run_analyzer_on_file(c_path: Path, stack_limit=None, resource_model=None, es
         args.append(f"--escape-model={escape_model}")
     if buffer_model:
         args.append(f"--buffer-model={buffer_model}")
+    if extra_args:
+        args.extend(extra_args)
     result = run_analyzer(args)
     output = (result.stdout or "") + (result.stderr or "")
     return output
+
+
+def _runner_has_explicit_smt_args() -> bool:
+    for arg in RUN_CONFIG.extra_analyzer_args:
+        if arg.startswith("--smt"):
+            return True
+    return False
+
+
+def _all_smt_rules() -> tuple[str, ...]:
+    """
+    Rules currently integrated with SMT refinement.
+    Applied to all fixture files for the dedicated SMT+Z3 pass.
+    """
+    return (
+        "recursion",
+        "integer-overflow",
+        "size-minus-k",
+        "stack-buffer",
+        "oob-read",
+    )
 
 
 def _has_positional_input_arg(args) -> bool:
@@ -2675,102 +2705,145 @@ def check_file(c_path: Path):
         report_lines.append("  (no expectations found, skipping)")
         return True, 0, 0, "\n".join(report_lines) + "\n\n"
 
-    analyzer_output = run_analyzer_on_file(
+    def evaluate_pass(pass_name: str, analyzer_output: str):
+        pass_lines = [f"  [pass: {pass_name}]"]
+        norm_output = normalize(analyzer_output)
+        output_index = _build_output_diagnostic_index_by_location(analyzer_output)
+
+        pass_ok = True
+        pass_total = len(expectations) + len(negative_expectations)
+        pass_passed = 0
+
+        for idx, exp in enumerate(expectations, start=1):
+            norm_exp = normalize(exp)
+            matched = norm_exp in norm_output
+            if not matched:
+                # Optimization: only normalize the body once, then vary the
+                # location prefix.  Avoids ~184 full normalize() calls per
+                # non-matching expectation.
+                exp_lines = exp.splitlines()
+                loc_match = _RE_LOCATION.match(exp_lines[0]) if exp_lines else None
+                if loc_match:
+                    norm_body = normalize("\n".join(exp_lines[1:])) if len(exp_lines) > 1 else ""
+                    base_line = int(loc_match.group(1))
+                    base_col = int(loc_match.group(2))
+                    for line_delta in range(-18, 19):
+                        for col_delta in (-2, -1, 0, 1, 2):
+                            if line_delta == 0 and col_delta == 0:
+                                continue
+                            cl = base_line + line_delta
+                            cc = base_col + col_delta
+                            if cl <= 0 or cc < 0:
+                                continue
+                            alt_loc = f"at line {cl}, column {cc}"
+                            candidate = f"{alt_loc}\n{norm_body}" if norm_body else alt_loc
+                            if candidate in norm_output:
+                                matched = True
+                                break
+                        if matched:
+                            break
+            if not matched and _expectation_matches_by_location_and_headlines(exp, output_index):
+                matched = True
+
+            if matched:
+                pass_lines.append(f"  ✅ ({pass_name}) expectation #{idx} FOUND")
+                pass_passed += 1
+            else:
+                pass_lines.append(f"  ❌ ({pass_name}) expectation #{idx} MISSING")
+                pass_lines.append("----- Expected block -----")
+                pass_lines.append(exp)
+                pass_lines.append("----- Analyzer output (normalized) -----")
+                pass_lines.append(f"<{norm_output}>")
+                pass_lines.append("---------------------------")
+                pass_ok = False
+
+        for idx, neg in enumerate(negative_expectations, start=1):
+            norm_neg = normalize(neg)
+            if norm_neg and norm_neg not in norm_output:
+                pass_lines.append(
+                    f"  ✅ ({pass_name}) negative expectation #{idx} NOT FOUND (as expected)"
+                )
+                pass_passed += 1
+            else:
+                pass_lines.append(f"  ❌ ({pass_name}) negative expectation #{idx} FOUND (unexpected)")
+                pass_lines.append("----- Forbidden text -----")
+                pass_lines.append(neg)
+                pass_lines.append("----- Analyzer output (normalized) -----")
+                pass_lines.append(f"<{norm_output}>")
+                pass_lines.append("---------------------------")
+                pass_ok = False
+
+        if strict_enabled:
+            pass_total += 1
+            expected_warning_error = sum(
+                1 for exp in expectations if _expectation_is_warning_or_error(exp)
+            )
+            actual_warning_error = _parse_total_warning_error_count(analyzer_output)
+            if actual_warning_error is None:
+                pass_lines.append(
+                    f"  ❌ ({pass_name}) strict diagnostic count check: summary line missing"
+                )
+                pass_lines.append("----- Analyzer output -----")
+                pass_lines.append(analyzer_output.strip())
+                pass_lines.append("---------------------------")
+                pass_ok = False
+            elif actual_warning_error == expected_warning_error:
+                pass_lines.append(
+                    f"  ✅ ({pass_name}) strict diagnostic count match ({actual_warning_error} warning/error)"
+                )
+                pass_passed += 1
+            else:
+                pass_lines.append(f"  ❌ ({pass_name}) strict diagnostic count mismatch")
+                pass_lines.append(
+                    f"     expected warning/error from comments: {expected_warning_error}"
+                )
+                pass_lines.append(
+                    f"     actual warning/error in analyzer output: {actual_warning_error}"
+                )
+                pass_lines.append("     hint: add missing // at line ... expectation blocks")
+                pass_ok = False
+
+        return pass_ok, pass_total, pass_passed, pass_lines
+
+    all_ok = True
+    total = 0
+    passed = 0
+
+    baseline_output = run_analyzer_on_file(
         c_path,
         stack_limit=stack_limit,
         resource_model=resource_model,
         escape_model=escape_model,
         buffer_model=buffer_model,
     )
-    norm_output = normalize(analyzer_output)
-    output_index = _build_output_diagnostic_index_by_location(analyzer_output)
+    base_ok, base_total, base_passed, base_lines = evaluate_pass("default", baseline_output)
+    report_lines.extend(base_lines)
+    all_ok = all_ok and base_ok
+    total += base_total
+    passed += base_passed
 
-    all_ok = True
-    total = len(expectations) + len(negative_expectations)
-    passed = 0
-    for idx, exp in enumerate(expectations, start=1):
-        norm_exp = normalize(exp)
-        matched = norm_exp in norm_output
-        if not matched:
-            # Optimization: only normalize the body once, then vary the
-            # location prefix.  Avoids ~184 full normalize() calls per
-            # non-matching expectation.
-            exp_lines = exp.splitlines()
-            loc_match = _RE_LOCATION.match(exp_lines[0]) if exp_lines else None
-            if loc_match:
-                norm_body = normalize("\n".join(exp_lines[1:])) if len(exp_lines) > 1 else ""
-                base_line = int(loc_match.group(1))
-                base_col = int(loc_match.group(2))
-                for line_delta in range(-18, 19):
-                    for col_delta in (-2, -1, 0, 1, 2):
-                        if line_delta == 0 and col_delta == 0:
-                            continue
-                        cl = base_line + line_delta
-                        cc = base_col + col_delta
-                        if cl <= 0 or cc < 0:
-                            continue
-                        alt_loc = f"at line {cl}, column {cc}"
-                        candidate = f"{alt_loc}\n{norm_body}" if norm_body else alt_loc
-                        if candidate in norm_output:
-                            matched = True
-                            break
-                    if matched:
-                        break
-        if not matched and _expectation_matches_by_location_and_headlines(exp, output_index):
-            matched = True
-        if matched:
-            report_lines.append(f"  ✅ expectation #{idx} FOUND")
-            passed += 1
-        else:
-            report_lines.append(f"  ❌ expectation #{idx} MISSING")
-            report_lines.append("----- Expected block -----")
-            report_lines.append(exp)
-            report_lines.append("----- Analyzer output (normalized) -----")
-            report_lines.append(f"<{norm_output}>")
-            report_lines.append("---------------------------")
-            all_ok = False
-
-    for idx, neg in enumerate(negative_expectations, start=1):
-        norm_neg = normalize(neg)
-        if norm_neg and norm_neg not in norm_output:
-            report_lines.append(f"  ✅ negative expectation #{idx} NOT FOUND (as expected)")
-            passed += 1
-        else:
-            report_lines.append(f"  ❌ negative expectation #{idx} FOUND (unexpected)")
-            report_lines.append("----- Forbidden text -----")
-            report_lines.append(neg)
-            report_lines.append("----- Analyzer output (normalized) -----")
-            report_lines.append(f"<{norm_output}>")
-            report_lines.append("---------------------------")
-            all_ok = False
-
-    if strict_enabled:
-        total += 1
-        expected_warning_error = sum(
-            1 for exp in expectations if _expectation_is_warning_or_error(exp)
+    if _runner_has_explicit_smt_args():
+        report_lines.append("  [info] dedicated smt-z3 pass skipped (runner already has --smt args)")
+    else:
+        smt_rules_csv = ",".join(_all_smt_rules())
+        smt_output = run_analyzer_on_file(
+            c_path,
+            stack_limit=stack_limit,
+            resource_model=resource_model,
+            escape_model=escape_model,
+            buffer_model=buffer_model,
+            extra_args=(
+                "--smt=on",
+                "--smt-backend=z3",
+                "--smt-mode=single",
+                f"--smt-rules={smt_rules_csv}",
+            ),
         )
-        actual_warning_error = _parse_total_warning_error_count(analyzer_output)
-        if actual_warning_error is None:
-            report_lines.append("  ❌ strict diagnostic count check: summary line missing")
-            report_lines.append("----- Analyzer output -----")
-            report_lines.append(analyzer_output.strip())
-            report_lines.append("---------------------------")
-            all_ok = False
-        elif actual_warning_error == expected_warning_error:
-            report_lines.append(
-                f"  ✅ strict diagnostic count match ({actual_warning_error} warning/error)"
-            )
-            passed += 1
-        else:
-            report_lines.append("  ❌ strict diagnostic count mismatch")
-            report_lines.append(
-                f"     expected warning/error from comments: {expected_warning_error}"
-            )
-            report_lines.append(
-                f"     actual warning/error in analyzer output: {actual_warning_error}"
-            )
-            report_lines.append("     hint: add missing // at line ... expectation blocks")
-            all_ok = False
+        smt_ok, smt_total, smt_passed, smt_lines = evaluate_pass("smt-z3", smt_output)
+        report_lines.extend(smt_lines)
+        all_ok = all_ok and smt_ok
+        total += smt_total
+        passed += smt_passed
 
     return all_ok, total, passed, "\n".join(report_lines) + "\n\n"
 
