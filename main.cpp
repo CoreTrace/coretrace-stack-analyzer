@@ -1,6 +1,8 @@
 #include "app/AnalyzerApp.hpp"
 #include "cli/ArgParser.hpp"
 
+#include <algorithm>
+#include <sstream>
 #include <string>
 #include <utility>
 
@@ -46,11 +48,20 @@ static void printHelp()
         << "  --compdb-fast          Speed up compdb builds (drops heavy flags)\n"
         << "  --include-compdb-deps Include _deps entries when auto-discovering files from "
            "compile_commands.json\n"
-        << "  --jobs=<N>             Parallel jobs for multi-file loading/analysis and cross-TU "
+        << "  --jobs=<N|auto>        Parallel jobs for multi-file loading/analysis and cross-TU "
            "summary build (default: 1)\n"
         << "                          If no input files are provided, supported files are loaded\n"
         << "                          from compile_commands.json automatically.\n"
         << "  --timing               Print compilation/analysis timing to stderr\n"
+        << "  --config=<path>        Load optional key=value config file (CLI flags override)\n"
+        << "  --print-effective-config  Print resolved runtime config to stderr\n"
+        << "  --smt=on|off           Enable or disable SMT-assisted reasoning (default: off)\n"
+        << "  --smt-backend=<name>   Primary SMT backend (interval|z3|cvc5)\n"
+        << "  --smt-secondary-backend=<name>  Secondary backend for coupled modes\n"
+        << "  --smt-mode=<mode>      Solver mode: single|portfolio|cross-check|dual-consensus\n"
+        << "  --smt-timeout-ms=<N>   Per-query timeout budget in milliseconds\n"
+        << "  --smt-budget-nodes=<N> Per-query complexity budget\n"
+        << "  --smt-rules=<csv>      Restrict SMT to selected rules (example: recursion)\n"
         << "  --escape-model=<path>  Stack escape model file "
            "(noescape_arg rules)\n"
         << "  --buffer-model=<path>  Buffer write model file "
@@ -82,8 +93,77 @@ static void printHelp()
         << "  stack_usage_analyzer main.cpp -I../include --format=json\n"
         << "  stack_usage_analyzer main.cpp -I../include --only-dir=../src\n"
         << "  stack_usage_analyzer main.cpp --compile-commands=build/compile_commands.json\n"
+        << "  stack_usage_analyzer --config=.ctrace-analyzer.cfg --jobs=auto\n"
+        << "  stack_usage_analyzer --config=.ctrace-analyzer.cfg --print-effective-config\n"
         << "  stack_usage_analyzer input.ll --mode=abi --format=json\n"
         << "  stack_usage_analyzer input.ll --warnings-only\n";
+}
+
+static const char* solverModeName(ctrace::stack::analysis::smt::SolverMode mode)
+{
+    using Mode = ctrace::stack::analysis::smt::SolverMode;
+    switch (mode)
+    {
+    case Mode::Single:
+        return "single";
+    case Mode::Portfolio:
+        return "portfolio";
+    case Mode::CrossCheck:
+        return "cross-check";
+    case Mode::DualConsensus:
+        return "dual-consensus";
+    }
+    return "single";
+}
+
+static std::string joinCsv(const std::vector<std::string>& values)
+{
+    if (values.empty())
+        return {};
+    std::ostringstream oss;
+    for (std::size_t i = 0; i < values.size(); ++i)
+    {
+        if (i != 0)
+            oss << ",";
+        oss << values[i];
+    }
+    return oss.str();
+}
+
+static void printEffectiveConfig(const ctrace::stack::cli::ParsedArguments& parsed)
+{
+    const AnalysisConfig& cfg = parsed.config;
+    llvm::errs() << "=== Effective Analyzer Configuration ===\n";
+    llvm::errs() << "config-file: "
+                 << (parsed.configPath.empty() ? "<none>" : parsed.configPath) << "\n";
+    llvm::errs() << "compile-commands: "
+                 << (parsed.compileCommandsPath.empty() ? "<none>" : parsed.compileCommandsPath)
+                 << "\n";
+    llvm::errs() << "analysis-profile: "
+                 << (cfg.profile == AnalysisProfile::Fast ? "fast" : "full") << "\n";
+    if (cfg.jobsAuto)
+        llvm::errs() << "jobs: auto\n";
+    else
+        llvm::errs() << "jobs: " << cfg.jobs << "\n";
+    llvm::errs() << "warnings-only: " << (cfg.warningsOnly ? "true" : "false") << "\n";
+    llvm::errs() << "quiet: " << (cfg.quiet ? "true" : "false") << "\n";
+    llvm::errs() << "demangle: " << (cfg.demangle ? "true" : "false") << "\n";
+    llvm::errs() << "resource-model: "
+                 << (cfg.resourceModelPath.empty() ? "<none>" : cfg.resourceModelPath) << "\n";
+    llvm::errs() << "escape-model: "
+                 << (cfg.escapeModelPath.empty() ? "<none>" : cfg.escapeModelPath) << "\n";
+    llvm::errs() << "buffer-model: "
+                 << (cfg.bufferModelPath.empty() ? "<none>" : cfg.bufferModelPath) << "\n";
+    llvm::errs() << "smt-enabled: " << (cfg.smtEnabled ? "true" : "false") << "\n";
+    llvm::errs() << "smt-backend: " << cfg.smtBackend << "\n";
+    llvm::errs() << "smt-secondary-backend: "
+                 << (cfg.smtSecondaryBackend.empty() ? "<none>" : cfg.smtSecondaryBackend) << "\n";
+    llvm::errs() << "smt-mode: " << solverModeName(cfg.smtMode) << "\n";
+    llvm::errs() << "smt-timeout-ms: " << cfg.smtTimeoutMs << "\n";
+    llvm::errs() << "smt-budget-nodes: " << cfg.smtBudgetNodes << "\n";
+    llvm::errs() << "smt-rules: "
+                 << (cfg.smtRules.empty() ? "<all>" : joinCsv(cfg.smtRules)) << "\n";
+    llvm::errs() << "========================================\n";
 }
 
 int main(int argc, char** argv)
@@ -118,6 +198,9 @@ int main(int argc, char** argv)
 
     if (parseResult.parsed.verbose)
         coretrace::set_min_level(coretrace::Level::Debug);
+
+    if (parseResult.parsed.printEffectiveConfig)
+        printEffectiveConfig(parseResult.parsed);
 
     ctrace::stack::app::RunResult runResult =
         ctrace::stack::app::runAnalyzerApp(std::move(parseResult.parsed), context);
