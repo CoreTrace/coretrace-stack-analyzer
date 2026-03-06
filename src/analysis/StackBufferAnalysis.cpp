@@ -21,11 +21,15 @@
 
 #include "analysis/IntRanges.hpp"
 #include "analysis/IRValueUtils.hpp"
+#include "analysis/smt/SmtEncoding.hpp"
+#include "analysis/smt/SmtRefinement.hpp"
 
 namespace ctrace::stack::analysis
 {
     namespace
     {
+        using SmtFeasibility = smt::SmtFeasibility;
+
         struct RecursionGuard
         {
             llvm::SmallPtrSetImpl<const llvm::Value*>& set;
@@ -86,6 +90,43 @@ namespace ctrace::stack::analysis
 
             return false;
         }
+
+        class StackBufferConstraintEvaluator final : public smt::SmtConstraintEvaluator
+        {
+          public:
+            explicit StackBufferConstraintEvaluator(const AnalysisConfig& config)
+                : smt::SmtConstraintEvaluator(config, "stack-buffer")
+            {
+            }
+
+            SmtFeasibility
+            isNegativeIndexFeasible(const std::map<const llvm::Value*, IntRange>& ranges,
+                                    const llvm::Value& indexExpr,
+                                    const llvm::Instruction* contextInst) const
+            {
+                return smt::SmtConstraintEvaluator::evaluateQuery(
+                    smt::encodeSignedComparisonFeasibility(
+                        ranges, indexExpr, -1, false, contextInst));
+            }
+
+            SmtFeasibility
+            isUpperOverflowFeasible(const std::map<const llvm::Value*, IntRange>& ranges,
+                                    const llvm::Value& indexExpr, StackSize limitExclusive,
+                                    const llvm::Instruction* contextInst) const
+            {
+                if (limitExclusive == 0 ||
+                    limitExclusive > static_cast<StackSize>(std::numeric_limits<std::int64_t>::max()))
+                {
+                    return SmtFeasibility::Inconclusive;
+                }
+
+                const std::int64_t upperInclusive =
+                    static_cast<std::int64_t>(limitExclusive - 1);
+                return smt::SmtConstraintEvaluator::evaluateQuery(
+                    smt::encodeSignedComparisonFeasibility(
+                        ranges, indexExpr, upperInclusive, true, contextInst));
+            }
+        };
 
         static std::string buildAliasPathString(const std::vector<std::string>& aliasPath)
         {
@@ -855,10 +896,45 @@ namespace ctrace::stack::analysis
             return refined;
         }
 
+        static bool isUpperViolationInfeasibleBySmt(
+            const StackBufferConstraintEvaluator& evaluator,
+            const IntRange& localRange, const llvm::Value* indexExpr, StackSize arraySize,
+            const llvm::Instruction& accessInst)
+        {
+            if (!indexExpr || !indexExpr->getType()->isIntegerTy())
+                return false;
+            if (!localRange.hasLower && !localRange.hasUpper)
+                return false;
+
+            std::map<const llvm::Value*, IntRange> queryRanges;
+            queryRanges[indexExpr] = localRange;
+
+            return evaluator.isUpperOverflowFeasible(queryRanges, *indexExpr, arraySize, &accessInst) ==
+                   SmtFeasibility::Infeasible;
+        }
+
+        static bool isLowerViolationInfeasibleBySmt(
+            const StackBufferConstraintEvaluator& evaluator,
+            const IntRange& localRange, const llvm::Value* indexExpr,
+            const llvm::Instruction& accessInst)
+        {
+            if (!indexExpr || !indexExpr->getType()->isIntegerTy())
+                return false;
+            if (!localRange.hasLower && !localRange.hasUpper)
+                return false;
+
+            std::map<const llvm::Value*, IntRange> queryRanges;
+            queryRanges[indexExpr] = localRange;
+
+            return evaluator.isNegativeIndexFeasible(queryRanges, *indexExpr, &accessInst) ==
+                   SmtFeasibility::Infeasible;
+        }
+
         static void
         analyzeStackBufferOverflowsInFunction(llvm::Function& F,
                                               std::vector<StackBufferOverflowIssue>& out,
-                                              const AnalysisComplexityBudgets& budgets)
+                                              const AnalysisComplexityBudgets& budgets,
+                                              const StackBufferConstraintEvaluator& evaluator)
         {
             using namespace llvm;
 
@@ -1125,6 +1201,12 @@ namespace ctrace::stack::analysis
                         {
                             if (auto* S = dyn_cast<StoreInst>(GU))
                             {
+                                if (isUpperViolationInfeasibleBySmt(
+                                        evaluator, R, baseIdxVal, arraySize, *S))
+                                {
+                                    continue;
+                                }
+
                                 StackBufferOverflowIssue report;
                                 report.funcName = F.getName().str();
                                 report.varName = varName;
@@ -1140,6 +1222,12 @@ namespace ctrace::stack::analysis
                             }
                             else if (auto* L = dyn_cast<LoadInst>(GU))
                             {
+                                if (isUpperViolationInfeasibleBySmt(
+                                        evaluator, R, baseIdxVal, arraySize, *L))
+                                {
+                                    continue;
+                                }
+
                                 StackBufferOverflowIssue report;
                                 report.funcName = F.getName().str();
                                 report.varName = varName;
@@ -1163,6 +1251,12 @@ namespace ctrace::stack::analysis
                         {
                             if (auto* S = dyn_cast<StoreInst>(GU))
                             {
+                                if (isLowerViolationInfeasibleBySmt(
+                                        evaluator, R, baseIdxVal, *S))
+                                {
+                                    continue;
+                                }
+
                                 StackBufferOverflowIssue report;
                                 report.funcName = F.getName().str();
                                 report.varName = varName;
@@ -1179,6 +1273,12 @@ namespace ctrace::stack::analysis
                             }
                             else if (auto* L = dyn_cast<LoadInst>(GU))
                             {
+                                if (isLowerViolationInfeasibleBySmt(
+                                        evaluator, R, baseIdxVal, *L))
+                                {
+                                    continue;
+                                }
+
                                 StackBufferOverflowIssue report;
                                 report.funcName = F.getName().str();
                                 report.varName = varName;
@@ -1329,6 +1429,7 @@ namespace ctrace::stack::analysis
     {
         std::vector<StackBufferOverflowIssue> out;
         const AnalysisComplexityBudgets budgets = buildAnalysisComplexityBudgets(config);
+        const StackBufferConstraintEvaluator evaluator(config);
 
         for (llvm::Function& F : mod)
         {
@@ -1336,7 +1437,7 @@ namespace ctrace::stack::analysis
                 continue;
             if (!shouldAnalyze(F))
                 continue;
-            analyzeStackBufferOverflowsInFunction(F, out, budgets);
+            analyzeStackBufferOverflowsInFunction(F, out, budgets, evaluator);
         }
 
         return out;
