@@ -52,7 +52,10 @@ namespace ctrace::stack::analysis
                                const std::vector<const llvm::Function*>& nodes);
 
     bool detectInfiniteSelfRecursion(llvm::Function& F);
+    bool detectInfiniteSelfRecursion(llvm::Function& F, const AnalysisConfig& config);
     bool detectInfiniteRecursionComponent(const std::vector<const llvm::Function*>& component);
+    bool detectInfiniteRecursionComponent(const std::vector<const llvm::Function*>& component,
+                                          const AnalysisConfig& config);
 
     StackSize computeAllocaLargeThreshold(const AnalysisConfig& config);
 } // namespace ctrace::stack::analysis
