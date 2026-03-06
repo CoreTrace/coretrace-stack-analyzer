@@ -71,6 +71,15 @@ struct NormalizedPathFilters
     std::vector<std::string> excludeDirs;
 };
 
+static unsigned resolveConfiguredJobs(const AnalysisConfig& cfg)
+{
+    if (!cfg.jobsAuto)
+        return std::max(1u, cfg.jobs);
+
+    const unsigned hw = std::thread::hardware_concurrency();
+    return hw == 0 ? 1u : hw;
+}
+
 template <typename T> struct AppResult
 {
     std::optional<T> value;
@@ -664,7 +673,7 @@ static void printInterprocStatus(const AnalysisConfig& cfg, std::size_t inputCou
             coretrace::log(coretrace::Level::Info,
                            "Resource inter-procedural analysis: enabled (cross-TU summaries across "
                            "{} files, jobs: {}{})\n",
-                           inputCount, std::max(1u, cfg.jobs), cacheSuffix);
+                           inputCount, resolveConfiguredJobs(cfg), cacheSuffix);
         }
         else if (!cfg.resourceCrossTU)
         {
@@ -688,7 +697,7 @@ static void printInterprocStatus(const AnalysisConfig& cfg, std::size_t inputCou
                 coretrace::Level::Info,
                 "Uninitialized inter-procedural analysis: enabled (cross-TU summaries across "
                 "{} files, jobs: {})\n",
-                inputCount, std::max(1u, cfg.jobs));
+                inputCount, resolveConfiguredJobs(cfg));
         }
         else if (!cfg.uninitializedCrossTU)
         {
@@ -736,7 +745,7 @@ static AppStatus analyzeWithSharedModuleLoading(const std::vector<std::string>& 
         loadSucceeded[index] = 1;
     };
 
-    const unsigned loadJobs = std::max(1u, cfg.jobs);
+    const unsigned loadJobs = resolveConfiguredJobs(cfg);
     if (loadJobs <= 1 || inputFilenames.size() <= 1)
     {
         for (std::size_t index = 0; index < inputFilenames.size(); ++index)
@@ -814,7 +823,7 @@ static AppStatus analyzeWithoutSharedModuleLoading(const std::vector<std::string
                                                    llvm::LLVMContext& context, bool hasFilter,
                                                    std::vector<AnalysisEntry>& results)
 {
-    const unsigned parallelJobs = std::max(1u, cfg.jobs);
+    const unsigned parallelJobs = resolveConfiguredJobs(cfg);
     if (parallelJobs <= 1 || inputFilenames.size() <= 1)
     {
         for (const auto& inputFilename : inputFilenames)
@@ -1376,7 +1385,7 @@ buildCrossTUSummaryIndex(const std::vector<LoadedInputModule>& loadedModules,
     constexpr llvm::StringLiteral kCacheSchema = "cross-tu-resource-summary-v1";
     const bool allowDiskCache =
         !cfg.resourceSummaryMemoryOnly && !cfg.resourceSummaryCacheDir.empty();
-    const unsigned maxJobs = std::max(1u, cfg.jobs);
+    const unsigned maxJobs = resolveConfiguredJobs(cfg);
     std::unordered_map<std::string, ctrace::stack::analysis::ResourceSummaryIndex> memoryCache;
     std::vector<std::string> moduleIRHashes;
     std::vector<std::string> moduleCompileArgsHashes;
@@ -1585,7 +1594,7 @@ buildCrossTUUninitializedSummaryIndex(const std::vector<LoadedInputModule>& load
 
     // Same fixed-point budget policy as resource summaries.
     constexpr unsigned kCrossTUMaxIterations = 12;
-    const unsigned maxJobs = std::max(1u, cfg.jobs);
+    const unsigned maxJobs = resolveConfiguredJobs(cfg);
     analysis::UninitializedSummaryIndex globalIndex;
     unsigned iterationsRan = 0;
     bool converged = false;
