@@ -5,10 +5,14 @@
 #include <charconv>
 #include <cctype>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <limits>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -41,7 +45,7 @@ namespace ctrace::stack::cli
             }
 
           private:
-            static constexpr std::array<OptionCandidate, 42> kCandidates = {
+            static constexpr std::array<OptionCandidate, 53> kCandidates = {
                 {{"-h", "-h"},
                  {"--help", "--help"},
                  {"--demangle", "--demangle"},
@@ -64,6 +68,15 @@ namespace ctrace::stack::cli
                  {"--include-compdb-deps", "--include-compdb-deps"},
                  {"--jobs", "--jobs"},
                  {"--timing", "--timing"},
+                 {"--smt", "--smt=on"},
+                 {"--smt=on", "--smt=on"},
+                 {"--smt=off", "--smt=off"},
+                 {"--smt-backend", "--smt-backend=interval"},
+                 {"--smt-secondary-backend", "--smt-secondary-backend=interval"},
+                 {"--smt-mode", "--smt-mode=single"},
+                 {"--smt-timeout-ms", "--smt-timeout-ms"},
+                 {"--smt-budget-nodes", "--smt-budget-nodes"},
+                 {"--smt-rules", "--smt-rules"},
                  {"--resource-model", "--resource-model"},
                  {"--escape-model", "--escape-model"},
                  {"--buffer-model", "--buffer-model"},
@@ -73,6 +86,8 @@ namespace ctrace::stack::cli
                  {"--no-uninitialized-cross-tu", "--no-uninitialized-cross-tu"},
                  {"--resource-summary-cache-dir", "--resource-summary-cache-dir"},
                  {"--resource-summary-cache-memory-only", "--resource-summary-cache-memory-only"},
+                 {"--config", "--config"},
+                 {"--print-effective-config", "--print-effective-config"},
                  {"--compile-commands", "--compile-commands"},
                  {"--compdb", "--compdb"},
                  {"--warnings-only", "--warnings-only"},
@@ -243,6 +258,113 @@ namespace ctrace::stack::cli
             return true;
         }
 
+        bool parsePositiveU64(const std::string& input, std::uint64_t& out, std::string& error)
+        {
+            const std::string trimmed = trimCopy(input);
+            if (trimmed.empty())
+            {
+                error = "value is empty";
+                return false;
+            }
+
+            unsigned long long parsed = 0;
+            const auto [ptr, ec] =
+                std::from_chars(trimmed.data(), trimmed.data() + trimmed.size(), parsed, 10);
+            if (ec != std::errc() || ptr != trimmed.data() + trimmed.size())
+            {
+                error = "invalid numeric value";
+                return false;
+            }
+            if (parsed == 0)
+            {
+                error = "value must be greater than zero";
+                return false;
+            }
+            out = static_cast<std::uint64_t>(parsed);
+            return true;
+        }
+
+        bool parseJobsValue(const std::string& input, unsigned& jobsOut, bool& autoOut,
+                            std::string& error)
+        {
+            const std::string trimmed = trimCopy(input);
+            std::string lowered;
+            lowered.reserve(trimmed.size());
+            for (char c : trimmed)
+                lowered.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+
+            if (lowered == "auto")
+            {
+                const unsigned hw = std::thread::hardware_concurrency();
+                jobsOut = hw == 0 ? 1u : hw;
+                autoOut = true;
+                return true;
+            }
+
+            unsigned parsedJobs = 0;
+            if (!parsePositiveUnsigned(trimmed, parsedJobs, error))
+                return false;
+
+            jobsOut = parsedJobs;
+            autoOut = false;
+            return true;
+        }
+
+        bool parseSmtSwitch(const std::string& input, bool& out, std::string& error)
+        {
+            std::string lowered;
+            lowered.reserve(input.size());
+            for (char c : trimCopy(input))
+                lowered.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+
+            if (lowered == "on")
+            {
+                out = true;
+                return true;
+            }
+            if (lowered == "off")
+            {
+                out = false;
+                return true;
+            }
+
+            error = "expected 'on' or 'off'";
+            return false;
+        }
+
+        bool parseSmtMode(const std::string& input, analysis::smt::SolverMode& out,
+                          std::string& error)
+        {
+            std::string lowered;
+            lowered.reserve(input.size());
+            for (char c : trimCopy(input))
+                lowered.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+
+            if (lowered == "single")
+            {
+                out = analysis::smt::SolverMode::Single;
+                return true;
+            }
+            if (lowered == "portfolio")
+            {
+                out = analysis::smt::SolverMode::Portfolio;
+                return true;
+            }
+            if (lowered == "cross-check")
+            {
+                out = analysis::smt::SolverMode::CrossCheck;
+                return true;
+            }
+            if (lowered == "dual-consensus")
+            {
+                out = analysis::smt::SolverMode::DualConsensus;
+                return true;
+            }
+
+            error = "expected 'single', 'portfolio', 'cross-check', or 'dual-consensus'";
+            return false;
+        }
+
         bool parseAnalysisProfile(const std::string& input, AnalysisProfile& out,
                                   std::string& error)
         {
@@ -348,6 +470,60 @@ namespace ctrace::stack::cli
             return true;
         }
 
+        bool parseBoolSwitch(const std::string& input, bool& out, std::string& error)
+        {
+            std::string lowered;
+            lowered.reserve(input.size());
+            for (char c : trimCopy(input))
+                lowered.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+
+            if (lowered == "true" || lowered == "on" || lowered == "yes" || lowered == "1")
+            {
+                out = true;
+                return true;
+            }
+            if (lowered == "false" || lowered == "off" || lowered == "no" || lowered == "0")
+            {
+                out = false;
+                return true;
+            }
+
+            error = "expected true/false (or on/off, yes/no, 1/0)";
+            return false;
+        }
+
+        std::string stripOptionalQuotes(const std::string& input)
+        {
+            if (input.size() >= 2)
+            {
+                const char first = input.front();
+                const char last = input.back();
+                if ((first == '"' && last == '"') || (first == '\'' && last == '\''))
+                    return input.substr(1, input.size() - 2);
+            }
+            return input;
+        }
+
+        std::string toLowerAsciiCopy(const std::string& input)
+        {
+            std::string lowered;
+            lowered.reserve(input.size());
+            for (char c : input)
+                lowered.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+            return lowered;
+        }
+
+        std::string resolveConfigRelativePath(const std::string& rawPath,
+                                              const std::filesystem::path& configDir)
+        {
+            if (rawPath.empty())
+                return rawPath;
+            std::filesystem::path p(rawPath);
+            if (p.is_absolute())
+                return p.lexically_normal().string();
+            return (configDir / p).lexically_normal().string();
+        }
+
         void addCsvFilters(std::vector<std::string>& dest, const std::string& input)
         {
             std::string current;
@@ -391,6 +567,396 @@ namespace ctrace::stack::cli
                 return true;
             }
             return false;
+        }
+
+        enum class SmtOptionSource
+        {
+            Config,
+            Cli
+        };
+
+        using SmtOptionApplyFn =
+            bool (*)(AnalysisConfig& cfg, const std::string& value, SmtOptionSource source,
+                     std::string& error);
+
+        struct SmtOptionSpec
+        {
+            std::string_view configKey;
+            const char* cliOption;
+            SmtOptionApplyFn apply = nullptr;
+            bool impliesSmtEnabled = true;
+        };
+
+        bool applySmtSwitchOption(AnalysisConfig& cfg, const std::string& value,
+                                  SmtOptionSource source, std::string& error)
+        {
+            bool parsedValue = false;
+            if (source == SmtOptionSource::Cli)
+            {
+                if (!parseSmtSwitch(value, parsedValue, error))
+                    return false;
+            }
+            else
+            {
+                if (!parseBoolSwitch(value, parsedValue, error))
+                    return false;
+            }
+            cfg.smtEnabled = parsedValue;
+            return true;
+        }
+
+        bool applySmtBackendOption(AnalysisConfig& cfg, const std::string& value, SmtOptionSource,
+                                   std::string&)
+        {
+            cfg.smtBackend = value;
+            return true;
+        }
+
+        bool applySmtSecondaryBackendOption(AnalysisConfig& cfg, const std::string& value,
+                                            SmtOptionSource, std::string&)
+        {
+            cfg.smtSecondaryBackend = value;
+            return true;
+        }
+
+        bool applySmtModeOption(AnalysisConfig& cfg, const std::string& value, SmtOptionSource,
+                                std::string& error)
+        {
+            analysis::smt::SolverMode parsedMode = cfg.smtMode;
+            if (!parseSmtMode(value, parsedMode, error))
+                return false;
+            cfg.smtMode = parsedMode;
+            return true;
+        }
+
+        bool applySmtTimeoutOption(AnalysisConfig& cfg, const std::string& value, SmtOptionSource,
+                                   std::string& error)
+        {
+            unsigned parsedTimeout = 0;
+            if (!parsePositiveUnsigned(value, parsedTimeout, error))
+                return false;
+            cfg.smtTimeoutMs = parsedTimeout;
+            return true;
+        }
+
+        bool applySmtBudgetOption(AnalysisConfig& cfg, const std::string& value, SmtOptionSource,
+                                  std::string& error)
+        {
+            std::uint64_t parsedBudget = 0;
+            if (!parsePositiveU64(value, parsedBudget, error))
+                return false;
+            cfg.smtBudgetNodes = parsedBudget;
+            return true;
+        }
+
+        bool applySmtRulesOption(AnalysisConfig& cfg, const std::string& value,
+                                 SmtOptionSource source, std::string&)
+        {
+            if (source == SmtOptionSource::Config)
+                cfg.smtRules.clear();
+            addCsvFilters(cfg.smtRules, value);
+            return true;
+        }
+
+        constexpr std::array<SmtOptionSpec, 7> kSmtOptionSpecs = {{
+            {"smt", "--smt", &applySmtSwitchOption, false},
+            {"smt-backend", "--smt-backend", &applySmtBackendOption, true},
+            {"smt-secondary-backend", "--smt-secondary-backend", &applySmtSecondaryBackendOption,
+             true},
+            {"smt-mode", "--smt-mode", &applySmtModeOption, true},
+            {"smt-timeout-ms", "--smt-timeout-ms", &applySmtTimeoutOption, true},
+            {"smt-budget-nodes", "--smt-budget-nodes", &applySmtBudgetOption, true},
+            {"smt-rules", "--smt-rules", &applySmtRulesOption, true},
+        }};
+
+        const SmtOptionSpec* findSmtOptionByConfigKey(std::string_view key)
+        {
+            for (const SmtOptionSpec& spec : kSmtOptionSpecs)
+            {
+                if (spec.configKey == key)
+                    return &spec;
+            }
+            return nullptr;
+        }
+
+        bool applySmtOptionValue(const SmtOptionSpec& spec, AnalysisConfig& cfg,
+                                 const std::string& value, SmtOptionSource source,
+                                 std::string& error)
+        {
+            if (!spec.apply || !spec.apply(cfg, value, source, error))
+                return false;
+            if (spec.impliesSmtEnabled)
+                cfg.smtEnabled = true;
+            return true;
+        }
+
+        bool tryConsumeAndApplySmtCliOption(const std::string& argStr, int& i, int argc,
+                                            char** argv, AnalysisConfig& cfg, std::string& error)
+        {
+            for (const SmtOptionSpec& spec : kSmtOptionSpecs)
+            {
+                std::string value;
+                std::string consumeError;
+                if (!consumeLongOptionValue(argStr, spec.cliOption, i, argc, argv, value,
+                                            consumeError))
+                {
+                    continue;
+                }
+
+                if (!consumeError.empty())
+                {
+                    error = consumeError;
+                    return true;
+                }
+
+                std::string valueError;
+                if (!applySmtOptionValue(spec, cfg, value, SmtOptionSource::Cli, valueError))
+                {
+                    error = "Invalid " + std::string(spec.cliOption) + " value: " + valueError;
+                    return true;
+                }
+
+                return true;
+            }
+            return false;
+        }
+
+        template <typename Owner> struct BoolConfigSpec
+        {
+            std::string_view key;
+            bool Owner::*field = nullptr;
+        };
+
+        constexpr std::array<BoolConfigSpec<AnalysisConfig>, 7> kConfigBoolSpecs = {{
+            {"timing", &AnalysisConfig::timing},
+            {"warnings-only", &AnalysisConfig::warningsOnly},
+            {"quiet", &AnalysisConfig::quiet},
+            {"demangle", &AnalysisConfig::demangle},
+            {"resource-cross-tu", &AnalysisConfig::resourceCrossTU},
+            {"uninitialized-cross-tu", &AnalysisConfig::uninitializedCrossTU},
+            {"resource-summary-cache-memory-only", &AnalysisConfig::resourceSummaryMemoryOnly},
+        }};
+
+        constexpr std::array<BoolConfigSpec<ParsedArguments>, 1> kParsedBoolSpecs = {{
+            {"include-compdb-deps", &ParsedArguments::includeCompdbDeps},
+        }};
+
+        template <typename Owner, std::size_t N>
+        bool tryApplyBoolConfigSpec(std::string_view key, const std::string& value, Owner& owner,
+                                    const std::array<BoolConfigSpec<Owner>, N>& specs,
+                                    std::string& error)
+        {
+            for (const BoolConfigSpec<Owner>& spec : specs)
+            {
+                if (spec.key != key)
+                    continue;
+
+                bool parsedValue = false;
+                std::string localError;
+                if (!parseBoolSwitch(value, parsedValue, localError))
+                {
+                    error = "invalid " + std::string(spec.key) + " value: " + localError;
+                    return false;
+                }
+
+                owner.*(spec.field) = parsedValue;
+                return true;
+            }
+            return false;
+        }
+
+        struct PreParsedCliMeta
+        {
+            std::string configPath;
+            bool printEffectiveConfig = false;
+        };
+
+        bool preScanMetaOptions(int argc, char** argv, PreParsedCliMeta& outMeta,
+                                std::string& error)
+        {
+            outMeta = {};
+            for (int i = 1; i < argc; ++i)
+            {
+                const std::string argStr{argv[i]};
+                if (argStr == "--print-effective-config")
+                {
+                    outMeta.printEffectiveConfig = true;
+                    continue;
+                }
+
+                std::string value;
+                if (consumeLongOptionValue(argStr, "--config", i, argc, argv, value, error))
+                {
+                    if (!error.empty())
+                        return false;
+                    outMeta.configPath = value;
+                    continue;
+                }
+            }
+            return true;
+        }
+
+        bool applyConfigEntry(const std::string& keyRaw, const std::string& valueRaw, ParsedArguments& parsed,
+                              AnalysisConfig& cfg, const std::filesystem::path& configDir,
+                              std::string& error)
+        {
+            std::string key = toLowerAsciiCopy(trimCopy(keyRaw));
+            for (char& c : key)
+            {
+                if (c == '_')
+                    c = '-';
+            }
+
+            const std::string value = stripOptionalQuotes(trimCopy(valueRaw));
+            if (key.empty())
+            {
+                error = "empty key";
+                return false;
+            }
+
+            if (key == "resource-model")
+            {
+                cfg.resourceModelPath = resolveConfigRelativePath(value, configDir);
+                return true;
+            }
+            if (key == "escape-model")
+            {
+                cfg.escapeModelPath = resolveConfigRelativePath(value, configDir);
+                return true;
+            }
+            if (key == "buffer-model")
+            {
+                cfg.bufferModelPath = resolveConfigRelativePath(value, configDir);
+                return true;
+            }
+            if (key == "compile-commands" || key == "compdb")
+            {
+                parsed.compileCommandsPath = resolveConfigRelativePath(value, configDir);
+                parsed.compileCommandsExplicit = true;
+                return true;
+            }
+            if (key == "analysis-profile")
+            {
+                std::string localError;
+                if (!parseAnalysisProfile(value, cfg.profile, localError))
+                {
+                    error = "invalid analysis profile: " + localError;
+                    return false;
+                }
+                parsed.analysisProfileExplicit = true;
+                return true;
+            }
+            if (key == "jobs")
+            {
+                unsigned parsedJobs = 0;
+                bool parsedAuto = false;
+                std::string localError;
+                if (!parseJobsValue(value, parsedJobs, parsedAuto, localError))
+                {
+                    error = "invalid jobs value: " + localError;
+                    return false;
+                }
+                cfg.jobs = parsedJobs;
+                cfg.jobsAuto = parsedAuto;
+                return true;
+            }
+            {
+                std::string boolError;
+                if (tryApplyBoolConfigSpec(key, value, cfg, kConfigBoolSpecs, boolError))
+                    return true;
+                if (!boolError.empty())
+                {
+                    error = std::move(boolError);
+                    return false;
+                }
+            }
+            {
+                std::string boolError;
+                if (tryApplyBoolConfigSpec(key, value, parsed, kParsedBoolSpecs, boolError))
+                    return true;
+                if (!boolError.empty())
+                {
+                    error = std::move(boolError);
+                    return false;
+                }
+            }
+            if (const SmtOptionSpec* smtSpec = findSmtOptionByConfigKey(key))
+            {
+                std::string localError;
+                if (!applySmtOptionValue(*smtSpec, cfg, value, SmtOptionSource::Config, localError))
+                {
+                    error = "invalid " + key + " value: " + localError;
+                    return false;
+                }
+                return true;
+            }
+            if (key == "resource-summary-cache-dir")
+            {
+                cfg.resourceSummaryCacheDir = resolveConfigRelativePath(value, configDir);
+                return true;
+            }
+
+            error = "unknown key '" + key + "'";
+            return false;
+        }
+
+        bool loadConfigFile(const std::string& configPathRaw, ParsedArguments& parsed,
+                            AnalysisConfig& cfg, std::string& error)
+        {
+            const std::filesystem::path configPath = std::filesystem::path(configPathRaw);
+            std::ifstream in(configPath);
+            if (!in)
+            {
+                error = "Unable to open config file: " + configPathRaw;
+                return false;
+            }
+
+            std::filesystem::path baseDir = configPath.parent_path();
+            if (baseDir.empty())
+                baseDir = std::filesystem::current_path();
+
+            std::string line;
+            std::size_t lineNo = 0;
+            while (std::getline(in, line))
+            {
+                ++lineNo;
+                const std::string trimmed = trimCopy(line);
+                if (trimmed.empty() || trimmed.rfind("#", 0) == 0 || trimmed.rfind(";", 0) == 0 ||
+                    trimmed.rfind("//", 0) == 0)
+                {
+                    continue;
+                }
+
+                const std::size_t eqPos = trimmed.find('=');
+                if (eqPos == std::string::npos)
+                {
+                    std::ostringstream oss;
+                    oss << "Invalid config syntax at line " << lineNo << ": expected key=value";
+                    error = oss.str();
+                    return false;
+                }
+
+                const std::string key = trimCopy(trimmed.substr(0, eqPos));
+                const std::string value = trimCopy(trimmed.substr(eqPos + 1));
+                if (key.empty())
+                {
+                    std::ostringstream oss;
+                    oss << "Invalid config syntax at line " << lineNo << ": empty key";
+                    error = oss.str();
+                    return false;
+                }
+
+                std::string applyError;
+                if (!applyConfigEntry(key, value, parsed, cfg, baseDir, applyError))
+                {
+                    std::ostringstream oss;
+                    oss << "Invalid config entry at line " << lineNo << ": " << applyError;
+                    error = oss.str();
+                    return false;
+                }
+            }
+
+            return true;
         }
 
         ParseResult makeError(std::string error)
@@ -524,6 +1090,19 @@ namespace ctrace::stack::cli
         cfg.extraCompileArgs.emplace_back("-O0");
         cfg.extraCompileArgs.emplace_back("--ct-optnone");
 
+        PreParsedCliMeta meta;
+        std::string preScanError;
+        if (!preScanMetaOptions(argc, argv, meta, preScanError))
+            return makeError(preScanError);
+        parsed.printEffectiveConfig = meta.printEffectiveConfig;
+        if (!meta.configPath.empty())
+        {
+            std::string configError;
+            if (!loadConfigFile(meta.configPath, parsed, cfg, configError))
+                return makeError(configError);
+            parsed.configPath = meta.configPath;
+        }
+
         for (int i = 1; i < argc; ++i)
         {
             const char* arg = argv[i];
@@ -549,6 +1128,22 @@ namespace ctrace::stack::cli
                 cfg.quiet = false;
                 parsed.verbose = true;
                 continue;
+            }
+            if (argStr == "--print-effective-config")
+            {
+                parsed.printEffectiveConfig = true;
+                continue;
+            }
+            {
+                std::string value;
+                std::string error;
+                if (consumeLongOptionValue(argStr, "--config", i, argc, argv, value, error))
+                {
+                    if (!error.empty())
+                        return makeError(error);
+                    parsed.configPath = value;
+                    continue;
+                }
             }
             if (argStr == "--STL" || argStr == "--stl")
             {
@@ -707,9 +1302,11 @@ namespace ctrace::stack::cli
                     if (!error.empty())
                         return makeError(error);
                     unsigned parsedJobs = 0;
-                    if (!parsePositiveUnsigned(value, parsedJobs, error))
+                    bool parsedAuto = false;
+                    if (!parseJobsValue(value, parsedJobs, parsedAuto, error))
                         return makeError("Invalid --jobs value: " + error);
                     cfg.jobs = parsedJobs;
+                    cfg.jobsAuto = parsedAuto;
                     continue;
                 }
             }
@@ -717,6 +1314,15 @@ namespace ctrace::stack::cli
             {
                 cfg.timing = true;
                 continue;
+            }
+            {
+                std::string error;
+                if (tryConsumeAndApplySmtCliOption(argStr, i, argc, argv, cfg, error))
+                {
+                    if (!error.empty())
+                        return makeError(error);
+                    continue;
+                }
             }
             {
                 std::string value;
