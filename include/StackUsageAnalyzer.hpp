@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 
+#include "analysis/smt/SolverTypes.hpp"
 #include "helpers.hpp"
 
 namespace llvm
@@ -52,6 +53,7 @@ namespace ctrace::stack
         bool requireCompilationDatabase = false;
         bool compdbFast = false;
         unsigned jobs = 1;
+        bool jobsAuto = false;
         bool timing = false;
         std::vector<std::string> onlyFiles;
         std::vector<std::string> onlyDirs;
@@ -71,6 +73,13 @@ namespace ctrace::stack
         std::shared_ptr<const analysis::ResourceSummaryIndex> resourceSummaryIndex;
         bool uninitializedCrossTU = true;
         std::shared_ptr<const analysis::UninitializedSummaryIndex> uninitializedSummaryIndex;
+        bool smtEnabled = false;
+        std::string smtBackend = "interval";
+        std::string smtSecondaryBackend;
+        analysis::smt::SolverMode smtMode = analysis::smt::SolverMode::Single;
+        std::uint32_t smtTimeoutMs = 50;
+        std::uint64_t smtBudgetNodes = 10000;
+        std::vector<std::string> smtRules;
     };
 
     // Per-function result
@@ -150,12 +159,13 @@ namespace ctrace::stack
         TOCTOURace = 19,
         IntegerOverflow = 20,
         TypeConfusion = 21,
-        OutOfBoundsRead = 22
+        OutOfBoundsRead = 22,
+        GlobalReadBeforeWrite = 23
     };
 
     template <> struct EnumTraits<DescriptiveErrorCode>
     {
-        static constexpr std::array<std::string_view, 23> names = {"None",
+        static constexpr std::array<std::string_view, 24> names = {"None",
                                                                    "StackBufferOverflow",
                                                                    "NegativeStackIndex",
                                                                    "VLAUsage",
@@ -177,7 +187,8 @@ namespace ctrace::stack
                                                                    "TOCTOURace",
                                                                    "IntegerOverflow",
                                                                    "TypeConfusion",
-                                                                   "OutOfBoundsRead"};
+                                                                   "OutOfBoundsRead",
+                                                                   "GlobalReadBeforeWrite"};
     };
 
     /*
