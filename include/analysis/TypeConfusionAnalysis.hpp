@@ -5,6 +5,8 @@
 #include <string>
 #include <vector>
 
+#include "StackUsageAnalyzer.hpp"
+
 namespace llvm
 {
     class DataLayout;
@@ -29,4 +31,9 @@ namespace ctrace::stack::analysis
     std::vector<TypeConfusionIssue>
     analyzeTypeConfusions(llvm::Module& mod, const llvm::DataLayout& dataLayout,
                           const std::function<bool(const llvm::Function&)>& shouldAnalyze);
+
+    std::vector<TypeConfusionIssue>
+    analyzeTypeConfusions(llvm::Module& mod, const llvm::DataLayout& dataLayout,
+                          const std::function<bool(const llvm::Function&)>& shouldAnalyze,
+                          const AnalysisConfig& config);
 } // namespace ctrace::stack::analysis
