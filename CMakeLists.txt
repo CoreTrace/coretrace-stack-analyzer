@@ -52,6 +52,7 @@ message(STATUS "Using LLVMConfig.cmake in: ${LLVM_DIR}")
 option(BUILD_CLI "Build stack_usage_analyzer CLI tool" ON)
 option(BUILD_SHARED_LIB "Build shared library variant" ON)
 option(ENABLE_STACK_USAGE "Emit per-function stack usage (.su) files" OFF)
+option(ENABLE_Z3_BACKEND "Enable optional Z3 SMT backend if Z3 is available" ON)
 
 # ===========================
 #  Communs Sources
@@ -74,6 +75,7 @@ set(STACK_ANALYZER_SOURCES
     src/analysis/BufferWriteModel.cpp
     src/analysis/FrontendDiagnostics.cpp
     src/analysis/FunctionFilter.cpp
+    src/analysis/GlobalReadBeforeWriteAnalysis.cpp
     src/analysis/IRValueUtils.cpp
     src/analysis/IntRanges.cpp
     src/analysis/IntegerOverflowAnalysis.cpp
@@ -90,6 +92,8 @@ set(STACK_ANALYZER_SOURCES
     src/analysis/StackPointerEscape.cpp
     src/analysis/StackPointerEscapeModel.cpp
     src/analysis/StackPointerEscapeResolver.cpp
+    src/analysis/smt/SmtEncoding.cpp
+    src/analysis/smt/SolverOrchestrator.cpp
     src/analysis/TOCTOUAnalysis.cpp
     src/analysis/TypeConfusionAnalysis.cpp
     src/analysis/UninitializedVarAnalysis.cpp
@@ -97,6 +101,18 @@ set(STACK_ANALYZER_SOURCES
     src/mangle.cpp
     src/passes/ModulePasses.cpp
 )
+
+set(CTRACE_STACK_HAVE_Z3_BACKEND OFF)
+if(ENABLE_Z3_BACKEND)
+    find_package(Z3 QUIET CONFIG)
+    if(Z3_FOUND)
+        list(APPEND STACK_ANALYZER_SOURCES src/analysis/smt/backends/Z3Backend.cpp)
+        set(CTRACE_STACK_HAVE_Z3_BACKEND ON)
+        message(STATUS "SMT Z3 backend enabled")
+    else()
+        message(STATUS "SMT Z3 backend disabled (Z3 not found)")
+    endif()
+endif()
 
 include_directories(${LLVM_INCLUDE_DIRS})
 add_definitions(${LLVM_DEFINITIONS})
@@ -111,6 +127,20 @@ add_definitions(${LLVM_DEFINITIONS})
 add_library(stack_usage_analyzer_lib STATIC
     ${STACK_ANALYZER_SOURCES}
 )
+
+if(CTRACE_STACK_HAVE_Z3_BACKEND)
+    target_compile_definitions(stack_usage_analyzer_lib PUBLIC CTRACE_STACK_ENABLE_Z3_BACKEND=1)
+    if(TARGET z3::libz3)
+        target_link_libraries(stack_usage_analyzer_lib PUBLIC z3::libz3)
+    elseif(TARGET z3)
+        target_link_libraries(stack_usage_analyzer_lib PUBLIC z3)
+    elseif(DEFINED Z3_LIBRARIES)
+        target_link_libraries(stack_usage_analyzer_lib PUBLIC ${Z3_LIBRARIES})
+        if(DEFINED Z3_INCLUDE_DIRS)
+            target_include_directories(stack_usage_analyzer_lib PUBLIC ${Z3_INCLUDE_DIRS})
+        endif()
+    endif()
+endif()
 
 if(ENABLE_STACK_USAGE)
     target_compile_options(stack_usage_analyzer_lib PRIVATE -fstack-usage)
