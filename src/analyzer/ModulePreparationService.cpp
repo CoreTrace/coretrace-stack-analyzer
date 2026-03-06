@@ -87,7 +87,7 @@ namespace ctrace::stack::analyzer
             const auto recursiveComponents = analysis::computeRecursiveComponents(graph, nodes);
             for (const auto& component : recursiveComponents)
             {
-                if (!analysis::detectInfiniteRecursionComponent(component))
+                if (!analysis::detectInfiniteRecursionComponent(component, ctx.config))
                     continue;
                 for (const llvm::Function* Fn : component)
                     state.InfiniteRecursionFuncs.insert(Fn);
