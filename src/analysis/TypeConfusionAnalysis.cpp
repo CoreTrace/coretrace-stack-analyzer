@@ -2,11 +2,13 @@
 
 #include "analysis/AnalyzerUtils.hpp"
 
+#include <algorithm>
 #include <limits>
 #include <map>
 #include <optional>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include <llvm/ADT/SmallVector.h>
@@ -209,6 +211,78 @@ namespace ctrace::stack::analysis
             return structType;
         }
 
+        static std::optional<std::uint64_t> checkedAddU64(std::uint64_t lhs, std::uint64_t rhs)
+        {
+            if (lhs > std::numeric_limits<std::uint64_t>::max() - rhs)
+                return std::nullopt;
+            return lhs + rhs;
+        }
+
+        static std::optional<std::uint64_t>
+        getConcreteRootSizeBytes(const llvm::Value* root, const llvm::DataLayout& dataLayout)
+        {
+            const llvm::StructType* rootType = getConcreteRootStructType(root);
+            if (!rootType)
+                return std::nullopt;
+
+            return static_cast<std::uint64_t>(
+                dataLayout.getTypeAllocSize(const_cast<llvm::StructType*>(rootType)));
+        }
+
+        static bool isAccessOutsideViewRange(const ViewObservation& view,
+                                             const ViewObservation& access)
+        {
+            const std::optional<std::uint64_t> viewEnd =
+                checkedAddU64(view.accessOffsetBytes, view.viewSizeBytes);
+            if (!viewEnd)
+                return false;
+            return access.accessOffsetBytes >= *viewEnd;
+        }
+
+        static bool
+        isAccessOutsideAllSmallViews(const ViewObservation& access,
+                                     const std::vector<const ViewObservation*>& smallViews)
+        {
+            if (smallViews.empty())
+                return false;
+            return std::all_of(smallViews.begin(), smallViews.end(),
+                               [&](const ViewObservation* smallView)
+                               {
+                                   return smallView &&
+                                          isAccessOutsideViewRange(*smallView, access);
+                               });
+        }
+
+        enum class LayoutFeasibility
+        {
+            Feasible,
+            Infeasible,
+            Inconclusive
+        };
+
+        static LayoutFeasibility
+        isIncompatibleLayoutFeasible(const ViewObservation& smaller, const ViewObservation& accessed,
+                                     std::uint64_t rootSizeBytes)
+        {
+            const std::optional<std::uint64_t> smallerEnd =
+                checkedAddU64(smaller.accessOffsetBytes, smaller.viewSizeBytes);
+            const std::optional<std::uint64_t> accessedEnd =
+                checkedAddU64(accessed.accessOffsetBytes, accessed.viewSizeBytes);
+            if (!smallerEnd || !accessedEnd)
+                return LayoutFeasibility::Inconclusive;
+
+            // Keep diagnostics when observations exceed the concrete root layout.
+            if (*smallerEnd > rootSizeBytes || *accessedEnd > rootSizeBytes)
+                return LayoutFeasibility::Feasible;
+
+            const bool sameStart = smaller.accessOffsetBytes == accessed.accessOffsetBytes;
+            const bool disjoint = *smallerEnd <= accessed.accessOffsetBytes ||
+                                  *accessedEnd <= smaller.accessOffsetBytes;
+
+            return (sameStart || disjoint) ? LayoutFeasibility::Infeasible
+                                           : LayoutFeasibility::Feasible;
+        }
+
         static bool hasCommonTypeContext(const std::unordered_set<const llvm::StructType*>& lhs,
                                          const std::unordered_set<const llvm::StructType*>& rhs)
         {
@@ -335,6 +409,16 @@ namespace ctrace::stack::analysis
     analyzeTypeConfusions(llvm::Module& mod, const llvm::DataLayout& dataLayout,
                           const std::function<bool(const llvm::Function&)>& shouldAnalyze)
     {
+        const AnalysisConfig defaultConfig{};
+        return analyzeTypeConfusions(mod, dataLayout, shouldAnalyze, defaultConfig);
+    }
+
+    std::vector<TypeConfusionIssue>
+    analyzeTypeConfusions(llvm::Module& mod, const llvm::DataLayout& dataLayout,
+                          const std::function<bool(const llvm::Function&)>& shouldAnalyze,
+                          const AnalysisConfig& config)
+    {
+        (void) config;
         std::vector<TypeConfusionIssue> issues;
         std::unordered_set<const llvm::Instruction*> emitted;
 
@@ -403,18 +487,54 @@ namespace ctrace::stack::analysis
                 if (!smallestViewType || distinctViews.size() < 2)
                     continue;
 
+                std::vector<const ViewObservation*> smallestViewObservations;
+                smallestViewObservations.reserve(observations.size());
+                for (const ViewObservation& obs : observations)
+                {
+                    if (obs.viewType == smallestViewType)
+                        smallestViewObservations.push_back(&obs);
+                }
+                if (smallestViewObservations.empty())
+                    continue;
+
                 const llvm::StructType* concreteRootType = getConcreteRootStructType(root);
+                const std::optional<std::uint64_t> concreteRootSizeBytes =
+                    getConcreteRootSizeBytes(root, dataLayout);
+
                 for (const ViewObservation& obs : observations)
                 {
                     if (!obs.inst || obs.viewType == smallestViewType)
                         continue;
-                    if (obs.accessOffsetBytes < smallestViewSize)
+                    if (!isAccessOutsideAllSmallViews(obs, smallestViewObservations))
                         continue;
                     if (viewsLikelyCompatible(smallestViewType, obs.viewType, contextsByView,
                                               concreteRootType))
                     {
                         continue;
                     }
+
+                    bool suppressedByLayoutProof = false;
+                    if (concreteRootSizeBytes)
+                    {
+                        bool allInfeasible = true;
+                        for (const ViewObservation* smallestObs : smallestViewObservations)
+                        {
+                            if (!smallestObs)
+                                continue;
+                            const LayoutFeasibility feasibility =
+                                isIncompatibleLayoutFeasible(*smallestObs, obs,
+                                                             *concreteRootSizeBytes);
+                            if (feasibility != LayoutFeasibility::Infeasible)
+                            {
+                                allInfeasible = false;
+                                break;
+                            }
+                        }
+                        suppressedByLayoutProof = allInfeasible;
+                    }
+                    if (suppressedByLayoutProof)
+                        continue;
+
                     if (!emitted.insert(obs.inst).second)
                         continue;
 
