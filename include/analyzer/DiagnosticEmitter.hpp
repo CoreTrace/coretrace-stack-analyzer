@@ -8,6 +8,7 @@
 #include "analysis/CommandInjectionAnalysis.hpp"
 #include "analysis/DuplicateIfCondition.hpp"
 #include "analysis/DynamicAlloca.hpp"
+#include "analysis/GlobalReadBeforeWriteAnalysis.hpp"
 #include "analysis/IntegerOverflowAnalysis.hpp"
 #include "analysis/InvalidBaseReconstruction.hpp"
 #include "analysis/MemIntrinsicOverflow.hpp"
@@ -80,6 +81,10 @@ namespace ctrace::stack::analyzer
 
     void appendUninitializedLocalReadDiagnostics(
         AnalysisResult& result, const std::vector<analysis::UninitializedLocalReadIssue>& issues);
+
+    void appendGlobalReadBeforeWriteDiagnostics(
+        AnalysisResult& result,
+        const std::vector<analysis::GlobalReadBeforeWriteIssue>& issues);
 
     void appendInvalidBaseReconstructionDiagnostics(
         AnalysisResult& result,
