@@ -5,6 +5,8 @@
 #include <string>
 #include <vector>
 
+#include "StackUsageAnalyzer.hpp"
+
 namespace llvm
 {
     class DataLayout;
@@ -29,4 +31,9 @@ namespace ctrace::stack::analysis
     std::vector<SizeMinusKWriteIssue> analyzeSizeMinusKWrites(
         llvm::Module& mod, const llvm::DataLayout& DL,
         const std::function<bool(const llvm::Function&)>& shouldAnalyzeFunction);
+
+    std::vector<SizeMinusKWriteIssue> analyzeSizeMinusKWrites(
+        llvm::Module& mod, const llvm::DataLayout& DL,
+        const std::function<bool(const llvm::Function&)>& shouldAnalyzeFunction,
+        const AnalysisConfig& config);
 } // namespace ctrace::stack::analysis
