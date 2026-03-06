@@ -4,6 +4,8 @@
 #include <string>
 #include <vector>
 
+#include "StackUsageAnalyzer.hpp"
+
 namespace llvm
 {
     class Function;
@@ -34,4 +36,9 @@ namespace ctrace::stack::analysis
     std::vector<IntegerOverflowIssue>
     analyzeIntegerOverflows(llvm::Module& mod,
                             const std::function<bool(const llvm::Function&)>& shouldAnalyze);
+
+    std::vector<IntegerOverflowIssue>
+    analyzeIntegerOverflows(llvm::Module& mod,
+                            const std::function<bool(const llvm::Function&)>& shouldAnalyze,
+                            const AnalysisConfig& config);
 } // namespace ctrace::stack::analysis
