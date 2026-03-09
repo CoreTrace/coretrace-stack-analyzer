@@ -40,7 +40,6 @@ namespace ctrace::stack::analyzer
         {
             llvm::Module& mod;
             const AnalysisConfig& config;
-            ModulePreparationService preparation;
             std::unique_ptr<PreparedModule> prepared;
             FunctionAuxData aux;
             AnalysisResult result;
@@ -82,8 +81,9 @@ namespace ctrace::stack::analyzer
 
         steps.push_back({"Prepare module", [](PipelineData& state)
                          {
+                             ModulePreparationService preparationService;
                              state.prepared = std::make_unique<PreparedModule>(
-                                 state.preparation.prepare(state.mod, state.config));
+                                 preparationService.prepare(state.mod, state.config));
                          }});
 
         steps.push_back({"Build results", [](PipelineData& state)
@@ -199,7 +199,9 @@ namespace ctrace::stack::analyzer
                              auto shouldAnalyze = [&](const llvm::Function& F) -> bool
                              { return state.prepared->ctx.shouldAnalyze(F); };
                              const std::vector<analysis::GlobalReadBeforeWriteIssue> issues =
-                                 analysis::analyzeGlobalReadBeforeWrites(state.mod, shouldAnalyze);
+                                 analysis::analyzeGlobalReadBeforeWrites(
+                                     state.mod, shouldAnalyze,
+                                     state.config.globalReadBeforeWriteSummaryIndex.get());
                              appendGlobalReadBeforeWriteDiagnostics(state.result, issues);
                          }});
 
