@@ -19,6 +19,7 @@ namespace llvm
 namespace ctrace::stack::analysis
 {
     class CompilationDatabase;
+    struct GlobalReadBeforeWriteSummaryIndex;
     struct ResourceSummaryIndex;
     struct UninitializedSummaryIndex;
 } // namespace ctrace::stack::analysis
@@ -28,58 +29,70 @@ namespace ctrace::stack
 
     using StackSize = std::uint64_t;
 
-    enum class AnalysisMode
+    enum class AnalysisMode : std::uint8_t
     {
-        IR,
-        ABI
+        IR = 0,
+        ABI = 1
     };
 
-    enum class AnalysisProfile
+    enum class AnalysisProfile : std::uint8_t
     {
-        Fast,
-        Full
+        Fast = 0,
+        Full = 1
     };
 
     // Analysis configuration (mode + stack limit).
     struct AnalysisConfig
     {
-        AnalysisMode mode = AnalysisMode::IR;
-        AnalysisProfile profile = AnalysisProfile::Full;
         StackSize stackLimit = 8ull * 1024ull * 1024ull; // 8 MiB default
-        bool quiet = false;
-        bool warningsOnly = false;
-        std::vector<std::string> extraCompileArgs;
+        std::uint64_t smtBudgetNodes = 10000;
+
         std::shared_ptr<const analysis::CompilationDatabase> compilationDatabase;
-        bool requireCompilationDatabase = false;
-        bool compdbFast = false;
-        unsigned jobs = 1;
-        bool jobsAuto = false;
-        bool timing = false;
-        std::vector<std::string> onlyFiles;
-        std::vector<std::string> onlyDirs;
+        std::shared_ptr<const analysis::ResourceSummaryIndex> resourceSummaryIndex;
+        std::shared_ptr<const analysis::UninitializedSummaryIndex> uninitializedSummaryIndex;
+        std::shared_ptr<const analysis::GlobalReadBeforeWriteSummaryIndex>
+        globalReadBeforeWriteSummaryIndex;
+
         std::vector<std::string> excludeDirs;
+        std::vector<std::string> extraCompileArgs;
+        std::vector<std::string> onlyDirs;
+        std::vector<std::string> onlyFiles;
         std::vector<std::string> onlyFunctions;
-        bool includeSTL = false;
-        bool dumpFilter = false;
+
+        std::vector<std::string> smtRules;
+        std::string compileIRCacheDir;
+        std::string smtSecondaryBackend;
+        std::string smtBackend = "interval";
         std::string dumpIRPath;
-        bool dumpIRIsDir = false;
-        bool demangle = false;
         std::string escapeModelPath;
         std::string bufferModelPath;
         std::string resourceModelPath;
-        bool resourceCrossTU = true;
         std::string resourceSummaryCacheDir = ".cache/resource-lifetime";
-        bool resourceSummaryMemoryOnly = false;
-        std::shared_ptr<const analysis::ResourceSummaryIndex> resourceSummaryIndex;
-        bool uninitializedCrossTU = true;
-        std::shared_ptr<const analysis::UninitializedSummaryIndex> uninitializedSummaryIndex;
-        bool smtEnabled = false;
-        std::string smtBackend = "interval";
-        std::string smtSecondaryBackend;
-        analysis::smt::SolverMode smtMode = analysis::smt::SolverMode::Single;
+
         std::uint32_t smtTimeoutMs = 50;
-        std::uint64_t smtBudgetNodes = 10000;
-        std::vector<std::string> smtRules;
+        std::uint32_t jobs = 1;
+
+        analysis::smt::SolverMode smtMode = analysis::smt::SolverMode::Single;
+        AnalysisMode mode = AnalysisMode::IR;
+        AnalysisProfile profile = AnalysisProfile::Full;
+
+        bool compdbFast : 1 = false;
+        bool demangle : 1 = false;
+        bool dumpFilter : 1 = false;
+        bool dumpIRIsDir : 1 = false;
+        bool includeSTL : 1 = false;
+        bool requireCompilationDatabase : 1 = false;
+        bool jobsAuto : 1 = false;
+        bool quiet : 1 = false;
+        bool smtEnabled : 1 = false;
+        bool timing : 1 = false;
+        bool uninitializedCrossTU : 1 = true;
+        bool resourceCrossTU : 1 = true;
+        bool resourceSummaryMemoryOnly : 1 = false;
+        bool warningsOnly : 1 = false;
+        bool reservedFlags0 : 1 = false;
+        bool reservedFlags1 : 1 = false;
+        std::uint32_t reservedPadding = 0;
     };
 
     // Per-function result
@@ -89,13 +102,14 @@ namespace ctrace::stack
         std::string name;
         StackSize localStack = 0;       // local frame size (depends on mode)
         StackSize maxStack = 0;         // max stack including callees
-        bool localStackUnknown = false; // unknown local size (dynamic alloca)
-        bool maxStackUnknown = false;   // unknown max stack (propagated via calls)
-        bool hasDynamicAlloca = false;  // dynamic alloca detected in the function
+        std::uint64_t localStackUnknown : 1 = false; // unknown local size (dynamic alloca)
+        std::uint64_t maxStackUnknown : 1 = false;   // unknown max stack (propagated via calls)
+        std::uint64_t hasDynamicAlloca : 1 = false;  // dynamic alloca detected in the function
 
-        bool isRecursive = false;              // part of a cycle F <-> G ...
-        bool hasInfiniteSelfRecursion = false; // DominatorTree heuristic
-        bool exceedsLimit = false;             // maxStack > config.stackLimit
+        std::uint64_t isRecursive : 1 = false;              // part of a cycle F <-> G ...
+        std::uint64_t hasInfiniteSelfRecursion : 1 = false; // DominatorTree heuristic
+        std::uint64_t exceedsLimit : 1 = false;             // maxStack > config.stackLimit
+        std::uint64_t reservedFlags : 58 = 0;
     };
 
     /*
