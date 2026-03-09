@@ -5,16 +5,23 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <cstdint>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <mutex>
+#include <optional>
+#include <sstream>
 #include <system_error>
+#include <unordered_set>
 #include <vector>
 
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
 #include <llvm/IRReader/IRReader.h>
 #include <llvm/Support/FileSystem.h>
+#include <llvm/Support/JSON.h>
+#include <llvm/Support/MD5.h>
 #include <llvm/Support/MemoryBuffer.h>
 #include <llvm/Support/SourceMgr.h>
 #include <llvm/Support/raw_ostream.h>
@@ -143,6 +150,382 @@ namespace ctrace::stack::analysis
             {
                 coretrace::log(level, "{}\n", text);
             }
+        }
+
+        constexpr llvm::StringLiteral kCompileIRCacheSchema = "compile-ir-cache-v1";
+
+        struct FileSnapshot
+        {
+            std::string path;
+            std::uint64_t size = 0;
+            std::int64_t mtimeNs = 0;
+        };
+
+        struct CompileIRCachePaths
+        {
+            std::filesystem::path directory;
+            std::filesystem::path metaFile;
+            std::filesystem::path irFile;
+            std::filesystem::path depFile;
+            std::uint64_t enabled : 1 = false;
+            std::uint64_t reservedFlags : 63 = 0;
+        };
+
+        struct CompileIRCachePayload
+        {
+            std::string llvmIR;
+            std::string diagnostics;
+        };
+
+        static std::string md5Hex(llvm::StringRef input)
+        {
+            llvm::MD5 hasher;
+            hasher.update(input);
+            llvm::MD5::MD5Result out;
+            hasher.final(out);
+            llvm::SmallString<32> hex;
+            llvm::MD5::stringifyResult(out, hex);
+            return std::string(hex.str());
+        }
+
+        static std::string makeAbsolutePathFrom(const std::string& path, const std::string& baseDir)
+        {
+            std::filesystem::path p(path);
+            if (p.is_relative() && !baseDir.empty())
+                p = std::filesystem::path(baseDir) / p;
+
+            std::error_code ec;
+            std::filesystem::path absPath = std::filesystem::absolute(p, ec);
+            if (ec)
+                return p.lexically_normal().generic_string();
+            return absPath.lexically_normal().generic_string();
+        }
+
+        static std::optional<FileSnapshot> captureFileSnapshot(const std::string& path)
+        {
+            if (path.empty())
+                return std::nullopt;
+
+            std::error_code ec;
+            std::filesystem::path absolute = std::filesystem::absolute(path, ec);
+            if (ec)
+                return std::nullopt;
+            absolute = absolute.lexically_normal();
+
+            if (!std::filesystem::exists(absolute, ec) || ec)
+                return std::nullopt;
+            if (!std::filesystem::is_regular_file(absolute, ec) || ec)
+                return std::nullopt;
+
+            const auto size = std::filesystem::file_size(absolute, ec);
+            if (ec)
+                return std::nullopt;
+
+            const auto mtime = std::filesystem::last_write_time(absolute, ec);
+            if (ec)
+                return std::nullopt;
+
+            const auto mtimeNs =
+                std::chrono::time_point_cast<std::chrono::nanoseconds>(mtime).time_since_epoch()
+                    .count();
+
+            FileSnapshot snapshot;
+            snapshot.path = absolute.generic_string();
+            snapshot.size = static_cast<std::uint64_t>(size);
+            snapshot.mtimeNs = static_cast<std::int64_t>(mtimeNs);
+            return snapshot;
+        }
+
+        static bool isSnapshotCurrent(const FileSnapshot& expected)
+        {
+            const auto current = captureFileSnapshot(expected.path);
+            if (!current)
+                return false;
+            return current->size == expected.size && current->mtimeNs == expected.mtimeNs;
+        }
+
+        static llvm::json::Object encodeSnapshot(const FileSnapshot& snapshot)
+        {
+            llvm::json::Object obj;
+            obj["path"] = snapshot.path;
+            obj["size"] = static_cast<std::int64_t>(snapshot.size);
+            obj["mtimeNs"] = snapshot.mtimeNs;
+            return obj;
+        }
+
+        static std::optional<FileSnapshot> decodeSnapshot(const llvm::json::Value& value)
+        {
+            const auto* obj = value.getAsObject();
+            if (!obj)
+                return std::nullopt;
+
+            const auto path = obj->getString("path");
+            const auto size = obj->getInteger("size");
+            const auto mtimeNs = obj->getInteger("mtimeNs");
+            if (!path || !size || !mtimeNs || *size < 0)
+                return std::nullopt;
+
+            FileSnapshot snapshot;
+            snapshot.path = path->str();
+            snapshot.size = static_cast<std::uint64_t>(*size);
+            snapshot.mtimeNs = static_cast<std::int64_t>(*mtimeNs);
+            return snapshot;
+        }
+
+        static bool readTextFile(const std::filesystem::path& path, std::string& out)
+        {
+            out.clear();
+            std::ifstream in(path, std::ios::in | std::ios::binary);
+            if (!in)
+                return false;
+            std::ostringstream buffer;
+            buffer << in.rdbuf();
+            out = buffer.str();
+            return true;
+        }
+
+        static bool writeTextFile(const std::filesystem::path& path, const std::string& content)
+        {
+            std::ofstream out(path, std::ios::out | std::ios::trunc | std::ios::binary);
+            if (!out)
+                return false;
+            out << content;
+            return out.good();
+        }
+
+        static CompileIRCachePaths buildCompileIRCachePaths(const AnalysisConfig& config,
+                                                            const std::string& filename,
+                                                            LanguageType language,
+                                                            const std::vector<std::string>& args,
+                                                            const std::string& workingDir)
+        {
+            CompileIRCachePaths paths;
+            if (config.compileIRCacheDir.empty())
+                return paths;
+
+            std::ostringstream keyPayload;
+            keyPayload << std::string(kCompileIRCacheSchema) << "\n";
+            keyPayload << "language:" << static_cast<int>(language) << "\n";
+            keyPayload << "file:" << makeAbsolutePathFrom(filename, workingDir) << "\n";
+            keyPayload << "workingDir:" << makeAbsolutePathFrom(workingDir, "") << "\n";
+            for (const std::string& arg : args)
+                keyPayload << "arg:" << arg << "\n";
+            const std::string key = md5Hex(keyPayload.str());
+
+            std::filesystem::path directory = config.compileIRCacheDir;
+            paths.enabled = true;
+            paths.directory = directory;
+            paths.metaFile = directory / (key + ".json");
+            paths.irFile = directory / (key + ".ll");
+            paths.depFile = directory / (key + ".d");
+            return paths;
+        }
+
+        static std::optional<std::vector<std::string>>
+        parseDepfileDependencies(const std::filesystem::path& depFile,
+                                 const std::string& compileWorkingDir)
+        {
+            std::string content;
+            if (!readTextFile(depFile, content))
+                return std::nullopt;
+
+            std::string merged;
+            merged.reserve(content.size());
+            for (std::size_t i = 0; i < content.size(); ++i)
+            {
+                const char c = content[i];
+                if (c == '\\' && i + 1 < content.size())
+                {
+                    if (content[i + 1] == '\n')
+                    {
+                        ++i;
+                        continue;
+                    }
+                    if (content[i + 1] == '\r' && i + 2 < content.size() && content[i + 2] == '\n')
+                    {
+                        i += 2;
+                        continue;
+                    }
+                }
+                merged.push_back(c);
+            }
+
+            std::size_t colonPos = std::string::npos;
+            for (std::size_t i = 0; i < merged.size(); ++i)
+            {
+                if (merged[i] != ':')
+                    continue;
+                if (i + 1 < merged.size() &&
+                    std::isspace(static_cast<unsigned char>(merged[i + 1])))
+                {
+                    colonPos = i;
+                    break;
+                }
+            }
+            if (colonPos == std::string::npos || colonPos + 1 >= merged.size())
+                return std::nullopt;
+
+            const std::string depsPart = merged.substr(colonPos + 1);
+            std::vector<std::string> dependencies;
+            std::unordered_set<std::string> seen;
+            std::string current;
+            bool escaping = false;
+
+            auto flushDependency = [&]()
+            {
+                if (current.empty())
+                    return;
+                const std::string absolute = makeAbsolutePathFrom(current, compileWorkingDir);
+                if (!absolute.empty() && seen.insert(absolute).second)
+                    dependencies.push_back(absolute);
+                current.clear();
+            };
+
+            for (char ch : depsPart)
+            {
+                if (escaping)
+                {
+                    current.push_back(ch);
+                    escaping = false;
+                    continue;
+                }
+
+                if (ch == '\\')
+                {
+                    escaping = true;
+                    continue;
+                }
+
+                if (std::isspace(static_cast<unsigned char>(ch)))
+                {
+                    flushDependency();
+                    continue;
+                }
+
+                current.push_back(ch);
+            }
+            flushDependency();
+
+            if (dependencies.empty())
+                return std::nullopt;
+            return dependencies;
+        }
+
+        static bool ensureDirectoryExists(const std::filesystem::path& directory)
+        {
+            std::error_code ec;
+            std::filesystem::create_directories(directory, ec);
+            return !ec;
+        }
+
+        static std::optional<CompileIRCachePayload>
+        loadCompileIRCachePayload(const CompileIRCachePaths& cachePaths)
+        {
+            if (!cachePaths.enabled)
+                return std::nullopt;
+
+            std::string metadataText;
+            if (!readTextFile(cachePaths.metaFile, metadataText))
+                return std::nullopt;
+
+            auto parsed = llvm::json::parse(metadataText);
+            if (!parsed)
+                return std::nullopt;
+
+            const auto* root = parsed->getAsObject();
+            if (!root)
+                return std::nullopt;
+
+            const auto schema = root->getString("schema");
+            if (!schema || *schema != kCompileIRCacheSchema)
+                return std::nullopt;
+
+            const auto* sourceValue = root->get("source");
+            if (!sourceValue)
+                return std::nullopt;
+            const auto sourceSnapshot = decodeSnapshot(*sourceValue);
+            if (!sourceSnapshot || !isSnapshotCurrent(*sourceSnapshot))
+                return std::nullopt;
+
+            const auto* depsArray = root->getArray("dependencies");
+            if (!depsArray)
+                return std::nullopt;
+            for (const auto& depValue : *depsArray)
+            {
+                const auto depSnapshot = decodeSnapshot(depValue);
+                if (!depSnapshot || !isSnapshotCurrent(*depSnapshot))
+                    return std::nullopt;
+            }
+
+            std::string llvmIR;
+            if (!readTextFile(cachePaths.irFile, llvmIR))
+                return std::nullopt;
+
+            CompileIRCachePayload payload;
+            payload.llvmIR = std::move(llvmIR);
+            if (const auto diagnostics = root->getString("diagnostics"))
+                payload.diagnostics = diagnostics->str();
+            return payload;
+        }
+
+        static bool storeCompileIRCachePayload(const CompileIRCachePaths& cachePaths,
+                                               const FileSnapshot& sourceSnapshot,
+                                               const std::vector<FileSnapshot>& dependencySnapshots,
+                                               const std::string& diagnostics,
+                                               const std::string& llvmIR)
+        {
+            if (!cachePaths.enabled)
+                return false;
+            if (dependencySnapshots.empty())
+                return false;
+            if (!ensureDirectoryExists(cachePaths.directory))
+                return false;
+
+            llvm::json::Array dependenciesArray;
+            for (const FileSnapshot& dependency : dependencySnapshots)
+                dependenciesArray.push_back(encodeSnapshot(dependency));
+
+            llvm::json::Object root;
+            root["schema"] = kCompileIRCacheSchema;
+            root["source"] = encodeSnapshot(sourceSnapshot);
+            root["dependencies"] = std::move(dependenciesArray);
+            root["diagnostics"] = diagnostics;
+
+            std::string metadataText;
+            llvm::raw_string_ostream metadataStream(metadataText);
+            metadataStream << llvm::formatv("{0:2}", llvm::json::Value(std::move(root)));
+            metadataStream.flush();
+
+            if (!writeTextFile(cachePaths.irFile, llvmIR))
+                return false;
+            if (!writeTextFile(cachePaths.metaFile, metadataText))
+                return false;
+            return true;
+        }
+
+        static std::optional<std::vector<FileSnapshot>>
+        buildDependencySnapshots(const std::vector<std::string>& dependencies)
+        {
+            std::vector<FileSnapshot> snapshots;
+            snapshots.reserve(dependencies.size());
+            for (const std::string& dependencyPath : dependencies)
+            {
+                const auto snapshot = captureFileSnapshot(dependencyPath);
+                if (!snapshot)
+                    return std::nullopt;
+                snapshots.push_back(*snapshot);
+            }
+            return snapshots;
+        }
+
+        static void appendDependencyCaptureArgs(std::vector<std::string>& args,
+                                                const std::filesystem::path& depFile)
+        {
+            args.push_back("-MMD");
+            args.push_back("-MF");
+            args.push_back(depFile.string());
+            args.push_back("-MT");
+            args.push_back("coretrace_compile_ir_cache_target");
         }
 
         static bool resolveDumpIRPath(const AnalysisConfig& config, const std::string& inputPath,
@@ -305,7 +688,8 @@ namespace ctrace::stack::analysis
 
           private:
             std::filesystem::path previousPath_;
-            bool active_ = false;
+            std::uint64_t active_ : 1 = false;
+            std::uint64_t reservedFlags_ : 63 = 0;
         };
     } // namespace
 
@@ -354,7 +738,6 @@ namespace ctrace::stack::analysis
         std::filesystem::path baseDir = std::filesystem::current_path(cwdErr);
         using Clock = std::chrono::steady_clock;
         auto compileStart = Clock::now();
-        bool compiled = false;
         result.language = detectLanguageFromFile(filename, ctx);
 
         if (result.language == LanguageType::Unknown)
@@ -379,12 +762,15 @@ namespace ctrace::stack::analysis
             if (config.timing)
                 coretrace::log(coretrace::Level::Info, "Compiling {}...\n", filename);
             compilerlib::OutputMode mode = compilerlib::OutputMode::ToMemory;
-            bool retriedWithWorkingDir = false;
-            auto compileWithOptionalWorkingDir =
-                [&](bool useWorkingDir) -> std::optional<compilerlib::CompileResult>
+            const CompileIRCachePaths cachePaths =
+                buildCompileIRCachePaths(config, filename, result.language, args, workingDir);
+
+            auto compileWithOptionalWorkingDir = [&](const std::vector<std::string>& compileArgs,
+                                                     bool useWorkingDir)
+                -> std::optional<compilerlib::CompileResult>
             {
                 if (!useWorkingDir)
-                    return compilerlib::compile(args, mode);
+                    return compilerlib::compile(compileArgs, mode);
 
                 std::string cwdError;
                 ScopedCurrentPath cwdGuard(workingDir, cwdError);
@@ -393,31 +779,132 @@ namespace ctrace::stack::analysis
                     result.error = cwdError + "\n";
                     return std::nullopt;
                 }
-                return compilerlib::compile(args, mode);
+                return compilerlib::compile(compileArgs, mode);
             };
 
-            std::optional<compilerlib::CompileResult> res;
-            const bool hasWorkingDir = !workingDir.empty();
-            if (config.jobs > 1 && hasWorkingDir)
+            auto compileWithConfiguredWorkingDir =
+                [&](const std::vector<std::string>& compileArgs,
+                    bool& retriedWithWorkingDir) -> std::optional<compilerlib::CompileResult>
             {
-                // Optimistic fast path for multi-job runs: most compdb commands use absolute paths.
-                res = compileWithOptionalWorkingDir(false);
+                retriedWithWorkingDir = false;
+                std::optional<compilerlib::CompileResult> res;
+                const bool hasWorkingDir = !workingDir.empty();
+                if (config.jobs > 1 && hasWorkingDir)
+                {
+                    // Optimistic fast path for multi-job runs: most compdb commands use absolute
+                    // paths.
+                    res = compileWithOptionalWorkingDir(compileArgs, false);
+                    if (!res || !res->success)
+                    {
+                        // Fallback keeps correctness for relative include paths and avoids process
+                        // cwd races.
+                        std::lock_guard<std::mutex> lock(gCompileWorkingDirMutex);
+                        res = compileWithOptionalWorkingDir(compileArgs, true);
+                        retriedWithWorkingDir = true;
+                    }
+                }
+                else
+                {
+                    res = compileWithOptionalWorkingDir(compileArgs, hasWorkingDir);
+                }
+                return res;
+            };
+
+            if (cachePaths.enabled)
+            {
+                if (auto cached = loadCompileIRCachePayload(cachePaths))
+                {
+                    if (config.timing)
+                        coretrace::log(coretrace::Level::Info, "Compilation cache hit for {}\n",
+                                       filename);
+
+                    compileDiagnosticsText = cached->diagnostics;
+                    if (!compileDiagnosticsText.empty() && !config.quiet)
+                        logText(coretrace::Level::Warn, compileDiagnosticsText);
+
+                    auto buffer = llvm::MemoryBuffer::getMemBuffer(cached->llvmIR, "cached_ir");
+                    llvm::SMDiagnostic diag;
+                    auto parseStart = Clock::now();
+                    result.module = llvm::parseIR(buffer->getMemBufferRef(), diag, ctx);
+                    if (config.timing)
+                    {
+                        const auto parseEnd = Clock::now();
+                        const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                            parseEnd - parseStart)
+                                            .count();
+                        coretrace::log(coretrace::Level::Info, "IR parse done in {} ms\n", ms);
+                    }
+
+                    if (result.module)
+                    {
+                        if (!compileDiagnosticsText.empty())
+                        {
+                            result.frontendDiagnostics = collectFrontendDiagnostics(
+                                compileDiagnosticsText, *result.module, filename);
+                        }
+
+                        if (!dumpModuleIR(*result.module, filename, config, baseDir, result.error))
+                            return result;
+                        return result;
+                    }
+
+                    if (config.timing)
+                    {
+                        coretrace::log(coretrace::Level::Warn,
+                                       "Compilation cache entry invalid for {}; recompiling\n",
+                                       filename);
+                    }
+                    result.module.reset();
+                }
+                else if (config.timing)
+                {
+                    coretrace::log(coretrace::Level::Info, "Compilation cache miss for {}\n",
+                                   filename);
+                }
+            }
+
+            bool retriedWithWorkingDir = false;
+            std::optional<compilerlib::CompileResult> res;
+            std::optional<FileSnapshot> sourceSnapshot;
+            std::optional<std::vector<FileSnapshot>> dependencySnapshots;
+            if (cachePaths.enabled && ensureDirectoryExists(cachePaths.directory))
+            {
+                std::error_code removeErr;
+                std::filesystem::remove(cachePaths.depFile, removeErr);
+                std::vector<std::string> cacheCompileArgs = args;
+                appendDependencyCaptureArgs(cacheCompileArgs, cachePaths.depFile);
+
+                bool retriedForDependencyCompile = false;
+                res = compileWithConfiguredWorkingDir(cacheCompileArgs, retriedForDependencyCompile);
+                retriedWithWorkingDir = retriedForDependencyCompile;
+
                 if (!res || !res->success)
                 {
-                    // Fallback keeps correctness for relative include paths and avoids process cwd races.
-                    std::lock_guard<std::mutex> lock(gCompileWorkingDirMutex);
-                    res = compileWithOptionalWorkingDir(true);
-                    retriedWithWorkingDir = true;
+                    bool retriedForFallbackCompile = false;
+                    auto fallbackResult =
+                        compileWithConfiguredWorkingDir(args, retriedForFallbackCompile);
+                    retriedWithWorkingDir =
+                        retriedWithWorkingDir || retriedForFallbackCompile;
+                    if (fallbackResult)
+                        res = std::move(fallbackResult);
+                }
+                else
+                {
+                    const auto dependencies =
+                        parseDepfileDependencies(cachePaths.depFile, workingDir);
+                    const std::string sourcePath = makeAbsolutePathFrom(filename, workingDir);
+                    sourceSnapshot = captureFileSnapshot(sourcePath);
+                    if (dependencies && sourceSnapshot)
+                        dependencySnapshots = buildDependencySnapshots(*dependencies);
                 }
             }
             else
             {
-                res = compileWithOptionalWorkingDir(hasWorkingDir);
+                res = compileWithConfiguredWorkingDir(args, retriedWithWorkingDir);
             }
 
             if (!res)
                 return result;
-            compiled = true;
 
             if (!res->success)
             {
@@ -472,6 +959,23 @@ namespace ctrace::stack::analysis
             {
                 result.frontendDiagnostics =
                     collectFrontendDiagnostics(compileDiagnosticsText, *result.module, filename);
+            }
+
+            if (cachePaths.enabled && sourceSnapshot && dependencySnapshots)
+            {
+                const bool stored = storeCompileIRCachePayload(
+                    cachePaths, *sourceSnapshot, *dependencySnapshots, compileDiagnosticsText,
+                    res->llvmIR);
+                if (config.timing && stored)
+                {
+                    coretrace::log(coretrace::Level::Info,
+                                   "Stored compilation cache entry for {}\n", filename);
+                }
+            }
+            if (cachePaths.enabled)
+            {
+                std::error_code removeErr;
+                std::filesystem::remove(cachePaths.depFile, removeErr);
             }
 
             if (!dumpModuleIR(*result.module, filename, config, baseDir, result.error))
