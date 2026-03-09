@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -11,18 +12,18 @@ namespace llvm
 
 namespace ctrace::stack::analysis
 {
-    enum class BufferWriteRuleKind
+    enum class BufferWriteRuleKind : std::uint64_t
     {
-        BoundedWrite,
-        UnboundedWrite
+        BoundedWrite = 0,
+        UnboundedWrite = 1
     };
 
     struct BufferWriteRule
     {
-        BufferWriteRuleKind kind = BufferWriteRuleKind::BoundedWrite;
         std::string functionPattern;
         unsigned destArgIndex = 0;
         unsigned sizeArgIndex = 0; // only used for BoundedWrite
+        BufferWriteRuleKind kind = BufferWriteRuleKind::BoundedWrite;
     };
 
     struct BufferWriteModel
