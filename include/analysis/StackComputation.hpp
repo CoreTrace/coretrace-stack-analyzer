@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <map>
 #include <set>
 #include <vector>
@@ -20,15 +21,17 @@ namespace ctrace::stack::analysis
     struct StackEstimate
     {
         StackSize bytes = 0;
-        bool unknown = false;
+        std::uint64_t unknown : 1 = false;
+        std::uint64_t reservedFlags : 63 = 0;
     };
 
     struct LocalStackInfo
     {
         StackSize bytes = 0;
-        bool unknown = false;
-        bool hasDynamicAlloca = false;
         std::vector<std::pair<std::string, StackSize>> localAllocas;
+        std::uint64_t unknown : 1 = false;
+        std::uint64_t hasDynamicAlloca : 1 = false;
+        std::uint64_t reservedFlags : 62 = 0;
     };
 
     struct InternalAnalysisState
