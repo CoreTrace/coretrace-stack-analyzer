@@ -29,7 +29,7 @@ namespace ctrace::stack::analysis
     {
         using SmtFeasibility = smt::SmtFeasibility;
 
-        enum class RecentWriteKind
+        enum class RecentWriteKind : std::uint64_t
         {
             Unknown,
             MemcpyLike,
@@ -39,9 +39,9 @@ namespace ctrace::stack::analysis
 
         struct RecentWrite
         {
-            RecentWriteKind kind = RecentWriteKind::Unknown;
             std::string apiName;
             std::uint64_t writeSizeBytes = 0;
+            RecentWriteKind kind = RecentWriteKind::Unknown;
         };
 
         struct ObjectInfo
@@ -469,7 +469,9 @@ namespace ctrace::stack::analysis
                                 if (obj && len)
                                 {
                                     recentWrites[obj->root] = RecentWrite{
-                                        RecentWriteKind::MemcpyLike, calleeName.str(), *len};
+                                        .apiName = calleeName.str(),
+                                        .writeSizeBytes = *len,
+                                        .kind = RecentWriteKind::MemcpyLike};
                                 }
                             }
                         }
@@ -485,8 +487,9 @@ namespace ctrace::stack::analysis
                                     RecentWriteKind kind = (*fill == 0)
                                                                ? RecentWriteKind::Unknown
                                                                : RecentWriteKind::MemsetNonZero;
-                                    recentWrites[obj->root] =
-                                        RecentWrite{kind, calleeName.str(), *len};
+                                    recentWrites[obj->root] = RecentWrite{.apiName = calleeName.str(),
+                                                                          .writeSizeBytes = *len,
+                                                                          .kind = kind};
                                 }
                             }
                         }
@@ -498,8 +501,10 @@ namespace ctrace::stack::analysis
                                 auto len = tryGetConstantU64(call->getArgOperand(2));
                                 if (obj && len)
                                 {
-                                    recentWrites[obj->root] =
-                                        RecentWrite{RecentWriteKind::MemcpyLike, "strncpy", *len};
+                                    recentWrites[obj->root] = RecentWrite{
+                                        .apiName = "strncpy",
+                                        .writeSizeBytes = *len,
+                                        .kind = RecentWriteKind::MemcpyLike};
                                 }
                             }
                         }
@@ -511,7 +516,9 @@ namespace ctrace::stack::analysis
                                 if (obj)
                                 {
                                     recentWrites[obj->root] = RecentWrite{
-                                        RecentWriteKind::StrcpyLike, calleeName.str(), 0};
+                                        .apiName = calleeName.str(),
+                                        .writeSizeBytes = 0,
+                                        .kind = RecentWriteKind::StrcpyLike};
                                 }
                             }
                         }
