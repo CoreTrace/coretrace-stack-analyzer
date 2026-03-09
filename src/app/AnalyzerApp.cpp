@@ -4,14 +4,17 @@
 #include "cli/ArgParser.hpp"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cctype>
 #include <chrono>
+#include <cstddef>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <map>
 #include <memory>
+#include <new>
 #include <optional>
 #include <sstream>
 #include <system_error>
@@ -29,6 +32,7 @@
 #include <llvm/Support/raw_ostream.h>
 #include "analysis/CompileCommands.hpp"
 #include "analysis/FunctionFilter.hpp"
+#include "analysis/GlobalReadBeforeWriteAnalysis.hpp"
 #include "analysis/InputPipeline.hpp"
 #include "analysis/ResourceLifetimeAnalysis.hpp"
 #include "analysis/UninitializedVarAnalysis.hpp"
@@ -128,6 +132,75 @@ template <> struct AppResult<void>
 };
 
 using AppStatus = AppResult<void>;
+
+#if defined(__cpp_lib_hardware_interference_size)
+static constexpr std::size_t kDestructiveCacheLineBytes =
+    std::hardware_destructive_interference_size == 0
+        ? 64
+        : std::hardware_destructive_interference_size;
+#else
+static constexpr std::size_t kDestructiveCacheLineBytes = 64;
+#endif
+
+template <typename WorkFn>
+static void runParallelWork(std::size_t workItemCount, unsigned maxJobs, WorkFn&& workFn)
+{
+    if (workItemCount == 0)
+        return;
+
+    const unsigned workerCount = std::min<unsigned>(maxJobs, static_cast<unsigned>(workItemCount));
+    if (workerCount <= 1 || workItemCount <= 1)
+    {
+        for (std::size_t index = 0; index < workItemCount; ++index)
+            workFn(index);
+        return;
+    }
+
+    struct alignas(kDestructiveCacheLineBytes) WorkerState
+    {
+        std::uint64_t processedCount = 0;
+        std::array<std::byte,
+                   (kDestructiveCacheLineBytes > sizeof(std::uint64_t))
+                       ? (kDestructiveCacheLineBytes - sizeof(std::uint64_t))
+                       : 0>
+            padding{};
+    };
+    static_assert(alignof(WorkerState) >= kDestructiveCacheLineBytes,
+                  "WorkerState alignment must satisfy cache-line isolation");
+
+    std::vector<WorkerState> workerStates(workerCount);
+    std::atomic_size_t nextIndex{0};
+    std::vector<std::thread> workers;
+    workers.reserve(workerCount);
+
+    for (unsigned workerId = 0; workerId < workerCount; ++workerId)
+    {
+        WorkerState* const workerState = &workerStates[workerId];
+        workers.emplace_back(
+            [&, workerState]()
+            {
+                WorkerState& state = *workerState;
+                while (true)
+                {
+                    const std::size_t index = nextIndex.fetch_add(1, std::memory_order_relaxed);
+                    if (index >= workItemCount)
+                        break;
+                    workFn(index);
+                    ++state.processedCount;
+                }
+            });
+    }
+
+    for (auto& worker : workers)
+        worker.join();
+
+    std::uint64_t processedTotal = 0;
+    for (const WorkerState& state : workerStates)
+        processedTotal += state.processedCount;
+
+    if (processedTotal != workItemCount)
+        llvm::report_fatal_error("parallel work scheduler inconsistency");
+}
 
 static NormalizedPathFilters buildNormalizedPathFilters(const AnalysisConfig& cfg)
 {
@@ -453,6 +526,10 @@ static std::shared_ptr<ctrace::stack::analysis::UninitializedSummaryIndex>
 buildCrossTUUninitializedSummaryIndex(const std::vector<LoadedInputModule>& loadedModules,
                                       const AnalysisConfig& cfg);
 
+static std::shared_ptr<ctrace::stack::analysis::GlobalReadBeforeWriteSummaryIndex>
+buildCrossTUGlobalReadBeforeWriteSummaryIndex(const std::vector<LoadedInputModule>& loadedModules,
+                                              const AnalysisConfig& cfg);
+
 struct DiagnosticSummary
 {
     std::size_t info = 0;
@@ -659,7 +736,8 @@ static AppStatus configureDumpIRPath(const std::vector<std::string>& inputFilena
 
 static void printInterprocStatus(const AnalysisConfig& cfg, std::size_t inputCount,
                                  bool needsCrossTUResourceSummaries,
-                                 bool needsCrossTUUninitializedSummaries)
+                                 bool needsCrossTUUninitializedSummaries,
+                                 bool needsCrossTUGlobalReadBeforeWriteSummaries)
 {
     if (!cfg.resourceModelPath.empty())
     {
@@ -691,6 +769,14 @@ static void printInterprocStatus(const AnalysisConfig& cfg, std::size_t inputCou
 
     if (inputCount > 1)
     {
+        if (needsCrossTUGlobalReadBeforeWriteSummaries)
+        {
+            coretrace::log(coretrace::Level::Info,
+                           "Global read-before-write analysis: enabled "
+                           "(cross-TU global symbol summaries across {} files)\n",
+                           inputCount);
+        }
+
         if (needsCrossTUUninitializedSummaries)
         {
             coretrace::log(
@@ -712,6 +798,7 @@ static AppStatus analyzeWithSharedModuleLoading(const std::vector<std::string>& 
                                                 AnalysisConfig& cfg, bool hasFilter,
                                                 bool needsCrossTUResourceSummaries,
                                                 bool needsCrossTUUninitializedSummaries,
+                                                bool needsCrossTUGlobalReadBeforeWriteSummaries,
                                                 std::vector<AnalysisEntry>& results)
 {
     std::vector<LoadedInputModule> loadedModules(inputFilenames.size());
@@ -753,27 +840,8 @@ static AppStatus analyzeWithSharedModuleLoading(const std::vector<std::string>& 
     }
     else
     {
-        std::atomic_size_t nextIndex{0};
-        const unsigned workerCount =
-            std::min<unsigned>(loadJobs, static_cast<unsigned>(inputFilenames.size()));
-        std::vector<std::thread> workers;
-        workers.reserve(workerCount);
-        for (unsigned worker = 0; worker < workerCount; ++worker)
-        {
-            workers.emplace_back(
-                [&]()
-                {
-                    while (true)
-                    {
-                        const std::size_t index = nextIndex.fetch_add(1);
-                        if (index >= inputFilenames.size())
-                            break;
-                        loadSingleModule(index);
-                    }
-                });
-        }
-        for (auto& worker : workers)
-            worker.join();
+        runParallelWork(inputFilenames.size(), loadJobs,
+                        [&](std::size_t index) { loadSingleModule(index); });
     }
 
     std::vector<LoadedInputModule> orderedLoadedModules;
@@ -800,6 +868,11 @@ static AppStatus analyzeWithSharedModuleLoading(const std::vector<std::string>& 
         cfg.resourceSummaryIndex = buildCrossTUSummaryIndex(loadedModules, cfg);
     if (needsCrossTUUninitializedSummaries)
         cfg.uninitializedSummaryIndex = buildCrossTUUninitializedSummaryIndex(loadedModules, cfg);
+    if (needsCrossTUGlobalReadBeforeWriteSummaries)
+    {
+        cfg.globalReadBeforeWriteSummaryIndex =
+            buildCrossTUGlobalReadBeforeWriteSummaryIndex(loadedModules, cfg);
+    }
 
     for (auto& loaded : loadedModules)
     {
@@ -869,72 +942,52 @@ static AppStatus analyzeWithoutSharedModuleLoading(const std::vector<std::string
 
     struct ParallelAnalysisSlot
     {
-        AnalysisResult result;
+        std::unique_ptr<AnalysisResult> result;
         std::string loadError;
         std::string noFunctionMsg;
-        bool success = false;
     };
 
     std::vector<ParallelAnalysisSlot> slots(inputFilenames.size());
-    std::atomic_size_t nextIndex{0};
-    const unsigned workerCount =
-        std::min<unsigned>(parallelJobs, static_cast<unsigned>(inputFilenames.size()));
-    std::vector<std::thread> workers;
-    workers.reserve(workerCount);
-    for (unsigned worker = 0; worker < workerCount; ++worker)
-    {
-        workers.emplace_back(
-            [&]()
+    runParallelWork(
+        inputFilenames.size(), parallelJobs,
+        [&](std::size_t index)
+        {
+            const std::string& inputFilename = inputFilenames[index];
+            llvm::LLVMContext localContext;
+            llvm::SMDiagnostic localErr;
+            analysis::ModuleLoadResult load =
+                analysis::loadModuleForAnalysis(inputFilename, cfg, localContext, localErr);
+            if (!load.module)
             {
-                while (true)
+                std::string err;
+                if (!load.error.empty())
+                    err += load.error;
+                if (localErr.getLineNo() != 0 || !localErr.getFilename().empty())
                 {
-                    const std::size_t index = nextIndex.fetch_add(1);
-                    if (index >= inputFilenames.size())
-                        break;
-
-                    const std::string& inputFilename = inputFilenames[index];
-                    llvm::LLVMContext localContext;
-                    llvm::SMDiagnostic localErr;
-                    analysis::ModuleLoadResult load =
-                        analysis::loadModuleForAnalysis(inputFilename, cfg, localContext, localErr);
-                    if (!load.module)
-                    {
-                        std::string err;
-                        if (!load.error.empty())
-                            err += load.error;
-                        if (localErr.getLineNo() != 0 || !localErr.getFilename().empty())
-                        {
-                            std::string diagText;
-                            llvm::raw_string_ostream os(diagText);
-                            localErr.print("stack_usage_analyzer", os);
-                            os.flush();
-                            err += diagText;
-                        }
-                        slots[index].loadError = std::move(err);
-                        continue;
-                    }
-
-                    AnalysisResult result = analyzeModule(*load.module, cfg);
-                    if (!load.frontendDiagnostics.empty())
-                    {
-                        result.diagnostics.insert(result.diagnostics.end(),
-                                                  load.frontendDiagnostics.begin(),
-                                                  load.frontendDiagnostics.end());
-                    }
-                    stampResultFilePaths(result, inputFilename);
-                    slots[index].noFunctionMsg =
-                        noFunctionMessage(result, inputFilename, hasFilter);
-                    slots[index].result = std::move(result);
-                    slots[index].success = true;
+                    std::string diagText;
+                    llvm::raw_string_ostream os(diagText);
+                    localErr.print("stack_usage_analyzer", os);
+                    os.flush();
+                    err += diagText;
                 }
-            });
-    }
-    for (auto& worker : workers)
-        worker.join();
+                slots[index].loadError = std::move(err);
+                return;
+            }
+
+            AnalysisResult result = analyzeModule(*load.module, cfg);
+            if (!load.frontendDiagnostics.empty())
+            {
+                result.diagnostics.insert(result.diagnostics.end(), load.frontendDiagnostics.begin(),
+                                          load.frontendDiagnostics.end());
+            }
+            stampResultFilePaths(result, inputFilename);
+            slots[index].noFunctionMsg = noFunctionMessage(result, inputFilename, hasFilter);
+            slots[index].result = std::make_unique<AnalysisResult>(std::move(result));
+        });
 
     for (std::size_t index = 0; index < inputFilenames.size(); ++index)
     {
-        if (!slots[index].success)
+        if (!slots[index].result)
         {
             std::string message;
             if (!slots[index].loadError.empty())
@@ -948,7 +1001,7 @@ static AppStatus analyzeWithoutSharedModuleLoading(const std::vector<std::string
         }
         if (!slots[index].noFunctionMsg.empty())
             logText(coretrace::Level::Info, slots[index].noFunctionMsg);
-        results.emplace_back(inputFilenames[index], std::move(slots[index].result));
+        results.emplace_back(inputFilenames[index], std::move(*slots[index].result));
     }
     return AppStatus::success();
 }
@@ -1382,7 +1435,9 @@ buildCrossTUSummaryIndex(const std::vector<LoadedInputModule>& loadedModules,
     const std::string modelContent = readFileAsString(cfg.resourceModelPath);
     const std::string modelHash =
         md5Hex(modelContent.empty() ? cfg.resourceModelPath : modelContent);
-    constexpr llvm::StringLiteral kCacheSchema = "cross-tu-resource-summary-v1";
+    // Bump this when summary semantics evolve so on-disk cache entries from older
+    // analyzer builds are not reused with incompatible interpretation.
+    constexpr llvm::StringLiteral kCacheSchema = "cross-tu-resource-summary-v2";
     const bool allowDiskCache =
         !cfg.resourceSummaryMemoryOnly && !cfg.resourceSummaryCacheDir.empty();
     const unsigned maxJobs = resolveConfiguredJobs(cfg);
@@ -1475,34 +1530,17 @@ buildCrossTUSummaryIndex(const std::vector<LoadedInputModule>& loadedModules,
             }
             else
             {
-                const unsigned workerCount =
-                    std::min<unsigned>(maxJobs, static_cast<unsigned>(missingIndices.size()));
                 std::vector<ctrace::stack::analysis::ResourceSummaryIndex> computed(
                     loadedModules.size());
                 std::vector<char> computedReady(loadedModules.size(), 0);
-                std::atomic_size_t nextMissing{0};
-                std::vector<std::thread> workers;
-                workers.reserve(workerCount);
-
-                for (unsigned worker = 0; worker < workerCount; ++worker)
-                {
-                    workers.emplace_back(
-                        [&]()
-                        {
-                            while (true)
-                            {
-                                const std::size_t slot = nextMissing.fetch_add(1);
-                                if (slot >= missingIndices.size())
-                                    break;
-                                const std::size_t moduleIndex = missingIndices[slot];
-                                computed[moduleIndex] = buildModuleSummary(moduleIndex);
-                                computedReady[moduleIndex] = 1;
-                            }
-                        });
-                }
-
-                for (auto& worker : workers)
-                    worker.join();
+                runParallelWork(
+                    missingIndices.size(), maxJobs,
+                    [&](std::size_t slot)
+                    {
+                        const std::size_t moduleIndex = missingIndices[slot];
+                        computed[moduleIndex] = buildModuleSummary(moduleIndex);
+                        computedReady[moduleIndex] = 1;
+                    });
 
                 for (std::size_t moduleIndex : missingIndices)
                 {
@@ -1576,6 +1614,70 @@ buildCrossTUSummaryIndex(const std::vector<LoadedInputModule>& loadedModules,
     return std::make_shared<analysis::ResourceSummaryIndex>(std::move(globalIndex));
 }
 
+static std::shared_ptr<ctrace::stack::analysis::GlobalReadBeforeWriteSummaryIndex>
+buildCrossTUGlobalReadBeforeWriteSummaryIndex(const std::vector<LoadedInputModule>& loadedModules,
+                                              const AnalysisConfig& cfg)
+{
+    if (loadedModules.size() < 2)
+        return nullptr;
+
+    using Clock = std::chrono::steady_clock;
+    const auto buildStart = Clock::now();
+    if (cfg.timing)
+    {
+        coretrace::log(
+            coretrace::Level::Info,
+            "Building cross-TU global read-before-write summaries for {} module(s)...\n",
+            loadedModules.size());
+    }
+
+    const unsigned maxJobs = resolveConfiguredJobs(cfg);
+    std::vector<analysis::GlobalReadBeforeWriteSummaryIndex> moduleSummaries(
+        loadedModules.size());
+
+    auto buildModuleSummary =
+        [&](std::size_t moduleIndex) -> analysis::GlobalReadBeforeWriteSummaryIndex
+    {
+        const LoadedInputModule& loaded = loadedModules[moduleIndex];
+        const analysis::FunctionFilter filter = analysis::buildFunctionFilter(*loaded.module, cfg);
+        auto shouldAnalyze = [&](const llvm::Function& F) -> bool
+        { return filter.shouldAnalyze(F); };
+        return analysis::buildGlobalReadBeforeWriteSummaryIndex(*loaded.module, shouldAnalyze);
+    };
+
+    if (maxJobs <= 1 || loadedModules.size() <= 1)
+    {
+        for (std::size_t moduleIndex = 0; moduleIndex < loadedModules.size(); ++moduleIndex)
+            moduleSummaries[moduleIndex] = buildModuleSummary(moduleIndex);
+    }
+    else
+    {
+        runParallelWork(
+            loadedModules.size(), maxJobs,
+            [&](std::size_t moduleIndex)
+            { moduleSummaries[moduleIndex] = buildModuleSummary(moduleIndex); });
+    }
+
+    analysis::GlobalReadBeforeWriteSummaryIndex globalIndex;
+    for (const auto& moduleSummary : moduleSummaries)
+    {
+        (void)analysis::mergeGlobalReadBeforeWriteSummaryIndex(globalIndex, moduleSummary);
+    }
+
+    if (cfg.timing)
+    {
+        const auto buildEnd = Clock::now();
+        const auto ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(buildEnd - buildStart).count();
+        coretrace::log(
+            coretrace::Level::Info,
+            "Cross-TU global read-before-write summary build done in {} ms ({} symbol(s))\n", ms,
+            globalIndex.globals.size());
+    }
+
+    return std::make_shared<analysis::GlobalReadBeforeWriteSummaryIndex>(std::move(globalIndex));
+}
+
 static std::shared_ptr<ctrace::stack::analysis::UninitializedSummaryIndex>
 buildCrossTUUninitializedSummaryIndex(const std::vector<LoadedInputModule>& loadedModules,
                                       const AnalysisConfig& cfg)
@@ -1595,12 +1697,24 @@ buildCrossTUUninitializedSummaryIndex(const std::vector<LoadedInputModule>& load
     // Same fixed-point budget policy as resource summaries.
     constexpr unsigned kCrossTUMaxIterations = 12;
     const unsigned maxJobs = resolveConfiguredJobs(cfg);
+    std::vector<analysis::PreparedUninitializedModuleContext> preparedModules;
+    preparedModules.reserve(loadedModules.size());
+    for (const LoadedInputModule& loaded : loadedModules)
+    {
+        const analysis::FunctionFilter filter = analysis::buildFunctionFilter(*loaded.module, cfg);
+        auto shouldAnalyze = [&](const llvm::Function& F) -> bool
+        { return filter.shouldAnalyze(F); };
+        preparedModules.push_back(
+            analysis::prepareUninitializedModuleContext(*loaded.module, shouldAnalyze));
+    }
     analysis::UninitializedSummaryIndex globalIndex;
     unsigned iterationsRan = 0;
     bool converged = false;
     for (unsigned iter = 0; iter < kCrossTUMaxIterations; ++iter)
     {
         const auto iterStart = Clock::now();
+        const analysis::PreparedUninitializedExternalSummaries preparedExternal =
+            analysis::prepareUninitializedExternalSummaries(&globalIndex);
         analysis::UninitializedSummaryIndex nextGlobal;
         std::vector<analysis::UninitializedSummaryIndex> moduleSummaries(loadedModules.size());
 
@@ -1608,11 +1722,8 @@ buildCrossTUUninitializedSummaryIndex(const std::vector<LoadedInputModule>& load
             [&](std::size_t moduleIndex) -> analysis::UninitializedSummaryIndex
         {
             const LoadedInputModule& loaded = loadedModules[moduleIndex];
-            analysis::FunctionFilter filter = analysis::buildFunctionFilter(*loaded.module, cfg);
-            auto shouldAnalyze = [&](const llvm::Function& F) -> bool
-            { return filter.shouldAnalyze(F); };
-            return analysis::buildUninitializedSummaryIndex(*loaded.module, shouldAnalyze,
-                                                            &globalIndex);
+            return analysis::buildUninitializedSummaryIndex(
+                *loaded.module, &preparedModules[moduleIndex], &preparedExternal);
         };
 
         if (maxJobs <= 1 || loadedModules.size() <= 1)
@@ -1622,27 +1733,10 @@ buildCrossTUUninitializedSummaryIndex(const std::vector<LoadedInputModule>& load
         }
         else
         {
-            const unsigned workerCount =
-                std::min<unsigned>(maxJobs, static_cast<unsigned>(loadedModules.size()));
-            std::atomic_size_t nextModule{0};
-            std::vector<std::thread> workers;
-            workers.reserve(workerCount);
-            for (unsigned worker = 0; worker < workerCount; ++worker)
-            {
-                workers.emplace_back(
-                    [&]()
-                    {
-                        while (true)
-                        {
-                            const std::size_t moduleIndex = nextModule.fetch_add(1);
-                            if (moduleIndex >= loadedModules.size())
-                                break;
-                            moduleSummaries[moduleIndex] = buildModuleSummary(moduleIndex);
-                        }
-                    });
-            }
-            for (auto& worker : workers)
-                worker.join();
+            runParallelWork(
+                loadedModules.size(), maxJobs,
+                [&](std::size_t moduleIndex)
+                { moduleSummaries[moduleIndex] = buildModuleSummary(moduleIndex); });
         }
 
         for (const auto& moduleSummary : moduleSummaries)
@@ -1726,12 +1820,14 @@ struct RunPlan
     AnalysisConfig cfg;
     std::vector<std::string> inputFilenames;
     NormalizedPathFilters normalizedFilters;
-    ctrace::stack::cli::OutputFormat outputFormat = ctrace::stack::cli::OutputFormat::Human;
     std::string sarifBaseDir;
-    bool hasFilter = false;
-    bool needsCrossTUResourceSummaries = false;
-    bool needsCrossTUUninitializedSummaries = false;
-    bool needsSharedModuleLoading = false;
+    ctrace::stack::cli::OutputFormat outputFormat = ctrace::stack::cli::OutputFormat::Human;
+    std::uint64_t hasFilter : 1 = false;
+    std::uint64_t needsCrossTUResourceSummaries : 1 = false;
+    std::uint64_t needsCrossTUUninitializedSummaries : 1 = false;
+    std::uint64_t needsCrossTUGlobalReadBeforeWriteSummaries : 1 = false;
+    std::uint64_t needsSharedModuleLoading : 1 = false;
+    std::uint64_t reservedFlags : 59 = 0;
 };
 
 class RunPlanBuilder
@@ -1792,8 +1888,10 @@ class RunPlanBuilder
                                              plan.inputFilenames.size() > 1;
         plan.needsCrossTUUninitializedSummaries =
             plan.cfg.uninitializedCrossTU && plan.inputFilenames.size() > 1;
-        plan.needsSharedModuleLoading =
-            plan.needsCrossTUResourceSummaries || plan.needsCrossTUUninitializedSummaries;
+        plan.needsCrossTUGlobalReadBeforeWriteSummaries = plan.inputFilenames.size() > 1;
+        plan.needsSharedModuleLoading = plan.needsCrossTUResourceSummaries ||
+                                        plan.needsCrossTUUninitializedSummaries ||
+                                        plan.needsCrossTUGlobalReadBeforeWriteSummaries;
         return AppResult<RunPlan>::success(std::move(plan));
     }
 
@@ -1818,7 +1916,9 @@ class SharedModuleLoadingExecutionStrategy final : public AnalysisExecutionStrat
     {
         return analyzeWithSharedModuleLoading(plan.inputFilenames, plan.cfg, plan.hasFilter,
                                               plan.needsCrossTUResourceSummaries,
-                                              plan.needsCrossTUUninitializedSummaries, results);
+                                              plan.needsCrossTUUninitializedSummaries,
+                                              plan.needsCrossTUGlobalReadBeforeWriteSummaries,
+                                              results);
     }
 };
 
@@ -1904,7 +2004,8 @@ class AnalyzerApp
         RunPlan plan = std::move(*planResult.value);
         printInterprocStatus(plan.cfg, plan.inputFilenames.size(),
                              plan.needsCrossTUResourceSummaries,
-                             plan.needsCrossTUUninitializedSummaries);
+                             plan.needsCrossTUUninitializedSummaries,
+                             plan.needsCrossTUGlobalReadBeforeWriteSummaries);
 
         std::vector<AnalysisEntry> results;
         results.reserve(plan.inputFilenames.size());
@@ -1920,7 +2021,6 @@ class AnalyzerApp
 
 namespace ctrace::stack::app
 {
-
     RunResult runAnalyzerApp(cli::ParsedArguments parsedArgs, llvm::LLVMContext& context)
     {
         AnalyzerApp app = {};
