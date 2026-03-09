@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <string>
 
 #include "StackUsageAnalyzer.hpp"
@@ -14,11 +15,12 @@ namespace ctrace::stack::analysis
 {
     struct FunctionFilter
     {
-        bool hasPathFilter = false;
-        bool hasFuncFilter = false;
-        bool hasFilter = false;
         std::string moduleSourcePath;
         const AnalysisConfig* config = nullptr;
+        std::uint64_t hasPathFilter : 1 = false;
+        std::uint64_t hasFuncFilter : 1 = false;
+        std::uint64_t hasFilter : 1 = false;
+        std::uint64_t reservedFlags : 61 = 0;
 
         bool shouldAnalyze(const llvm::Function& F) const;
     };
