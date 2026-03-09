@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstdint>
+
 namespace llvm
 {
     class AllocaInst;
@@ -17,7 +19,8 @@ namespace ctrace::stack::analyzer
         unsigned startColumn = 0;
         unsigned endLine = 0;
         unsigned endColumn = 0;
-        bool hasLocation = false;
+        std::uint32_t hasLocation : 1 = false;
+        std::uint32_t reservedFlags : 31 = 0;
     };
 
     ResolvedLocation resolveFromInstruction(const llvm::Instruction* inst,
