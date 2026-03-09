@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
@@ -19,6 +20,7 @@ namespace ctrace::stack::analysis
     {
         std::unique_ptr<llvm::Module> module;
         LanguageType language = LanguageType::Unknown;
+        std::uint32_t reservedLanguagePadding = 0;
         std::vector<Diagnostic> frontendDiagnostics;
         std::string error;
     };
