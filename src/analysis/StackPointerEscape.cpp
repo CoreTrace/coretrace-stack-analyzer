@@ -12,6 +12,7 @@
 #include <llvm/IR/Value.h>
 
 #include <algorithm>
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <vector>
@@ -28,7 +29,8 @@ namespace ctrace::stack::analysis
         struct DeferredCallback
         {
             StackPointerEscapeIssue issue;
-            bool isVirtualDispatch = false;
+            std::uint64_t isVirtualDispatch : 1 = false;
+            std::uint64_t reservedFlags : 63 = 0;
         };
 
         static const llvm::Value* peelPointerFromSingleStoreSlot(const llvm::Value* ptr)
