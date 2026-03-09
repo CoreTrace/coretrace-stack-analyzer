@@ -3,6 +3,7 @@ project(stack_usage_analyzer)
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}/cmake")
 include(CheckLLVMVersion OPTIONAL)
+include(CheckCXXCompilerFlag)
 
 if(COMMAND check_llvm_version)
     set(LLVM_MIN_REQUIRED_VERSION "19" CACHE STRING "Minimum required LLVM version")
@@ -15,8 +16,6 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
-
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wreorder-init-list")
 
 set(LLVM_LINK_LLVM_DYLIB ON)
 
@@ -55,7 +54,12 @@ option(BUILD_CLI "Build stack_usage_analyzer CLI tool" ON)
 option(BUILD_SHARED_LIB "Build shared library variant" ON)
 option(ENABLE_STACK_USAGE "Emit per-function stack usage (.su) files" ON)
 option(ENABLE_WARN_PADDED "Enable -Wpadded warnings" ON)
+option(ENABLE_WARN_REORDER_INIT_LIST "Enable -Wreorder-init-list when supported" ON)
 option(ENABLE_Z3_BACKEND "Enable optional Z3 SMT backend if Z3 is available" ON)
+
+if(ENABLE_WARN_REORDER_INIT_LIST)
+    check_cxx_compiler_flag("-Wreorder-init-list" CTRACE_STACK_HAS_WREORDER_INIT_LIST)
+endif()
 
 # ===========================
 #  Communs Sources
@@ -129,6 +133,10 @@ add_definitions(${LLVM_DEFINITIONS})
 add_library(stack_usage_analyzer_lib STATIC
     ${STACK_ANALYZER_SOURCES}
 )
+
+if(ENABLE_WARN_REORDER_INIT_LIST AND CTRACE_STACK_HAS_WREORDER_INIT_LIST)
+    target_compile_options(stack_usage_analyzer_lib PRIVATE -Wreorder-init-list)
+endif()
 
 if(CTRACE_STACK_HAVE_Z3_BACKEND)
     target_compile_definitions(stack_usage_analyzer_lib PUBLIC CTRACE_STACK_ENABLE_Z3_BACKEND=1)
@@ -228,6 +236,10 @@ if(BUILD_CLI)
     add_executable(stack_usage_analyzer
       main.cpp
     )
+
+    if(ENABLE_WARN_REORDER_INIT_LIST AND CTRACE_STACK_HAS_WREORDER_INIT_LIST)
+        target_compile_options(stack_usage_analyzer PRIVATE -Wreorder-init-list)
+    endif()
 
     target_link_libraries(stack_usage_analyzer
       PRIVATE
