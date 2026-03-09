@@ -136,13 +136,13 @@ static void printEffectiveConfig(const ctrace::stack::cli::ParsedArguments& pars
 {
     const AnalysisConfig& cfg = parsed.config;
     llvm::errs() << "=== Effective Analyzer Configuration ===\n";
-    llvm::errs() << "config-file: "
-                 << (parsed.configPath.empty() ? "<none>" : parsed.configPath) << "\n";
+    llvm::errs() << "config-file: " << (parsed.configPath.empty() ? "<none>" : parsed.configPath)
+                 << "\n";
     llvm::errs() << "compile-commands: "
                  << (parsed.compileCommandsPath.empty() ? "<none>" : parsed.compileCommandsPath)
                  << "\n";
-    llvm::errs() << "analysis-profile: "
-                 << (cfg.profile == AnalysisProfile::Fast ? "fast" : "full") << "\n";
+    llvm::errs() << "analysis-profile: " << (cfg.profile == AnalysisProfile::Fast ? "fast" : "full")
+                 << "\n";
     if (cfg.jobsAuto)
         llvm::errs() << "jobs: auto\n";
     else
@@ -165,8 +165,8 @@ static void printEffectiveConfig(const ctrace::stack::cli::ParsedArguments& pars
     llvm::errs() << "smt-mode: " << solverModeName(cfg.smtMode) << "\n";
     llvm::errs() << "smt-timeout-ms: " << cfg.smtTimeoutMs << "\n";
     llvm::errs() << "smt-budget-nodes: " << cfg.smtBudgetNodes << "\n";
-    llvm::errs() << "smt-rules: "
-                 << (cfg.smtRules.empty() ? "<all>" : joinCsv(cfg.smtRules)) << "\n";
+    llvm::errs() << "smt-rules: " << (cfg.smtRules.empty() ? "<all>" : joinCsv(cfg.smtRules))
+                 << "\n";
     llvm::errs() << "========================================\n";
 }
 

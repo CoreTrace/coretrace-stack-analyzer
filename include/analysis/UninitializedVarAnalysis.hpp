@@ -88,8 +88,7 @@ namespace ctrace::stack::analysis
     PreparedUninitializedExternalSummaries
     prepareUninitializedExternalSummaries(const UninitializedSummaryIndex* externalSummaries);
 
-    PreparedUninitializedModuleContext
-    prepareUninitializedModuleContext(
+    PreparedUninitializedModuleContext prepareUninitializedModuleContext(
         llvm::Module& mod, const std::function<bool(const llvm::Function&)>& shouldAnalyze);
 
     UninitializedSummaryIndex
@@ -97,9 +96,10 @@ namespace ctrace::stack::analysis
                                    const std::function<bool(const llvm::Function&)>& shouldAnalyze,
                                    const PreparedUninitializedExternalSummaries* preparedExternal);
 
-    UninitializedSummaryIndex buildUninitializedSummaryIndex(
-        llvm::Module& mod, const PreparedUninitializedModuleContext* preparedModule,
-        const PreparedUninitializedExternalSummaries* preparedExternal);
+    UninitializedSummaryIndex
+    buildUninitializedSummaryIndex(llvm::Module& mod,
+                                   const PreparedUninitializedModuleContext* preparedModule,
+                                   const PreparedUninitializedExternalSummaries* preparedExternal);
 
     bool mergeUninitializedSummaryIndex(UninitializedSummaryIndex& dst,
                                         const UninitializedSummaryIndex& src);

@@ -225,9 +225,9 @@ namespace ctrace::stack::analysis
             if (ec)
                 return std::nullopt;
 
-            const auto mtimeNs =
-                std::chrono::time_point_cast<std::chrono::nanoseconds>(mtime).time_since_epoch()
-                    .count();
+            const auto mtimeNs = std::chrono::time_point_cast<std::chrono::nanoseconds>(mtime)
+                                     .time_since_epoch()
+                                     .count();
 
             FileSnapshot snapshot;
             snapshot.path = absolute.generic_string();
@@ -765,9 +765,9 @@ namespace ctrace::stack::analysis
             const CompileIRCachePaths cachePaths =
                 buildCompileIRCachePaths(config, filename, result.language, args, workingDir);
 
-            auto compileWithOptionalWorkingDir = [&](const std::vector<std::string>& compileArgs,
-                                                     bool useWorkingDir)
-                -> std::optional<compilerlib::CompileResult>
+            auto compileWithOptionalWorkingDir =
+                [&](const std::vector<std::string>& compileArgs,
+                    bool useWorkingDir) -> std::optional<compilerlib::CompileResult>
             {
                 if (!useWorkingDir)
                     return compilerlib::compile(compileArgs, mode);
@@ -875,7 +875,8 @@ namespace ctrace::stack::analysis
                 appendDependencyCaptureArgs(cacheCompileArgs, cachePaths.depFile);
 
                 bool retriedForDependencyCompile = false;
-                res = compileWithConfiguredWorkingDir(cacheCompileArgs, retriedForDependencyCompile);
+                res =
+                    compileWithConfiguredWorkingDir(cacheCompileArgs, retriedForDependencyCompile);
                 retriedWithWorkingDir = retriedForDependencyCompile;
 
                 if (!res || !res->success)
@@ -883,8 +884,7 @@ namespace ctrace::stack::analysis
                     bool retriedForFallbackCompile = false;
                     auto fallbackResult =
                         compileWithConfiguredWorkingDir(args, retriedForFallbackCompile);
-                    retriedWithWorkingDir =
-                        retriedWithWorkingDir || retriedForFallbackCompile;
+                    retriedWithWorkingDir = retriedWithWorkingDir || retriedForFallbackCompile;
                     if (fallbackResult)
                         res = std::move(fallbackResult);
                 }
@@ -963,9 +963,9 @@ namespace ctrace::stack::analysis
 
             if (cachePaths.enabled && sourceSnapshot && dependencySnapshots)
             {
-                const bool stored = storeCompileIRCachePayload(
-                    cachePaths, *sourceSnapshot, *dependencySnapshots, compileDiagnosticsText,
-                    res->llvmIR);
+                const bool stored =
+                    storeCompileIRCachePayload(cachePaths, *sourceSnapshot, *dependencySnapshots,
+                                               compileDiagnosticsText, res->llvmIR);
                 if (config.timing && stored)
                 {
                     coretrace::log(coretrace::Level::Info,

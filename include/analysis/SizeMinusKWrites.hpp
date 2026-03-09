@@ -33,8 +33,8 @@ namespace ctrace::stack::analysis
         llvm::Module& mod, const llvm::DataLayout& DL,
         const std::function<bool(const llvm::Function&)>& shouldAnalyzeFunction);
 
-    std::vector<SizeMinusKWriteIssue> analyzeSizeMinusKWrites(
-        llvm::Module& mod, const llvm::DataLayout& DL,
-        const std::function<bool(const llvm::Function&)>& shouldAnalyzeFunction,
-        const AnalysisConfig& config);
+    std::vector<SizeMinusKWriteIssue>
+    analyzeSizeMinusKWrites(llvm::Module& mod, const llvm::DataLayout& DL,
+                            const std::function<bool(const llvm::Function&)>& shouldAnalyzeFunction,
+                            const AnalysisConfig& config);
 } // namespace ctrace::stack::analysis

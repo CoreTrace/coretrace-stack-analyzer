@@ -80,10 +80,7 @@ namespace ctrace::stack::analysis::smt
         class ConstraintIrBuilder
         {
           public:
-            explicit ConstraintIrBuilder(ConstraintIR& ir)
-                : ir_(ir)
-            {
-            }
+            explicit ConstraintIrBuilder(ConstraintIR& ir) : ir_(ir) {}
 
             ExprId makeConstant(std::int64_t value, std::uint32_t bitWidth)
             {
@@ -104,16 +101,18 @@ namespace ctrace::stack::analysis::smt
 
                 const SymbolId id = nextSymbolId_++;
                 symbolByValue_.emplace(value, id);
-                symbolExprById_.emplace(id, appendNode(ExprNode{.kind = ExprKind::Symbol,
-                                                                .symbol = id,
-                                                                .constant = 0,
-                                                                .bitWidth = normalizeBitWidth(bitWidth),
-                                                                .lhs = 0,
-                                                                .rhs = 0,
-                                                                .extra = 0}));
+                symbolExprById_.emplace(id,
+                                        appendNode(ExprNode{.kind = ExprKind::Symbol,
+                                                            .symbol = id,
+                                                            .constant = 0,
+                                                            .bitWidth = normalizeBitWidth(bitWidth),
+                                                            .lhs = 0,
+                                                            .rhs = 0,
+                                                            .extra = 0}));
 
-                ir_.symbols.push_back(SymbolInfo{
-                    .id = id, .debugName = buildSymbolName(value, id), .sourceToken = toSourceToken(value)});
+                ir_.symbols.push_back(SymbolInfo{.id = id,
+                                                 .debugName = buildSymbolName(value, id),
+                                                 .sourceToken = toSourceToken(value)});
                 return symbolExprById_.at(id);
             }
 
@@ -203,8 +202,7 @@ namespace ctrace::stack::analysis::smt
         {
           public:
             LlvmExprEncoder(ConstraintIrBuilder& builder, const llvm::BasicBlock* incomingBlock)
-                : builder_(builder)
-                , incomingBlock_(incomingBlock)
+                : builder_(builder), incomingBlock_(incomingBlock)
             {
             }
 
@@ -282,10 +280,9 @@ namespace ctrace::stack::analysis::smt
                 const std::uint32_t bitWidth = inferBitWidth(&binaryOp);
                 const ExprId result = builder_.makeBinary(opKind, *lhs, *rhs, bitWidth);
 
-                const bool isOverflowSensitive =
-                    binaryOp.getOpcode() == llvm::Instruction::Add ||
-                    binaryOp.getOpcode() == llvm::Instruction::Sub ||
-                    binaryOp.getOpcode() == llvm::Instruction::Mul;
+                const bool isOverflowSensitive = binaryOp.getOpcode() == llvm::Instruction::Add ||
+                                                 binaryOp.getOpcode() == llvm::Instruction::Sub ||
+                                                 binaryOp.getOpcode() == llvm::Instruction::Mul;
                 if (!isOverflowSensitive || bitWidth >= std::numeric_limits<std::uint32_t>::max())
                     return result;
 
@@ -296,7 +293,8 @@ namespace ctrace::stack::analysis::smt
                     const ExprId rhsExt = builder_.makeUnary(ExprKind::SExt, *rhs, extWidth);
                     const ExprId resultExt = builder_.makeUnary(ExprKind::SExt, result, extWidth);
                     const ExprId extArith = builder_.makeBinary(opKind, lhsExt, rhsExt, extWidth);
-                    builder_.addAssertion(builder_.makeBinary(ExprKind::Eq, resultExt, extArith, 1));
+                    builder_.addAssertion(
+                        builder_.makeBinary(ExprKind::Eq, resultExt, extArith, 1));
                 }
                 if (binaryOp.hasNoUnsignedWrap())
                 {
@@ -304,7 +302,8 @@ namespace ctrace::stack::analysis::smt
                     const ExprId rhsExt = builder_.makeUnary(ExprKind::ZExt, *rhs, extWidth);
                     const ExprId resultExt = builder_.makeUnary(ExprKind::ZExt, result, extWidth);
                     const ExprId extArith = builder_.makeBinary(opKind, lhsExt, rhsExt, extWidth);
-                    builder_.addAssertion(builder_.makeBinary(ExprKind::Eq, resultExt, extArith, 1));
+                    builder_.addAssertion(
+                        builder_.makeBinary(ExprKind::Eq, resultExt, extArith, 1));
                 }
 
                 return result;
@@ -313,7 +312,8 @@ namespace ctrace::stack::analysis::smt
             std::optional<ExprId> encodeValueImpl(const llvm::Value& value)
             {
                 if (const auto* constantInt = llvm::dyn_cast<llvm::ConstantInt>(&value))
-                    return builder_.makeConstant(constantInt->getSExtValue(), inferBitWidth(&value));
+                    return builder_.makeConstant(constantInt->getSExtValue(),
+                                                 inferBitWidth(&value));
 
                 if (llvm::isa<llvm::ConstantPointerNull>(&value))
                     return builder_.makeConstant(0, inferBitWidth(&value));
@@ -355,10 +355,11 @@ namespace ctrace::stack::analysis::smt
                         if (!trueValue || !falseValue)
                             return std::nullopt;
 
-                        const ExprId onTrue = builder_.makeBinary(ExprKind::And, *cond, *trueValue, 1);
-                        const ExprId onFalse =
-                            builder_.makeBinary(ExprKind::And, builder_.makeUnary(ExprKind::Not, *cond, 1),
-                                                *falseValue, 1);
+                        const ExprId onTrue =
+                            builder_.makeBinary(ExprKind::And, *cond, *trueValue, 1);
+                        const ExprId onFalse = builder_.makeBinary(
+                            ExprKind::And, builder_.makeUnary(ExprKind::Not, *cond, 1), *falseValue,
+                            1);
                         return builder_.makeBinary(ExprKind::Or, onTrue, onFalse, 1);
                     }
 
@@ -486,23 +487,23 @@ namespace ctrace::stack::analysis::smt
                     symbolId = builder.lookupSymbolId(value);
                 }
 
-                ir.intervals.push_back(IntervalConstraint{
-                    .symbol = symbolId,
-                    .lower = static_cast<std::int64_t>(range.lower),
-                    .upper = static_cast<std::int64_t>(range.upper),
-                    .hasLower = range.hasLower,
-                    .hasUpper = range.hasUpper});
+                ir.intervals.push_back(
+                    IntervalConstraint{.symbol = symbolId,
+                                       .lower = static_cast<std::int64_t>(range.lower),
+                                       .upper = static_cast<std::int64_t>(range.upper),
+                                       .hasLower = range.hasLower,
+                                       .hasUpper = range.hasUpper});
 
                 if (range.hasLower)
                 {
-                    const ExprId lower = builder.makeConstant(static_cast<std::int64_t>(range.lower),
-                                                              builder.node(*symbolExpr).bitWidth);
+                    const ExprId lower = builder.makeConstant(
+                        static_cast<std::int64_t>(range.lower), builder.node(*symbolExpr).bitWidth);
                     builder.addAssertion(builder.makeBinary(ExprKind::Sge, *symbolExpr, lower, 1));
                 }
                 if (range.hasUpper)
                 {
-                    const ExprId upper = builder.makeConstant(static_cast<std::int64_t>(range.upper),
-                                                              builder.node(*symbolExpr).bitWidth);
+                    const ExprId upper = builder.makeConstant(
+                        static_cast<std::int64_t>(range.upper), builder.node(*symbolExpr).bitWidth);
                     builder.addAssertion(builder.makeBinary(ExprKind::Sle, *symbolExpr, upper, 1));
                 }
             }
@@ -528,8 +529,7 @@ namespace ctrace::stack::analysis::smt
         }
 
         static void encodeEdgeCondition(const llvm::Value* edgeCondition, bool takesTrueEdge,
-                                        ConstraintIrBuilder& builder,
-                                        LlvmExprEncoder& exprEncoder)
+                                        ConstraintIrBuilder& builder, LlvmExprEncoder& exprEncoder)
         {
             if (!edgeCondition)
                 return;
@@ -580,12 +580,10 @@ namespace ctrace::stack::analysis::smt
             }
         }
 
-        static ConstraintIR
-        encodeWithCustomAssertions(const std::map<const llvm::Value*, IntRange>& ranges,
-                                   const llvm::Value* edgeCondition, bool takesTrueEdge,
-                                   const llvm::BasicBlock* edgeBlock,
-                                   const llvm::BasicBlock* incomingBlock,
-                                   const QueryPostEncoder& postEncode = {})
+        static ConstraintIR encodeWithCustomAssertions(
+            const std::map<const llvm::Value*, IntRange>& ranges, const llvm::Value* edgeCondition,
+            bool takesTrueEdge, const llvm::BasicBlock* edgeBlock,
+            const llvm::BasicBlock* incomingBlock, const QueryPostEncoder& postEncode = {})
         {
             ConstraintIR ir;
             ir.intervals.reserve(ranges.size());
@@ -619,9 +617,10 @@ namespace ctrace::stack::analysis::smt
         return encoder.encode(ranges);
     }
 
-    ConstraintIR encodeSignedOverflowFeasibility(
-        const std::map<const llvm::Value*, IntRange>& ranges,
-        const llvm::BinaryOperator& binaryOperation, const llvm::Instruction* contextInst)
+    ConstraintIR
+    encodeSignedOverflowFeasibility(const std::map<const llvm::Value*, IntRange>& ranges,
+                                    const llvm::BinaryOperator& binaryOperation,
+                                    const llvm::Instruction* contextInst)
     {
         return encodeWithCustomAssertions(
             ranges, nullptr, true, nullptr, nullptr,
@@ -634,8 +633,10 @@ namespace ctrace::stack::analysis::smt
                 if (!opKind)
                     return;
 
-                const std::optional<ExprId> lhs = exprEncoder.encodeValue(binaryOperation.getOperand(0));
-                const std::optional<ExprId> rhs = exprEncoder.encodeValue(binaryOperation.getOperand(1));
+                const std::optional<ExprId> lhs =
+                    exprEncoder.encodeValue(binaryOperation.getOperand(0));
+                const std::optional<ExprId> rhs =
+                    exprEncoder.encodeValue(binaryOperation.getOperand(1));
                 if (!lhs || !rhs)
                     return;
 
@@ -655,9 +656,10 @@ namespace ctrace::stack::analysis::smt
             });
     }
 
-    ConstraintIR encodeUnsignedOverflowFeasibility(
-        const std::map<const llvm::Value*, IntRange>& ranges,
-        const llvm::BinaryOperator& binaryOperation, const llvm::Instruction* contextInst)
+    ConstraintIR
+    encodeUnsignedOverflowFeasibility(const std::map<const llvm::Value*, IntRange>& ranges,
+                                      const llvm::BinaryOperator& binaryOperation,
+                                      const llvm::Instruction* contextInst)
     {
         return encodeWithCustomAssertions(
             ranges, nullptr, true, nullptr, nullptr,
@@ -670,8 +672,10 @@ namespace ctrace::stack::analysis::smt
                 if (!opKind)
                     return;
 
-                const std::optional<ExprId> lhs = exprEncoder.encodeValue(binaryOperation.getOperand(0));
-                const std::optional<ExprId> rhs = exprEncoder.encodeValue(binaryOperation.getOperand(1));
+                const std::optional<ExprId> lhs =
+                    exprEncoder.encodeValue(binaryOperation.getOperand(0));
+                const std::optional<ExprId> rhs =
+                    exprEncoder.encodeValue(binaryOperation.getOperand(1));
                 if (!lhs || !rhs)
                     return;
 
@@ -691,9 +695,10 @@ namespace ctrace::stack::analysis::smt
             });
     }
 
-    ConstraintIR encodeSignedComparisonFeasibility(
-        const std::map<const llvm::Value*, IntRange>& ranges, const llvm::Value& lhs,
-        std::int64_t rhsConstant, bool greaterThan, const llvm::Instruction* contextInst)
+    ConstraintIR
+    encodeSignedComparisonFeasibility(const std::map<const llvm::Value*, IntRange>& ranges,
+                                      const llvm::Value& lhs, std::int64_t rhsConstant,
+                                      bool greaterThan, const llvm::Instruction* contextInst)
     {
         return encodeWithCustomAssertions(
             ranges, nullptr, true, nullptr, nullptr,

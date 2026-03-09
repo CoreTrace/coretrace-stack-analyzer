@@ -51,7 +51,7 @@ namespace ctrace::stack
         std::shared_ptr<const analysis::ResourceSummaryIndex> resourceSummaryIndex;
         std::shared_ptr<const analysis::UninitializedSummaryIndex> uninitializedSummaryIndex;
         std::shared_ptr<const analysis::GlobalReadBeforeWriteSummaryIndex>
-        globalReadBeforeWriteSummaryIndex;
+            globalReadBeforeWriteSummaryIndex;
 
         std::vector<std::string> excludeDirs;
         std::vector<std::string> extraCompileArgs;
@@ -100,8 +100,8 @@ namespace ctrace::stack
     {
         std::string filePath;
         std::string name;
-        StackSize localStack = 0;       // local frame size (depends on mode)
-        StackSize maxStack = 0;         // max stack including callees
+        StackSize localStack = 0;                    // local frame size (depends on mode)
+        StackSize maxStack = 0;                      // max stack including callees
         std::uint64_t localStackUnknown : 1 = false; // unknown local size (dynamic alloca)
         std::uint64_t maxStackUnknown : 1 = false;   // unknown max stack (propagated via calls)
         std::uint64_t hasDynamicAlloca : 1 = false;  // dynamic alloca detected in the function

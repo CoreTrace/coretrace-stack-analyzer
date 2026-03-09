@@ -312,17 +312,16 @@ namespace ctrace::stack::analysis
             {
             }
 
-            ConstraintSat
-            isSatisfiable(const std::map<const llvm::Value*, IntRange>& ranges,
-                          const llvm::Value* edgeCondition = nullptr, bool takesTrueEdge = true,
-                          const llvm::BasicBlock* edgeBlock = nullptr,
-                          const llvm::BasicBlock* incomingBlock = nullptr) const
+            ConstraintSat isSatisfiable(const std::map<const llvm::Value*, IntRange>& ranges,
+                                        const llvm::Value* edgeCondition = nullptr,
+                                        bool takesTrueEdge = true,
+                                        const llvm::BasicBlock* edgeBlock = nullptr,
+                                        const llvm::BasicBlock* incomingBlock = nullptr) const
             {
                 const ConstraintSat fallbackDecision = evaluateIntervalSatisfiability(ranges);
                 const smt::SmtFeasibility feasibility =
-                    smt::SmtConstraintEvaluator::evaluateQuery(
-                        encoder_.encode(ranges, edgeCondition, takesTrueEdge, edgeBlock,
-                                        incomingBlock));
+                    smt::SmtConstraintEvaluator::evaluateQuery(encoder_.encode(
+                        ranges, edgeCondition, takesTrueEdge, edgeBlock, incomingBlock));
                 switch (feasibility)
                 {
                 case smt::SmtFeasibility::Feasible:
@@ -356,7 +355,8 @@ namespace ctrace::stack::analysis
             return current;
         }
 
-        static bool deriveRangeConstraintFromPredicate(llvm::ICmpInst::Predicate pred, bool valueIsOp0,
+        static bool deriveRangeConstraintFromPredicate(llvm::ICmpInst::Predicate pred,
+                                                       bool valueIsOp0,
                                                        const llvm::ConstantInt& constant,
                                                        IntRange& out)
         {
@@ -553,9 +553,8 @@ namespace ctrace::stack::analysis
             return outKey != nullptr;
         }
 
-        static bool
-        applyConstraintToState(std::map<const llvm::Value*, IntRange>& ranges,
-                               const llvm::Value* key, const IntRange& constraint)
+        static bool applyConstraintToState(std::map<const llvm::Value*, IntRange>& ranges,
+                                           const llvm::Value* key, const IntRange& constraint)
         {
             IntRange& cur = ranges[key];
 
@@ -696,10 +695,10 @@ namespace ctrace::stack::analysis
                             }
                         }
 
-                        const llvm::Value* edgeCondition = branch->getCondition()->stripPointerCasts();
-                        const ConstraintSat sat =
-                            evaluator.isSatisfiable(next.ranges, edgeCondition, succIndex == 0, BB,
-                                                    current.predecessor);
+                        const llvm::Value* edgeCondition =
+                            branch->getCondition()->stripPointerCasts();
+                        const ConstraintSat sat = evaluator.isSatisfiable(
+                            next.ranges, edgeCondition, succIndex == 0, BB, current.predecessor);
                         if (sat == ConstraintSat::Unsat)
                             continue;
                         if (sat == ConstraintSat::Unknown)
@@ -945,11 +944,8 @@ namespace ctrace::stack::analysis
             return true;
         }
 
-        const NonRecursiveReturnFeasibility feasibility =
-            hasFeasibleNonRecursiveReturnPath(F,
-                                              [Self](const llvm::Function* Callee)
-                                              { return Callee == Self; },
-                                              evaluator);
+        const NonRecursiveReturnFeasibility feasibility = hasFeasibleNonRecursiveReturnPath(
+            F, [Self](const llvm::Function* Callee) { return Callee == Self; }, evaluator);
         return feasibility == NonRecursiveReturnFeasibility::DoesNotExist;
     }
 
@@ -984,8 +980,7 @@ namespace ctrace::stack::analysis
             {
                 const NonRecursiveReturnFeasibility feasibility = hasFeasibleNonRecursiveReturnPath(
                     *CF, [&componentSet](const llvm::Function* Callee)
-                    { return componentSet.count(Callee) != 0; },
-                    evaluator);
+                    { return componentSet.count(Callee) != 0; }, evaluator);
                 hasNoBaseCase = (feasibility == NonRecursiveReturnFeasibility::DoesNotExist);
             }
 

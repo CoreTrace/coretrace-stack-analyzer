@@ -43,15 +43,13 @@ namespace ctrace::stack::analysis
         std::uint64_t reservedFlags : 63 = 0;
     };
 
-    GlobalReadBeforeWriteSummaryIndex
-    buildGlobalReadBeforeWriteSummaryIndex(
+    GlobalReadBeforeWriteSummaryIndex buildGlobalReadBeforeWriteSummaryIndex(
         llvm::Module& mod, const std::function<bool(const llvm::Function&)>& shouldAnalyze);
 
     bool mergeGlobalReadBeforeWriteSummaryIndex(GlobalReadBeforeWriteSummaryIndex& dst,
                                                 const GlobalReadBeforeWriteSummaryIndex& src);
 
-    std::vector<GlobalReadBeforeWriteIssue>
-    analyzeGlobalReadBeforeWrites(
+    std::vector<GlobalReadBeforeWriteIssue> analyzeGlobalReadBeforeWrites(
         llvm::Module& mod, const std::function<bool(const llvm::Function&)>& shouldAnalyze,
         const GlobalReadBeforeWriteSummaryIndex* externalSummaries = nullptr);
 } // namespace ctrace::stack::analysis

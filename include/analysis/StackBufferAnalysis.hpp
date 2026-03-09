@@ -32,7 +32,7 @@ namespace ctrace::stack::analysis
         const llvm::Instruction* inst = nullptr;
         StackSize arraySize = 0;
         StackSize indexOrUpperBound = 0; // used for upper bounds (UB) or constant index
-        long long lowerBound = 0; // deduced lower bound (signed)
+        long long lowerBound = 0;        // deduced lower bound (signed)
         BufferStorageClass storageClass = BufferStorageClass::Stack;
         std::uint64_t isWrite : 1 = false;
         std::uint64_t indexIsConstant : 1 = false;

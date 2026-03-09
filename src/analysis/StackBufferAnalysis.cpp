@@ -105,8 +105,8 @@ namespace ctrace::stack::analysis
                                     const llvm::Instruction* contextInst) const
             {
                 return smt::SmtConstraintEvaluator::evaluateQuery(
-                    smt::encodeSignedComparisonFeasibility(
-                        ranges, indexExpr, -1, false, contextInst));
+                    smt::encodeSignedComparisonFeasibility(ranges, indexExpr, -1, false,
+                                                           contextInst));
             }
 
             SmtFeasibility
@@ -115,16 +115,16 @@ namespace ctrace::stack::analysis
                                     const llvm::Instruction* contextInst) const
             {
                 if (limitExclusive == 0 ||
-                    limitExclusive > static_cast<StackSize>(std::numeric_limits<std::int64_t>::max()))
+                    limitExclusive >
+                        static_cast<StackSize>(std::numeric_limits<std::int64_t>::max()))
                 {
                     return SmtFeasibility::Inconclusive;
                 }
 
-                const std::int64_t upperInclusive =
-                    static_cast<std::int64_t>(limitExclusive - 1);
+                const std::int64_t upperInclusive = static_cast<std::int64_t>(limitExclusive - 1);
                 return smt::SmtConstraintEvaluator::evaluateQuery(
-                    smt::encodeSignedComparisonFeasibility(
-                        ranges, indexExpr, upperInclusive, true, contextInst));
+                    smt::encodeSignedComparisonFeasibility(ranges, indexExpr, upperInclusive, true,
+                                                           contextInst));
             }
         };
 
@@ -896,10 +896,11 @@ namespace ctrace::stack::analysis
             return refined;
         }
 
-        static bool isUpperViolationInfeasibleBySmt(
-            const StackBufferConstraintEvaluator& evaluator,
-            const IntRange& localRange, const llvm::Value* indexExpr, StackSize arraySize,
-            const llvm::Instruction& accessInst)
+        static bool isUpperViolationInfeasibleBySmt(const StackBufferConstraintEvaluator& evaluator,
+                                                    const IntRange& localRange,
+                                                    const llvm::Value* indexExpr,
+                                                    StackSize arraySize,
+                                                    const llvm::Instruction& accessInst)
         {
             if (!indexExpr || !indexExpr->getType()->isIntegerTy())
                 return false;
@@ -909,14 +910,14 @@ namespace ctrace::stack::analysis
             std::map<const llvm::Value*, IntRange> queryRanges;
             queryRanges[indexExpr] = localRange;
 
-            return evaluator.isUpperOverflowFeasible(queryRanges, *indexExpr, arraySize, &accessInst) ==
-                   SmtFeasibility::Infeasible;
+            return evaluator.isUpperOverflowFeasible(queryRanges, *indexExpr, arraySize,
+                                                     &accessInst) == SmtFeasibility::Infeasible;
         }
 
-        static bool isLowerViolationInfeasibleBySmt(
-            const StackBufferConstraintEvaluator& evaluator,
-            const IntRange& localRange, const llvm::Value* indexExpr,
-            const llvm::Instruction& accessInst)
+        static bool isLowerViolationInfeasibleBySmt(const StackBufferConstraintEvaluator& evaluator,
+                                                    const IntRange& localRange,
+                                                    const llvm::Value* indexExpr,
+                                                    const llvm::Instruction& accessInst)
         {
             if (!indexExpr || !indexExpr->getType()->isIntegerTy())
                 return false;
@@ -1202,8 +1203,8 @@ namespace ctrace::stack::analysis
                         {
                             if (auto* S = dyn_cast<StoreInst>(GU))
                             {
-                                if (isUpperViolationInfeasibleBySmt(
-                                        evaluator, R, baseIdxVal, arraySize, *S))
+                                if (isUpperViolationInfeasibleBySmt(evaluator, R, baseIdxVal,
+                                                                    arraySize, *S))
                                 {
                                     continue;
                                 }
@@ -1223,8 +1224,8 @@ namespace ctrace::stack::analysis
                             }
                             else if (auto* L = dyn_cast<LoadInst>(GU))
                             {
-                                if (isUpperViolationInfeasibleBySmt(
-                                        evaluator, R, baseIdxVal, arraySize, *L))
+                                if (isUpperViolationInfeasibleBySmt(evaluator, R, baseIdxVal,
+                                                                    arraySize, *L))
                                 {
                                     continue;
                                 }
@@ -1252,8 +1253,7 @@ namespace ctrace::stack::analysis
                         {
                             if (auto* S = dyn_cast<StoreInst>(GU))
                             {
-                                if (isLowerViolationInfeasibleBySmt(
-                                        evaluator, R, baseIdxVal, *S))
+                                if (isLowerViolationInfeasibleBySmt(evaluator, R, baseIdxVal, *S))
                                 {
                                     continue;
                                 }
@@ -1274,8 +1274,7 @@ namespace ctrace::stack::analysis
                             }
                             else if (auto* L = dyn_cast<LoadInst>(GU))
                             {
-                                if (isLowerViolationInfeasibleBySmt(
-                                        evaluator, R, baseIdxVal, *L))
+                                if (isLowerViolationInfeasibleBySmt(evaluator, R, baseIdxVal, *L))
                                 {
                                     continue;
                                 }

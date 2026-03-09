@@ -26,7 +26,8 @@ unsigned long long fp_uninitialized_info_temp_map(const std::vector<int>& values
 
     unsigned long long sum = 0;
     for (const auto& [key, info] : localById)
-        sum += info.bytes + (info.unknown ? 1ull : 0ull) + static_cast<unsigned long long>(key >= 0);
+        sum +=
+            info.bytes + (info.unknown ? 1ull : 0ull) + static_cast<unsigned long long>(key >= 0);
     return sum;
 }
 

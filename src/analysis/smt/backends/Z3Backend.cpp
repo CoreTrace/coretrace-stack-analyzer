@@ -19,9 +19,7 @@ namespace ctrace::stack::analysis::smt
             std::uint32_t reserved = 0;
 
             SymbolEntry(std::string symbolName, std::uint32_t width, z3::expr symbolExpr)
-                : name(std::move(symbolName))
-                , expr(std::move(symbolExpr))
-                , bitWidth(width)
+                : name(std::move(symbolName)), expr(std::move(symbolExpr)), bitWidth(width)
             {
             }
         };
@@ -37,8 +35,7 @@ namespace ctrace::stack::analysis::smt
             return ctx.bv_val(std::to_string(raw).c_str(), normalizeBitWidth(bitWidth));
         }
 
-        static std::unordered_map<SymbolId, std::uint32_t>
-        collectBitWidths(const ConstraintIR& ir)
+        static std::unordered_map<SymbolId, std::uint32_t> collectBitWidths(const ConstraintIR& ir)
         {
             std::unordered_map<SymbolId, std::uint32_t> widths;
             for (const ExprNode& node : ir.nodes)
@@ -50,8 +47,7 @@ namespace ctrace::stack::analysis::smt
             return widths;
         }
 
-        static std::unordered_map<SymbolId, std::string>
-        collectNames(const ConstraintIR& ir)
+        static std::unordered_map<SymbolId, std::string> collectNames(const ConstraintIR& ir)
         {
             std::unordered_map<SymbolId, std::string> names;
             for (const SymbolInfo& symbol : ir.symbols)
@@ -67,7 +63,8 @@ namespace ctrace::stack::analysis::smt
         static std::optional<z3::expr>
         getOrCreateSymbol(z3::context& ctx, SymbolId id, std::uint32_t bitWidth,
                           std::unordered_map<SymbolId, SymbolEntry>& symbols,
-                          const std::unordered_map<SymbolId, std::string>& names, std::string& error)
+                          const std::unordered_map<SymbolId, std::string>& names,
+                          std::string& error)
         {
             if (id == 0)
             {
@@ -87,7 +84,8 @@ namespace ctrace::stack::analysis::smt
             }
 
             auto nameIt = names.find(id);
-            std::string symbolName = (nameIt != names.end()) ? nameIt->second : ("sym_" + std::to_string(id));
+            std::string symbolName =
+                (nameIt != names.end()) ? nameIt->second : ("sym_" + std::to_string(id));
 
             const std::uint32_t width = normalizeBitWidth(bitWidth);
             z3::expr symbolExpr = ctx.bv_const(symbolName.c_str(), width);
@@ -117,7 +115,7 @@ namespace ctrace::stack::analysis::smt
             auto memoize = [&](z3::expr value) -> std::optional<z3::expr>
             {
                 auto [it, inserted] = cache.emplace(id, std::move(value));
-                (void) inserted;
+                (void)inserted;
                 return it->second;
             };
 
@@ -361,10 +359,10 @@ namespace ctrace::stack::analysis::smt
     {
         if (query.budgetNodes != 0 && query.ir.nodes.size() > query.budgetNodes)
         {
-            return SmtAnswer{
-                .backendName = name(),
-                .reason = std::string("query budget exceeded before solver invocation"),
-                .status = SmtStatus::Timeout};
+            return SmtAnswer{.backendName = name(),
+                             .reason =
+                                 std::string("query budget exceeded before solver invocation"),
+                             .status = SmtStatus::Timeout};
         }
 
         try
@@ -415,10 +413,9 @@ namespace ctrace::stack::analysis::smt
                     buildExpr(assertionId, query.ir, ctx, cache, symbols, names, error);
                 if (!assertion)
                 {
-                    return SmtAnswer{
-                        .backendName = name(),
-                        .reason = std::move(error),
-                        .status = SmtStatus::Unknown};
+                    return SmtAnswer{.backendName = name(),
+                                     .reason = std::move(error),
+                                     .status = SmtStatus::Unknown};
                 }
                 if (!assertion->is_bool())
                 {
@@ -441,15 +438,12 @@ namespace ctrace::stack::analysis::smt
             if (reason == "timeout")
                 return SmtAnswer{
                     .backendName = name(), .reason = reason, .status = SmtStatus::Timeout};
-            return SmtAnswer{
-                .backendName = name(), .reason = reason, .status = SmtStatus::Unknown};
+            return SmtAnswer{.backendName = name(), .reason = reason, .status = SmtStatus::Unknown};
         }
         catch (const z3::exception& ex)
         {
             return SmtAnswer{
-                .backendName = name(),
-                .reason = std::string(ex.msg()),
-                .status = SmtStatus::Error};
+                .backendName = name(), .reason = std::string(ex.msg()), .status = SmtStatus::Error};
         }
     }
 } // namespace ctrace::stack::analysis::smt

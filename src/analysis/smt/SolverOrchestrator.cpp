@@ -31,8 +31,9 @@ namespace ctrace::stack::analysis::smt
                 {
                     if (c.hasLower && c.hasUpper && c.lower > c.upper)
                     {
-                        return SmtAnswer{
-                            .backendName = name(), .reason = std::nullopt, .status = SmtStatus::Unsat};
+                        return SmtAnswer{.backendName = name(),
+                                         .reason = std::nullopt,
+                                         .status = SmtStatus::Unsat};
                     }
                 }
                 return SmtAnswer{
@@ -57,8 +58,8 @@ namespace ctrace::stack::analysis::smt
             {
                 return SmtAnswer{
                     .backendName = backendName_,
-                    .reason =
-                        std::string("backend unavailable in this build (optional dependency not linked)"),
+                    .reason = std::string(
+                        "backend unavailable in this build (optional dependency not linked)"),
                     .status = SmtStatus::Unknown};
             }
 
@@ -90,9 +91,9 @@ namespace ctrace::stack::analysis::smt
         {
             std::shared_ptr<ISmtBackend> backend = createBackend(name);
             const std::string backendName = backend->name();
-            const bool exists = std::any_of(out.begin(), out.end(),
-                                            [&](const std::shared_ptr<ISmtBackend>& b)
-                                            { return b->name() == backendName; });
+            const bool exists =
+                std::any_of(out.begin(), out.end(), [&](const std::shared_ptr<ISmtBackend>& b)
+                            { return b->name() == backendName; });
             if (!exists)
                 out.push_back(std::move(backend));
         }
@@ -152,8 +153,7 @@ namespace ctrace::stack::analysis::smt
             }
         };
 
-        static SmtStatus aggregateStatuses(const std::vector<SmtAnswer>& answers,
-                                           SolverMode mode)
+        static SmtStatus aggregateStatuses(const std::vector<SmtAnswer>& answers, SolverMode mode)
         {
             if (answers.empty())
                 return SmtStatus::Error;
@@ -243,11 +243,10 @@ namespace ctrace::stack::analysis::smt
         std::vector<std::shared_ptr<ISmtBackend>> backends = resolveBackends(config_);
         if (backends.empty())
         {
-            return SmtDecision{
-                .answers = {SmtAnswer{.backendName = "orchestrator",
-                                      .reason = std::string("no backend available"),
-                                      .status = SmtStatus::Error}},
-                .status = SmtStatus::Error};
+            return SmtDecision{.answers = {SmtAnswer{.backendName = "orchestrator",
+                                                     .reason = std::string("no backend available"),
+                                                     .status = SmtStatus::Error}},
+                               .status = SmtStatus::Error};
         }
 
         SmtQuery runtimeQuery = query;
@@ -275,7 +274,6 @@ namespace ctrace::stack::analysis::smt
 
         std::vector<SmtAnswer> answers = strategy->run(runtimeQuery, backends);
         const SmtStatus status = aggregateStatuses(answers, config_.mode);
-        return SmtDecision{
-            .answers = std::move(answers), .status = status};
+        return SmtDecision{.answers = std::move(answers), .status = status};
     }
 } // namespace ctrace::stack::analysis::smt

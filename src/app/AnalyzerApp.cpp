@@ -135,9 +135,8 @@ using AppStatus = AppResult<void>;
 
 #if defined(__cpp_lib_hardware_interference_size)
 static constexpr std::size_t kDestructiveCacheLineBytes =
-    std::hardware_destructive_interference_size == 0
-        ? 64
-        : std::hardware_destructive_interference_size;
+    std::hardware_destructive_interference_size == 0 ? 64
+                                                     : std::hardware_destructive_interference_size;
 #else
 static constexpr std::size_t kDestructiveCacheLineBytes = 64;
 #endif
@@ -159,10 +158,9 @@ static void runParallelWork(std::size_t workItemCount, unsigned maxJobs, WorkFn&
     struct alignas(kDestructiveCacheLineBytes) WorkerState
     {
         std::uint64_t processedCount = 0;
-        std::array<std::byte,
-                   (kDestructiveCacheLineBytes > sizeof(std::uint64_t))
-                       ? (kDestructiveCacheLineBytes - sizeof(std::uint64_t))
-                       : 0>
+        std::array<std::byte, (kDestructiveCacheLineBytes > sizeof(std::uint64_t))
+                                  ? (kDestructiveCacheLineBytes - sizeof(std::uint64_t))
+                                  : 0>
             padding{};
     };
     static_assert(alignof(WorkerState) >= kDestructiveCacheLineBytes,
@@ -948,42 +946,43 @@ static AppStatus analyzeWithoutSharedModuleLoading(const std::vector<std::string
     };
 
     std::vector<ParallelAnalysisSlot> slots(inputFilenames.size());
-    runParallelWork(
-        inputFilenames.size(), parallelJobs,
-        [&](std::size_t index)
-        {
-            const std::string& inputFilename = inputFilenames[index];
-            llvm::LLVMContext localContext;
-            llvm::SMDiagnostic localErr;
-            analysis::ModuleLoadResult load =
-                analysis::loadModuleForAnalysis(inputFilename, cfg, localContext, localErr);
-            if (!load.module)
-            {
-                std::string err;
-                if (!load.error.empty())
-                    err += load.error;
-                if (localErr.getLineNo() != 0 || !localErr.getFilename().empty())
-                {
-                    std::string diagText;
-                    llvm::raw_string_ostream os(diagText);
-                    localErr.print("stack_usage_analyzer", os);
-                    os.flush();
-                    err += diagText;
-                }
-                slots[index].loadError = std::move(err);
-                return;
-            }
+    runParallelWork(inputFilenames.size(), parallelJobs,
+                    [&](std::size_t index)
+                    {
+                        const std::string& inputFilename = inputFilenames[index];
+                        llvm::LLVMContext localContext;
+                        llvm::SMDiagnostic localErr;
+                        analysis::ModuleLoadResult load = analysis::loadModuleForAnalysis(
+                            inputFilename, cfg, localContext, localErr);
+                        if (!load.module)
+                        {
+                            std::string err;
+                            if (!load.error.empty())
+                                err += load.error;
+                            if (localErr.getLineNo() != 0 || !localErr.getFilename().empty())
+                            {
+                                std::string diagText;
+                                llvm::raw_string_ostream os(diagText);
+                                localErr.print("stack_usage_analyzer", os);
+                                os.flush();
+                                err += diagText;
+                            }
+                            slots[index].loadError = std::move(err);
+                            return;
+                        }
 
-            AnalysisResult result = analyzeModule(*load.module, cfg);
-            if (!load.frontendDiagnostics.empty())
-            {
-                result.diagnostics.insert(result.diagnostics.end(), load.frontendDiagnostics.begin(),
-                                          load.frontendDiagnostics.end());
-            }
-            stampResultFilePaths(result, inputFilename);
-            slots[index].noFunctionMsg = noFunctionMessage(result, inputFilename, hasFilter);
-            slots[index].result = std::make_unique<AnalysisResult>(std::move(result));
-        });
+                        AnalysisResult result = analyzeModule(*load.module, cfg);
+                        if (!load.frontendDiagnostics.empty())
+                        {
+                            result.diagnostics.insert(result.diagnostics.end(),
+                                                      load.frontendDiagnostics.begin(),
+                                                      load.frontendDiagnostics.end());
+                        }
+                        stampResultFilePaths(result, inputFilename);
+                        slots[index].noFunctionMsg =
+                            noFunctionMessage(result, inputFilename, hasFilter);
+                        slots[index].result = std::make_unique<AnalysisResult>(std::move(result));
+                    });
 
     for (std::size_t index = 0; index < inputFilenames.size(); ++index)
     {
@@ -1533,14 +1532,13 @@ buildCrossTUSummaryIndex(const std::vector<LoadedInputModule>& loadedModules,
                 std::vector<ctrace::stack::analysis::ResourceSummaryIndex> computed(
                     loadedModules.size());
                 std::vector<char> computedReady(loadedModules.size(), 0);
-                runParallelWork(
-                    missingIndices.size(), maxJobs,
-                    [&](std::size_t slot)
-                    {
-                        const std::size_t moduleIndex = missingIndices[slot];
-                        computed[moduleIndex] = buildModuleSummary(moduleIndex);
-                        computedReady[moduleIndex] = 1;
-                    });
+                runParallelWork(missingIndices.size(), maxJobs,
+                                [&](std::size_t slot)
+                                {
+                                    const std::size_t moduleIndex = missingIndices[slot];
+                                    computed[moduleIndex] = buildModuleSummary(moduleIndex);
+                                    computedReady[moduleIndex] = 1;
+                                });
 
                 for (std::size_t moduleIndex : missingIndices)
                 {
@@ -1625,15 +1623,13 @@ buildCrossTUGlobalReadBeforeWriteSummaryIndex(const std::vector<LoadedInputModul
     const auto buildStart = Clock::now();
     if (cfg.timing)
     {
-        coretrace::log(
-            coretrace::Level::Info,
-            "Building cross-TU global read-before-write summaries for {} module(s)...\n",
-            loadedModules.size());
+        coretrace::log(coretrace::Level::Info,
+                       "Building cross-TU global read-before-write summaries for {} module(s)...\n",
+                       loadedModules.size());
     }
 
     const unsigned maxJobs = resolveConfiguredJobs(cfg);
-    std::vector<analysis::GlobalReadBeforeWriteSummaryIndex> moduleSummaries(
-        loadedModules.size());
+    std::vector<analysis::GlobalReadBeforeWriteSummaryIndex> moduleSummaries(loadedModules.size());
 
     auto buildModuleSummary =
         [&](std::size_t moduleIndex) -> analysis::GlobalReadBeforeWriteSummaryIndex
@@ -1652,10 +1648,8 @@ buildCrossTUGlobalReadBeforeWriteSummaryIndex(const std::vector<LoadedInputModul
     }
     else
     {
-        runParallelWork(
-            loadedModules.size(), maxJobs,
-            [&](std::size_t moduleIndex)
-            { moduleSummaries[moduleIndex] = buildModuleSummary(moduleIndex); });
+        runParallelWork(loadedModules.size(), maxJobs, [&](std::size_t moduleIndex)
+                        { moduleSummaries[moduleIndex] = buildModuleSummary(moduleIndex); });
     }
 
     analysis::GlobalReadBeforeWriteSummaryIndex globalIndex;
@@ -1733,10 +1727,8 @@ buildCrossTUUninitializedSummaryIndex(const std::vector<LoadedInputModule>& load
         }
         else
         {
-            runParallelWork(
-                loadedModules.size(), maxJobs,
-                [&](std::size_t moduleIndex)
-                { moduleSummaries[moduleIndex] = buildModuleSummary(moduleIndex); });
+            runParallelWork(loadedModules.size(), maxJobs, [&](std::size_t moduleIndex)
+                            { moduleSummaries[moduleIndex] = buildModuleSummary(moduleIndex); });
         }
 
         for (const auto& moduleSummary : moduleSummaries)
@@ -1914,11 +1906,10 @@ class SharedModuleLoadingExecutionStrategy final : public AnalysisExecutionStrat
     AppStatus execute(RunPlan& plan, llvm::LLVMContext&,
                       std::vector<AnalysisEntry>& results) const override
     {
-        return analyzeWithSharedModuleLoading(plan.inputFilenames, plan.cfg, plan.hasFilter,
-                                              plan.needsCrossTUResourceSummaries,
-                                              plan.needsCrossTUUninitializedSummaries,
-                                              plan.needsCrossTUGlobalReadBeforeWriteSummaries,
-                                              results);
+        return analyzeWithSharedModuleLoading(
+            plan.inputFilenames, plan.cfg, plan.hasFilter, plan.needsCrossTUResourceSummaries,
+            plan.needsCrossTUUninitializedSummaries,
+            plan.needsCrossTUGlobalReadBeforeWriteSummaries, results);
     }
 };
 

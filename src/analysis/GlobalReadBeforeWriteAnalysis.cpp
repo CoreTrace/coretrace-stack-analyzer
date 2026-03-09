@@ -162,9 +162,9 @@ namespace ctrace::stack::analysis
             const llvm::GlobalVariable* global = nullptr;
         };
 
-        void rememberAnyKnownWrite(const TrackedGlobalLookup& tracked,
-                                   llvm::DenseMap<const llvm::GlobalVariable*, bool>&
-                                       hasAnyKnownWriteByGlobal)
+        void rememberAnyKnownWrite(
+            const TrackedGlobalLookup& tracked,
+            llvm::DenseMap<const llvm::GlobalVariable*, bool>& hasAnyKnownWriteByGlobal)
         {
             if (!tracked.global)
                 return;
@@ -190,11 +190,11 @@ namespace ctrace::stack::analysis
             rememberAnyKnownWrite(tracked, hasAnyKnownWriteByGlobal);
         }
 
-        void recordGlobalRead(const llvm::Value* pointerOperand, const llvm::Instruction& inst,
-                              const GlobalReadBeforeWriteSummaryIndex* externalSummaries,
-                              std::vector<ReadEvent>& reads,
-                              llvm::DenseMap<const llvm::GlobalVariable*, bool>&
-                                  hasAnyKnownWriteByGlobal)
+        void recordGlobalRead(
+            const llvm::Value* pointerOperand, const llvm::Instruction& inst,
+            const GlobalReadBeforeWriteSummaryIndex* externalSummaries,
+            std::vector<ReadEvent>& reads,
+            llvm::DenseMap<const llvm::GlobalVariable*, bool>& hasAnyKnownWriteByGlobal)
         {
             const TrackedGlobalLookup tracked =
                 resolveTrackedGlobalBuffer(pointerOperand, externalSummaries);
@@ -205,8 +205,8 @@ namespace ctrace::stack::analysis
             rememberAnyKnownWrite(tracked, hasAnyKnownWriteByGlobal);
         }
 
-        void collectGlobalWriteSummaryForPointer(
-            const llvm::Value* pointerOperand, GlobalReadBeforeWriteSummaryIndex& out)
+        void collectGlobalWriteSummaryForPointer(const llvm::Value* pointerOperand,
+                                                 GlobalReadBeforeWriteSummaryIndex& out)
         {
             const llvm::GlobalVariable* global = resolveUnderlyingGlobal(pointerOperand);
             if (!global || !global->hasName() || global->getName().empty())
@@ -219,8 +219,7 @@ namespace ctrace::stack::analysis
         }
     } // namespace
 
-    GlobalReadBeforeWriteSummaryIndex
-    buildGlobalReadBeforeWriteSummaryIndex(
+    GlobalReadBeforeWriteSummaryIndex buildGlobalReadBeforeWriteSummaryIndex(
         llvm::Module& mod, const std::function<bool(const llvm::Function&)>& shouldAnalyze)
     {
         GlobalReadBeforeWriteSummaryIndex out;
@@ -310,9 +309,10 @@ namespace ctrace::stack::analysis
         return changed;
     }
 
-    std::vector<GlobalReadBeforeWriteIssue> analyzeGlobalReadBeforeWrites(
-        llvm::Module& mod, const std::function<bool(const llvm::Function&)>& shouldAnalyze,
-        const GlobalReadBeforeWriteSummaryIndex* externalSummaries)
+    std::vector<GlobalReadBeforeWriteIssue>
+    analyzeGlobalReadBeforeWrites(llvm::Module& mod,
+                                  const std::function<bool(const llvm::Function&)>& shouldAnalyze,
+                                  const GlobalReadBeforeWriteSummaryIndex* externalSummaries)
     {
         std::vector<GlobalReadBeforeWriteIssue> issues;
 

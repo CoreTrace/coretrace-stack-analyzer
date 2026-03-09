@@ -14,8 +14,7 @@ int fp_duplicate_if_unreachable_elseif_guard(bool isCtorThis, bool isAssignmentL
 
     if (hasReadBeforeWrite)
     {
-        const bool suppressForAssignmentPadding =
-            isAssignmentLike && state == InitState::Partial;
+        const bool suppressForAssignmentPadding = isAssignmentLike && state == InitState::Partial;
         const bool suppressCtorThisReadBeforeWrite = isCtorThis && state == InitState::Uninit;
         if (suppressForAssignmentPadding || suppressCtorThisReadBeforeWrite)
             return 1;

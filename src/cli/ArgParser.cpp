@@ -577,9 +577,8 @@ namespace ctrace::stack::cli
             Cli
         };
 
-        using SmtOptionApplyFn =
-            bool (*)(AnalysisConfig& cfg, const std::string& value, SmtOptionSource source,
-                     std::string& error);
+        using SmtOptionApplyFn = bool (*)(AnalysisConfig& cfg, const std::string& value,
+                                          SmtOptionSource source, std::string& error);
 
         struct SmtOptionSpec
         {
@@ -841,9 +840,9 @@ namespace ctrace::stack::cli
             return true;
         }
 
-        bool applyConfigEntry(const std::string& keyRaw, const std::string& valueRaw, ParsedArguments& parsed,
-                              AnalysisConfig& cfg, const std::filesystem::path& configDir,
-                              std::string& error)
+        bool applyConfigEntry(const std::string& keyRaw, const std::string& valueRaw,
+                              ParsedArguments& parsed, AnalysisConfig& cfg,
+                              const std::filesystem::path& configDir, std::string& error)
         {
             std::string key = toLowerAsciiCopy(trimCopy(keyRaw));
             for (char& c : key)

@@ -149,7 +149,7 @@ namespace ctrace::stack::analyzer
                              { return state.prepared->ctx.shouldAnalyze(F); };
                              const std::vector<analysis::IntegerOverflowIssue> issues =
                                  analysis::analyzeIntegerOverflows(state.mod, shouldAnalyze,
-                                                                    state.config);
+                                                                   state.config);
                              appendIntegerOverflowDiagnostics(state.result, issues);
                          }});
 

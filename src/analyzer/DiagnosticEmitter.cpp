@@ -811,7 +811,8 @@ namespace ctrace::stack::analyzer
         for (const auto& issue : issues)
         {
             const ResolvedLocation readLoc = resolveFromInstruction(issue.readInst, true);
-            const ResolvedLocation firstWriteLoc = resolveFromInstruction(issue.firstWriteInst, true);
+            const ResolvedLocation firstWriteLoc =
+                resolveFromInstruction(issue.firstWriteInst, true);
 
             std::ostringstream body;
             body << "\t[ !!Warn ] potential read of global buffer '" << issue.globalName

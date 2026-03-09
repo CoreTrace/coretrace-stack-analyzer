@@ -12,7 +12,7 @@ namespace ctrace::stack::analysis::smt
       public:
         virtual ~ISolverStrategy() = default;
         virtual std::vector<SmtAnswer>
-        run(const SmtQuery& query, const std::vector<std::shared_ptr<ISmtBackend>>& backends) const = 0;
+        run(const SmtQuery& query,
+            const std::vector<std::shared_ptr<ISmtBackend>>& backends) const = 0;
     };
 } // namespace ctrace::stack::analysis::smt
-

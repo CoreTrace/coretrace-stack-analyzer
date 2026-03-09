@@ -1076,8 +1076,7 @@ namespace ctrace::stack::analysis
 
             llvm::DenseSet<const llvm::Value*> visited;
             bool foundStoreToSameSlot = false;
-            if (!isBitfieldMaskingRmwFromLoadImpl(LI, basePtr, LI, visited,
-                                                  foundStoreToSameSlot))
+            if (!isBitfieldMaskingRmwFromLoadImpl(LI, basePtr, LI, visited, foundStoreToSameSlot))
             {
                 return false;
             }
@@ -1124,12 +1123,13 @@ namespace ctrace::stack::analysis
                 if (!arg.getType()->isPointerTy())
                     continue;
                 unsigned idx = static_cast<unsigned>(tracked.objects.size());
-                tracked.objects.push_back(TrackedMemoryObject{.alloca = nullptr,
-                                                              .param = &arg,
-                                                              .sizeBytes = 0,
-                                                              .nonPaddingRanges = {},
-                                                              .kind = TrackedObjectKind::PointerParam,
-                                                              .hasNonPaddingLayout = false});
+                tracked.objects.push_back(
+                    TrackedMemoryObject{.alloca = nullptr,
+                                        .param = &arg,
+                                        .sizeBytes = 0,
+                                        .nonPaddingRanges = {},
+                                        .kind = TrackedObjectKind::PointerParam,
+                                        .hasNonPaddingLayout = false});
                 tracked.paramIndex[&arg] = idx;
             }
         }
@@ -3215,11 +3215,11 @@ namespace ctrace::stack::analysis
                         if (itName != canonicalCalleeNames->end())
                             canonicalName = &itName->second;
                     }
-                    auto itExternal = canonicalName
-                                          ? externalSummariesByName->find(*canonicalName)
-                                          : externalSummariesByName->find(
-                                                ctrace_tools::canonicalizeMangledName(
-                                                    callee->getName().str()));
+                    auto itExternal =
+                        canonicalName
+                            ? externalSummariesByName->find(*canonicalName)
+                            : externalSummariesByName->find(
+                                  ctrace_tools::canonicalizeMangledName(callee->getName().str()));
                     if (itExternal != externalSummariesByName->end())
                         calleeSummary = &itExternal->second;
                 }
@@ -3452,8 +3452,7 @@ namespace ctrace::stack::analysis
 
                     FunctionSummary next = makeEmptySummary(F);
                     analyzeFunction(F, mod.getDataLayout(), summaries, externalSummariesByName,
-                                    canonicalCalleeNames,
-                                    &next, nullptr);
+                                    canonicalCalleeNames, &next, nullptr);
                     FunctionSummary& cur = summaries[&F];
                     if (!(cur == next))
                     {
@@ -3682,9 +3681,9 @@ namespace ctrace::stack::analysis
             return true;
         }
 
-        static bool pointerSlotWritesEqual(
-            const std::vector<UninitializedSummaryPointerSlotWrite>& lhs,
-            const std::vector<UninitializedSummaryPointerSlotWrite>& rhs)
+        static bool
+        pointerSlotWritesEqual(const std::vector<UninitializedSummaryPointerSlotWrite>& lhs,
+                               const std::vector<UninitializedSummaryPointerSlotWrite>& rhs)
         {
             if (lhs.size() != rhs.size())
                 return false;
@@ -3734,12 +3733,13 @@ namespace ctrace::stack::analysis
                 changed |= addPublicRange(dst.writeRanges, wr.begin, wr.end);
             for (const UninitializedSummaryPointerSlotWrite& slotWrite : src.pointerSlotWrites)
             {
-                auto it = std::find_if(dst.pointerSlotWrites.begin(), dst.pointerSlotWrites.end(),
-                                       [&](const UninitializedSummaryPointerSlotWrite& existing)
-                                       {
-                                           return existing.slotOffset == slotWrite.slotOffset &&
-                                                  existing.writeSizeBytes == slotWrite.writeSizeBytes;
-                                       });
+                auto it =
+                    std::find_if(dst.pointerSlotWrites.begin(), dst.pointerSlotWrites.end(),
+                                 [&](const UninitializedSummaryPointerSlotWrite& existing)
+                                 {
+                                     return existing.slotOffset == slotWrite.slotOffset &&
+                                            existing.writeSizeBytes == slotWrite.writeSizeBytes;
+                                 });
                 if (it == dst.pointerSlotWrites.end())
                 {
                     dst.pointerSlotWrites.push_back(slotWrite);
@@ -3825,9 +3825,8 @@ namespace ctrace::stack::analysis
         return prepared;
     }
 
-    PreparedUninitializedModuleContext
-    prepareUninitializedModuleContext(llvm::Module& mod,
-                                      const std::function<bool(const llvm::Function&)>& shouldAnalyze)
+    PreparedUninitializedModuleContext prepareUninitializedModuleContext(
+        llvm::Module& mod, const std::function<bool(const llvm::Function&)>& shouldAnalyze)
     {
         PreparedUninitializedModuleContext prepared;
         auto opaque = std::make_shared<PreparedUninitializedModuleContextOpaque>();
@@ -3849,21 +3848,22 @@ namespace ctrace::stack::analysis
         return buildUninitializedSummaryIndex(mod, &preparedModule, &prepared);
     }
 
-    UninitializedSummaryIndex buildUninitializedSummaryIndex(
-        llvm::Module& mod, const std::function<bool(const llvm::Function&)>& shouldAnalyze,
-        const PreparedUninitializedExternalSummaries* preparedExternal)
+    UninitializedSummaryIndex
+    buildUninitializedSummaryIndex(llvm::Module& mod,
+                                   const std::function<bool(const llvm::Function&)>& shouldAnalyze,
+                                   const PreparedUninitializedExternalSummaries* preparedExternal)
     {
         const PreparedUninitializedModuleContext preparedModule =
             prepareUninitializedModuleContext(mod, shouldAnalyze);
         return buildUninitializedSummaryIndex(mod, &preparedModule, preparedExternal);
     }
 
-    UninitializedSummaryIndex buildUninitializedSummaryIndex(
-        llvm::Module& mod, const PreparedUninitializedModuleContext* preparedModule,
-        const PreparedUninitializedExternalSummaries* preparedExternal)
+    UninitializedSummaryIndex
+    buildUninitializedSummaryIndex(llvm::Module& mod,
+                                   const PreparedUninitializedModuleContext* preparedModule,
+                                   const PreparedUninitializedExternalSummaries* preparedExternal)
     {
-        assert(preparedModule && preparedModule->opaque &&
-               "prepared module context is required");
+        assert(preparedModule && preparedModule->opaque && "prepared module context is required");
         if (!preparedModule || !preparedModule->opaque)
         {
             return {};

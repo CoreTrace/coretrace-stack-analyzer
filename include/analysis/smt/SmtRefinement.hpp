@@ -40,18 +40,17 @@ namespace ctrace::stack::analysis::smt
     {
       public:
         SmtConstraintEvaluator(const ctrace::stack::AnalysisConfig& config, std::string ruleId)
-            : ruleId_(std::move(ruleId))
-            , timeoutMs_(config.smtTimeoutMs)
-            , budgetNodes_(config.smtBudgetNodes)
+            : ruleId_(std::move(ruleId)), timeoutMs_(config.smtTimeoutMs),
+              budgetNodes_(config.smtBudgetNodes)
         {
             if (smtRuleEnabled(config, ruleId_))
             {
-                orchestrator_.emplace(SolverOrchestratorConfig{
-                    .primaryBackend = config.smtBackend,
-                    .secondaryBackend = config.smtSecondaryBackend,
-                    .mode = config.smtMode,
-                    .budgetNodes = config.smtBudgetNodes,
-                    .timeoutMs = config.smtTimeoutMs});
+                orchestrator_.emplace(
+                    SolverOrchestratorConfig{.primaryBackend = config.smtBackend,
+                                             .secondaryBackend = config.smtSecondaryBackend,
+                                             .mode = config.smtMode,
+                                             .budgetNodes = config.smtBudgetNodes,
+                                             .timeoutMs = config.smtTimeoutMs});
             }
         }
 

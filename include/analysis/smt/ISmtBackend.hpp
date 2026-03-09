@@ -14,4 +14,3 @@ namespace ctrace::stack::analysis::smt
         virtual SmtAnswer solve(const SmtQuery& query) const = 0;
     };
 } // namespace ctrace::stack::analysis::smt
-

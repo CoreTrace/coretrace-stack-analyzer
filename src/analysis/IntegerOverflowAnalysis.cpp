@@ -75,8 +75,8 @@ namespace ctrace::stack::analysis
                                         const llvm::Instruction* contextInst) const
             {
                 return smt::SmtConstraintEvaluator::evaluateQuery(
-                    smt::encodeSignedComparisonFeasibility(
-                    ranges, lhs, rhsConstant, true, contextInst));
+                    smt::encodeSignedComparisonFeasibility(ranges, lhs, rhsConstant, true,
+                                                           contextInst));
             }
 
             SmtFeasibility
@@ -85,8 +85,8 @@ namespace ctrace::stack::analysis
                                       const llvm::Instruction* contextInst) const
             {
                 return smt::SmtConstraintEvaluator::evaluateQuery(
-                    smt::encodeSignedComparisonFeasibility(
-                    ranges, lhs, rhsConstant, false, contextInst));
+                    smt::encodeSignedComparisonFeasibility(ranges, lhs, rhsConstant, false,
+                                                           contextInst));
             }
         };
 
@@ -717,17 +717,18 @@ namespace ctrace::stack::analysis
             queryRanges[queryValue] = *knownRange;
         }
 
-        static std::map<const llvm::Value*, IntRange> buildValueQueryRanges(
-            const llvm::Value& queryValue, const std::map<const llvm::Value*, IntRange>& ranges)
+        static std::map<const llvm::Value*, IntRange>
+        buildValueQueryRanges(const llvm::Value& queryValue,
+                              const std::map<const llvm::Value*, IntRange>& ranges)
         {
             std::map<const llvm::Value*, IntRange> queryRanges;
             addLocalRangeForSmt(queryRanges, &queryValue, ranges);
             return queryRanges;
         }
 
-        static std::map<const llvm::Value*, IntRange> buildArithmeticQueryRanges(
-            const llvm::BinaryOperator& operation,
-            const std::map<const llvm::Value*, IntRange>& ranges)
+        static std::map<const llvm::Value*, IntRange>
+        buildArithmeticQueryRanges(const llvm::BinaryOperator& operation,
+                                   const std::map<const llvm::Value*, IntRange>& ranges)
         {
             std::map<const llvm::Value*, IntRange> queryRanges;
             addLocalRangeForSmt(queryRanges, operation.getOperand(0), ranges);
@@ -736,10 +737,10 @@ namespace ctrace::stack::analysis
             return queryRanges;
         }
 
-        static bool shouldSuppressRiskWithSmt(
-            const IntegerOverflowConstraintEvaluator& evaluator,
-            const std::map<const llvm::Value*, IntRange>& ranges, const RiskSummary& risk,
-            const llvm::Instruction& contextInst)
+        static bool shouldSuppressRiskWithSmt(const IntegerOverflowConstraintEvaluator& evaluator,
+                                              const std::map<const llvm::Value*, IntRange>& ranges,
+                                              const RiskSummary& risk,
+                                              const llvm::Instruction& contextInst)
         {
             switch (risk.kind)
             {
@@ -779,12 +780,10 @@ namespace ctrace::stack::analysis
                 if (queryRanges.empty())
                     return false;
                 const std::int64_t truncMax = (std::int64_t{1} << risk.truncTargetBitWidth) - 1;
-                const SmtFeasibility negativeFeasible =
-                    evaluator.isSignedLessEqualFeasible(queryRanges, *risk.relatedValue, -1,
-                                                        &contextInst);
-                const SmtFeasibility aboveMaxFeasible =
-                    evaluator.isSignedGreaterThanFeasible(queryRanges, *risk.relatedValue, truncMax,
-                                                          &contextInst);
+                const SmtFeasibility negativeFeasible = evaluator.isSignedLessEqualFeasible(
+                    queryRanges, *risk.relatedValue, -1, &contextInst);
+                const SmtFeasibility aboveMaxFeasible = evaluator.isSignedGreaterThanFeasible(
+                    queryRanges, *risk.relatedValue, truncMax, &contextInst);
                 return negativeFeasible == SmtFeasibility::Infeasible &&
                        aboveMaxFeasible == SmtFeasibility::Infeasible;
             }
@@ -833,7 +832,7 @@ namespace ctrace::stack::analysis
                                 buildArithmeticQueryRanges(*binary, ranges);
                             if (!queryRanges.empty() &&
                                 evaluator.isSignedOverflowFeasible(queryRanges, *binary, &inst) ==
-                                SmtFeasibility::Infeasible)
+                                    SmtFeasibility::Infeasible)
                             {
                                 continue;
                             }
