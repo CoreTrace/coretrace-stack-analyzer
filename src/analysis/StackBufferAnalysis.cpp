@@ -952,7 +952,8 @@ namespace ctrace::stack::analysis
                 const AllocaInst* alloca = nullptr;
                 const GlobalVariable* global = nullptr;
                 std::vector<std::string> aliasPath;
-                bool computed = false;
+                std::uint64_t computed : 1 = false;
+                std::uint64_t reservedFlags : 63 = 0;
             };
             std::unordered_map<const Value*, CachedResolution> resolutionCache;
 
