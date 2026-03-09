@@ -14,13 +14,14 @@ namespace ctrace::stack::analysis::smt
         struct SymbolEntry
         {
             std::string name;
-            std::uint32_t bitWidth = 64;
             z3::expr expr;
+            std::uint32_t bitWidth = 64;
+            std::uint32_t reserved = 0;
 
             SymbolEntry(std::string symbolName, std::uint32_t width, z3::expr symbolExpr)
                 : name(std::move(symbolName))
-                , bitWidth(width)
                 , expr(std::move(symbolExpr))
+                , bitWidth(width)
             {
             }
         };
@@ -361,9 +362,9 @@ namespace ctrace::stack::analysis::smt
         if (query.budgetNodes != 0 && query.ir.nodes.size() > query.budgetNodes)
         {
             return SmtAnswer{
-                .status = SmtStatus::Timeout,
                 .backendName = name(),
-                .reason = std::string("query budget exceeded before solver invocation")};
+                .reason = std::string("query budget exceeded before solver invocation"),
+                .status = SmtStatus::Timeout};
         }
 
         try
@@ -397,7 +398,7 @@ namespace ctrace::stack::analysis::smt
                         getOrCreateSymbol(ctx, interval.symbol, bitWidth, symbols, names, error);
                     if (!symbol)
                         return SmtAnswer{
-                            .status = SmtStatus::Unknown, .backendName = name(), .reason = error};
+                            .backendName = name(), .reason = error, .status = SmtStatus::Unknown};
 
                     if (interval.hasLower)
                         solver.add(z3::sge(*symbol, makeBvConstant(ctx, interval.lower, bitWidth)));
@@ -415,32 +416,40 @@ namespace ctrace::stack::analysis::smt
                 if (!assertion)
                 {
                     return SmtAnswer{
-                        .status = SmtStatus::Unknown, .backendName = name(), .reason = std::move(error)};
+                        .backendName = name(),
+                        .reason = std::move(error),
+                        .status = SmtStatus::Unknown};
                 }
                 if (!assertion->is_bool())
                 {
-                    return SmtAnswer{.status = SmtStatus::Unknown,
-                                     .backendName = name(),
-                                     .reason = std::string("non-boolean assertion")};
+                    return SmtAnswer{.backendName = name(),
+                                     .reason = std::string("non-boolean assertion"),
+                                     .status = SmtStatus::Unknown};
                 }
                 solver.add(*assertion);
             }
 
             const z3::check_result result = solver.check();
             if (result == z3::sat)
-                return SmtAnswer{.status = SmtStatus::Sat, .backendName = name(), .reason = std::nullopt};
+                return SmtAnswer{
+                    .backendName = name(), .reason = std::nullopt, .status = SmtStatus::Sat};
             if (result == z3::unsat)
-                return SmtAnswer{.status = SmtStatus::Unsat, .backendName = name(), .reason = std::nullopt};
+                return SmtAnswer{
+                    .backendName = name(), .reason = std::nullopt, .status = SmtStatus::Unsat};
 
             const std::string reason = solver.reason_unknown();
             if (reason == "timeout")
-                return SmtAnswer{.status = SmtStatus::Timeout, .backendName = name(), .reason = reason};
-            return SmtAnswer{.status = SmtStatus::Unknown, .backendName = name(), .reason = reason};
+                return SmtAnswer{
+                    .backendName = name(), .reason = reason, .status = SmtStatus::Timeout};
+            return SmtAnswer{
+                .backendName = name(), .reason = reason, .status = SmtStatus::Unknown};
         }
         catch (const z3::exception& ex)
         {
             return SmtAnswer{
-                .status = SmtStatus::Error, .backendName = name(), .reason = std::string(ex.msg())};
+                .backendName = name(),
+                .reason = std::string(ex.msg()),
+                .status = SmtStatus::Error};
         }
     }
 } // namespace ctrace::stack::analysis::smt
