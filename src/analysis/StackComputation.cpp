@@ -1,6 +1,7 @@
 #include "analysis/StackComputation.hpp"
 
 #include <algorithm>
+#include <cstdint>
 #include <deque>
 #include <limits>
 #include <optional>
@@ -336,7 +337,7 @@ namespace ctrace::stack::analysis
             }
 
           private:
-            smt::LlvmConstraintEncoder encoder_;
+            [[no_unique_address]] smt::LlvmConstraintEncoder encoder_;
         };
 
         static const llvm::Value* canonicalConstraintValue(const llvm::Value* value)
@@ -601,9 +602,9 @@ namespace ctrace::stack::analysis
             {
                 const BasicBlock* block = nullptr;
                 const BasicBlock* predecessor = nullptr;
-                bool sawRecursiveCall = false;
                 std::map<const Value*, IntRange> ranges;
-                unsigned depth = 0;
+                std::uint64_t depth = 0;
+                std::uint64_t sawRecursiveCall = 0;
             };
 
             constexpr unsigned kMaxStates = 4096;
@@ -611,7 +612,11 @@ namespace ctrace::stack::analysis
             constexpr unsigned kMaxVisitsPerNode = 128;
 
             std::deque<PathState> worklist;
-            worklist.push_back(PathState{&F.getEntryBlock(), nullptr, false, {}, 0});
+            worklist.push_back(PathState{.block = &F.getEntryBlock(),
+                                         .predecessor = nullptr,
+                                         .ranges = {},
+                                         .depth = 0,
+                                         .sawRecursiveCall = 0});
 
             std::map<std::pair<const BasicBlock*, bool>, unsigned> visits;
             unsigned exploredStates = 0;
@@ -727,9 +732,10 @@ namespace ctrace::stack::analysis
             std::unordered_map<const llvm::Function*, int> lowlink;
             std::vector<const llvm::Function*> stack;
             std::unordered_set<const llvm::Function*> onStack;
-            int nextIndex = 0;
             std::set<const llvm::Function*> recursive;
             std::vector<std::vector<const llvm::Function*>> recursiveComponents;
+            int nextIndex = 0;
+            int reserved = 0;
         };
 
         static void strongConnect(const llvm::Function* V, const CallGraph& CG, TarjanState& state)
