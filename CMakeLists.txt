@@ -16,6 +16,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wreorder-init-list")
+
 set(LLVM_LINK_LLVM_DYLIB ON)
 
 find_package(LLVM REQUIRED CONFIG)
@@ -51,7 +53,8 @@ message(STATUS "Using LLVMConfig.cmake in: ${LLVM_DIR}")
 # Options de build
 option(BUILD_CLI "Build stack_usage_analyzer CLI tool" ON)
 option(BUILD_SHARED_LIB "Build shared library variant" ON)
-option(ENABLE_STACK_USAGE "Emit per-function stack usage (.su) files" OFF)
+option(ENABLE_STACK_USAGE "Emit per-function stack usage (.su) files" ON)
+option(ENABLE_WARN_PADDED "Enable -Wpadded warnings" ON)
 option(ENABLE_Z3_BACKEND "Enable optional Z3 SMT backend if Z3 is available" ON)
 
 # ===========================
@@ -114,7 +117,6 @@ if(ENABLE_Z3_BACKEND)
     endif()
 endif()
 
-include_directories(${LLVM_INCLUDE_DIRS})
 add_definitions(${LLVM_DEFINITIONS})
 
 # llvm_map_components_to_libnames(llvm_libs
@@ -137,7 +139,7 @@ if(CTRACE_STACK_HAVE_Z3_BACKEND)
     elseif(DEFINED Z3_LIBRARIES)
         target_link_libraries(stack_usage_analyzer_lib PUBLIC ${Z3_LIBRARIES})
         if(DEFINED Z3_INCLUDE_DIRS)
-            target_include_directories(stack_usage_analyzer_lib PUBLIC ${Z3_INCLUDE_DIRS})
+            target_include_directories(stack_usage_analyzer_lib SYSTEM PUBLIC ${Z3_INCLUDE_DIRS})
         endif()
     endif()
 endif()
@@ -162,7 +164,19 @@ target_include_directories(stack_usage_analyzer_lib
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:include>
+)
+
+target_include_directories(stack_usage_analyzer_lib SYSTEM
+    PUBLIC
         ${LLVM_INCLUDE_DIRS}
+)
+
+# Treat external dependency headers as system includes to reduce warning noise
+# from third-party code when project warning levels are strict.
+target_include_directories(stack_usage_analyzer_lib SYSTEM
+    PUBLIC
+        $<TARGET_PROPERTY:cc::compilerlib_static,INTERFACE_INCLUDE_DIRECTORIES>
+        $<TARGET_PROPERTY:coretrace::logger,INTERFACE_INCLUDE_DIRECTORIES>
 )
 
 # ALIAS FOR USE WITH FETCHCONTENT
@@ -224,6 +238,11 @@ if(BUILD_CLI)
 
     if(ENABLE_STACK_USAGE)
         target_compile_options(stack_usage_analyzer PRIVATE -fstack-usage)
+    endif()
+
+    if(ENABLE_WARN_PADDED AND CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+        target_compile_options(stack_usage_analyzer_lib PRIVATE -Wpadded)
+        target_compile_options(stack_usage_analyzer PRIVATE -Wpadded)
     endif()
 
     if(ENABLE_DEBUG_ASAN)
