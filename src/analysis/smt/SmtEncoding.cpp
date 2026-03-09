@@ -88,9 +88,9 @@ namespace ctrace::stack::analysis::smt
             ExprId makeConstant(std::int64_t value, std::uint32_t bitWidth)
             {
                 return appendNode(ExprNode{.kind = ExprKind::Constant,
-                                           .bitWidth = normalizeBitWidth(bitWidth),
                                            .symbol = 0,
                                            .constant = value,
+                                           .bitWidth = normalizeBitWidth(bitWidth),
                                            .lhs = 0,
                                            .rhs = 0,
                                            .extra = 0});
@@ -105,9 +105,9 @@ namespace ctrace::stack::analysis::smt
                 const SymbolId id = nextSymbolId_++;
                 symbolByValue_.emplace(value, id);
                 symbolExprById_.emplace(id, appendNode(ExprNode{.kind = ExprKind::Symbol,
-                                                                .bitWidth = normalizeBitWidth(bitWidth),
                                                                 .symbol = id,
                                                                 .constant = 0,
+                                                                .bitWidth = normalizeBitWidth(bitWidth),
                                                                 .lhs = 0,
                                                                 .rhs = 0,
                                                                 .extra = 0}));
@@ -120,9 +120,9 @@ namespace ctrace::stack::analysis::smt
             ExprId makeBinary(ExprKind kind, ExprId lhs, ExprId rhs, std::uint32_t bitWidth)
             {
                 return appendNode(ExprNode{.kind = kind,
-                                           .bitWidth = normalizeBitWidth(bitWidth),
                                            .symbol = 0,
                                            .constant = 0,
+                                           .bitWidth = normalizeBitWidth(bitWidth),
                                            .lhs = lhs,
                                            .rhs = rhs,
                                            .extra = 0});
@@ -131,9 +131,9 @@ namespace ctrace::stack::analysis::smt
             ExprId makeUnary(ExprKind kind, ExprId operand, std::uint32_t bitWidth)
             {
                 return appendNode(ExprNode{.kind = kind,
-                                           .bitWidth = normalizeBitWidth(bitWidth),
                                            .symbol = 0,
                                            .constant = 0,
+                                           .bitWidth = normalizeBitWidth(bitWidth),
                                            .lhs = operand,
                                            .rhs = 0,
                                            .extra = 0});
@@ -143,9 +143,9 @@ namespace ctrace::stack::analysis::smt
                                std::uint32_t bitWidth)
             {
                 return appendNode(ExprNode{.kind = kind,
-                                           .bitWidth = normalizeBitWidth(bitWidth),
                                            .symbol = 0,
                                            .constant = 0,
+                                           .bitWidth = normalizeBitWidth(bitWidth),
                                            .lhs = lhs,
                                            .rhs = rhs,
                                            .extra = extra});
@@ -488,10 +488,10 @@ namespace ctrace::stack::analysis::smt
 
                 ir.intervals.push_back(IntervalConstraint{
                     .symbol = symbolId,
-                    .hasLower = range.hasLower,
                     .lower = static_cast<std::int64_t>(range.lower),
-                    .hasUpper = range.hasUpper,
-                    .upper = static_cast<std::int64_t>(range.upper)});
+                    .upper = static_cast<std::int64_t>(range.upper),
+                    .hasLower = range.hasLower,
+                    .hasUpper = range.hasUpper});
 
                 if (range.hasLower)
                 {
