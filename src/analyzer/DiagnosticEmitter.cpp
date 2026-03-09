@@ -818,10 +818,22 @@ namespace ctrace::stack::analyzer
                  << "' before first write in this function\n";
             body << "\t\t ↳ this buffer has static zero initialization; read is defined but may "
                     "indicate stale/default-state use\n";
+            double confidence = 0.60;
             if (firstWriteLoc.hasLocation)
             {
                 body << "\t\t ↳ first write appears later at line " << firstWriteLoc.line
                      << ", column " << firstWriteLoc.column << "\n";
+            }
+            else if (issue.kind == analysis::GlobalReadBeforeWriteKind::WithoutLocalWrite)
+            {
+                body << "\t\t ↳ no write to this buffer is observed in this function; value may "
+                        "come from static initialization or writes in other functions/TUs\n";
+                confidence = issue.hasNonLocalWrite ? 0.50 : 0.55;
+                if (issue.hasNonLocalWrite)
+                {
+                    body << "\t\t ↳ at least one write to this buffer is observed in another "
+                            "analyzed function/TU\n";
+                }
             }
 
             DiagnosticBuilder builder;
@@ -830,7 +842,7 @@ namespace ctrace::stack::analyzer
                 .errCode(DescriptiveErrorCode::GlobalReadBeforeWrite)
                 .ruleId("GlobalReadBeforeWrite")
                 .cwe("CWE-665")
-                .confidence(0.60)
+                .confidence(confidence)
                 .location(readLoc)
                 .message(body.str());
             result.diagnostics.push_back(builder.build());
