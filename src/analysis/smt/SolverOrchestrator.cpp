@@ -31,10 +31,12 @@ namespace ctrace::stack::analysis::smt
                 {
                     if (c.hasLower && c.hasUpper && c.lower > c.upper)
                     {
-                        return SmtAnswer{SmtStatus::Unsat, name(), std::nullopt};
+                        return SmtAnswer{
+                            .backendName = name(), .reason = std::nullopt, .status = SmtStatus::Unsat};
                     }
                 }
-                return SmtAnswer{SmtStatus::Sat, name(), std::nullopt};
+                return SmtAnswer{
+                    .backendName = name(), .reason = std::nullopt, .status = SmtStatus::Sat};
             }
         };
 
@@ -54,9 +56,10 @@ namespace ctrace::stack::analysis::smt
             SmtAnswer solve(const SmtQuery&) const override
             {
                 return SmtAnswer{
-                    SmtStatus::Unknown,
-                    backendName_,
-                    std::string("backend unavailable in this build (optional dependency not linked)")};
+                    .backendName = backendName_,
+                    .reason =
+                        std::string("backend unavailable in this build (optional dependency not linked)"),
+                    .status = SmtStatus::Unknown};
             }
 
           private:
@@ -241,8 +244,10 @@ namespace ctrace::stack::analysis::smt
         if (backends.empty())
         {
             return SmtDecision{
-                SmtStatus::Error,
-                {SmtAnswer{SmtStatus::Error, "orchestrator", std::string("no backend available")}}};
+                .answers = {SmtAnswer{.backendName = "orchestrator",
+                                      .reason = std::string("no backend available"),
+                                      .status = SmtStatus::Error}},
+                .status = SmtStatus::Error};
         }
 
         SmtQuery runtimeQuery = query;
@@ -269,6 +274,8 @@ namespace ctrace::stack::analysis::smt
         }
 
         std::vector<SmtAnswer> answers = strategy->run(runtimeQuery, backends);
-        return SmtDecision{aggregateStatuses(answers, config_.mode), std::move(answers)};
+        const SmtStatus status = aggregateStatuses(answers, config_.mode);
+        return SmtDecision{
+            .answers = std::move(answers), .status = status};
     }
 } // namespace ctrace::stack::analysis::smt
