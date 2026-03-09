@@ -28,15 +28,17 @@ namespace ctrace::stack::analysis
         {
             llvm::StringRef name;
             unsigned sizeArgIndex = 0;
+            unsigned reserved = 0;
         };
 
         struct RiskSummary
         {
             IntegerOverflowIssueKind kind;
-            std::string operation;
             const llvm::Value* relatedValue = nullptr;
             const llvm::BinaryOperator* arithmeticOp = nullptr;
+            std::string operation;
             unsigned truncTargetBitWidth = 0;
+            unsigned reserved = 0;
         };
 
         using SmtFeasibility = smt::SmtFeasibility;
@@ -566,11 +568,11 @@ namespace ctrace::stack::analysis
             {
                 if (isPotentiallyLossyTruncation(*trunc, ranges))
                 {
-                    return RiskSummary{IntegerOverflowIssueKind::TruncationInSizeComputation,
-                                       "trunc",
-                                       trunc->getOperand(0),
-                                       nullptr,
-                                       trunc->getType()->getIntegerBitWidth()};
+                    return RiskSummary{
+                        .kind = IntegerOverflowIssueKind::TruncationInSizeComputation,
+                        .relatedValue = trunc->getOperand(0),
+                        .operation = "trunc",
+                        .truncTargetBitWidth = trunc->getType()->getIntegerBitWidth()};
                 }
                 return classifySizeOperandRecursive(trunc->getOperand(0), ranges, visited,
                                                     depth + 1);
@@ -581,8 +583,9 @@ namespace ctrace::stack::analysis
                 const llvm::Value* source = sext->getOperand(0);
                 if (dependsOnFunctionArgument(source) && !hasKnownNonNegativeRange(source, ranges))
                 {
-                    return RiskSummary{
-                        IntegerOverflowIssueKind::SignedToUnsignedSize, "sext", source};
+                    return RiskSummary{.kind = IntegerOverflowIssueKind::SignedToUnsignedSize,
+                                       .relatedValue = source,
+                                       .operation = "sext"};
                 }
                 return classifySizeOperandRecursive(source, ranges, visited, depth + 1);
             }
@@ -605,11 +608,12 @@ namespace ctrace::stack::analysis
                         llvm::isa<llvm::ConstantInt>(binary->getOperand(1));
                     if (!bothConstants && dependsOnFunctionArgument(binary))
                     {
-                        return RiskSummary{IntegerOverflowIssueKind::ArithmeticInSizeComputation,
-                                           binary->getOpcodeName(),
-                                           binary,
-                                           binary,
-                                           0};
+                        return RiskSummary{
+                            .kind = IntegerOverflowIssueKind::ArithmeticInSizeComputation,
+                            .relatedValue = binary,
+                            .arithmeticOp = binary,
+                            .operation = binary->getOpcodeName(),
+                            .truncTargetBitWidth = 0};
                     }
                     break;
                 }
@@ -634,11 +638,11 @@ namespace ctrace::stack::analysis
                         case llvm::Intrinsic::usub_with_overflow:
                         case llvm::Intrinsic::umul_with_overflow:
                             return RiskSummary{
-                                IntegerOverflowIssueKind::ArithmeticInSizeComputation,
-                                intrinsic->getCalledFunction()
-                                    ? intrinsic->getCalledFunction()->getName().str()
-                                    : "with.overflow",
-                                aggregate};
+                                .kind = IntegerOverflowIssueKind::ArithmeticInSizeComputation,
+                                .relatedValue = aggregate,
+                                .operation = intrinsic->getCalledFunction()
+                                                 ? intrinsic->getCalledFunction()->getName().str()
+                                                 : "with.overflow"};
                         default:
                             break;
                         }
