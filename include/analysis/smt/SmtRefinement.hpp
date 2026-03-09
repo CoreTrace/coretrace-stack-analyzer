@@ -46,12 +46,12 @@ namespace ctrace::stack::analysis::smt
         {
             if (smtRuleEnabled(config, ruleId_))
             {
-                orchestrator_.emplace(SolverOrchestratorConfig{.mode = config.smtMode,
-                                                               .primaryBackend = config.smtBackend,
-                                                               .secondaryBackend =
-                                                                   config.smtSecondaryBackend,
-                                                               .timeoutMs = config.smtTimeoutMs,
-                                                               .budgetNodes = config.smtBudgetNodes});
+                orchestrator_.emplace(SolverOrchestratorConfig{
+                    .primaryBackend = config.smtBackend,
+                    .secondaryBackend = config.smtSecondaryBackend,
+                    .mode = config.smtMode,
+                    .budgetNodes = config.smtBudgetNodes,
+                    .timeoutMs = config.smtTimeoutMs});
             }
         }
 
@@ -85,7 +85,8 @@ namespace ctrace::stack::analysis::smt
       private:
         std::string ruleId_;
         std::optional<SolverOrchestrator> orchestrator_;
-        std::uint32_t timeoutMs_ = 50;
         std::uint64_t budgetNodes_ = 10000;
+        std::uint32_t timeoutMs_ = 50;
+        std::uint32_t reserved_ = 0;
     };
 } // namespace ctrace::stack::analysis::smt
