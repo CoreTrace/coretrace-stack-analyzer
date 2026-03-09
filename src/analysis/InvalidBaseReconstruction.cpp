@@ -1,5 +1,6 @@
 #include "analysis/InvalidBaseReconstruction.hpp"
 
+#include <cstdint>
 #include <cstddef>
 #include <limits>
 #include <map>
@@ -153,7 +154,8 @@ namespace ctrace::stack::analysis
         {
             const llvm::Value* ptrOperand = nullptr;
             int64_t offset = 0;
-            bool sawOffset = false;
+            std::uint64_t sawOffset : 1 = false;
+            std::uint64_t reservedFlags : 63 = 0;
         };
 
         static const llvm::Value* stripIntCasts(const llvm::Value* V)
@@ -213,7 +215,8 @@ namespace ctrace::stack::analysis
             {
                 const Value* val = nullptr;
                 int64_t offset = 0;
-                bool sawOffset = false;
+                std::uint64_t sawOffset : 1 = false;
+                std::uint64_t reservedFlags : 63 = 0;
             };
 
             SmallVector<IntWorkItem, 16> worklist;
@@ -978,11 +981,12 @@ namespace ctrace::stack::analysis
                         struct AggEntry
                         {
                             std::set<int64_t> memberOffsets;
-                            bool anyOutOfBounds = false;
-                            bool anyNonZeroResult = false;
                             std::string varName;
-                            uint64_t allocaSize = 0;
                             std::string targetType;
+                            uint64_t allocaSize = 0;
+                            std::uint64_t anyOutOfBounds : 1 = false;
+                            std::uint64_t anyNonZeroResult : 1 = false;
+                            std::uint64_t reservedFlags : 62 = 0;
                         };
 
                         std::map<std::pair<const llvm::AllocaInst*, int64_t>, AggEntry> agg;
@@ -1097,10 +1101,11 @@ namespace ctrace::stack::analysis
                         struct AggEntry
                         {
                             std::set<int64_t> memberOffsets;
-                            bool anyOutOfBounds = false;
-                            bool anyNonZeroResult = false;
                             std::string varName;
                             std::string targetType;
+                            std::uint64_t anyOutOfBounds : 1 = false;
+                            std::uint64_t anyNonZeroResult : 1 = false;
+                            std::uint64_t reservedFlags : 62 = 0;
                         };
 
                         std::map<const llvm::AllocaInst*, AggEntry> agg;
