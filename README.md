@@ -239,6 +239,7 @@ Ready-to-adapt workflow examples:
 --no-resource-cross-tu disables cross-TU resource summaries
 --resource-summary-cache-dir=<path> sets cache directory for cross-TU resource summaries (default: .cache/resource-lifetime)
 --resource-summary-cache-memory-only keeps cross-TU summary cache in memory only (process-local, no files)
+--compile-ir-cache-dir=<path> enables dependency-aware LLVM IR compile cache for unchanged source files
 --timing prints compile/analysis timings to stderr
 --config=<path> loads optional key=value config file (CLI flags override config values)
 --print-effective-config prints resolved runtime config to stderr
@@ -268,6 +269,8 @@ To generate `compile_commands.json` with CMake, configure with
 If analysis feels slow, `--compdb-fast` disables heavy flags (optimizations,
 sanitizers, profiling) while keeping include paths and macros.
 For multi-file runs, `--jobs=<N|auto>` parallelizes input loading; with cross-TU enabled it also parallelizes summary construction.
+`--compile-ir-cache-dir=<path>` reuses compiled LLVM IR for unchanged translation units
+based on source/dependency stamps, which reduces repeated C/C++ frontend cost across runs.
 When inputs are auto-discovered from `compile_commands.json`, `_deps` entries are skipped by default
 to keep analysis focused on project code; use `--include-compdb-deps` to opt back in.
 
@@ -305,6 +308,7 @@ Supported keys:
 - `uninitialized-cross-tu`
 - `resource-summary-cache-dir`
 - `resource-summary-cache-memory-only`
+- `compile-ir-cache-dir`
 
 Example file:
 
@@ -315,6 +319,7 @@ buffer-model=models/buffer-overflow/generic.txt
 compile-commands=build/compile_commands.json
 analysis-profile=full
 jobs=auto
+compile-ir-cache-dir=.cache/compile-ir
 smt=on
 smt-backend=z3
 smt-rules=recursion,integer-overflow,size-minus-k,stack-buffer,oob-read
