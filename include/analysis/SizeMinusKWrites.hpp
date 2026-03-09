@@ -21,11 +21,12 @@ namespace ctrace::stack::analysis
     {
         std::string funcName;
         std::string sinkName; // call name or "store"
-        bool ptrNonNull = false;
-        bool sizeAboveK = false;
-        bool hasPointerDest = true;
         int64_t k = 1;
         const llvm::Instruction* inst = nullptr;
+        std::uint64_t ptrNonNull : 1 = false;
+        std::uint64_t sizeAboveK : 1 = false;
+        std::uint64_t hasPointerDest : 1 = true;
+        std::uint64_t reservedFlags : 61 = 0;
     };
 
     std::vector<SizeMinusKWriteIssue> analyzeSizeMinusKWrites(
