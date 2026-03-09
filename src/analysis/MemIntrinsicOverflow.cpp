@@ -20,11 +20,12 @@ namespace ctrace::stack::analysis
     {
         struct ResolvedSink
         {
-            bool valid = false;
-            bool hasExplicitLength = false;
+            std::string displayName;
             unsigned destArgIndex = 0;
             unsigned sizeArgIndex = 0;
-            std::string displayName;
+            std::uint64_t valid : 1 = false;
+            std::uint64_t hasExplicitLength : 1 = false;
+            std::uint64_t reservedFlags : 62 = 0;
         };
 
         static std::optional<StackSize> getAllocaTotalSizeBytes(const llvm::AllocaInst* AI,
