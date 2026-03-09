@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdint>
 #include <fstream>
 #include <unordered_map>
 
@@ -268,7 +269,8 @@ namespace ctrace::stack::analysis
         struct MemoryOperand
         {
             const llvm::Value* ptr = nullptr;
-            bool precise = false; // true if we can reason about direct stores only
+            std::uint64_t precise : 1 = false; // true if we can reason about direct stores only
+            std::uint64_t reservedFlags : 63 = 0;
         };
 
         enum class ConditionKind
@@ -285,14 +287,16 @@ namespace ctrace::stack::analysis
             llvm::Value* lhs = nullptr;
             llvm::Value* rhs = nullptr;
             llvm::Value* boolValue = nullptr;
-            bool valid = false;
             llvm::SmallVector<MemoryOperand, 2> memoryOperands;
+            std::uint64_t valid : 1 = false;
+            std::uint64_t reservedFlags : 63 = 0;
         };
 
         struct ConditionAtom
         {
             ConditionKey key;
-            bool polarity = true;
+            std::uint64_t polarity : 1 = true;
+            std::uint64_t reservedFlags : 63 = 0;
         };
 
         using ConditionSignature = llvm::SmallVector<ConditionAtom, 4>;
@@ -1194,6 +1198,23 @@ namespace ctrace::stack::analysis
                     ++dominatingSuccCount;
                 }
                 if (!elsePathSucc || dominatingSuccCount != 1)
+                    continue;
+
+                bool bypassesDominatingElsePath = false;
+                llvm::SmallPtrSet<llvm::BasicBlock*, 1> exclusionSet;
+                exclusionSet.insert(const_cast<llvm::BasicBlock*>(domBlock));
+                for (unsigned succIndex = 0; succIndex < domTerm->getNumSuccessors(); ++succIndex)
+                {
+                    const llvm::BasicBlock* succ = domTerm->getSuccessor(succIndex);
+                    if (!succ || succ == elsePathSucc)
+                        continue;
+                    if (llvm::isPotentiallyReachable(succ, curBlock, &exclusionSet, &DT))
+                    {
+                        bypassesDominatingElsePath = true;
+                        break;
+                    }
+                }
+                if (bypassesDominatingElsePath)
                     continue;
 
                 ConditionSignature domSig = buildConditionSignature(domTerm);

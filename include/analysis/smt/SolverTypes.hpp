@@ -9,7 +9,7 @@
 
 namespace ctrace::stack::analysis::smt
 {
-    enum class SolverMode
+    enum class SolverMode : std::uint64_t
     {
         Single,
         Portfolio,
@@ -17,7 +17,7 @@ namespace ctrace::stack::analysis::smt
         DualConsensus
     };
 
-    enum class SmtStatus
+    enum class SmtStatus : std::uint64_t
     {
         Sat,
         Unsat,
@@ -30,20 +30,21 @@ namespace ctrace::stack::analysis::smt
     {
         ConstraintIR ir;
         std::string ruleId;
-        std::uint32_t timeoutMs = 50;
         std::uint64_t budgetNodes = 10000;
+        std::uint32_t timeoutMs = 50;
+        std::uint32_t reserved = 0;
     };
 
     struct SmtAnswer
     {
-        SmtStatus status = SmtStatus::Unknown;
         std::string backendName;
         std::optional<std::string> reason;
+        SmtStatus status = SmtStatus::Unknown;
     };
 
     struct SmtDecision
     {
-        SmtStatus status = SmtStatus::Unknown;
         std::vector<SmtAnswer> answers;
+        SmtStatus status = SmtStatus::Unknown;
     };
 } // namespace ctrace::stack::analysis::smt

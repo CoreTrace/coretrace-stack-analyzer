@@ -81,8 +81,8 @@ namespace ctrace::stack::analysis
                                       const llvm::Instruction* contextInst) const
             {
                 return smt::SmtConstraintEvaluator::evaluateQuery(
-                    smt::encodeSignedComparisonFeasibility(
-                    ranges, lhs, rhsConstant, false, contextInst));
+                    smt::encodeSignedComparisonFeasibility(ranges, lhs, rhsConstant, false,
+                                                           contextInst));
             }
         };
 
@@ -98,9 +98,10 @@ namespace ctrace::stack::analysis
             return true;
         }
 
-        static std::optional<IntRange> resolveSmtRangeRecursive(
-            const llvm::Value* value, const std::map<const llvm::Value*, IntRange>& ranges,
-            llvm::SmallPtrSetImpl<const llvm::Value*>& visited, unsigned depth)
+        static std::optional<IntRange>
+        resolveSmtRangeRecursive(const llvm::Value* value,
+                                 const std::map<const llvm::Value*, IntRange>& ranges,
+                                 llvm::SmallPtrSetImpl<const llvm::Value*>& visited, unsigned depth)
         {
             if (!value || depth > 16)
                 return std::nullopt;
@@ -431,10 +432,9 @@ namespace ctrace::stack::analysis
             return summaries;
         }
 
-        static void analyzeSizeMinusKWritesInFunction(llvm::Function& F, const llvm::DataLayout& DL,
-                                                      const SizeMinusKSummaryMap& summaries,
-                                                      const SizeMinusKConstraintEvaluator& evaluator,
-                                                      std::vector<SizeMinusKWriteIssue>& out)
+        static void analyzeSizeMinusKWritesInFunction(
+            llvm::Function& F, const llvm::DataLayout& DL, const SizeMinusKSummaryMap& summaries,
+            const SizeMinusKConstraintEvaluator& evaluator, std::vector<SizeMinusKWriteIssue>& out)
         {
             using namespace llvm;
 
@@ -578,10 +578,10 @@ namespace ctrace::stack::analysis
         return analyzeSizeMinusKWrites(mod, DL, shouldAnalyzeFunction, defaultConfig);
     }
 
-    std::vector<SizeMinusKWriteIssue> analyzeSizeMinusKWrites(
-        llvm::Module& mod, const llvm::DataLayout& DL,
-        const std::function<bool(const llvm::Function&)>& shouldAnalyzeFunction,
-        const AnalysisConfig& config)
+    std::vector<SizeMinusKWriteIssue>
+    analyzeSizeMinusKWrites(llvm::Module& mod, const llvm::DataLayout& DL,
+                            const std::function<bool(const llvm::Function&)>& shouldAnalyzeFunction,
+                            const AnalysisConfig& config)
     {
         SizeMinusKSummaryMap summaries = buildSizeMinusKSummaries(mod);
         std::vector<SizeMinusKWriteIssue> issues;

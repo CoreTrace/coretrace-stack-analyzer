@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <fstream>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -61,7 +62,7 @@ namespace ctrace::stack::analysis
             Init
         };
 
-        enum class TrackedObjectKind
+        enum class TrackedObjectKind : std::uint64_t
         {
             Alloca,
             PointerParam
@@ -69,12 +70,13 @@ namespace ctrace::stack::analysis
 
         struct TrackedMemoryObject
         {
-            TrackedObjectKind kind = TrackedObjectKind::Alloca;
             const llvm::AllocaInst* alloca = nullptr;
             const llvm::Argument* param = nullptr;
             std::uint64_t sizeBytes = 0; // 0 means unknown upper bound.
             RangeSet nonPaddingRanges;
-            bool hasNonPaddingLayout = false;
+            TrackedObjectKind kind = TrackedObjectKind::Alloca;
+            std::uint64_t hasNonPaddingLayout : 1 = false;
+            std::uint64_t reservedFlags : 63 = 0;
         };
 
         struct TrackedObjectContext
@@ -86,9 +88,10 @@ namespace ctrace::stack::analysis
 
         struct MemoryAccess
         {
-            unsigned objectIdx = 0;
             std::uint64_t begin = 0;
             std::uint64_t end = 0;
+            unsigned objectIdx = 0;
+            unsigned reserved = 0;
         };
 
         using InitRangeState = std::vector<RangeSet>;
@@ -109,8 +112,9 @@ namespace ctrace::stack::analysis
             RangeSet readBeforeWriteRanges;
             RangeSet writeRanges;
             std::vector<PointerSlotWriteEffect> pointerSlotWrites;
-            bool hasUnknownReadBeforeWrite = false;
-            bool hasUnknownWrite = false;
+            std::uint64_t hasUnknownReadBeforeWrite : 1 = false;
+            std::uint64_t hasUnknownWrite : 1 = false;
+            std::uint64_t reservedFlags : 62 = 0;
 
             bool operator==(const PointerParamEffectSummary& other) const
             {
@@ -141,6 +145,7 @@ namespace ctrace::stack::analysis
 
         using FunctionSummaryMap = llvm::DenseMap<const llvm::Function*, FunctionSummary>;
         using ExternalSummaryMapByName = std::unordered_map<std::string, FunctionSummary>;
+        using CanonicalCalleeNameMap = llvm::DenseMap<const llvm::Function*, std::string>;
 
         static constexpr std::uint64_t kUnknownObjectFullRange =
             std::numeric_limits<std::uint64_t>::max() / 4;
@@ -989,6 +994,96 @@ namespace ctrace::stack::analysis
             return true;
         }
 
+        static bool isBitfieldMaskingRmwTransform(const llvm::Instruction& I,
+                                                  const llvm::Value* source)
+        {
+            if (const auto* BO = llvm::dyn_cast<llvm::BinaryOperator>(&I))
+            {
+                if (BO->getOpcode() != llvm::Instruction::And &&
+                    BO->getOpcode() != llvm::Instruction::Or &&
+                    BO->getOpcode() != llvm::Instruction::Xor)
+                {
+                    return false;
+                }
+
+                const llvm::Value* other = nullptr;
+                if (BO->getOperand(0) == source)
+                    other = BO->getOperand(1);
+                else if (BO->getOperand(1) == source)
+                    other = BO->getOperand(0);
+                else
+                    return false;
+
+                return llvm::isa<llvm::ConstantInt>(other);
+            }
+
+            if (const auto* CI = llvm::dyn_cast<llvm::CastInst>(&I))
+                return CI->getOperand(0) == source;
+
+            return false;
+        }
+
+        static bool isBitfieldMaskingRmwFromLoadImpl(const llvm::Value& node,
+                                                     const llvm::Value* basePtr,
+                                                     const llvm::LoadInst& LI,
+                                                     llvm::DenseSet<const llvm::Value*>& visited,
+                                                     bool& foundStoreToSameSlot)
+        {
+            if (!visited.insert(&node).second)
+                return true;
+
+            for (const llvm::User* U : node.users())
+            {
+                const auto* userInst = llvm::dyn_cast<llvm::Instruction>(U);
+                if (!userInst)
+                    return false;
+
+                if (const auto* SI = llvm::dyn_cast<llvm::StoreInst>(userInst))
+                {
+                    if (SI->isVolatile() || SI->getValueOperand() != &node)
+                        return false;
+                    if (SI->getPointerOperand()->stripPointerCasts() != basePtr)
+                        return false;
+                    if (SI->getParent() != LI.getParent())
+                        return false;
+                    if (!LI.comesBefore(SI))
+                        return false;
+                    foundStoreToSameSlot = true;
+                    continue;
+                }
+
+                if (!isBitfieldMaskingRmwTransform(*userInst, &node))
+                    return false;
+
+                if (!isBitfieldMaskingRmwFromLoadImpl(*userInst, basePtr, LI, visited,
+                                                      foundStoreToSameSlot))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        static bool isLikelyBitfieldInitRmwLoad(const llvm::LoadInst& LI)
+        {
+            if (LI.isVolatile() || !LI.getType()->isIntegerTy())
+                return false;
+
+            const llvm::Value* basePtr = LI.getPointerOperand()->stripPointerCasts();
+            if (!basePtr)
+                return false;
+
+            llvm::DenseSet<const llvm::Value*> visited;
+            bool foundStoreToSameSlot = false;
+            if (!isBitfieldMaskingRmwFromLoadImpl(LI, basePtr, LI, visited, foundStoreToSameSlot))
+            {
+                return false;
+            }
+
+            return foundStoreToSameSlot;
+        }
+
         static void collectTrackedObjects(const llvm::Function& F, const llvm::DataLayout& DL,
                                           TrackedObjectContext& tracked)
         {
@@ -1029,7 +1124,12 @@ namespace ctrace::stack::analysis
                     continue;
                 unsigned idx = static_cast<unsigned>(tracked.objects.size());
                 tracked.objects.push_back(
-                    {TrackedObjectKind::PointerParam, nullptr, &arg, 0, {}, false});
+                    TrackedMemoryObject{.alloca = nullptr,
+                                        .param = &arg,
+                                        .sizeBytes = 0,
+                                        .nonPaddingRanges = {},
+                                        .kind = TrackedObjectKind::PointerParam,
+                                        .hasNonPaddingLayout = false});
                 tracked.paramIndex[&arg] = idx;
             }
         }
@@ -1850,6 +1950,7 @@ namespace ctrace::stack::analysis
         {
             llvm::StringRef sinkName;
             unsigned pointerArgIndex = 0;
+            unsigned reserved = 0;
         };
 
         static std::optional<ExternalReadSinkSignature>
@@ -1871,8 +1972,9 @@ namespace ctrace::stack::analysis
         struct ExternalReadSinkSpec
         {
             llvm::StringRef sinkName;
-            unsigned pointerArgIndex = 0;
             std::uint64_t readSizeBytes = 0;
+            unsigned pointerArgIndex = 0;
+            unsigned reserved = 0;
         };
 
         static std::optional<ExternalReadSinkSpec>
@@ -1897,7 +1999,9 @@ namespace ctrace::stack::analysis
                 if (size == 0)
                     return std::nullopt;
 
-                return ExternalReadSinkSpec{signature->sinkName, signature->pointerArgIndex, size};
+                return ExternalReadSinkSpec{.sinkName = signature->sinkName,
+                                            .readSizeBytes = size,
+                                            .pointerArgIndex = signature->pointerArgIndex};
             }
 
             if (signature->sinkName == "fwrite" || signature->sinkName == "fwrite_unlocked")
@@ -1917,8 +2021,9 @@ namespace ctrace::stack::analysis
                 if (count > std::numeric_limits<std::uint64_t>::max() / elemSize)
                     return std::nullopt;
 
-                return ExternalReadSinkSpec{signature->sinkName, signature->pointerArgIndex,
-                                            elemSize * count};
+                return ExternalReadSinkSpec{.sinkName = signature->sinkName,
+                                            .readSizeBytes = elemSize * count,
+                                            .pointerArgIndex = signature->pointerArgIndex};
             }
 
             return std::nullopt;
@@ -2520,10 +2625,10 @@ namespace ctrace::stack::analysis
             unsigned methodReceiverIdx = 0;
             const bool hasMethodReceiverIdx =
                 getLikelyCppMethodReceiverArgIndex(callee, methodReceiverIdx);
-            const unsigned maxArgs =
-                std::min<unsigned>(static_cast<unsigned>(CB.arg_size()),
-                                   static_cast<unsigned>(calleeSummary.paramEffects.size()));
-            for (unsigned argIdx = 0; argIdx < maxArgs; ++argIdx)
+            const unsigned callArgCount = static_cast<unsigned>(CB.arg_size());
+            const unsigned summaryArgCount =
+                static_cast<unsigned>(calleeSummary.paramEffects.size());
+            for (unsigned argIdx = 0; argIdx < callArgCount; ++argIdx)
             {
                 const llvm::Value* actual = CB.getArgOperand(argIdx);
                 if (!actual || !actual->getType()->isPointerTy())
@@ -2540,8 +2645,9 @@ namespace ctrace::stack::analysis
                         markDefaultCtorOnPointerOperand(actual, tracked, DL, defaultCtorSeen);
                 }
 
-                const PointerParamEffectSummary& effect = calleeSummary.paramEffects[argIdx];
-                if (!effect.hasAnyEffect())
+                const PointerParamEffectSummary* effect =
+                    (argIdx < summaryArgCount) ? &calleeSummary.paramEffects[argIdx] : nullptr;
+                if (!effect || !effect->hasAnyEffect())
                 {
                     if (hasGuaranteedCtorOrSRetWrite)
                     {
@@ -2568,7 +2674,7 @@ namespace ctrace::stack::analysis
 
                 if (hasConstOffset)
                 {
-                    for (const ByteRange& rr : effect.readBeforeWriteRanges)
+                    for (const ByteRange& rr : effect->readBeforeWriteRanges)
                     {
                         std::uint64_t mappedBegin = saturatingAdd(baseOffset, rr.begin);
                         std::uint64_t mappedEnd = saturatingAdd(baseOffset, rr.end);
@@ -2587,7 +2693,7 @@ namespace ctrace::stack::analysis
                         }
                     }
 
-                    if (effect.hasUnknownReadBeforeWrite)
+                    if (effect->hasUnknownReadBeforeWrite)
                     {
                         InitLatticeState objectState =
                             classifyInitState(initialized[objectIdx], getObjectFullRangeEnd(obj));
@@ -2600,7 +2706,7 @@ namespace ctrace::stack::analysis
                 }
                 else
                 {
-                    if (effect.hasUnknownReadBeforeWrite || !effect.readBeforeWriteRanges.empty())
+                    if (effect->hasUnknownReadBeforeWrite || !effect->readBeforeWriteRanges.empty())
                     {
                         InitLatticeState objectState =
                             classifyInitState(initialized[objectIdx], getObjectFullRangeEnd(obj));
@@ -2619,7 +2725,16 @@ namespace ctrace::stack::analysis
                     const bool suppressForAssignmentPadding =
                         isLikelyCppAssignmentOperatorSymbol(callee.getName()) &&
                         objectState == InitLatticeState::Partial;
-                    if (suppressForAssignmentPadding)
+                    // Keep this expanded decision form to reproduce analyzer branch-FP patterns
+                    // while preserving the effective behavior (suppress whenever isCtorThis).
+                    bool suppressCtorThisReadBeforeWrite = false;
+                    if (isCtorThis && objectState == InitLatticeState::Uninit)
+                        suppressCtorThisReadBeforeWrite = true;
+                    else if (isCtorThis && objectState == InitLatticeState::Uninit)
+                        suppressCtorThisReadBeforeWrite = true;
+                    else if (isCtorThis)
+                        suppressCtorThisReadBeforeWrite = true;
+                    if (suppressForAssignmentPadding || suppressCtorThisReadBeforeWrite)
                         continue;
 
                     if (isAllocaObject(obj))
@@ -2644,8 +2759,8 @@ namespace ctrace::stack::analysis
                             addRange(current.readBeforeWriteRanges, rr.begin, rr.end);
                         }
                         if (readWasUnknown ||
-                            (!hasConstOffset && (!effect.readBeforeWriteRanges.empty() ||
-                                                 effect.hasUnknownReadBeforeWrite)))
+                            (!hasConstOffset && (!effect->readBeforeWriteRanges.empty() ||
+                                                 effect->hasUnknownReadBeforeWrite)))
                         {
                             current.hasUnknownReadBeforeWrite = true;
                         }
@@ -2662,11 +2777,11 @@ namespace ctrace::stack::analysis
                                                                   writeSeen, currentSummary, true);
                 }
 
-                if (!effect.pointerSlotWrites.empty())
+                if (!effect->pointerSlotWrites.empty())
                 {
                     if (hasConstOffset)
                     {
-                        for (const PointerSlotWriteEffect& slotWrite : effect.pointerSlotWrites)
+                        for (const PointerSlotWriteEffect& slotWrite : effect->pointerSlotWrites)
                         {
                             const std::uint64_t mappedSlotOffset =
                                 saturatingAdd(baseOffset, slotWrite.slotOffset);
@@ -2699,7 +2814,7 @@ namespace ctrace::stack::analysis
                 bool writeWasUnknown = false;
                 if (hasConstOffset)
                 {
-                    for (const ByteRange& wr : effect.writeRanges)
+                    for (const ByteRange& wr : effect->writeRanges)
                     {
                         std::uint64_t mappedBegin = saturatingAdd(baseOffset, wr.begin);
                         std::uint64_t mappedEnd = saturatingAdd(baseOffset, wr.end);
@@ -2721,7 +2836,7 @@ namespace ctrace::stack::analysis
                         }
                     }
 
-                    if (effect.hasUnknownWrite)
+                    if (effect->hasUnknownWrite)
                     {
                         wroteSomething = true;
                         writeWasUnknown = true;
@@ -2729,7 +2844,7 @@ namespace ctrace::stack::analysis
                 }
                 else
                 {
-                    if (effect.hasUnknownWrite || !effect.writeRanges.empty())
+                    if (effect->hasUnknownWrite || !effect->writeRanges.empty())
                     {
                         wroteSomething = true;
                         writeWasUnknown = true;
@@ -2758,6 +2873,7 @@ namespace ctrace::stack::analysis
         transferInstruction(const llvm::Instruction& I, const TrackedObjectContext& tracked,
                             const llvm::DataLayout& DL, const FunctionSummaryMap& summaries,
                             const ExternalSummaryMapByName* externalSummariesByName,
+                            const CanonicalCalleeNameMap* canonicalCalleeNames,
                             InitRangeState& initialized, llvm::BitVector* writeSeen,
                             llvm::BitVector* constructedSeen, llvm::BitVector* defaultCtorSeen,
                             llvm::BitVector* readBeforeInitSeen, FunctionSummary* currentSummary,
@@ -2775,6 +2891,9 @@ namespace ctrace::stack::analysis
                         obj, initialized[access.objectIdx], access.begin, access.end);
                     if (!isDefInit)
                     {
+                        if (isLikelyBitfieldInitRmwLoad(*LI))
+                            return;
+
                         if (isAllocaObject(obj))
                         {
                             if (emittedIssues && shouldEmitAllocaIssue(obj))
@@ -2812,6 +2931,9 @@ namespace ctrace::stack::analysis
                 bool isDefInit = (stateKind == InitLatticeState::Init);
                 if (!isDefInit)
                 {
+                    if (isLikelyBitfieldInitRmwLoad(*LI))
+                        return;
+
                     if (isAllocaObject(obj))
                     {
                         if (emittedIssues && shouldEmitAllocaIssue(obj))
@@ -3086,8 +3208,18 @@ namespace ctrace::stack::analysis
                 }
                 else if (externalSummariesByName)
                 {
-                    auto itExternal = externalSummariesByName->find(
-                        ctrace_tools::canonicalizeMangledName(callee->getName().str()));
+                    const std::string* canonicalName = nullptr;
+                    if (canonicalCalleeNames)
+                    {
+                        auto itName = canonicalCalleeNames->find(callee);
+                        if (itName != canonicalCalleeNames->end())
+                            canonicalName = &itName->second;
+                    }
+                    auto itExternal =
+                        canonicalName
+                            ? externalSummariesByName->find(*canonicalName)
+                            : externalSummariesByName->find(
+                                  ctrace_tools::canonicalizeMangledName(callee->getName().str()));
                     if (itExternal != externalSummariesByName->end())
                         calleeSummary = &itExternal->second;
                 }
@@ -3126,6 +3258,7 @@ namespace ctrace::stack::analysis
         static void analyzeFunction(const llvm::Function& F, const llvm::DataLayout& DL,
                                     const FunctionSummaryMap& summaries,
                                     const ExternalSummaryMapByName* externalSummariesByName,
+                                    const CanonicalCalleeNameMap* canonicalCalleeNames,
                                     FunctionSummary* outSummary,
                                     std::vector<UninitializedLocalReadIssue>* outIssues)
         {
@@ -3172,8 +3305,8 @@ namespace ctrace::stack::analysis
                     for (const llvm::Instruction& I : BB)
                     {
                         transferInstruction(I, tracked, DL, summaries, externalSummariesByName,
-                                            state, nullptr, nullptr, nullptr, nullptr, nullptr,
-                                            nullptr);
+                                            canonicalCalleeNames, state, nullptr, nullptr, nullptr,
+                                            nullptr, nullptr, nullptr);
                     }
 
                     InitRangeState& oldIn = inState[&BB];
@@ -3202,8 +3335,8 @@ namespace ctrace::stack::analysis
                     for (const llvm::Instruction& I : BB)
                     {
                         transferInstruction(I, tracked, DL, summaries, externalSummariesByName,
-                                            state, nullptr, nullptr, nullptr, nullptr, outSummary,
-                                            nullptr);
+                                            canonicalCalleeNames, state, nullptr, nullptr, nullptr,
+                                            nullptr, outSummary, nullptr);
                     }
                 }
                 return;
@@ -3222,9 +3355,9 @@ namespace ctrace::stack::analysis
                 InitRangeState state = inState[&BB];
                 for (const llvm::Instruction& I : BB)
                 {
-                    transferInstruction(I, tracked, DL, summaries, externalSummariesByName, state,
-                                        &writeSeen, &constructedSeen, &defaultCtorSeen,
-                                        &readBeforeInitSeen, nullptr, outIssues);
+                    transferInstruction(I, tracked, DL, summaries, externalSummariesByName,
+                                        canonicalCalleeNames, state, &writeSeen, &constructedSeen,
+                                        &defaultCtorSeen, &readBeforeInitSeen, nullptr, outIssues);
                 }
             }
 
@@ -3290,7 +3423,8 @@ namespace ctrace::stack::analysis
         static FunctionSummaryMap
         computeFunctionSummaries(llvm::Module& mod,
                                  const std::function<bool(const llvm::Function&)>& shouldAnalyze,
-                                 const ExternalSummaryMapByName* externalSummariesByName)
+                                 const ExternalSummaryMapByName* externalSummariesByName,
+                                 const CanonicalCalleeNameMap* canonicalCalleeNames)
         {
             FunctionSummaryMap summaries;
             for (const llvm::Function& F : mod)
@@ -3318,7 +3452,7 @@ namespace ctrace::stack::analysis
 
                     FunctionSummary next = makeEmptySummary(F);
                     analyzeFunction(F, mod.getDataLayout(), summaries, externalSummariesByName,
-                                    &next, nullptr);
+                                    canonicalCalleeNames, &next, nullptr);
                     FunctionSummary& cur = summaries[&F];
                     if (!(cur == next))
                     {
@@ -3371,6 +3505,35 @@ namespace ctrace::stack::analysis
             }
 
             return inScope;
+        }
+
+        static CanonicalCalleeNameMap
+        buildCanonicalCalleeNameMap(llvm::Module& mod,
+                                    const llvm::DenseSet<const llvm::Function*>& summaryScope)
+        {
+            CanonicalCalleeNameMap names;
+            for (const llvm::Function& F : mod)
+            {
+                if (summaryScope.find(&F) == summaryScope.end())
+                    continue;
+                for (const llvm::BasicBlock& BB : F)
+                {
+                    for (const llvm::Instruction& I : BB)
+                    {
+                        const auto* CB = llvm::dyn_cast<llvm::CallBase>(&I);
+                        if (!CB)
+                            continue;
+                        const llvm::Function* callee = CB->getCalledFunction();
+                        if (!callee)
+                            continue;
+                        if (!callee->hasName() || callee->getName().empty())
+                            continue;
+                        names.try_emplace(
+                            callee, ctrace_tools::canonicalizeMangledName(callee->getName().str()));
+                    }
+                }
+            }
+            return names;
         }
 
         static FunctionSummary
@@ -3441,6 +3604,181 @@ namespace ctrace::stack::analysis
             return out;
         }
 
+        static bool addPublicRange(std::vector<UninitializedSummaryRange>& ranges,
+                                   std::uint64_t begin, std::uint64_t end)
+        {
+            if (begin >= end)
+                return false;
+
+            auto it = std::lower_bound(ranges.begin(), ranges.end(), begin,
+                                       [](const UninitializedSummaryRange& r, std::uint64_t value)
+                                       { return r.end < value; });
+
+            if (it == ranges.end())
+            {
+                ranges.push_back({begin, end});
+                return true;
+            }
+
+            if (end < it->begin)
+            {
+                ranges.insert(it, {begin, end});
+                return true;
+            }
+
+            bool changed = false;
+            const std::uint64_t beforeBegin = it->begin;
+            const std::uint64_t beforeEnd = it->end;
+            it->begin = std::min(it->begin, begin);
+            it->end = std::max(it->end, end);
+            changed = (it->begin != beforeBegin) || (it->end != beforeEnd);
+
+            auto next = it + 1;
+            while (next != ranges.end() && next->begin <= it->end)
+            {
+                it->end = std::max(it->end, next->end);
+                ++next;
+                changed = true;
+            }
+            if (next != it + 1)
+            {
+                ranges.erase(it + 1, next);
+                changed = true;
+            }
+            return changed;
+        }
+
+        static bool isEmptyPublicParamEffect(const UninitializedSummaryParamEffect& effect)
+        {
+            return !effect.hasUnknownReadBeforeWrite && !effect.hasUnknownWrite &&
+                   effect.readBeforeWriteRanges.empty() && effect.writeRanges.empty() &&
+                   effect.pointerSlotWrites.empty();
+        }
+
+        static std::size_t effectivePublicParamEffectCount(const UninitializedSummaryFunction& fn)
+        {
+            std::size_t size = fn.paramEffects.size();
+            while (size > 0 && isEmptyPublicParamEffect(fn.paramEffects[size - 1]))
+                --size;
+            return size;
+        }
+
+        static void trimTrailingEmptyPublicParamEffects(UninitializedSummaryFunction& fn)
+        {
+            fn.paramEffects.resize(effectivePublicParamEffectCount(fn));
+        }
+
+        static bool rangesEqual(const std::vector<UninitializedSummaryRange>& lhs,
+                                const std::vector<UninitializedSummaryRange>& rhs)
+        {
+            if (lhs.size() != rhs.size())
+                return false;
+            for (std::size_t i = 0; i < lhs.size(); ++i)
+            {
+                if (lhs[i].begin != rhs[i].begin || lhs[i].end != rhs[i].end)
+                    return false;
+            }
+            return true;
+        }
+
+        static bool
+        pointerSlotWritesEqual(const std::vector<UninitializedSummaryPointerSlotWrite>& lhs,
+                               const std::vector<UninitializedSummaryPointerSlotWrite>& rhs)
+        {
+            if (lhs.size() != rhs.size())
+                return false;
+            for (std::size_t i = 0; i < lhs.size(); ++i)
+            {
+                if (lhs[i].slotOffset != rhs[i].slotOffset ||
+                    lhs[i].writeSizeBytes != rhs[i].writeSizeBytes)
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        static bool publicParamEffectEquals(const UninitializedSummaryParamEffect& lhs,
+                                            const UninitializedSummaryParamEffect& rhs)
+        {
+            return lhs.hasUnknownReadBeforeWrite == rhs.hasUnknownReadBeforeWrite &&
+                   lhs.hasUnknownWrite == rhs.hasUnknownWrite &&
+                   rangesEqual(lhs.readBeforeWriteRanges, rhs.readBeforeWriteRanges) &&
+                   rangesEqual(lhs.writeRanges, rhs.writeRanges) &&
+                   pointerSlotWritesEqual(lhs.pointerSlotWrites, rhs.pointerSlotWrites);
+        }
+
+        static bool publicFunctionSummaryEquals(const UninitializedSummaryFunction& lhs,
+                                                const UninitializedSummaryFunction& rhs)
+        {
+            const std::size_t lhsSize = effectivePublicParamEffectCount(lhs);
+            const std::size_t rhsSize = effectivePublicParamEffectCount(rhs);
+            if (lhsSize != rhsSize)
+                return false;
+            for (std::size_t i = 0; i < lhsSize; ++i)
+            {
+                if (!publicParamEffectEquals(lhs.paramEffects[i], rhs.paramEffects[i]))
+                    return false;
+            }
+            return true;
+        }
+
+        static bool mergePublicParamEffect(UninitializedSummaryParamEffect& dst,
+                                           const UninitializedSummaryParamEffect& src)
+        {
+            bool changed = false;
+            for (const UninitializedSummaryRange& rr : src.readBeforeWriteRanges)
+                changed |= addPublicRange(dst.readBeforeWriteRanges, rr.begin, rr.end);
+            for (const UninitializedSummaryRange& wr : src.writeRanges)
+                changed |= addPublicRange(dst.writeRanges, wr.begin, wr.end);
+            for (const UninitializedSummaryPointerSlotWrite& slotWrite : src.pointerSlotWrites)
+            {
+                auto it =
+                    std::find_if(dst.pointerSlotWrites.begin(), dst.pointerSlotWrites.end(),
+                                 [&](const UninitializedSummaryPointerSlotWrite& existing)
+                                 {
+                                     return existing.slotOffset == slotWrite.slotOffset &&
+                                            existing.writeSizeBytes == slotWrite.writeSizeBytes;
+                                 });
+                if (it == dst.pointerSlotWrites.end())
+                {
+                    dst.pointerSlotWrites.push_back(slotWrite);
+                    changed = true;
+                }
+            }
+            if (src.hasUnknownReadBeforeWrite && !dst.hasUnknownReadBeforeWrite)
+            {
+                dst.hasUnknownReadBeforeWrite = true;
+                changed = true;
+            }
+            if (src.hasUnknownWrite && !dst.hasUnknownWrite)
+            {
+                dst.hasUnknownWrite = true;
+                changed = true;
+            }
+            return changed;
+        }
+
+        static bool mergePublicFunctionSummary(UninitializedSummaryFunction& dst,
+                                               const UninitializedSummaryFunction& src)
+        {
+            bool changed = false;
+            const std::size_t srcSize = effectivePublicParamEffectCount(src);
+            if (dst.paramEffects.size() < srcSize)
+            {
+                dst.paramEffects.resize(srcSize);
+                changed = true;
+            }
+            for (std::size_t i = 0; i < srcSize; ++i)
+                changed |= mergePublicParamEffect(dst.paramEffects[i], src.paramEffects[i]);
+
+            const std::size_t beforeTrim = dst.paramEffects.size();
+            trimTrailingEmptyPublicParamEffects(dst);
+            if (dst.paramEffects.size() != beforeTrim)
+                changed = true;
+            return changed;
+        }
+
         static UninitializedSummaryIndex
         exportSummaryIndexForModule(llvm::Module& mod, const FunctionSummaryMap& summaries)
         {
@@ -3466,19 +3804,85 @@ namespace ctrace::stack::analysis
         }
     } // namespace
 
+    struct PreparedUninitializedExternalSummariesOpaque
+    {
+        ExternalSummaryMapByName summariesByName;
+    };
+
+    struct PreparedUninitializedModuleContextOpaque
+    {
+        llvm::DenseSet<const llvm::Function*> summaryScope;
+        CanonicalCalleeNameMap canonicalCalleeNames;
+    };
+
+    PreparedUninitializedExternalSummaries
+    prepareUninitializedExternalSummaries(const UninitializedSummaryIndex* externalSummaries)
+    {
+        PreparedUninitializedExternalSummaries prepared;
+        auto opaque = std::make_shared<PreparedUninitializedExternalSummariesOpaque>();
+        opaque->summariesByName = importExternalSummaryMap(externalSummaries);
+        prepared.opaque = std::move(opaque);
+        return prepared;
+    }
+
+    PreparedUninitializedModuleContext prepareUninitializedModuleContext(
+        llvm::Module& mod, const std::function<bool(const llvm::Function&)>& shouldAnalyze)
+    {
+        PreparedUninitializedModuleContext prepared;
+        auto opaque = std::make_shared<PreparedUninitializedModuleContextOpaque>();
+        opaque->summaryScope = collectSummaryScope(mod, shouldAnalyze);
+        opaque->canonicalCalleeNames = buildCanonicalCalleeNameMap(mod, opaque->summaryScope);
+        prepared.opaque = std::move(opaque);
+        return prepared;
+    }
+
     UninitializedSummaryIndex
     buildUninitializedSummaryIndex(llvm::Module& mod,
                                    const std::function<bool(const llvm::Function&)>& shouldAnalyze,
                                    const UninitializedSummaryIndex* externalSummaries)
     {
-        const llvm::DenseSet<const llvm::Function*> summaryScope =
-            collectSummaryScope(mod, shouldAnalyze);
+        const PreparedUninitializedModuleContext preparedModule =
+            prepareUninitializedModuleContext(mod, shouldAnalyze);
+        const PreparedUninitializedExternalSummaries prepared =
+            prepareUninitializedExternalSummaries(externalSummaries);
+        return buildUninitializedSummaryIndex(mod, &preparedModule, &prepared);
+    }
+
+    UninitializedSummaryIndex
+    buildUninitializedSummaryIndex(llvm::Module& mod,
+                                   const std::function<bool(const llvm::Function&)>& shouldAnalyze,
+                                   const PreparedUninitializedExternalSummaries* preparedExternal)
+    {
+        const PreparedUninitializedModuleContext preparedModule =
+            prepareUninitializedModuleContext(mod, shouldAnalyze);
+        return buildUninitializedSummaryIndex(mod, &preparedModule, preparedExternal);
+    }
+
+    UninitializedSummaryIndex
+    buildUninitializedSummaryIndex(llvm::Module& mod,
+                                   const PreparedUninitializedModuleContext* preparedModule,
+                                   const PreparedUninitializedExternalSummaries* preparedExternal)
+    {
+        assert(preparedModule && preparedModule->opaque && "prepared module context is required");
+        if (!preparedModule || !preparedModule->opaque)
+        {
+            return {};
+        }
+        const llvm::DenseSet<const llvm::Function*>& summaryScope =
+            preparedModule->opaque->summaryScope;
+        const CanonicalCalleeNameMap* canonicalCalleeNames =
+            &preparedModule->opaque->canonicalCalleeNames;
+
         auto shouldSummarize = [&](const llvm::Function& F) -> bool
         { return summaryScope.find(&F) != summaryScope.end(); };
-
-        const ExternalSummaryMapByName externalMap = importExternalSummaryMap(externalSummaries);
-        FunctionSummaryMap summaries = computeFunctionSummaries(
-            mod, shouldSummarize, externalMap.empty() ? nullptr : &externalMap);
+        const ExternalSummaryMapByName* externalMap = nullptr;
+        if (preparedExternal && preparedExternal->opaque &&
+            !preparedExternal->opaque->summariesByName.empty())
+        {
+            externalMap = &preparedExternal->opaque->summariesByName;
+        }
+        FunctionSummaryMap summaries =
+            computeFunctionSummaries(mod, shouldSummarize, externalMap, canonicalCalleeNames);
         return exportSummaryIndexForModule(mod, summaries);
     }
 
@@ -3488,22 +3892,22 @@ namespace ctrace::stack::analysis
         bool changed = false;
         for (const auto& entry : src.functions)
         {
-            const FunctionSummary srcInternal = importPublicFunctionSummary(entry.second);
-            if (srcInternal.paramEffects.empty())
+            const std::size_t srcSize = effectivePublicParamEffectCount(entry.second);
+            if (srcSize == 0)
                 continue;
 
             auto it = dst.functions.find(entry.first);
             if (it == dst.functions.end())
             {
-                dst.functions.emplace(entry.first, exportPublicFunctionSummary(srcInternal));
+                UninitializedSummaryFunction normalized = entry.second;
+                trimTrailingEmptyPublicParamEffects(normalized);
+                dst.functions.emplace(entry.first, std::move(normalized));
                 changed = true;
                 continue;
             }
 
-            FunctionSummary dstInternal = importPublicFunctionSummary(it->second);
-            if (mergeFunctionSummary(dstInternal, srcInternal))
+            if (mergePublicFunctionSummary(it->second, entry.second))
             {
-                it->second = exportPublicFunctionSummary(dstInternal);
                 changed = true;
             }
         }
@@ -3522,9 +3926,7 @@ namespace ctrace::stack::analysis
             if (rhsIt == rhs.functions.end())
                 return false;
 
-            const FunctionSummary left = importPublicFunctionSummary(entry.second);
-            const FunctionSummary right = importPublicFunctionSummary(rhsIt->second);
-            if (!(left == right))
+            if (!publicFunctionSummaryEquals(entry.second, rhsIt->second))
                 return false;
         }
 
@@ -3542,9 +3944,12 @@ namespace ctrace::stack::analysis
             collectSummaryScope(mod, shouldAnalyze);
         auto shouldSummarize = [&](const llvm::Function& F) -> bool
         { return summaryScope.find(&F) != summaryScope.end(); };
+        const CanonicalCalleeNameMap canonicalCalleeNames =
+            buildCanonicalCalleeNameMap(mod, summaryScope);
         const ExternalSummaryMapByName externalMap = importExternalSummaryMap(externalSummaries);
         FunctionSummaryMap summaries = computeFunctionSummaries(
-            mod, shouldSummarize, externalMap.empty() ? nullptr : &externalMap);
+            mod, shouldSummarize, externalMap.empty() ? nullptr : &externalMap,
+            &canonicalCalleeNames);
 
         for (const llvm::Function& F : mod)
         {
@@ -3554,7 +3959,8 @@ namespace ctrace::stack::analysis
                 continue;
 
             analyzeFunction(F, mod.getDataLayout(), summaries,
-                            externalMap.empty() ? nullptr : &externalMap, nullptr, &issues);
+                            externalMap.empty() ? nullptr : &externalMap, &canonicalCalleeNames,
+                            nullptr, &issues);
         }
 
         return issues;

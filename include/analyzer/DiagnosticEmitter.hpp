@@ -83,8 +83,7 @@ namespace ctrace::stack::analyzer
         AnalysisResult& result, const std::vector<analysis::UninitializedLocalReadIssue>& issues);
 
     void appendGlobalReadBeforeWriteDiagnostics(
-        AnalysisResult& result,
-        const std::vector<analysis::GlobalReadBeforeWriteIssue>& issues);
+        AnalysisResult& result, const std::vector<analysis::GlobalReadBeforeWriteIssue>& issues);
 
     void appendInvalidBaseReconstructionDiagnostics(
         AnalysisResult& result,

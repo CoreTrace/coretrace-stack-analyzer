@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -27,6 +28,7 @@ namespace ctrace::stack::analysis
     {
         std::string functionPattern;
         unsigned argIndex = 0;
+        unsigned reserved = 0;
     };
 
     struct StackEscapeModel
@@ -38,20 +40,23 @@ namespace ctrace::stack::analysis
     {
         const llvm::Function* callee = nullptr;
         unsigned argIndex = 0;
+        unsigned reserved = 0;
     };
 
     struct IndirectCallDependency
     {
         std::vector<DirectParamDependency> candidates;
-        bool hasUnknownTarget = false;
+        std::uint64_t hasUnknownTarget : 1 = false;
+        std::uint64_t reservedFlags : 63 = 0;
     };
 
     struct ParamEscapeFacts
     {
-        bool hardEscape = false;
-        bool hasOpaqueExternalCall = false;
         std::vector<DirectParamDependency> directDeps;
         std::vector<IndirectCallDependency> indirectDeps;
+        std::uint64_t hardEscape : 1 = false;
+        std::uint64_t hasOpaqueExternalCall : 1 = false;
+        std::uint64_t reservedFlags : 62 = 0;
     };
 
     struct FunctionEscapeFacts

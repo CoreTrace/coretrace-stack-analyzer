@@ -245,12 +245,9 @@ namespace ctrace::stack::analysis
         {
             if (smallViews.empty())
                 return false;
-            return std::all_of(smallViews.begin(), smallViews.end(),
-                               [&](const ViewObservation* smallView)
-                               {
-                                   return smallView &&
-                                          isAccessOutsideViewRange(*smallView, access);
-                               });
+            return std::all_of(
+                smallViews.begin(), smallViews.end(), [&](const ViewObservation* smallView)
+                { return smallView && isAccessOutsideViewRange(*smallView, access); });
         }
 
         enum class LayoutFeasibility
@@ -260,9 +257,9 @@ namespace ctrace::stack::analysis
             Inconclusive
         };
 
-        static LayoutFeasibility
-        isIncompatibleLayoutFeasible(const ViewObservation& smaller, const ViewObservation& accessed,
-                                     std::uint64_t rootSizeBytes)
+        static LayoutFeasibility isIncompatibleLayoutFeasible(const ViewObservation& smaller,
+                                                              const ViewObservation& accessed,
+                                                              std::uint64_t rootSizeBytes)
         {
             const std::optional<std::uint64_t> smallerEnd =
                 checkedAddU64(smaller.accessOffsetBytes, smaller.viewSizeBytes);
@@ -418,7 +415,7 @@ namespace ctrace::stack::analysis
                           const std::function<bool(const llvm::Function&)>& shouldAnalyze,
                           const AnalysisConfig& config)
     {
-        (void) config;
+        (void)config;
         std::vector<TypeConfusionIssue> issues;
         std::unordered_set<const llvm::Instruction*> emitted;
 
@@ -521,9 +518,8 @@ namespace ctrace::stack::analysis
                         {
                             if (!smallestObs)
                                 continue;
-                            const LayoutFeasibility feasibility =
-                                isIncompatibleLayoutFeasible(*smallestObs, obs,
-                                                             *concreteRootSizeBytes);
+                            const LayoutFeasibility feasibility = isIncompatibleLayoutFeasible(
+                                *smallestObs, obs, *concreteRootSizeBytes);
                             if (feasibility != LayoutFeasibility::Infeasible)
                             {
                                 allInfeasible = false;

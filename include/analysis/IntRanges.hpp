@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <map>
 
 namespace llvm
@@ -12,10 +13,11 @@ namespace ctrace::stack::analysis
 {
     struct IntRange
     {
-        bool hasLower = false;
         long long lower = 0;
-        bool hasUpper = false;
         long long upper = 0;
+        std::uint64_t hasLower : 1 = false;
+        std::uint64_t hasUpper : 1 = false;
+        std::uint64_t reservedFlags : 62 = 0;
     };
 
     std::map<const llvm::Value*, IntRange> computeIntRangesFromICmps(llvm::Function& F);

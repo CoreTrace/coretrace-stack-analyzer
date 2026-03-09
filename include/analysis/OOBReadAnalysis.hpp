@@ -17,7 +17,7 @@ namespace llvm
 
 namespace ctrace::stack::analysis
 {
-    enum class OOBReadIssueKind
+    enum class OOBReadIssueKind : std::uint64_t
     {
         MissingNullTerminator,
         HeapIndexOutOfBounds
@@ -29,11 +29,11 @@ namespace ctrace::stack::analysis
         std::string filePath;
         std::string bufferName;
         std::string apiName;
-        OOBReadIssueKind kind = OOBReadIssueKind::HeapIndexOutOfBounds;
         std::uint64_t bufferSizeBytes = 0;
         std::uint64_t writeSizeBytes = 0;
         std::uint64_t capacityElements = 0;
         const llvm::Instruction* inst = nullptr;
+        OOBReadIssueKind kind = OOBReadIssueKind::HeapIndexOutOfBounds;
     };
 
     std::vector<OOBReadIssue>

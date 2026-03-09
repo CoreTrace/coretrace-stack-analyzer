@@ -19,7 +19,7 @@ namespace ctrace::stack::analysis
 {
     namespace
     {
-        enum class ParsedSeverity
+        enum class ParsedSeverity : std::uint64_t
         {
             Warning,
             Error
@@ -28,10 +28,10 @@ namespace ctrace::stack::analysis
         struct ParsedFrontendWarning
         {
             std::string filePath;
+            std::string message;
+            ParsedSeverity severity = ParsedSeverity::Warning;
             unsigned line = 0;
             unsigned column = 0;
-            ParsedSeverity severity = ParsedSeverity::Warning;
-            std::string message;
         };
 
         struct Classification

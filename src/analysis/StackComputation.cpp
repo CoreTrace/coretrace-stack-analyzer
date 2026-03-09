@@ -1,6 +1,7 @@
 #include "analysis/StackComputation.hpp"
 
 #include <algorithm>
+#include <cstdint>
 #include <deque>
 #include <limits>
 #include <optional>
@@ -311,17 +312,16 @@ namespace ctrace::stack::analysis
             {
             }
 
-            ConstraintSat
-            isSatisfiable(const std::map<const llvm::Value*, IntRange>& ranges,
-                          const llvm::Value* edgeCondition = nullptr, bool takesTrueEdge = true,
-                          const llvm::BasicBlock* edgeBlock = nullptr,
-                          const llvm::BasicBlock* incomingBlock = nullptr) const
+            ConstraintSat isSatisfiable(const std::map<const llvm::Value*, IntRange>& ranges,
+                                        const llvm::Value* edgeCondition = nullptr,
+                                        bool takesTrueEdge = true,
+                                        const llvm::BasicBlock* edgeBlock = nullptr,
+                                        const llvm::BasicBlock* incomingBlock = nullptr) const
             {
                 const ConstraintSat fallbackDecision = evaluateIntervalSatisfiability(ranges);
                 const smt::SmtFeasibility feasibility =
-                    smt::SmtConstraintEvaluator::evaluateQuery(
-                        encoder_.encode(ranges, edgeCondition, takesTrueEdge, edgeBlock,
-                                        incomingBlock));
+                    smt::SmtConstraintEvaluator::evaluateQuery(encoder_.encode(
+                        ranges, edgeCondition, takesTrueEdge, edgeBlock, incomingBlock));
                 switch (feasibility)
                 {
                 case smt::SmtFeasibility::Feasible:
@@ -336,7 +336,7 @@ namespace ctrace::stack::analysis
             }
 
           private:
-            smt::LlvmConstraintEncoder encoder_;
+            [[no_unique_address]] smt::LlvmConstraintEncoder encoder_;
         };
 
         static const llvm::Value* canonicalConstraintValue(const llvm::Value* value)
@@ -355,7 +355,8 @@ namespace ctrace::stack::analysis
             return current;
         }
 
-        static bool deriveRangeConstraintFromPredicate(llvm::ICmpInst::Predicate pred, bool valueIsOp0,
+        static bool deriveRangeConstraintFromPredicate(llvm::ICmpInst::Predicate pred,
+                                                       bool valueIsOp0,
                                                        const llvm::ConstantInt& constant,
                                                        IntRange& out)
         {
@@ -552,9 +553,8 @@ namespace ctrace::stack::analysis
             return outKey != nullptr;
         }
 
-        static bool
-        applyConstraintToState(std::map<const llvm::Value*, IntRange>& ranges,
-                               const llvm::Value* key, const IntRange& constraint)
+        static bool applyConstraintToState(std::map<const llvm::Value*, IntRange>& ranges,
+                                           const llvm::Value* key, const IntRange& constraint)
         {
             IntRange& cur = ranges[key];
 
@@ -601,9 +601,9 @@ namespace ctrace::stack::analysis
             {
                 const BasicBlock* block = nullptr;
                 const BasicBlock* predecessor = nullptr;
-                bool sawRecursiveCall = false;
                 std::map<const Value*, IntRange> ranges;
-                unsigned depth = 0;
+                std::uint64_t depth = 0;
+                std::uint64_t sawRecursiveCall = 0;
             };
 
             constexpr unsigned kMaxStates = 4096;
@@ -611,7 +611,11 @@ namespace ctrace::stack::analysis
             constexpr unsigned kMaxVisitsPerNode = 128;
 
             std::deque<PathState> worklist;
-            worklist.push_back(PathState{&F.getEntryBlock(), nullptr, false, {}, 0});
+            worklist.push_back(PathState{.block = &F.getEntryBlock(),
+                                         .predecessor = nullptr,
+                                         .ranges = {},
+                                         .depth = 0,
+                                         .sawRecursiveCall = 0});
 
             std::map<std::pair<const BasicBlock*, bool>, unsigned> visits;
             unsigned exploredStates = 0;
@@ -691,10 +695,10 @@ namespace ctrace::stack::analysis
                             }
                         }
 
-                        const llvm::Value* edgeCondition = branch->getCondition()->stripPointerCasts();
-                        const ConstraintSat sat =
-                            evaluator.isSatisfiable(next.ranges, edgeCondition, succIndex == 0, BB,
-                                                    current.predecessor);
+                        const llvm::Value* edgeCondition =
+                            branch->getCondition()->stripPointerCasts();
+                        const ConstraintSat sat = evaluator.isSatisfiable(
+                            next.ranges, edgeCondition, succIndex == 0, BB, current.predecessor);
                         if (sat == ConstraintSat::Unsat)
                             continue;
                         if (sat == ConstraintSat::Unknown)
@@ -727,9 +731,10 @@ namespace ctrace::stack::analysis
             std::unordered_map<const llvm::Function*, int> lowlink;
             std::vector<const llvm::Function*> stack;
             std::unordered_set<const llvm::Function*> onStack;
-            int nextIndex = 0;
             std::set<const llvm::Function*> recursive;
             std::vector<std::vector<const llvm::Function*>> recursiveComponents;
+            int nextIndex = 0;
+            int reserved = 0;
         };
 
         static void strongConnect(const llvm::Function* V, const CallGraph& CG, TarjanState& state)
@@ -939,11 +944,8 @@ namespace ctrace::stack::analysis
             return true;
         }
 
-        const NonRecursiveReturnFeasibility feasibility =
-            hasFeasibleNonRecursiveReturnPath(F,
-                                              [Self](const llvm::Function* Callee)
-                                              { return Callee == Self; },
-                                              evaluator);
+        const NonRecursiveReturnFeasibility feasibility = hasFeasibleNonRecursiveReturnPath(
+            F, [Self](const llvm::Function* Callee) { return Callee == Self; }, evaluator);
         return feasibility == NonRecursiveReturnFeasibility::DoesNotExist;
     }
 
@@ -978,8 +980,7 @@ namespace ctrace::stack::analysis
             {
                 const NonRecursiveReturnFeasibility feasibility = hasFeasibleNonRecursiveReturnPath(
                     *CF, [&componentSet](const llvm::Function* Callee)
-                    { return componentSet.count(Callee) != 0; },
-                    evaluator);
+                    { return componentSet.count(Callee) != 0; }, evaluator);
                 hasNoBaseCase = (feasibility == NonRecursiveReturnFeasibility::DoesNotExist);
             }
 

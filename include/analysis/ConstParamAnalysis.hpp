@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <functional>
 #include <string>
 #include <vector>
@@ -19,11 +20,12 @@ namespace ctrace::stack::analysis
         std::string currentType;
         std::string suggestedType;
         std::string suggestedTypeAlt;
-        bool pointerConstOnly = false; // ex: T * const param
-        bool isReference = false;
-        bool isRvalueRef = false;
         unsigned line = 0;
         unsigned column = 0;
+        std::uint64_t pointerConstOnly : 1 = false; // ex: T * const param
+        std::uint64_t isReference : 1 = false;
+        std::uint64_t isRvalueRef : 1 = false;
+        std::uint64_t reservedFlags : 61 = 0;
     };
 
     std::vector<ConstParamIssue>

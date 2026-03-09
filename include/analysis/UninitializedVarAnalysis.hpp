@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -15,6 +16,19 @@ namespace llvm
 
 namespace ctrace::stack::analysis
 {
+    struct PreparedUninitializedExternalSummariesOpaque;
+    struct PreparedUninitializedModuleContextOpaque;
+
+    struct PreparedUninitializedExternalSummaries
+    {
+        std::shared_ptr<const PreparedUninitializedExternalSummariesOpaque> opaque;
+    };
+
+    struct PreparedUninitializedModuleContext
+    {
+        std::shared_ptr<const PreparedUninitializedModuleContextOpaque> opaque;
+    };
+
     struct UninitializedSummaryRange
     {
         std::uint64_t begin = 0;
@@ -32,8 +46,9 @@ namespace ctrace::stack::analysis
         std::vector<UninitializedSummaryRange> readBeforeWriteRanges;
         std::vector<UninitializedSummaryRange> writeRanges;
         std::vector<UninitializedSummaryPointerSlotWrite> pointerSlotWrites;
-        bool hasUnknownReadBeforeWrite = false;
-        bool hasUnknownWrite = false;
+        std::uint64_t hasUnknownReadBeforeWrite : 1 = false;
+        std::uint64_t hasUnknownWrite : 1 = false;
+        std::uint64_t reservedFlags : 62 = 0;
     };
 
     struct UninitializedSummaryFunction
@@ -46,7 +61,7 @@ namespace ctrace::stack::analysis
         std::unordered_map<std::string, UninitializedSummaryFunction> functions;
     };
 
-    enum class UninitializedLocalIssueKind
+    enum class UninitializedLocalIssueKind : std::uint64_t
     {
         ReadBeforeDefiniteInit,
         ReadBeforeDefiniteInitViaCall,
@@ -69,6 +84,22 @@ namespace ctrace::stack::analysis
     buildUninitializedSummaryIndex(llvm::Module& mod,
                                    const std::function<bool(const llvm::Function&)>& shouldAnalyze,
                                    const UninitializedSummaryIndex* externalSummaries = nullptr);
+
+    PreparedUninitializedExternalSummaries
+    prepareUninitializedExternalSummaries(const UninitializedSummaryIndex* externalSummaries);
+
+    PreparedUninitializedModuleContext prepareUninitializedModuleContext(
+        llvm::Module& mod, const std::function<bool(const llvm::Function&)>& shouldAnalyze);
+
+    UninitializedSummaryIndex
+    buildUninitializedSummaryIndex(llvm::Module& mod,
+                                   const std::function<bool(const llvm::Function&)>& shouldAnalyze,
+                                   const PreparedUninitializedExternalSummaries* preparedExternal);
+
+    UninitializedSummaryIndex
+    buildUninitializedSummaryIndex(llvm::Module& mod,
+                                   const PreparedUninitializedModuleContext* preparedModule,
+                                   const PreparedUninitializedExternalSummaries* preparedExternal);
 
     bool mergeUninitializedSummaryIndex(UninitializedSummaryIndex& dst,
                                         const UninitializedSummaryIndex& src);

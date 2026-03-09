@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <functional>
 #include <set>
 #include <string>
@@ -23,14 +24,15 @@ namespace ctrace::stack::analysis
         std::string varName;
         const llvm::AllocaInst* allocaInst = nullptr;
 
-        bool userControlled = false;      // size derived from argument / non-local value
-        bool sizeIsConst = false;         // size known exactly
-        bool hasUpperBound = false;       // bounded size (from ICmp-derived range)
-        bool isRecursive = false;         // function participates in a recursion cycle
-        bool isInfiniteRecursive = false; // unconditional self recursion
-
         StackSize sizeBytes = 0;       // exact size in bytes (if sizeIsConst)
         StackSize upperBoundBytes = 0; // upper bound in bytes (if hasUpperBound)
+
+        std::uint64_t userControlled : 1 = false; // size derived from argument / non-local value
+        std::uint64_t sizeIsConst : 1 = false;    // size known exactly
+        std::uint64_t hasUpperBound : 1 = false;  // bounded size (from ICmp-derived range)
+        std::uint64_t isRecursive : 1 = false;    // function participates in a recursion cycle
+        std::uint64_t isInfiniteRecursive : 1 = false; // unconditional self recursion
+        std::uint64_t reservedFlags : 59 = 0;
     };
 
     std::vector<AllocaUsageIssue>

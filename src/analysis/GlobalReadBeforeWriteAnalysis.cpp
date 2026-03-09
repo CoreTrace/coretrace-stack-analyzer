@@ -1,6 +1,7 @@
 #include "analysis/GlobalReadBeforeWriteAnalysis.hpp"
 
 #include <queue>
+#include <string>
 #include <vector>
 
 #include <llvm/ADT/DenseMap.h>
@@ -20,8 +21,18 @@ namespace ctrace::stack::analysis
     {
         constexpr unsigned kUnderlyingObjectLookupLimit = 32;
 
-        const llvm::GlobalVariable*
-        resolveTrackedGlobalBuffer(const llvm::Value* pointerOperand)
+        bool isTrackedDefinitionGlobal(const llvm::GlobalVariable& global)
+        {
+            if (global.isDeclaration() || global.isConstant())
+                return false;
+            if (!global.hasInitializer() || !global.getInitializer()->isNullValue())
+                return false;
+            if (!global.getValueType()->isArrayTy())
+                return false;
+            return true;
+        }
+
+        const llvm::GlobalVariable* resolveUnderlyingGlobal(const llvm::Value* pointerOperand)
         {
             if (!pointerOperand || !pointerOperand->getType()->isPointerTy())
                 return nullptr;
@@ -32,14 +43,46 @@ namespace ctrace::stack::analysis
             const auto* global = llvm::dyn_cast_or_null<llvm::GlobalVariable>(underlying);
             if (!global)
                 return nullptr;
-            if (global->isDeclaration() || global->isConstant())
+            if (global->isConstant())
                 return nullptr;
-            if (!global->hasInitializer() || !global->getInitializer()->isNullValue())
-                return nullptr;
-            if (!global->getValueType()->isArrayTy())
+            return global;
+        }
+
+        const GlobalReadBeforeWriteGlobalSummary*
+        lookupExternalSummary(const GlobalReadBeforeWriteSummaryIndex* externalSummaries,
+                              const llvm::GlobalVariable& global)
+        {
+            if (!externalSummaries || !global.hasName() || global.getName().empty())
                 return nullptr;
 
-            return global;
+            const auto it = externalSummaries->globals.find(global.getName().str());
+            if (it == externalSummaries->globals.end())
+                return nullptr;
+            return &it->second;
+        }
+
+        struct TrackedGlobalLookup
+        {
+            const llvm::GlobalVariable* global = nullptr;
+            const GlobalReadBeforeWriteGlobalSummary* summary = nullptr;
+        };
+
+        TrackedGlobalLookup
+        resolveTrackedGlobalBuffer(const llvm::Value* pointerOperand,
+                                   const GlobalReadBeforeWriteSummaryIndex* externalSummaries)
+        {
+            const llvm::GlobalVariable* global = resolveUnderlyingGlobal(pointerOperand);
+            if (!global)
+                return {};
+
+            const bool trackedLocally = isTrackedDefinitionGlobal(*global);
+            const GlobalReadBeforeWriteGlobalSummary* external =
+                lookupExternalSummary(externalSummaries, *global);
+            const bool trackedExternally = external && external->zeroInitializedArray;
+
+            if (!trackedLocally && !trackedExternally)
+                return {};
+            return {global, external};
         }
 
         bool isControlOnlyLoadUsage(const llvm::LoadInst& load)
@@ -115,14 +158,161 @@ namespace ctrace::stack::analysis
 
         struct ReadEvent
         {
-            const llvm::LoadInst* load = nullptr;
+            const llvm::Instruction* inst = nullptr;
             const llvm::GlobalVariable* global = nullptr;
         };
+
+        void rememberAnyKnownWrite(
+            const TrackedGlobalLookup& tracked,
+            llvm::DenseMap<const llvm::GlobalVariable*, bool>& hasAnyKnownWriteByGlobal)
+        {
+            if (!tracked.global)
+                return;
+            if (hasAnyKnownWriteByGlobal.find(tracked.global) == hasAnyKnownWriteByGlobal.end())
+                hasAnyKnownWriteByGlobal[tracked.global] = false;
+            if (tracked.summary && tracked.summary->hasAnyWrite)
+                hasAnyKnownWriteByGlobal[tracked.global] = true;
+        }
+
+        void recordGlobalWrite(
+            const llvm::Value* pointerOperand, const llvm::Instruction& inst,
+            const GlobalReadBeforeWriteSummaryIndex* externalSummaries,
+            llvm::DenseMap<const llvm::GlobalVariable*, std::vector<const llvm::Instruction*>>&
+                writesByGlobal,
+            llvm::DenseMap<const llvm::GlobalVariable*, bool>& hasAnyKnownWriteByGlobal)
+        {
+            const TrackedGlobalLookup tracked =
+                resolveTrackedGlobalBuffer(pointerOperand, externalSummaries);
+            if (!tracked.global)
+                return;
+
+            writesByGlobal[tracked.global].push_back(&inst);
+            rememberAnyKnownWrite(tracked, hasAnyKnownWriteByGlobal);
+        }
+
+        void recordGlobalRead(
+            const llvm::Value* pointerOperand, const llvm::Instruction& inst,
+            const GlobalReadBeforeWriteSummaryIndex* externalSummaries,
+            std::vector<ReadEvent>& reads,
+            llvm::DenseMap<const llvm::GlobalVariable*, bool>& hasAnyKnownWriteByGlobal)
+        {
+            const TrackedGlobalLookup tracked =
+                resolveTrackedGlobalBuffer(pointerOperand, externalSummaries);
+            if (!tracked.global)
+                return;
+
+            reads.push_back(ReadEvent{&inst, tracked.global});
+            rememberAnyKnownWrite(tracked, hasAnyKnownWriteByGlobal);
+        }
+
+        void collectGlobalWriteSummaryForPointer(const llvm::Value* pointerOperand,
+                                                 GlobalReadBeforeWriteSummaryIndex& out)
+        {
+            const llvm::GlobalVariable* global = resolveUnderlyingGlobal(pointerOperand);
+            if (!global || !global->hasName() || global->getName().empty())
+                return;
+
+            auto& summary = out.globals[global->getName().str()];
+            summary.hasAnyWrite = true;
+            summary.zeroInitializedArray =
+                summary.zeroInitializedArray || isTrackedDefinitionGlobal(*global);
+        }
     } // namespace
+
+    GlobalReadBeforeWriteSummaryIndex buildGlobalReadBeforeWriteSummaryIndex(
+        llvm::Module& mod, const std::function<bool(const llvm::Function&)>& shouldAnalyze)
+    {
+        GlobalReadBeforeWriteSummaryIndex out;
+
+        for (const llvm::GlobalVariable& global : mod.globals())
+        {
+            if (!isTrackedDefinitionGlobal(global) || !global.hasName() || global.getName().empty())
+                continue;
+            out.globals[global.getName().str()].zeroInitializedArray = true;
+        }
+
+        for (const llvm::Function& function : mod)
+        {
+            if (function.isDeclaration() || !shouldAnalyze(function))
+                continue;
+
+            for (const llvm::BasicBlock& block : function)
+            {
+                for (const llvm::Instruction& inst : block)
+                {
+                    if (const auto* store = llvm::dyn_cast<llvm::StoreInst>(&inst))
+                    {
+                        if (!store->isVolatile())
+                            collectGlobalWriteSummaryForPointer(store->getPointerOperand(), out);
+                        continue;
+                    }
+
+                    if (const auto* memTransfer = llvm::dyn_cast<llvm::MemTransferInst>(&inst))
+                    {
+                        if (!memTransfer->isVolatile())
+                            collectGlobalWriteSummaryForPointer(memTransfer->getRawDest(), out);
+                        continue;
+                    }
+
+                    if (const auto* memSet = llvm::dyn_cast<llvm::MemSetInst>(&inst))
+                    {
+                        if (!memSet->isVolatile())
+                            collectGlobalWriteSummaryForPointer(memSet->getRawDest(), out);
+                        continue;
+                    }
+
+                    if (const auto* atomicRmw = llvm::dyn_cast<llvm::AtomicRMWInst>(&inst))
+                    {
+                        collectGlobalWriteSummaryForPointer(atomicRmw->getPointerOperand(), out);
+                        continue;
+                    }
+
+                    if (const auto* cmpXchg = llvm::dyn_cast<llvm::AtomicCmpXchgInst>(&inst))
+                    {
+                        collectGlobalWriteSummaryForPointer(cmpXchg->getPointerOperand(), out);
+                        continue;
+                    }
+
+                    const auto* call = llvm::dyn_cast<llvm::CallBase>(&inst);
+                    if (!call || !call->mayWriteToMemory())
+                        continue;
+                    for (const llvm::Value* arg : call->args())
+                        collectGlobalWriteSummaryForPointer(arg, out);
+                }
+            }
+        }
+
+        return out;
+    }
+
+    bool mergeGlobalReadBeforeWriteSummaryIndex(GlobalReadBeforeWriteSummaryIndex& dst,
+                                                const GlobalReadBeforeWriteSummaryIndex& src)
+    {
+        bool changed = false;
+        for (const auto& entry : src.globals)
+        {
+            auto [it, inserted] = dst.globals.try_emplace(entry.first, entry.second);
+            if (inserted)
+            {
+                changed = true;
+                continue;
+            }
+
+            GlobalReadBeforeWriteGlobalSummary& merged = it->second;
+            const bool beforeTracked = merged.zeroInitializedArray;
+            const bool beforeWrite = merged.hasAnyWrite;
+            merged.zeroInitializedArray |= entry.second.zeroInitializedArray;
+            merged.hasAnyWrite |= entry.second.hasAnyWrite;
+            if (merged.zeroInitializedArray != beforeTracked || merged.hasAnyWrite != beforeWrite)
+                changed = true;
+        }
+        return changed;
+    }
 
     std::vector<GlobalReadBeforeWriteIssue>
     analyzeGlobalReadBeforeWrites(llvm::Module& mod,
-                                  const std::function<bool(const llvm::Function&)>& shouldAnalyze)
+                                  const std::function<bool(const llvm::Function&)>& shouldAnalyze,
+                                  const GlobalReadBeforeWriteSummaryIndex* externalSummaries)
     {
         std::vector<GlobalReadBeforeWriteIssue> issues;
 
@@ -135,6 +325,7 @@ namespace ctrace::stack::analysis
             llvm::DenseMap<const llvm::Instruction*, unsigned> instructionOrder;
             llvm::DenseMap<const llvm::GlobalVariable*, std::vector<const llvm::Instruction*>>
                 writesByGlobal;
+            llvm::DenseMap<const llvm::GlobalVariable*, bool> hasAnyKnownWriteByGlobal;
             std::vector<ReadEvent> reads;
 
             unsigned sequence = 0;
@@ -148,21 +339,60 @@ namespace ctrace::stack::analysis
                     {
                         if (!store->isVolatile())
                         {
-                            if (const auto* global =
-                                    resolveTrackedGlobalBuffer(store->getPointerOperand()))
-                            {
-                                writesByGlobal[global].push_back(&inst);
-                            }
+                            recordGlobalWrite(store->getPointerOperand(), inst, externalSummaries,
+                                              writesByGlobal, hasAnyKnownWriteByGlobal);
                         }
                     }
-                    else if (auto* memIntrinsic = llvm::dyn_cast<llvm::MemIntrinsic>(&inst))
+                    else if (auto* memTransfer = llvm::dyn_cast<llvm::MemTransferInst>(&inst))
                     {
-                        if (!memIntrinsic->isVolatile())
+                        if (!memTransfer->isVolatile())
                         {
-                            if (const auto* global =
-                                    resolveTrackedGlobalBuffer(memIntrinsic->getRawDest()))
+                            recordGlobalWrite(memTransfer->getRawDest(), inst, externalSummaries,
+                                              writesByGlobal, hasAnyKnownWriteByGlobal);
+                            recordGlobalRead(memTransfer->getRawSource(), inst, externalSummaries,
+                                             reads, hasAnyKnownWriteByGlobal);
+                        }
+                    }
+                    else if (auto* memSet = llvm::dyn_cast<llvm::MemSetInst>(&inst))
+                    {
+                        if (!memSet->isVolatile())
+                        {
+                            recordGlobalWrite(memSet->getRawDest(), inst, externalSummaries,
+                                              writesByGlobal, hasAnyKnownWriteByGlobal);
+                        }
+                    }
+                    else if (auto* atomicRmw = llvm::dyn_cast<llvm::AtomicRMWInst>(&inst))
+                    {
+                        recordGlobalRead(atomicRmw->getPointerOperand(), inst, externalSummaries,
+                                         reads, hasAnyKnownWriteByGlobal);
+                        recordGlobalWrite(atomicRmw->getPointerOperand(), inst, externalSummaries,
+                                          writesByGlobal, hasAnyKnownWriteByGlobal);
+                    }
+                    else if (auto* cmpXchg = llvm::dyn_cast<llvm::AtomicCmpXchgInst>(&inst))
+                    {
+                        recordGlobalRead(cmpXchg->getPointerOperand(), inst, externalSummaries,
+                                         reads, hasAnyKnownWriteByGlobal);
+                        recordGlobalWrite(cmpXchg->getPointerOperand(), inst, externalSummaries,
+                                          writesByGlobal, hasAnyKnownWriteByGlobal);
+                    }
+                    else if (auto* call = llvm::dyn_cast<llvm::CallBase>(&inst))
+                    {
+                        const bool mayRead = call->mayReadFromMemory();
+                        const bool mayWrite = call->mayWriteToMemory();
+                        if (mayRead || mayWrite)
+                        {
+                            for (llvm::Value* arg : call->args())
                             {
-                                writesByGlobal[global].push_back(&inst);
+                                if (mayRead)
+                                {
+                                    recordGlobalRead(arg, inst, externalSummaries, reads,
+                                                     hasAnyKnownWriteByGlobal);
+                                }
+                                if (mayWrite)
+                                {
+                                    recordGlobalWrite(arg, inst, externalSummaries, writesByGlobal,
+                                                      hasAnyKnownWriteByGlobal);
+                                }
                             }
                         }
                     }
@@ -171,53 +401,61 @@ namespace ctrace::stack::analysis
                     if (!load || load->isVolatile())
                         continue;
 
-                    const auto* global = resolveTrackedGlobalBuffer(load->getPointerOperand());
-                    if (!global)
-                        continue;
-
                     if (isControlOnlyLoadUsage(*load))
                         continue;
 
-                    reads.push_back(ReadEvent{load, global});
+                    recordGlobalRead(load->getPointerOperand(), inst, externalSummaries, reads,
+                                     hasAnyKnownWriteByGlobal);
                 }
             }
 
-            if (reads.empty() || writesByGlobal.empty())
+            if (reads.empty())
                 continue;
 
             llvm::DenseMap<const llvm::GlobalVariable*, const ReadEvent*> selectedReads;
             llvm::DenseMap<const llvm::GlobalVariable*, const llvm::Instruction*> selectedWrites;
+            llvm::DenseMap<const llvm::GlobalVariable*, GlobalReadBeforeWriteKind> selectedKinds;
 
             for (const ReadEvent& readEvent : reads)
             {
-                const auto writesIt = writesByGlobal.find(readEvent.global);
-                if (writesIt == writesByGlobal.end())
-                    continue;
-
                 bool hasDominatingWrite = false;
                 const llvm::Instruction* firstWriteAfterRead = nullptr;
-                for (const llvm::Instruction* writeInst : writesIt->second)
+                const auto writesIt = writesByGlobal.find(readEvent.global);
+                if (writesIt != writesByGlobal.end())
                 {
-                    if (domTree.dominates(writeInst, readEvent.load))
+                    for (const llvm::Instruction* writeInst : writesIt->second)
                     {
-                        hasDominatingWrite = true;
-                        break;
-                    }
-                    if (!firstWriteAfterRead && domTree.dominates(readEvent.load, writeInst))
-                    {
-                        firstWriteAfterRead = writeInst;
+                        if (writeInst == readEvent.inst)
+                            continue;
+                        if (domTree.dominates(writeInst, readEvent.inst))
+                        {
+                            hasDominatingWrite = true;
+                            break;
+                        }
+                        if (domTree.dominates(readEvent.inst, writeInst) &&
+                            (!firstWriteAfterRead ||
+                             instructionOrder.lookup(writeInst) <
+                                 instructionOrder.lookup(firstWriteAfterRead)))
+                        {
+                            firstWriteAfterRead = writeInst;
+                        }
                     }
                 }
 
-                if (hasDominatingWrite || !firstWriteAfterRead)
+                if (hasDominatingWrite)
                     continue;
 
+                const GlobalReadBeforeWriteKind kind =
+                    firstWriteAfterRead ? GlobalReadBeforeWriteKind::BeforeFirstLocalWrite
+                                        : GlobalReadBeforeWriteKind::WithoutLocalWrite;
                 const auto selectedIt = selectedReads.find(readEvent.global);
                 if (selectedIt == selectedReads.end() ||
-                    instructionOrder[readEvent.load] < instructionOrder[selectedIt->second->load])
+                    instructionOrder.lookup(readEvent.inst) <
+                        instructionOrder.lookup(selectedIt->second->inst))
                 {
                     selectedReads[readEvent.global] = &readEvent;
                     selectedWrites[readEvent.global] = firstWriteAfterRead;
+                    selectedKinds[readEvent.global] = kind;
                 }
             }
 
@@ -225,15 +463,17 @@ namespace ctrace::stack::analysis
             {
                 const auto* global = selected.first;
                 const ReadEvent* readEvent = selected.second;
-                if (!readEvent || !readEvent->load || !global)
+                if (!readEvent || !readEvent->inst || !global)
                     continue;
 
                 GlobalReadBeforeWriteIssue issue;
                 issue.funcName = function.getName().str();
                 issue.globalName =
                     global->hasName() ? global->getName().str() : std::string("<unnamed-global>");
-                issue.readInst = readEvent->load;
+                issue.readInst = readEvent->inst;
                 issue.firstWriteInst = selectedWrites.lookup(global);
+                issue.kind = selectedKinds.lookup(global);
+                issue.hasNonLocalWrite = hasAnyKnownWriteByGlobal.lookup(global);
                 issues.push_back(std::move(issue));
             }
         }

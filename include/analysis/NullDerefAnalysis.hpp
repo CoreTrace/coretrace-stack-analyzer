@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <functional>
 #include <string>
 #include <vector>
@@ -13,7 +14,7 @@ namespace llvm
 
 namespace ctrace::stack::analysis
 {
-    enum class NullDerefIssueKind
+    enum class NullDerefIssueKind : std::uint64_t
     {
         DirectNullPointer,
         NullBranchDereference,
@@ -26,8 +27,8 @@ namespace ctrace::stack::analysis
         std::string funcName;
         std::string filePath;
         std::string pointerName;
-        NullDerefIssueKind kind = NullDerefIssueKind::DirectNullPointer;
         const llvm::Instruction* inst = nullptr;
+        NullDerefIssueKind kind = NullDerefIssueKind::DirectNullPointer;
     };
 
     std::vector<NullDerefIssue>

@@ -29,7 +29,7 @@ namespace ctrace::stack::analysis
     {
         using SmtFeasibility = smt::SmtFeasibility;
 
-        enum class RecentWriteKind
+        enum class RecentWriteKind : std::uint64_t
         {
             Unknown,
             MemcpyLike,
@@ -39,9 +39,9 @@ namespace ctrace::stack::analysis
 
         struct RecentWrite
         {
-            RecentWriteKind kind = RecentWriteKind::Unknown;
             std::string apiName;
             std::uint64_t writeSizeBytes = 0;
+            RecentWriteKind kind = RecentWriteKind::Unknown;
         };
 
         struct ObjectInfo
@@ -322,8 +322,8 @@ namespace ctrace::stack::analysis
                                     const llvm::Instruction* contextInst) const
             {
                 return smt::SmtConstraintEvaluator::evaluateQuery(
-                    smt::encodeSignedComparisonFeasibility(
-                        ranges, indexExpr, -1, false, contextInst));
+                    smt::encodeSignedComparisonFeasibility(ranges, indexExpr, -1, false,
+                                                           contextInst));
             }
 
             SmtFeasibility
@@ -332,16 +332,16 @@ namespace ctrace::stack::analysis
                                     const llvm::Instruction* contextInst) const
             {
                 if (limitExclusive == 0 ||
-                    limitExclusive > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()))
+                    limitExclusive >
+                        static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()))
                 {
                     return SmtFeasibility::Inconclusive;
                 }
 
-                const std::int64_t upperInclusive =
-                    static_cast<std::int64_t>(limitExclusive - 1);
+                const std::int64_t upperInclusive = static_cast<std::int64_t>(limitExclusive - 1);
                 return smt::SmtConstraintEvaluator::evaluateQuery(
-                    smt::encodeSignedComparisonFeasibility(
-                        ranges, indexExpr, upperInclusive, true, contextInst));
+                    smt::encodeSignedComparisonFeasibility(ranges, indexExpr, upperInclusive, true,
+                                                           contextInst));
             }
         };
 
@@ -368,8 +368,7 @@ namespace ctrace::stack::analysis
             }
 
             return evaluator.isUpperOverflowFeasible(queryRanges, *indexExpr, capacity,
-                                                     &accessInst) ==
-                   SmtFeasibility::Infeasible;
+                                                     &accessInst) == SmtFeasibility::Infeasible;
         }
     } // namespace
 
@@ -468,8 +467,10 @@ namespace ctrace::stack::analysis
                                 auto len = tryGetConstantU64(call->getArgOperand(2));
                                 if (obj && len)
                                 {
-                                    recentWrites[obj->root] = RecentWrite{
-                                        RecentWriteKind::MemcpyLike, calleeName.str(), *len};
+                                    recentWrites[obj->root] =
+                                        RecentWrite{.apiName = calleeName.str(),
+                                                    .writeSizeBytes = *len,
+                                                    .kind = RecentWriteKind::MemcpyLike};
                                 }
                             }
                         }
@@ -486,7 +487,9 @@ namespace ctrace::stack::analysis
                                                                ? RecentWriteKind::Unknown
                                                                : RecentWriteKind::MemsetNonZero;
                                     recentWrites[obj->root] =
-                                        RecentWrite{kind, calleeName.str(), *len};
+                                        RecentWrite{.apiName = calleeName.str(),
+                                                    .writeSizeBytes = *len,
+                                                    .kind = kind};
                                 }
                             }
                         }
@@ -499,7 +502,9 @@ namespace ctrace::stack::analysis
                                 if (obj && len)
                                 {
                                     recentWrites[obj->root] =
-                                        RecentWrite{RecentWriteKind::MemcpyLike, "strncpy", *len};
+                                        RecentWrite{.apiName = "strncpy",
+                                                    .writeSizeBytes = *len,
+                                                    .kind = RecentWriteKind::MemcpyLike};
                                 }
                             }
                         }
@@ -510,8 +515,10 @@ namespace ctrace::stack::analysis
                                 auto obj = resolveObjectInfo(call->getArgOperand(0), dataLayout);
                                 if (obj)
                                 {
-                                    recentWrites[obj->root] = RecentWrite{
-                                        RecentWriteKind::StrcpyLike, calleeName.str(), 0};
+                                    recentWrites[obj->root] =
+                                        RecentWrite{.apiName = calleeName.str(),
+                                                    .writeSizeBytes = 0,
+                                                    .kind = RecentWriteKind::StrcpyLike};
                                 }
                             }
                         }

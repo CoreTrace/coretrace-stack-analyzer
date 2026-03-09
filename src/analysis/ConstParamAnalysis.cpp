@@ -19,9 +19,10 @@ namespace ctrace::stack::analysis
     {
         struct TypeQualifiers
         {
-            bool isConst = false;
-            bool isVolatile = false;
-            bool isRestrict = false;
+            std::uint64_t isConst : 1 = false;
+            std::uint64_t isVolatile : 1 = false;
+            std::uint64_t isRestrict : 1 = false;
+            std::uint64_t reservedFlags : 61 = 0;
         };
 
         struct StrippedDIType
@@ -43,18 +44,19 @@ namespace ctrace::stack::analysis
             const llvm::DIType* originalType = nullptr;
             const llvm::DIType* pointeeType = nullptr;        // unqualified, typedefs stripped
             const llvm::DIType* pointeeDisplayType = nullptr; // unqualified, typedefs preserved
-            bool isPointer = false;
-            bool isReference = false;
-            bool isRvalueReference = false;
-            bool pointerConst = false;
-            bool pointerVolatile = false;
-            bool pointerRestrict = false;
-            bool pointeeConst = false;
-            bool pointeeVolatile = false;
-            bool pointeeRestrict = false;
-            bool isDoublePointer = false;
-            bool isVoid = false;
-            bool isFunctionPointer = false;
+            std::uint64_t isPointer : 1 = false;
+            std::uint64_t isReference : 1 = false;
+            std::uint64_t isRvalueReference : 1 = false;
+            std::uint64_t pointerConst : 1 = false;
+            std::uint64_t pointerVolatile : 1 = false;
+            std::uint64_t pointerRestrict : 1 = false;
+            std::uint64_t pointeeConst : 1 = false;
+            std::uint64_t pointeeVolatile : 1 = false;
+            std::uint64_t pointeeRestrict : 1 = false;
+            std::uint64_t isDoublePointer : 1 = false;
+            std::uint64_t isVoid : 1 = false;
+            std::uint64_t isFunctionPointer : 1 = false;
+            std::uint64_t reservedFlags : 52 = 0;
         };
 
         static const llvm::DIType* stripTypedefs(const llvm::DIType* type)

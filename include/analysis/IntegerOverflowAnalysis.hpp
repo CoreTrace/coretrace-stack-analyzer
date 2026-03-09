@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <functional>
 #include <string>
 #include <vector>
@@ -15,7 +16,7 @@ namespace llvm
 
 namespace ctrace::stack::analysis
 {
-    enum class IntegerOverflowIssueKind
+    enum class IntegerOverflowIssueKind : std::uint64_t
     {
         ArithmeticInSizeComputation,
         SignedToUnsignedSize,
@@ -29,8 +30,8 @@ namespace ctrace::stack::analysis
         std::string filePath;
         std::string sinkName;
         std::string operation;
-        IntegerOverflowIssueKind kind = IntegerOverflowIssueKind::ArithmeticInSizeComputation;
         const llvm::Instruction* inst = nullptr;
+        IntegerOverflowIssueKind kind = IntegerOverflowIssueKind::ArithmeticInSizeComputation;
     };
 
     std::vector<IntegerOverflowIssue>

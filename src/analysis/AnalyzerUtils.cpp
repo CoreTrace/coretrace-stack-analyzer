@@ -91,6 +91,7 @@ namespace ctrace::stack::analysis
 
             const llvm::Function* bestCallee = nullptr;
             StackEstimate bestStack{};
+            StackSize bestStackBytes = 0;
 
             auto itCG = CG.find(current);
             if (itCG == CG.end())
@@ -101,10 +102,13 @@ namespace ctrace::stack::analysis
                 auto itTotal = state.TotalStack.find(callee);
                 StackEstimate est =
                     (itTotal != state.TotalStack.end()) ? itTotal->second : StackEstimate{};
+                const StackSize estBytes =
+                    (itTotal != state.TotalStack.end()) ? itTotal->second.bytes : 0;
                 if (!bestCallee || est.bytes > bestStack.bytes)
                 {
                     bestCallee = callee;
                     bestStack = est;
+                    bestStackBytes = estBytes;
                 }
             }
 

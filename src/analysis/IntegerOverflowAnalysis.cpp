@@ -28,15 +28,17 @@ namespace ctrace::stack::analysis
         {
             llvm::StringRef name;
             unsigned sizeArgIndex = 0;
+            unsigned reserved = 0;
         };
 
         struct RiskSummary
         {
             IntegerOverflowIssueKind kind;
-            std::string operation;
             const llvm::Value* relatedValue = nullptr;
             const llvm::BinaryOperator* arithmeticOp = nullptr;
+            std::string operation;
             unsigned truncTargetBitWidth = 0;
+            unsigned reserved = 0;
         };
 
         using SmtFeasibility = smt::SmtFeasibility;
@@ -73,8 +75,8 @@ namespace ctrace::stack::analysis
                                         const llvm::Instruction* contextInst) const
             {
                 return smt::SmtConstraintEvaluator::evaluateQuery(
-                    smt::encodeSignedComparisonFeasibility(
-                    ranges, lhs, rhsConstant, true, contextInst));
+                    smt::encodeSignedComparisonFeasibility(ranges, lhs, rhsConstant, true,
+                                                           contextInst));
             }
 
             SmtFeasibility
@@ -83,8 +85,8 @@ namespace ctrace::stack::analysis
                                       const llvm::Instruction* contextInst) const
             {
                 return smt::SmtConstraintEvaluator::evaluateQuery(
-                    smt::encodeSignedComparisonFeasibility(
-                    ranges, lhs, rhsConstant, false, contextInst));
+                    smt::encodeSignedComparisonFeasibility(ranges, lhs, rhsConstant, false,
+                                                           contextInst));
             }
         };
 
@@ -566,11 +568,11 @@ namespace ctrace::stack::analysis
             {
                 if (isPotentiallyLossyTruncation(*trunc, ranges))
                 {
-                    return RiskSummary{IntegerOverflowIssueKind::TruncationInSizeComputation,
-                                       "trunc",
-                                       trunc->getOperand(0),
-                                       nullptr,
-                                       trunc->getType()->getIntegerBitWidth()};
+                    return RiskSummary{
+                        .kind = IntegerOverflowIssueKind::TruncationInSizeComputation,
+                        .relatedValue = trunc->getOperand(0),
+                        .operation = "trunc",
+                        .truncTargetBitWidth = trunc->getType()->getIntegerBitWidth()};
                 }
                 return classifySizeOperandRecursive(trunc->getOperand(0), ranges, visited,
                                                     depth + 1);
@@ -581,8 +583,9 @@ namespace ctrace::stack::analysis
                 const llvm::Value* source = sext->getOperand(0);
                 if (dependsOnFunctionArgument(source) && !hasKnownNonNegativeRange(source, ranges))
                 {
-                    return RiskSummary{
-                        IntegerOverflowIssueKind::SignedToUnsignedSize, "sext", source};
+                    return RiskSummary{.kind = IntegerOverflowIssueKind::SignedToUnsignedSize,
+                                       .relatedValue = source,
+                                       .operation = "sext"};
                 }
                 return classifySizeOperandRecursive(source, ranges, visited, depth + 1);
             }
@@ -605,11 +608,12 @@ namespace ctrace::stack::analysis
                         llvm::isa<llvm::ConstantInt>(binary->getOperand(1));
                     if (!bothConstants && dependsOnFunctionArgument(binary))
                     {
-                        return RiskSummary{IntegerOverflowIssueKind::ArithmeticInSizeComputation,
-                                           binary->getOpcodeName(),
-                                           binary,
-                                           binary,
-                                           0};
+                        return RiskSummary{
+                            .kind = IntegerOverflowIssueKind::ArithmeticInSizeComputation,
+                            .relatedValue = binary,
+                            .arithmeticOp = binary,
+                            .operation = binary->getOpcodeName(),
+                            .truncTargetBitWidth = 0};
                     }
                     break;
                 }
@@ -634,11 +638,11 @@ namespace ctrace::stack::analysis
                         case llvm::Intrinsic::usub_with_overflow:
                         case llvm::Intrinsic::umul_with_overflow:
                             return RiskSummary{
-                                IntegerOverflowIssueKind::ArithmeticInSizeComputation,
-                                intrinsic->getCalledFunction()
-                                    ? intrinsic->getCalledFunction()->getName().str()
-                                    : "with.overflow",
-                                aggregate};
+                                .kind = IntegerOverflowIssueKind::ArithmeticInSizeComputation,
+                                .relatedValue = aggregate,
+                                .operation = intrinsic->getCalledFunction()
+                                                 ? intrinsic->getCalledFunction()->getName().str()
+                                                 : "with.overflow"};
                         default:
                             break;
                         }
@@ -713,17 +717,18 @@ namespace ctrace::stack::analysis
             queryRanges[queryValue] = *knownRange;
         }
 
-        static std::map<const llvm::Value*, IntRange> buildValueQueryRanges(
-            const llvm::Value& queryValue, const std::map<const llvm::Value*, IntRange>& ranges)
+        static std::map<const llvm::Value*, IntRange>
+        buildValueQueryRanges(const llvm::Value& queryValue,
+                              const std::map<const llvm::Value*, IntRange>& ranges)
         {
             std::map<const llvm::Value*, IntRange> queryRanges;
             addLocalRangeForSmt(queryRanges, &queryValue, ranges);
             return queryRanges;
         }
 
-        static std::map<const llvm::Value*, IntRange> buildArithmeticQueryRanges(
-            const llvm::BinaryOperator& operation,
-            const std::map<const llvm::Value*, IntRange>& ranges)
+        static std::map<const llvm::Value*, IntRange>
+        buildArithmeticQueryRanges(const llvm::BinaryOperator& operation,
+                                   const std::map<const llvm::Value*, IntRange>& ranges)
         {
             std::map<const llvm::Value*, IntRange> queryRanges;
             addLocalRangeForSmt(queryRanges, operation.getOperand(0), ranges);
@@ -732,10 +737,10 @@ namespace ctrace::stack::analysis
             return queryRanges;
         }
 
-        static bool shouldSuppressRiskWithSmt(
-            const IntegerOverflowConstraintEvaluator& evaluator,
-            const std::map<const llvm::Value*, IntRange>& ranges, const RiskSummary& risk,
-            const llvm::Instruction& contextInst)
+        static bool shouldSuppressRiskWithSmt(const IntegerOverflowConstraintEvaluator& evaluator,
+                                              const std::map<const llvm::Value*, IntRange>& ranges,
+                                              const RiskSummary& risk,
+                                              const llvm::Instruction& contextInst)
         {
             switch (risk.kind)
             {
@@ -775,12 +780,10 @@ namespace ctrace::stack::analysis
                 if (queryRanges.empty())
                     return false;
                 const std::int64_t truncMax = (std::int64_t{1} << risk.truncTargetBitWidth) - 1;
-                const SmtFeasibility negativeFeasible =
-                    evaluator.isSignedLessEqualFeasible(queryRanges, *risk.relatedValue, -1,
-                                                        &contextInst);
-                const SmtFeasibility aboveMaxFeasible =
-                    evaluator.isSignedGreaterThanFeasible(queryRanges, *risk.relatedValue, truncMax,
-                                                          &contextInst);
+                const SmtFeasibility negativeFeasible = evaluator.isSignedLessEqualFeasible(
+                    queryRanges, *risk.relatedValue, -1, &contextInst);
+                const SmtFeasibility aboveMaxFeasible = evaluator.isSignedGreaterThanFeasible(
+                    queryRanges, *risk.relatedValue, truncMax, &contextInst);
                 return negativeFeasible == SmtFeasibility::Infeasible &&
                        aboveMaxFeasible == SmtFeasibility::Infeasible;
             }
@@ -829,7 +832,7 @@ namespace ctrace::stack::analysis
                                 buildArithmeticQueryRanges(*binary, ranges);
                             if (!queryRanges.empty() &&
                                 evaluator.isSignedOverflowFeasible(queryRanges, *binary, &inst) ==
-                                SmtFeasibility::Infeasible)
+                                    SmtFeasibility::Infeasible)
                             {
                                 continue;
                             }

@@ -2,46 +2,56 @@
 
 #include "StackUsageAnalyzer.hpp"
 
+#include <cstdint>
 #include <string>
 #include <vector>
+
+// char dummyGlobal[16];
+// int a[10];
 
 namespace ctrace::stack::cli
 {
 
-    enum class OutputFormat
+    enum class OutputFormat : std::uint64_t
     {
-        Human,
-        Json,
-        Sarif
+        Human = 0,
+        Json = 1,
+        Sarif = 2
     };
 
     struct ParsedArguments
     {
         AnalysisConfig config;
+
         std::vector<std::string> inputFilenames;
-        OutputFormat outputFormat = OutputFormat::Human;
+
         std::string sarifBaseDir;
         std::string configPath;
         std::string compileCommandsPath;
-        bool compileCommandsExplicit = false;
-        bool analysisProfileExplicit = false;
-        bool includeCompdbDeps = false;
-        bool printEffectiveConfig = false;
-        bool verbose = false;
+
+        OutputFormat outputFormat = OutputFormat::Human;
+
+        std::uint64_t compileCommandsExplicit : 1 = false;
+        std::uint64_t analysisProfileExplicit : 1 = false;
+        std::uint64_t includeCompdbDeps : 1 = false;
+        std::uint64_t printEffectiveConfig : 1 = false;
+        std::uint64_t verbose : 1 = false;
+        std::uint64_t reservedFlags : 59 = 0;
     };
 
-    enum class ParseStatus
+    enum class ParseStatus : std::uint8_t
     {
-        Ok,
-        Help,
-        Error
+        Ok = 0,
+        Help = 1,
+        Error = 2,
     };
 
     struct ParseResult
     {
-        ParseStatus status = ParseStatus::Ok;
-        ParsedArguments parsed;
         std::string error;
+        ParsedArguments parsed;
+        ParseStatus status = ParseStatus::Ok;
+        char padded[7];
     };
 
     ParseResult parseArguments(int argc, char** argv);

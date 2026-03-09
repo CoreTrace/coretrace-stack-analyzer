@@ -74,10 +74,10 @@ namespace ctrace::stack::analysis
 
         struct ResourceRule
         {
-            RuleAction action = RuleAction::AcquireOut;
             std::string functionPattern;
-            unsigned argIndex = 0;
             std::string resourceKind;
+            unsigned argIndex = 0;
+            RuleAction action = RuleAction::AcquireOut;
         };
 
         struct ResourceModel
@@ -89,9 +89,10 @@ namespace ctrace::stack::analysis
         {
             std::string className;
             std::string methodName;
-            bool isCtor = false;
-            bool isDtor = false;
-            bool isLifecycleReleaseLike = false;
+            std::uint64_t isCtor : 1 = false;
+            std::uint64_t isDtor : 1 = false;
+            std::uint64_t isLifecycleReleaseLike : 1 = false;
+            std::uint64_t reservedFlags : 61 = 0;
         };
 
         enum class StorageScope
@@ -105,13 +106,13 @@ namespace ctrace::stack::analysis
 
         struct StorageKey
         {
-            StorageScope scope = StorageScope::Unknown;
             std::string key;
             std::string displayName;
             std::string className;
+            const llvm::AllocaInst* localAlloca = nullptr;
             std::uint64_t offset = 0;
             int argumentIndex = -1;
-            const llvm::AllocaInst* localAlloca = nullptr;
+            StorageScope scope = StorageScope::Unknown;
 
             bool valid() const
             {
@@ -121,11 +122,12 @@ namespace ctrace::stack::analysis
 
         struct ParamLifetimeEffect
         {
-            RuleAction action = RuleAction::AcquireOut;
-            unsigned argIndex = 0;
-            std::uint64_t offset = 0;
-            bool viaPointerSlot = false;
             std::string resourceKind;
+            std::uint64_t offset = 0;
+            unsigned argIndex = 0;
+            RuleAction action = RuleAction::AcquireOut;
+            std::uint64_t viaPointerSlot : 1 = false;
+            std::uint64_t reservedFlags : 63 = 0;
         };
 
         struct FunctionLifetimeSummary
@@ -142,8 +144,9 @@ namespace ctrace::stack::analysis
             std::vector<const llvm::Instruction*> releaseInsts;
             int acquires = 0;
             int releases = 0;
-            bool escapesViaReturn = false;
             OwnershipState ownership = OwnershipState::Unknown;
+            std::uint32_t escapesViaReturn : 1 = false;
+            std::uint32_t reservedFlags : 31 = 0;
         };
 
         struct ClassAcquireRecord
