@@ -45,7 +45,7 @@ namespace ctrace::stack::cli
             }
 
           private:
-            static constexpr std::array<OptionCandidate, 53> kCandidates = {
+            static constexpr std::array<OptionCandidate, 54> kCandidates = {
                 {{"-h", "-h"},
                  {"--help", "--help"},
                  {"--demangle", "--demangle"},
@@ -86,6 +86,7 @@ namespace ctrace::stack::cli
                  {"--no-uninitialized-cross-tu", "--no-uninitialized-cross-tu"},
                  {"--resource-summary-cache-dir", "--resource-summary-cache-dir"},
                  {"--resource-summary-cache-memory-only", "--resource-summary-cache-memory-only"},
+                 {"--compile-ir-cache-dir", "--compile-ir-cache-dir"},
                  {"--config", "--config"},
                  {"--print-effective-config", "--print-effective-config"},
                  {"--compile-commands", "--compile-commands"},
@@ -105,7 +106,8 @@ namespace ctrace::stack::cli
                 std::string_view suggestion;
                 std::size_t distance = std::numeric_limits<std::size_t>::max();
                 std::size_t queryLength = 0;
-                bool valid = false;
+                std::uint64_t valid : 1 = false;
+                std::uint64_t reservedFlags : 63 = 0;
             };
 
             static std::optional<std::string>
@@ -584,7 +586,8 @@ namespace ctrace::stack::cli
             std::string_view configKey;
             const char* cliOption;
             SmtOptionApplyFn apply = nullptr;
-            bool impliesSmtEnabled = true;
+            std::uint64_t impliesSmtEnabled : 1 = true;
+            std::uint64_t reservedFlags : 63 = 0;
         };
 
         bool applySmtSwitchOption(AnalysisConfig& cfg, const std::string& value,
@@ -724,21 +727,61 @@ namespace ctrace::stack::cli
         template <typename Owner> struct BoolConfigSpec
         {
             std::string_view key;
-            bool Owner::*field = nullptr;
+            void (*set)(Owner&, bool) = nullptr;
         };
 
+        void setConfigTiming(AnalysisConfig& cfg, bool value)
+        {
+            cfg.timing = value;
+        }
+
+        void setConfigWarningsOnly(AnalysisConfig& cfg, bool value)
+        {
+            cfg.warningsOnly = value;
+        }
+
+        void setConfigQuiet(AnalysisConfig& cfg, bool value)
+        {
+            cfg.quiet = value;
+        }
+
+        void setConfigDemangle(AnalysisConfig& cfg, bool value)
+        {
+            cfg.demangle = value;
+        }
+
+        void setConfigResourceCrossTU(AnalysisConfig& cfg, bool value)
+        {
+            cfg.resourceCrossTU = value;
+        }
+
+        void setConfigUninitializedCrossTU(AnalysisConfig& cfg, bool value)
+        {
+            cfg.uninitializedCrossTU = value;
+        }
+
+        void setConfigResourceSummaryMemoryOnly(AnalysisConfig& cfg, bool value)
+        {
+            cfg.resourceSummaryMemoryOnly = value;
+        }
+
+        void setParsedIncludeCompdbDeps(ParsedArguments& parsed, bool value)
+        {
+            parsed.includeCompdbDeps = value;
+        }
+
         constexpr std::array<BoolConfigSpec<AnalysisConfig>, 7> kConfigBoolSpecs = {{
-            {"timing", &AnalysisConfig::timing},
-            {"warnings-only", &AnalysisConfig::warningsOnly},
-            {"quiet", &AnalysisConfig::quiet},
-            {"demangle", &AnalysisConfig::demangle},
-            {"resource-cross-tu", &AnalysisConfig::resourceCrossTU},
-            {"uninitialized-cross-tu", &AnalysisConfig::uninitializedCrossTU},
-            {"resource-summary-cache-memory-only", &AnalysisConfig::resourceSummaryMemoryOnly},
+            {"timing", &setConfigTiming},
+            {"warnings-only", &setConfigWarningsOnly},
+            {"quiet", &setConfigQuiet},
+            {"demangle", &setConfigDemangle},
+            {"resource-cross-tu", &setConfigResourceCrossTU},
+            {"uninitialized-cross-tu", &setConfigUninitializedCrossTU},
+            {"resource-summary-cache-memory-only", &setConfigResourceSummaryMemoryOnly},
         }};
 
         constexpr std::array<BoolConfigSpec<ParsedArguments>, 1> kParsedBoolSpecs = {{
-            {"include-compdb-deps", &ParsedArguments::includeCompdbDeps},
+            {"include-compdb-deps", &setParsedIncludeCompdbDeps},
         }};
 
         template <typename Owner, std::size_t N>
@@ -759,7 +802,8 @@ namespace ctrace::stack::cli
                     return false;
                 }
 
-                owner.*(spec.field) = parsedValue;
+                if (spec.set)
+                    spec.set(owner, parsedValue);
                 return true;
             }
             return false;
@@ -768,7 +812,8 @@ namespace ctrace::stack::cli
         struct PreParsedCliMeta
         {
             std::string configPath;
-            bool printEffectiveConfig = false;
+            std::uint64_t printEffectiveConfig : 1 = false;
+            std::uint64_t reservedFlags : 63 = 0;
         };
 
         bool preScanMetaOptions(int argc, char** argv, PreParsedCliMeta& outMeta,
@@ -893,6 +938,11 @@ namespace ctrace::stack::cli
             if (key == "resource-summary-cache-dir")
             {
                 cfg.resourceSummaryCacheDir = resolveConfigRelativePath(value, configDir);
+                return true;
+            }
+            if (key == "compile-ir-cache-dir")
+            {
+                cfg.compileIRCacheDir = resolveConfigRelativePath(value, configDir);
                 return true;
             }
 
@@ -1386,6 +1436,18 @@ namespace ctrace::stack::cli
                     if (!error.empty())
                         return makeError(error);
                     cfg.resourceSummaryCacheDir = std::move(value);
+                    continue;
+                }
+            }
+            {
+                std::string value;
+                std::string error;
+                if (consumeLongOptionValue(argStr, "--compile-ir-cache-dir", i, argc, argv, value,
+                                           error))
+                {
+                    if (!error.empty())
+                        return makeError(error);
+                    cfg.compileIRCacheDir = std::move(value);
                     continue;
                 }
             }
