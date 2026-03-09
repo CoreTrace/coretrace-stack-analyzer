@@ -10,7 +10,7 @@ namespace ctrace::stack::analysis::smt
     using SymbolId = std::uint64_t;
     using ExprId = std::uint32_t;
 
-    enum class ExprKind
+    enum class ExprKind : std::uint64_t
     {
         Symbol,
         Constant,
@@ -42,12 +42,14 @@ namespace ctrace::stack::analysis::smt
     struct ExprNode
     {
         ExprKind kind = ExprKind::Constant;
-        std::uint32_t bitWidth = 1;
         SymbolId symbol = 0;
         std::int64_t constant = 0;
+        std::uint32_t bitWidth = 1;
         ExprId lhs = 0;
         ExprId rhs = 0;
         ExprId extra = 0;
+        std::uint32_t reserved0 = 0;
+        std::uint32_t reserved1 = 0;
     };
 
     struct SymbolInfo
@@ -60,10 +62,11 @@ namespace ctrace::stack::analysis::smt
     struct IntervalConstraint
     {
         SymbolId symbol = 0;
-        bool hasLower = false;
         std::int64_t lower = 0;
-        bool hasUpper = false;
         std::int64_t upper = 0;
+        std::uint64_t hasLower : 1 = false;
+        std::uint64_t hasUpper : 1 = false;
+        std::uint64_t reservedFlags : 62 = 0;
     };
 
     struct ConstraintIR
