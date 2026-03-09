@@ -21,11 +21,12 @@ namespace ctrace::stack::analysis
     {
         struct PathEvent
         {
-            const llvm::Instruction* inst = nullptr;
-            const llvm::Value* root = nullptr;
             std::string literal;
             std::string api;
+            const llvm::Instruction* inst = nullptr;
+            const llvm::Value* root = nullptr;
             unsigned order = 0;
+            unsigned reserved = 0;
         };
 
         static const llvm::Function* getDirectCallee(const llvm::CallBase& call)
