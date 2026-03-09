@@ -71,6 +71,8 @@ static void printHelp()
         << "  --resource-cross-tu    Enable cross-TU resource summaries (default: on)\n"
         << "  --no-resource-cross-tu Disable cross-TU resource summaries\n"
         << "  --resource-summary-cache-dir=<path>  Cache directory for cross-TU summaries\n"
+        << "  --compile-ir-cache-dir=<path>  Cache directory for compiled LLVM IR per source "
+           "file\n"
         << "  --resource-summary-cache-memory-only  Use in-memory cache only for cross-TU "
            "summaries\n"
         << "  --uninitialized-cross-tu    Enable cross-TU uninitialized summaries (default: on)\n"
@@ -154,6 +156,8 @@ static void printEffectiveConfig(const ctrace::stack::cli::ParsedArguments& pars
                  << (cfg.escapeModelPath.empty() ? "<none>" : cfg.escapeModelPath) << "\n";
     llvm::errs() << "buffer-model: "
                  << (cfg.bufferModelPath.empty() ? "<none>" : cfg.bufferModelPath) << "\n";
+    llvm::errs() << "compile-ir-cache-dir: "
+                 << (cfg.compileIRCacheDir.empty() ? "<none>" : cfg.compileIRCacheDir) << "\n";
     llvm::errs() << "smt-enabled: " << (cfg.smtEnabled ? "true" : "false") << "\n";
     llvm::errs() << "smt-backend: " << cfg.smtBackend << "\n";
     llvm::errs() << "smt-secondary-backend: "
