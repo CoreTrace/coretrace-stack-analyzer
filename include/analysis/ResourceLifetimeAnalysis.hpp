@@ -27,7 +27,8 @@ namespace ctrace::stack::analysis
         ResourceSummaryAction action = ResourceSummaryAction::AcquireOut;
         unsigned argIndex = 0;
         std::uint64_t offset = 0;
-        bool viaPointerSlot = false;
+        std::uint64_t viaPointerSlot : 1 = false;
+        std::uint64_t reservedFlags : 63 = 0;
         std::string resourceKind;
     };
 
@@ -41,7 +42,7 @@ namespace ctrace::stack::analysis
         std::unordered_map<std::string, ResourceSummaryFunction> functions;
     };
 
-    enum class ResourceLifetimeIssueKind
+    enum class ResourceLifetimeIssueKind : std::uint64_t
     {
         MissingRelease,
         DoubleRelease,
