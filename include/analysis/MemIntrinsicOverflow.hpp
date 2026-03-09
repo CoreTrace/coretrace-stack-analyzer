@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <functional>
 #include <string>
 #include <vector>
@@ -23,8 +24,9 @@ namespace ctrace::stack::analysis
         std::string intrinsicName;
         StackSize destSizeBytes = 0;
         StackSize lengthBytes = 0;
-        bool hasExplicitLength = false;
         const llvm::Instruction* inst = nullptr;
+        std::uint64_t hasExplicitLength : 1 = false;
+        std::uint64_t reservedFlags : 63 = 0;
     };
 
     std::vector<MemIntrinsicIssue>
