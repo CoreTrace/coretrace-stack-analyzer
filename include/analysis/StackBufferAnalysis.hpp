@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <functional>
 #include <string>
 #include <vector>
@@ -16,7 +17,7 @@ namespace llvm
 
 namespace ctrace::stack::analysis
 {
-    enum class BufferStorageClass
+    enum class BufferStorageClass : std::uint64_t
     {
         Stack,
         Global,
@@ -26,19 +27,18 @@ namespace ctrace::stack::analysis
     {
         std::string funcName;
         std::string varName;
-        StackSize arraySize = 0;
-        StackSize indexOrUpperBound = 0; // used for upper bounds (UB) or constant index
-        bool isWrite = false;
-        bool indexIsConstant = false;
-        BufferStorageClass storageClass = BufferStorageClass::Stack;
-        const llvm::Instruction* inst = nullptr;
-
-        // Violation based on a lower bound (index potentially negative)
-        bool isLowerBoundViolation = false;
-        long long lowerBound = 0; // deduced lower bound (signed)
-
         std::string aliasPath;                 // ex: "pp -> ptr -> buf"
         std::vector<std::string> aliasPathVec; // {"pp", "ptr", "buf"}
+        const llvm::Instruction* inst = nullptr;
+        StackSize arraySize = 0;
+        StackSize indexOrUpperBound = 0; // used for upper bounds (UB) or constant index
+        long long lowerBound = 0; // deduced lower bound (signed)
+        BufferStorageClass storageClass = BufferStorageClass::Stack;
+        std::uint64_t isWrite : 1 = false;
+        std::uint64_t indexIsConstant : 1 = false;
+        // Violation based on a lower bound (index potentially negative)
+        std::uint64_t isLowerBoundViolation : 1 = false;
+        std::uint64_t reservedFlags : 61 = 0;
         // Optional : helper for sync string <- vector
         void rebuildAliasPathString(const std::string& sep = " -> ")
         {
