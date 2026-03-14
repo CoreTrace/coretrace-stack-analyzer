@@ -890,8 +890,7 @@ static AppStatus analyzeWithSharedModuleLoading(const std::vector<std::string>& 
 }
 
 static AppStatus analyzeWithoutSharedModuleLoading(const std::vector<std::string>& inputFilenames,
-                                                   const AnalysisConfig& cfg,
-                                                   llvm::LLVMContext& context, bool hasFilter,
+                                                   const AnalysisConfig& cfg, bool hasFilter,
                                                    std::vector<AnalysisEntry>& results)
 {
     const unsigned parallelJobs = resolveConfiguredJobs(cfg);
@@ -899,9 +898,10 @@ static AppStatus analyzeWithoutSharedModuleLoading(const std::vector<std::string
     {
         for (const auto& inputFilename : inputFilenames)
         {
+            llvm::LLVMContext localContext;
             llvm::SMDiagnostic localErr;
             analysis::ModuleLoadResult load =
-                analysis::loadModuleForAnalysis(inputFilename, cfg, context, localErr);
+                analysis::loadModuleForAnalysis(inputFilename, cfg, localContext, localErr);
             if (!load.module)
             {
                 std::string message;
@@ -1243,6 +1243,28 @@ static std::string computeCompileArgsSignature(const AnalysisConfig& cfg, const 
     return md5Hex(oss.str());
 }
 
+static void appendVectorSignature(std::ostringstream& oss, const char* key,
+                                  const std::vector<std::string>& values)
+{
+    oss << key << "=" << values.size() << "\n";
+    for (const std::string& value : values)
+    {
+        // Length-prefix values to avoid ambiguity when entries contain separators.
+        oss << value.size() << ":" << value << "\n";
+    }
+}
+
+static std::string computeFunctionFilterSignature(const AnalysisConfig& cfg)
+{
+    std::ostringstream oss;
+    oss << "include-stl=" << (cfg.includeSTL ? 1 : 0) << "\n";
+    appendVectorSignature(oss, "only-functions", cfg.onlyFunctions);
+    appendVectorSignature(oss, "only-files", cfg.onlyFiles);
+    appendVectorSignature(oss, "only-dirs", cfg.onlyDirs);
+    appendVectorSignature(oss, "exclude-dirs", cfg.excludeDirs);
+    return md5Hex(oss.str());
+}
+
 static std::string
 encodeSummaryEffectKey(const ctrace::stack::analysis::ResourceSummaryEffect& effect)
 {
@@ -1443,6 +1465,7 @@ buildCrossTUSummaryIndex(const std::vector<LoadedInputModule>& loadedModules,
     std::unordered_map<std::string, ctrace::stack::analysis::ResourceSummaryIndex> memoryCache;
     std::vector<std::string> moduleIRHashes;
     std::vector<std::string> moduleCompileArgsHashes;
+    const std::string filterHash = computeFunctionFilterSignature(cfg);
     moduleIRHashes.reserve(loadedModules.size());
     moduleCompileArgsHashes.reserve(loadedModules.size());
     for (const LoadedInputModule& loaded : loadedModules)
@@ -1473,7 +1496,8 @@ buildCrossTUSummaryIndex(const std::vector<LoadedInputModule>& loadedModules,
         {
             const std::string cacheKeyPayload =
                 std::string(kCacheSchema) + "|" + modelHash + "|" + externalHash + "|" +
-                moduleCompileArgsHashes[moduleIndex] + "|" + moduleIRHashes[moduleIndex];
+                filterHash + "|" + moduleCompileArgsHashes[moduleIndex] + "|" +
+                moduleIRHashes[moduleIndex];
             const std::string cacheKey = md5Hex(cacheKeyPayload);
             cacheKeys[moduleIndex] = cacheKey;
 
@@ -1896,15 +1920,13 @@ class AnalysisExecutionStrategy
   public:
     virtual ~AnalysisExecutionStrategy() = default;
 
-    virtual AppStatus execute(RunPlan& plan, llvm::LLVMContext& context,
-                              std::vector<AnalysisEntry>& results) const = 0;
+    virtual AppStatus execute(RunPlan& plan, std::vector<AnalysisEntry>& results) const = 0;
 };
 
 class SharedModuleLoadingExecutionStrategy final : public AnalysisExecutionStrategy
 {
   public:
-    AppStatus execute(RunPlan& plan, llvm::LLVMContext&,
-                      std::vector<AnalysisEntry>& results) const override
+    AppStatus execute(RunPlan& plan, std::vector<AnalysisEntry>& results) const override
     {
         return analyzeWithSharedModuleLoading(
             plan.inputFilenames, plan.cfg, plan.hasFilter, plan.needsCrossTUResourceSummaries,
@@ -1916,11 +1938,10 @@ class SharedModuleLoadingExecutionStrategy final : public AnalysisExecutionStrat
 class DirectModuleLoadingExecutionStrategy final : public AnalysisExecutionStrategy
 {
   public:
-    AppStatus execute(RunPlan& plan, llvm::LLVMContext& context,
-                      std::vector<AnalysisEntry>& results) const override
+    AppStatus execute(RunPlan& plan, std::vector<AnalysisEntry>& results) const override
     {
-        return analyzeWithoutSharedModuleLoading(plan.inputFilenames, plan.cfg, context,
-                                                 plan.hasFilter, results);
+        return analyzeWithoutSharedModuleLoading(plan.inputFilenames, plan.cfg, plan.hasFilter,
+                                                 results);
     }
 };
 
@@ -1984,8 +2005,7 @@ makeOutputStrategy(ctrace::stack::cli::OutputFormat outputFormat)
 class AnalyzerApp
 {
   public:
-    AppResult<int> run(ctrace::stack::cli::ParsedArguments parsedArgs,
-                       llvm::LLVMContext& context) const
+    AppResult<int> run(ctrace::stack::cli::ParsedArguments parsedArgs) const
     {
         RunPlanBuilder planBuilder(std::move(parsedArgs));
         AppResult<RunPlan> planResult = planBuilder.build();
@@ -2001,7 +2021,7 @@ class AnalyzerApp
         std::vector<AnalysisEntry> results;
         results.reserve(plan.inputFilenames.size());
         std::unique_ptr<AnalysisExecutionStrategy> executionStrategy = makeExecutionStrategy(plan);
-        AppStatus executionStatus = executionStrategy->execute(plan, context, results);
+        AppStatus executionStatus = executionStrategy->execute(plan, results);
         if (!executionStatus.isOk())
             return AppResult<int>::failure(std::move(executionStatus.error));
 
@@ -2012,10 +2032,10 @@ class AnalyzerApp
 
 namespace ctrace::stack::app
 {
-    RunResult runAnalyzerApp(cli::ParsedArguments parsedArgs, llvm::LLVMContext& context)
+    RunResult runAnalyzerApp(cli::ParsedArguments parsedArgs)
     {
         AnalyzerApp app = {};
-        AppResult<int> runResult = app.run(std::move(parsedArgs), context);
+        AppResult<int> runResult = app.run(std::move(parsedArgs));
 
         RunResult result;
         if (!runResult.isOk())
