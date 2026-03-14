@@ -964,6 +964,7 @@ namespace ctrace::stack::analyzer
             std::ostringstream body;
             const std::string displayFuncName =
                 analysis::formatFunctionNameForMessage(issue.funcName);
+            const std::string& paramName = issue.binding.name;
 
             const char* subLabel = "Pointer";
             if (issue.pointerConstOnly)
@@ -974,8 +975,8 @@ namespace ctrace::stack::analyzer
             if (issue.isRvalueRef)
             {
                 body << "\t" << prefixForSeverity(DiagnosticSeverity::Info)
-                     << " ConstParameterNotModified." << subLabel << ": parameter '"
-                     << issue.paramName << "' in function '" << displayFuncName
+                     << " ConstParameterNotModified." << subLabel << ": parameter '" << paramName
+                     << "' in function '" << displayFuncName
                      << "' is an rvalue reference and is never used to modify the referred "
                         "object\n";
                 body << kDiagIndentArrow << "consider passing by value (" << issue.suggestedType
@@ -985,8 +986,8 @@ namespace ctrace::stack::analyzer
             else if (issue.pointerConstOnly)
             {
                 body << "\t" << prefixForSeverity(DiagnosticSeverity::Info)
-                     << " ConstParameterNotModified." << subLabel << ": parameter '"
-                     << issue.paramName << "' in function '" << displayFuncName << "' is declared '"
+                     << " ConstParameterNotModified." << subLabel << ": parameter '" << paramName
+                     << "' in function '" << displayFuncName << "' is declared '"
                      << issue.currentType << "' but the pointed object is never modified\n";
                 body << kDiagIndentArrow << "consider '" << issue.suggestedType
                      << "' for API const-correctness\n";
@@ -994,9 +995,8 @@ namespace ctrace::stack::analyzer
             else
             {
                 body << "\t" << prefixForSeverity(DiagnosticSeverity::Info)
-                     << " ConstParameterNotModified." << subLabel << ": parameter '"
-                     << issue.paramName << "' in function '" << displayFuncName
-                     << "' is never used to modify the "
+                     << " ConstParameterNotModified." << subLabel << ": parameter '" << paramName
+                     << "' in function '" << displayFuncName << "' is never used to modify the "
                      << (issue.isReference ? "referred" : "pointed") << " object\n";
             }
 
@@ -1010,9 +1010,11 @@ namespace ctrace::stack::analyzer
             builder.function(issue.funcName)
                 .severity(DiagnosticSeverity::Info)
                 .errCode(DescriptiveErrorCode::ConstParameterNotModified)
-                .lineColumn(issue.line, issue.column)
+                .lineColumn(issue.binding.line, issue.binding.column)
                 .ruleId(std::string("ConstParameterNotModified.") + subLabel)
                 .message(body.str());
+            if (issue.confidence >= 0.0)
+                builder.confidence(issue.confidence);
             result.diagnostics.push_back(builder.build());
         }
     }

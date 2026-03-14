@@ -4,11 +4,6 @@
 
 #include <string>
 
-namespace llvm
-{
-    class LLVMContext;
-}
-
 namespace ctrace::stack::app
 {
 
@@ -24,6 +19,6 @@ namespace ctrace::stack::app
         char padded[4];
     };
 
-    RunResult runAnalyzerApp(cli::ParsedArguments parsedArgs, llvm::LLVMContext& context);
+    RunResult runAnalyzerApp(cli::ParsedArguments parsedArgs);
 
 } // namespace ctrace::stack::app

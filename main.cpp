@@ -6,7 +6,6 @@
 #include <string>
 #include <utility>
 
-#include <llvm/IR/LLVMContext.h>
 #include <llvm/Support/raw_ostream.h>
 
 #include <coretrace/logger.hpp>
@@ -180,8 +179,6 @@ int main(int argc, char** argv)
     coretrace::log(coretrace::Level::Debug, coretrace::Module("cli"),
                    "Starting analysis for {} input(s)\n", argc - 1);
 
-    llvm::LLVMContext context;
-
     if (argc < 2)
     {
         printHelp();
@@ -207,7 +204,7 @@ int main(int argc, char** argv)
         printEffectiveConfig(parseResult.parsed);
 
     ctrace::stack::app::RunResult runResult =
-        ctrace::stack::app::runAnalyzerApp(std::move(parseResult.parsed), context);
+        ctrace::stack::app::runAnalyzerApp(std::move(parseResult.parsed));
     if (!runResult.isOk())
     {
         logText(coretrace::Level::Error, runResult.error);

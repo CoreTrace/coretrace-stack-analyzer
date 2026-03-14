@@ -221,7 +221,7 @@ namespace ctrace::stack::analysis
             return predicateAt(lvi, llvm::CmpInst::ICMP_SGT, v, boundConst, at);
         }
 
-        static bool getKnownSinkCallInfo(llvm::CallBase* CB, llvm::TargetLibraryInfo& TLI,
+        static bool getKnownSinkCallInfo(llvm::CallBase* CB, const llvm::TargetLibraryInfo& TLI,
                                          unsigned& dstIdx, unsigned& lenIdx, std::string& sinkName)
         {
             using namespace llvm;

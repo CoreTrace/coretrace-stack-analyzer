@@ -1,5 +1,7 @@
 #include "analysis/ConstParamAnalysis.hpp"
 
+#include <cctype>
+
 #include <llvm/ADT/SmallPtrSet.h>
 #include <llvm/ADT/SmallVector.h>
 #include <llvm/BinaryFormat/Dwarf.h>
@@ -29,14 +31,6 @@ namespace ctrace::stack::analysis
         {
             const llvm::DIType* type = nullptr;
             TypeQualifiers quals;
-        };
-
-        struct ParamDebugInfo
-        {
-            std::string name;
-            const llvm::DIType* type = nullptr;
-            unsigned line = 0;
-            unsigned column = 0;
         };
 
         struct ParamTypeInfo
@@ -288,44 +282,20 @@ namespace ctrace::stack::analysis
             return out;
         }
 
-        static ParamDebugInfo getParamDebugInfo(const llvm::Function& F, const llvm::Argument& Arg)
+        enum class ParamWriteState : std::uint8_t
         {
-            using namespace llvm;
-            ParamDebugInfo info;
-            info.name = Arg.getName().str();
+            NoWrite = 0,
+            Unknown = 1,
+            MayWrite = 2
+        };
 
-            if (auto* SP = F.getSubprogram())
-            {
-                for (DINode* node : SP->getRetainedNodes())
-                {
-                    auto* var = dyn_cast<DILocalVariable>(node);
-                    if (!var || !var->isParameter())
-                        continue;
-                    if (var->getArg() != Arg.getArgNo() + 1)
-                        continue;
-                    if (!var->getName().empty())
-                        info.name = var->getName().str();
-                    info.type = var->getType();
-                    if (var->getLine() != 0)
-                        info.line = var->getLine();
-                    break;
-                }
-
-                if (!info.type)
-                {
-                    if (auto* subTy = SP->getType())
-                    {
-                        auto types = subTy->getTypeArray();
-                        if (types.size() > Arg.getArgNo() + 1)
-                            info.type = types[Arg.getArgNo() + 1];
-                    }
-                }
-
-                if (info.line == 0)
-                    info.line = SP->getLine();
-            }
-
-            return info;
+        static ParamWriteState mergeParamWriteState(ParamWriteState lhs, ParamWriteState rhs)
+        {
+            if (lhs == ParamWriteState::MayWrite || rhs == ParamWriteState::MayWrite)
+                return ParamWriteState::MayWrite;
+            if (lhs == ParamWriteState::Unknown || rhs == ParamWriteState::Unknown)
+                return ParamWriteState::Unknown;
+            return ParamWriteState::NoWrite;
         }
 
         static bool calleeParamIsReadOnly(const llvm::Function* callee, unsigned argIndex)
@@ -334,12 +304,12 @@ namespace ctrace::stack::analysis
                 return false;
 
             const llvm::Argument& param = *callee->getArg(argIndex);
-            ParamDebugInfo dbg = getParamDebugInfo(*callee, param);
-            if (!dbg.type)
+            const ParameterDebugBinding binding = resolveParameterDebugBinding(*callee, param);
+            if (!binding.type)
                 return false;
 
             ParamTypeInfo typeInfo;
-            if (!buildParamTypeInfo(dbg.type, typeInfo))
+            if (!buildParamTypeInfo(binding.type, typeInfo))
                 return false;
 
             if (typeInfo.isDoublePointer || typeInfo.isVoid || typeInfo.isFunctionPointer)
@@ -351,7 +321,7 @@ namespace ctrace::stack::analysis
             return typeInfo.pointeeConst;
         }
 
-        static bool callArgMayWriteThrough(const llvm::CallBase& CB, unsigned argIndex)
+        static ParamWriteState callArgWriteState(const llvm::CallBase& CB, unsigned argIndex)
         {
             using namespace llvm;
 
@@ -365,14 +335,14 @@ namespace ctrace::stack::analysis
             }
 
             if (!callee)
-                return true;
+                return ParamWriteState::Unknown;
 
             if (auto* MI = dyn_cast<MemIntrinsic>(&CB))
             {
                 if (isa<MemSetInst>(MI))
-                    return argIndex == 0;
+                    return argIndex == 0 ? ParamWriteState::MayWrite : ParamWriteState::NoWrite;
                 if (isa<MemTransferInst>(MI))
-                    return argIndex == 0;
+                    return argIndex == 0 ? ParamWriteState::MayWrite : ParamWriteState::NoWrite;
             }
 
             if (callee->isIntrinsic())
@@ -387,36 +357,58 @@ namespace ctrace::stack::analysis
                 case Intrinsic::invariant_start:
                 case Intrinsic::invariant_end:
                 case Intrinsic::assume:
-                    return false;
+                    return ParamWriteState::NoWrite;
                 default:
                     break;
                 }
             }
 
             if (callee->doesNotAccessMemory())
-                return false;
+                return ParamWriteState::NoWrite;
             if (callee->onlyReadsMemory())
-                return false;
+                return ParamWriteState::NoWrite;
 
             if (argIndex >= callee->arg_size())
-                return true; // varargs or unknown
+                return ParamWriteState::Unknown; // varargs or unknown
 
             const AttributeList& attrs = callee->getAttributes();
             if (attrs.hasParamAttr(argIndex, Attribute::ReadOnly) ||
                 attrs.hasParamAttr(argIndex, Attribute::ReadNone))
             {
-                return false;
+                return ParamWriteState::NoWrite;
             }
             if (attrs.hasParamAttr(argIndex, Attribute::WriteOnly))
-                return true;
+                return ParamWriteState::MayWrite;
+
+            if (const auto* calleeArg = callee->getArg(argIndex))
+            {
+                if (calleeArg->onlyReadsMemory())
+                    return ParamWriteState::NoWrite;
+            }
 
             if (calleeParamIsReadOnly(callee, argIndex))
-                return false;
+                return ParamWriteState::NoWrite;
 
-            return true;
+            return ParamWriteState::Unknown;
         }
 
-        static bool valueMayBeWrittenThrough(const llvm::Value* root, const llvm::Function& F)
+        static ParamWriteState argumentWriteStateFromMetadata(const llvm::Argument& Arg)
+        {
+            using namespace llvm;
+
+            if (Arg.hasAttribute(Attribute::WriteOnly))
+                return ParamWriteState::MayWrite;
+
+            if (Arg.onlyReadsMemory() || Arg.hasAttribute(Attribute::ReadOnly) ||
+                Arg.hasAttribute(Attribute::ReadNone))
+            {
+                return ParamWriteState::NoWrite;
+            }
+
+            return ParamWriteState::Unknown;
+        }
+
+        static ParamWriteState valueWriteState(const llvm::Value* root, const llvm::Function& F)
         {
             using namespace llvm;
             (void)F;
@@ -424,6 +416,7 @@ namespace ctrace::stack::analysis
             SmallPtrSet<const Value*, 32> visited;
             SmallVector<const Value*, 16> worklist;
             worklist.push_back(root);
+            ParamWriteState aggregate = ParamWriteState::NoWrite;
 
             while (!worklist.empty())
             {
@@ -438,7 +431,7 @@ namespace ctrace::stack::analysis
                     if (auto* SI = dyn_cast<StoreInst>(Usr))
                     {
                         if (SI->getPointerOperand() == V)
-                            return true;
+                            return ParamWriteState::MayWrite;
                         if (SI->getValueOperand() == V)
                         {
                             const Value* dst = SI->getPointerOperand()->stripPointerCasts();
@@ -455,7 +448,8 @@ namespace ctrace::stack::analysis
                             }
                             else
                             {
-                                return true; // pointer escapes to non-local memory
+                                aggregate =
+                                    mergeParamWriteState(aggregate, ParamWriteState::Unknown);
                             }
                         }
                         continue;
@@ -464,14 +458,14 @@ namespace ctrace::stack::analysis
                     if (auto* AI = dyn_cast<AtomicRMWInst>(Usr))
                     {
                         if (AI->getPointerOperand() == V)
-                            return true;
+                            return ParamWriteState::MayWrite;
                         continue;
                     }
 
                     if (auto* CX = dyn_cast<AtomicCmpXchgInst>(Usr))
                     {
                         if (CX->getPointerOperand() == V)
-                            return true;
+                            return ParamWriteState::MayWrite;
                         continue;
                     }
 
@@ -481,8 +475,10 @@ namespace ctrace::stack::analysis
                         {
                             if (CB->getArgOperand(i) == V)
                             {
-                                if (callArgMayWriteThrough(*CB, i))
-                                    return true;
+                                const ParamWriteState callWriteState = callArgWriteState(*CB, i);
+                                if (callWriteState == ParamWriteState::MayWrite)
+                                    return ParamWriteState::MayWrite;
+                                aggregate = mergeParamWriteState(aggregate, callWriteState);
                             }
                         }
                         continue;
@@ -522,11 +518,102 @@ namespace ctrace::stack::analysis
                         continue;
                     }
                     if (isa<PtrToIntInst>(Usr))
-                        return true; // unknown aliasing, be conservative
+                    {
+                        aggregate = mergeParamWriteState(aggregate, ParamWriteState::Unknown);
+                        continue;
+                    }
                 }
             }
 
+            return aggregate;
+        }
+
+        static bool isAnonymousTypeName(llvm::StringRef typeName)
+        {
+            return typeName.empty() || typeName == "<unknown type>" ||
+                   typeName == "<anonymous type>";
+        }
+
+        static bool isLikelyForwardingTypeName(llvm::StringRef typeName)
+        {
+            if (typeName.empty())
+                return false;
+            if (typeName.size() == 1)
+            {
+                const unsigned char c = static_cast<unsigned char>(typeName.front());
+                if (std::isalpha(c) && std::isupper(c))
+                    return true;
+            }
+            if (typeName.contains("type-parameter-"))
+                return true;
+            if (typeName.ends_with("_Tp"))
+                return true;
             return false;
+        }
+
+        static bool argumentLooksCallable(const llvm::Argument& Arg)
+        {
+            for (const llvm::Use& use : Arg.uses())
+            {
+                const auto* CB = llvm::dyn_cast<llvm::CallBase>(use.getUser());
+                if (!CB)
+                    continue;
+                if (CB->isCallee(&use))
+                    return true;
+                const llvm::Function* callee = CB->getCalledFunction();
+                if (!callee)
+                    continue;
+                if (const llvm::DISubprogram* SP = callee->getSubprogram())
+                {
+                    if (SP->getName().contains("operator()"))
+                        return true;
+                }
+            }
+            return false;
+        }
+
+        static bool shouldSuppressConstParamIssue(const llvm::Argument& Arg,
+                                                  const ParameterDebugBinding& binding,
+                                                  const ParamTypeInfo& typeInfo,
+                                                  llvm::StringRef baseTypeName)
+        {
+            if (binding.isArtificial)
+                return true;
+
+            if (typeInfo.isRvalueReference)
+            {
+                if (isLikelyForwardingTypeName(baseTypeName))
+                    return true;
+                if (argumentLooksCallable(Arg))
+                    return true;
+            }
+
+            return false;
+        }
+
+        static double computeIssueConfidence(const ParameterDebugBinding& binding,
+                                             bool provenReadOnlyByMetadata, bool anonymousType)
+        {
+            double confidence = 0.58;
+            switch (binding.confidence)
+            {
+            case ParameterBindingConfidence::High:
+                confidence = 0.85;
+                break;
+            case ParameterBindingConfidence::Medium:
+                confidence = 0.72;
+                break;
+            case ParameterBindingConfidence::Low:
+                confidence = 0.58;
+                break;
+            }
+            if (provenReadOnlyByMetadata)
+                confidence += 0.07;
+            if (anonymousType && confidence > 0.50)
+                confidence = 0.50;
+            if (confidence > 0.95)
+                confidence = 0.95;
+            return confidence;
         }
 
         static bool hasDtorToken(llvm::StringRef symbol, llvm::StringRef token)
@@ -577,12 +664,12 @@ namespace ctrace::stack::analysis
 
             for (Argument& Arg : F.args())
             {
-                ParamDebugInfo dbg = getParamDebugInfo(F, Arg);
-                if (!dbg.type)
+                const ParameterDebugBinding binding = resolveParameterDebugBinding(F, Arg);
+                if (!binding.type)
                     continue;
 
                 ParamTypeInfo typeInfo;
-                if (!buildParamTypeInfo(dbg.type, typeInfo))
+                if (!buildParamTypeInfo(binding.type, typeInfo))
                     continue;
 
                 if (!typeInfo.isPointer && !typeInfo.isReference)
@@ -592,33 +679,45 @@ namespace ctrace::stack::analysis
                 if (typeInfo.pointeeConst)
                     continue;
 
-                if (valueMayBeWrittenThrough(&Arg, F))
+                const ParamWriteState metadataWriteState = argumentWriteStateFromMetadata(Arg);
+                if (metadataWriteState == ParamWriteState::MayWrite)
+                    continue;
+                const bool readOnlyByMetadata = metadataWriteState == ParamWriteState::NoWrite;
+
+                const ParamWriteState writeState =
+                    readOnlyByMetadata ? ParamWriteState::NoWrite : valueWriteState(&Arg, F);
+                if (writeState != ParamWriteState::NoWrite)
+                    continue;
+
+                const std::string paramName =
+                    binding.name.empty() ? Arg.getName().str() : binding.name;
+                const std::string baseName = formatDITypeName(typeInfo.pointeeDisplayType);
+                const bool anonymousType = isAnonymousTypeName(baseName);
+                if (shouldSuppressConstParamIssue(Arg, binding, typeInfo, baseName))
                     continue;
 
                 ConstParamIssue issue;
                 issue.funcName = F.getName().str();
-                issue.paramName = dbg.name.empty() ? Arg.getName().str() : dbg.name;
-                issue.line = dbg.line;
-                issue.column = dbg.column;
+                issue.binding = binding;
+                issue.confidence =
+                    computeIssueConfidence(binding, readOnlyByMetadata, anonymousType);
                 issue.pointerConstOnly =
                     typeInfo.isPointer && typeInfo.pointerConst && !typeInfo.pointeeConst;
                 issue.isReference = typeInfo.isReference;
                 issue.isRvalueRef = typeInfo.isRvalueReference;
 
-                std::string baseName = formatDITypeName(typeInfo.pointeeDisplayType);
-                issue.currentType =
-                    buildTypeString(typeInfo, baseName, false, true, issue.paramName);
+                issue.currentType = buildTypeString(typeInfo, baseName, false, true, paramName);
                 if (typeInfo.isRvalueReference)
                 {
                     std::string valuePrefix = buildPointeeQualPrefix(typeInfo, false);
                     std::string constRefPrefix = buildPointeeQualPrefix(typeInfo, true);
-                    issue.suggestedType = valuePrefix + baseName + " " + issue.paramName;
-                    issue.suggestedTypeAlt = constRefPrefix + baseName + " &" + issue.paramName;
+                    issue.suggestedType = valuePrefix + baseName + " " + paramName;
+                    issue.suggestedTypeAlt = constRefPrefix + baseName + " &" + paramName;
                 }
                 else
                 {
                     issue.suggestedType =
-                        buildTypeString(typeInfo, baseName, true, false, issue.paramName);
+                        buildTypeString(typeInfo, baseName, true, false, paramName);
                 }
 
                 out.push_back(std::move(issue));

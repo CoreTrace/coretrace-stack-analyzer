@@ -50,14 +50,14 @@ namespace ctrace::stack::analysis
             return std::nullopt;
         }
 
-        static llvm::Function* resolveDirectCallee(llvm::CallBase* CB)
+        static const llvm::Function* resolveDirectCallee(const llvm::CallBase* CB)
         {
             using namespace llvm;
             if (!CB)
                 return nullptr;
-            if (Function* direct = CB->getCalledFunction())
+            if (const Function* direct = CB->getCalledFunction())
                 return direct;
-            Value* callee = CB->getCalledOperand();
+            const Value* callee = CB->getCalledOperand();
             if (!callee)
                 return nullptr;
             return dyn_cast<Function>(callee->stripPointerCasts());
@@ -100,7 +100,7 @@ namespace ctrace::stack::analysis
                 }
             }
 
-            Function* callee = resolveDirectCallee(CB);
+            const Function* callee = resolveDirectCallee(CB);
             if (!callee)
                 return sink;
 
@@ -136,14 +136,15 @@ namespace ctrace::stack::analysis
             return sink;
         }
 
-        static ResolvedSink resolveModelSink(llvm::CallBase* CB, const BufferWriteModel* model,
+        static ResolvedSink resolveModelSink(const llvm::CallBase* CB,
+                                             const BufferWriteModel* model,
                                              BufferWriteRuleMatcher* matcher)
         {
             ResolvedSink sink;
             if (!CB || !model || !matcher)
                 return sink;
 
-            llvm::Function* callee = resolveDirectCallee(CB);
+            const llvm::Function* callee = resolveDirectCallee(CB);
             if (!callee)
                 return sink;
 
