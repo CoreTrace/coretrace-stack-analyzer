@@ -136,7 +136,8 @@ namespace ctrace::stack::analysis
             return sink;
         }
 
-        static ResolvedSink resolveModelSink(const llvm::CallBase* CB, const BufferWriteModel* model,
+        static ResolvedSink resolveModelSink(const llvm::CallBase* CB,
+                                             const BufferWriteModel* model,
                                              BufferWriteRuleMatcher* matcher)
         {
             ResolvedSink sink;

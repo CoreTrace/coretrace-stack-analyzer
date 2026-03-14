@@ -1494,10 +1494,10 @@ buildCrossTUSummaryIndex(const std::vector<LoadedInputModule>& loadedModules,
 
         for (std::size_t moduleIndex = 0; moduleIndex < loadedModules.size(); ++moduleIndex)
         {
-            const std::string cacheKeyPayload =
-                std::string(kCacheSchema) + "|" + modelHash + "|" + externalHash + "|" +
-                filterHash + "|" + moduleCompileArgsHashes[moduleIndex] + "|" +
-                moduleIRHashes[moduleIndex];
+            const std::string cacheKeyPayload = std::string(kCacheSchema) + "|" + modelHash + "|" +
+                                                externalHash + "|" + filterHash + "|" +
+                                                moduleCompileArgsHashes[moduleIndex] + "|" +
+                                                moduleIRHashes[moduleIndex];
             const std::string cacheKey = md5Hex(cacheKeyPayload);
             cacheKeys[moduleIndex] = cacheKey;
 

@@ -76,8 +76,8 @@ namespace ctrace::stack::analyzer
         };
 
         std::vector<PipelineStep> steps;
-        steps.push_back(
-            {"Function attrs pass", [](const PipelineData& state) { runFunctionAttrsPass(state.mod); }});
+        steps.push_back({"Function attrs pass",
+                         [](const PipelineData& state) { runFunctionAttrsPass(state.mod); }});
 
         steps.push_back({"Prepare module", [](PipelineData& state)
                          {

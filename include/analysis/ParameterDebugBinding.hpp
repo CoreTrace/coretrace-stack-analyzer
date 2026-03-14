@@ -32,6 +32,6 @@ namespace ctrace::stack::analysis
         std::uint8_t paddingTail[5] = {};
     };
 
-    ParameterDebugBinding
-    resolveParameterDebugBinding(const llvm::Function& F, const llvm::Argument& Arg);
+    ParameterDebugBinding resolveParameterDebugBinding(const llvm::Function& F,
+                                                       const llvm::Argument& Arg);
 } // namespace ctrace::stack::analysis

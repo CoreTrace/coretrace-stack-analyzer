@@ -96,10 +96,12 @@ namespace ctrace::stack::analysis
         {
             if (!var)
                 return false;
-            return var->isArtificial() || var->isObjectPointer() || hasSyntheticFlags(var->getFlags());
+            return var->isArtificial() || var->isObjectPointer() ||
+                   hasSyntheticFlags(var->getFlags());
         }
 
-        static unsigned expectedDebugArgIndex(const llvm::Argument& Arg, const DebugParamLayout& layout)
+        static unsigned expectedDebugArgIndex(const llvm::Argument& Arg,
+                                              const DebugParamLayout& layout)
         {
             if (layout.hasCanonicalDebugIndex)
                 return layout.debugArgIndex;
@@ -156,9 +158,9 @@ namespace ctrace::stack::analysis
             return score;
         }
 
-        static void considerVariableCandidate(VariableCandidate& best, const llvm::DILocalVariable* var,
-                                              llvm::DebugLoc loc, BindingOrigin origin,
-                                              const llvm::Argument& Arg,
+        static void considerVariableCandidate(VariableCandidate& best,
+                                              const llvm::DILocalVariable* var, llvm::DebugLoc loc,
+                                              BindingOrigin origin, const llvm::Argument& Arg,
                                               const DebugParamLayout& layout)
         {
             bool argMatchesExpected = false;
@@ -192,7 +194,8 @@ namespace ctrace::stack::analysis
             }
         }
 
-        static ParameterBindingConfidence confidenceFromCandidate(const VariableCandidate& candidate)
+        static ParameterBindingConfidence
+        confidenceFromCandidate(const VariableCandidate& candidate)
         {
             if (!candidate.var || !candidate.var->getType())
                 return ParameterBindingConfidence::Low;
@@ -222,8 +225,8 @@ namespace ctrace::stack::analysis
         }
     } // namespace
 
-    ParameterDebugBinding
-    resolveParameterDebugBinding(const llvm::Function& F, const llvm::Argument& Arg)
+    ParameterDebugBinding resolveParameterDebugBinding(const llvm::Function& F,
+                                                       const llvm::Argument& Arg)
     {
         ParameterDebugBinding binding;
         binding.name = Arg.getName().str();
@@ -258,8 +261,8 @@ namespace ctrace::stack::analysis
         for (llvm::DbgVariableRecord* dvr : dbgRecords)
         {
             considerVariableCandidate(best, dvr ? dvr->getVariable() : nullptr,
-                                      llvm::getDebugValueLoc(dvr), BindingOrigin::DbgRecordUser, Arg,
-                                      layout);
+                                      llvm::getDebugValueLoc(dvr), BindingOrigin::DbgRecordUser,
+                                      Arg, layout);
         }
 
         for (llvm::DbgDeclareInst* ddi : llvm::findDbgDeclares(nonConstArg))

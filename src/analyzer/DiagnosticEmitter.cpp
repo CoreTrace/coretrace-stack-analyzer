@@ -987,8 +987,8 @@ namespace ctrace::stack::analyzer
             {
                 body << "\t" << prefixForSeverity(DiagnosticSeverity::Info)
                      << " ConstParameterNotModified." << subLabel << ": parameter '" << paramName
-                     << "' in function '" << displayFuncName << "' is declared '" << issue.currentType
-                     << "' but the pointed object is never modified\n";
+                     << "' in function '" << displayFuncName << "' is declared '"
+                     << issue.currentType << "' but the pointed object is never modified\n";
                 body << kDiagIndentArrow << "consider '" << issue.suggestedType
                      << "' for API const-correctness\n";
             }
@@ -996,8 +996,7 @@ namespace ctrace::stack::analyzer
             {
                 body << "\t" << prefixForSeverity(DiagnosticSeverity::Info)
                      << " ConstParameterNotModified." << subLabel << ": parameter '" << paramName
-                     << "' in function '" << displayFuncName
-                     << "' is never used to modify the "
+                     << "' in function '" << displayFuncName << "' is never used to modify the "
                      << (issue.isReference ? "referred" : "pointed") << " object\n";
             }
 

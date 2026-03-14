@@ -578,9 +578,9 @@ namespace ctrace::stack::cli
         };
 
         using SmtOptionApplyResult = std::optional<std::string>;
-        using SmtOptionApplyFn =
-            SmtOptionApplyResult (*)(AnalysisConfig& cfg, const std::string& value,
-                                     SmtOptionSource source);
+        using SmtOptionApplyFn = SmtOptionApplyResult (*)(AnalysisConfig& cfg,
+                                                          const std::string& value,
+                                                          SmtOptionSource source);
 
         struct SmtOptionSpec
         {
@@ -617,9 +617,9 @@ namespace ctrace::stack::cli
             return std::nullopt;
         }
 
-        SmtOptionApplyResult
-        applySmtSecondaryBackendOption(AnalysisConfig& cfg, const std::string& value,
-                                       SmtOptionSource)
+        SmtOptionApplyResult applySmtSecondaryBackendOption(AnalysisConfig& cfg,
+                                                            const std::string& value,
+                                                            SmtOptionSource)
         {
             cfg.smtSecondaryBackend = value;
             return std::nullopt;
@@ -689,8 +689,7 @@ namespace ctrace::stack::cli
         }
 
         SmtOptionApplyResult applySmtOptionValue(const SmtOptionSpec& spec, AnalysisConfig& cfg,
-                                                 const std::string& value,
-                                                 SmtOptionSource source)
+                                                 const std::string& value, SmtOptionSource source)
         {
             if (!spec.apply)
                 return "SMT option handler is not configured";

@@ -448,7 +448,8 @@ namespace ctrace::stack::analysis
                             }
                             else
                             {
-                                aggregate = mergeParamWriteState(aggregate, ParamWriteState::Unknown);
+                                aggregate =
+                                    mergeParamWriteState(aggregate, ParamWriteState::Unknown);
                             }
                         }
                         continue;
@@ -529,7 +530,8 @@ namespace ctrace::stack::analysis
 
         static bool isAnonymousTypeName(llvm::StringRef typeName)
         {
-            return typeName.empty() || typeName == "<unknown type>" || typeName == "<anonymous type>";
+            return typeName.empty() || typeName == "<unknown type>" ||
+                   typeName == "<anonymous type>";
         }
 
         static bool isLikelyForwardingTypeName(llvm::StringRef typeName)
@@ -590,8 +592,7 @@ namespace ctrace::stack::analysis
         }
 
         static double computeIssueConfidence(const ParameterDebugBinding& binding,
-                                             bool provenReadOnlyByMetadata,
-                                             bool anonymousType)
+                                             bool provenReadOnlyByMetadata, bool anonymousType)
         {
             double confidence = 0.58;
             switch (binding.confidence)
@@ -688,7 +689,8 @@ namespace ctrace::stack::analysis
                 if (writeState != ParamWriteState::NoWrite)
                     continue;
 
-                const std::string paramName = binding.name.empty() ? Arg.getName().str() : binding.name;
+                const std::string paramName =
+                    binding.name.empty() ? Arg.getName().str() : binding.name;
                 const std::string baseName = formatDITypeName(typeInfo.pointeeDisplayType);
                 const bool anonymousType = isAnonymousTypeName(baseName);
                 if (shouldSuppressConstParamIssue(Arg, binding, typeInfo, baseName))
@@ -704,8 +706,7 @@ namespace ctrace::stack::analysis
                 issue.isReference = typeInfo.isReference;
                 issue.isRvalueRef = typeInfo.isRvalueReference;
 
-                issue.currentType =
-                    buildTypeString(typeInfo, baseName, false, true, paramName);
+                issue.currentType = buildTypeString(typeInfo, baseName, false, true, paramName);
                 if (typeInfo.isRvalueReference)
                 {
                     std::string valuePrefix = buildPointeeQualPrefix(typeInfo, false);
@@ -715,7 +716,8 @@ namespace ctrace::stack::analysis
                 }
                 else
                 {
-                    issue.suggestedType = buildTypeString(typeInfo, baseName, true, false, paramName);
+                    issue.suggestedType =
+                        buildTypeString(typeInfo, baseName, true, false, paramName);
                 }
 
                 out.push_back(std::move(issue));
