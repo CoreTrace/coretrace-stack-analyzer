@@ -577,8 +577,10 @@ namespace ctrace::stack::cli
             Cli
         };
 
-        using SmtOptionApplyFn = bool (*)(AnalysisConfig& cfg, const std::string& value,
-                                          SmtOptionSource source, std::string& error);
+        using SmtOptionApplyResult = std::optional<std::string>;
+        using SmtOptionApplyFn =
+            SmtOptionApplyResult (*)(AnalysisConfig& cfg, const std::string& value,
+                                     SmtOptionSource source);
 
         struct SmtOptionSpec
         {
@@ -589,75 +591,80 @@ namespace ctrace::stack::cli
             std::uint64_t reservedFlags : 63 = 0;
         };
 
-        bool applySmtSwitchOption(AnalysisConfig& cfg, const std::string& value,
-                                  SmtOptionSource source, std::string& error)
+        SmtOptionApplyResult applySmtSwitchOption(AnalysisConfig& cfg, const std::string& value,
+                                                  SmtOptionSource source)
         {
             bool parsedValue = false;
+            std::string error;
             if (source == SmtOptionSource::Cli)
             {
                 if (!parseSmtSwitch(value, parsedValue, error))
-                    return false;
+                    return error;
             }
             else
             {
                 if (!parseBoolSwitch(value, parsedValue, error))
-                    return false;
+                    return error;
             }
             cfg.smtEnabled = parsedValue;
-            return true;
+            return std::nullopt;
         }
 
-        bool applySmtBackendOption(AnalysisConfig& cfg, const std::string& value, SmtOptionSource,
-                                   std::string&)
+        SmtOptionApplyResult applySmtBackendOption(AnalysisConfig& cfg, const std::string& value,
+                                                   SmtOptionSource)
         {
             cfg.smtBackend = value;
-            return true;
+            return std::nullopt;
         }
 
-        bool applySmtSecondaryBackendOption(AnalysisConfig& cfg, const std::string& value,
-                                            SmtOptionSource, std::string&)
+        SmtOptionApplyResult
+        applySmtSecondaryBackendOption(AnalysisConfig& cfg, const std::string& value,
+                                       SmtOptionSource)
         {
             cfg.smtSecondaryBackend = value;
-            return true;
+            return std::nullopt;
         }
 
-        bool applySmtModeOption(AnalysisConfig& cfg, const std::string& value, SmtOptionSource,
-                                std::string& error)
+        SmtOptionApplyResult applySmtModeOption(AnalysisConfig& cfg, const std::string& value,
+                                                SmtOptionSource)
         {
             analysis::smt::SolverMode parsedMode = cfg.smtMode;
+            std::string error;
             if (!parseSmtMode(value, parsedMode, error))
-                return false;
+                return error;
             cfg.smtMode = parsedMode;
-            return true;
+            return std::nullopt;
         }
 
-        bool applySmtTimeoutOption(AnalysisConfig& cfg, const std::string& value, SmtOptionSource,
-                                   std::string& error)
+        SmtOptionApplyResult applySmtTimeoutOption(AnalysisConfig& cfg, const std::string& value,
+                                                   SmtOptionSource)
         {
             unsigned parsedTimeout = 0;
+            std::string error;
             if (!parsePositiveUnsigned(value, parsedTimeout, error))
-                return false;
+                return error;
             cfg.smtTimeoutMs = parsedTimeout;
-            return true;
+            return std::nullopt;
         }
 
-        bool applySmtBudgetOption(AnalysisConfig& cfg, const std::string& value, SmtOptionSource,
-                                  std::string& error)
+        SmtOptionApplyResult applySmtBudgetOption(AnalysisConfig& cfg, const std::string& value,
+                                                  SmtOptionSource)
         {
             std::uint64_t parsedBudget = 0;
+            std::string error;
             if (!parsePositiveU64(value, parsedBudget, error))
-                return false;
+                return error;
             cfg.smtBudgetNodes = parsedBudget;
-            return true;
+            return std::nullopt;
         }
 
-        bool applySmtRulesOption(AnalysisConfig& cfg, const std::string& value,
-                                 SmtOptionSource source, std::string&)
+        SmtOptionApplyResult applySmtRulesOption(AnalysisConfig& cfg, const std::string& value,
+                                                 SmtOptionSource source)
         {
             if (source == SmtOptionSource::Config)
                 cfg.smtRules.clear();
             addCsvFilters(cfg.smtRules, value);
-            return true;
+            return std::nullopt;
         }
 
         constexpr std::array<SmtOptionSpec, 7> kSmtOptionSpecs = {{
@@ -681,15 +688,17 @@ namespace ctrace::stack::cli
             return nullptr;
         }
 
-        bool applySmtOptionValue(const SmtOptionSpec& spec, AnalysisConfig& cfg,
-                                 const std::string& value, SmtOptionSource source,
-                                 std::string& error)
+        SmtOptionApplyResult applySmtOptionValue(const SmtOptionSpec& spec, AnalysisConfig& cfg,
+                                                 const std::string& value,
+                                                 SmtOptionSource source)
         {
-            if (!spec.apply || !spec.apply(cfg, value, source, error))
-                return false;
+            if (!spec.apply)
+                return "SMT option handler is not configured";
+            if (std::optional<std::string> applyError = spec.apply(cfg, value, source))
+                return applyError;
             if (spec.impliesSmtEnabled)
                 cfg.smtEnabled = true;
-            return true;
+            return std::nullopt;
         }
 
         bool tryConsumeAndApplySmtCliOption(const std::string& argStr, int& i, int argc,
@@ -711,10 +720,10 @@ namespace ctrace::stack::cli
                     return true;
                 }
 
-                std::string valueError;
-                if (!applySmtOptionValue(spec, cfg, value, SmtOptionSource::Cli, valueError))
+                if (std::optional<std::string> valueError =
+                        applySmtOptionValue(spec, cfg, value, SmtOptionSource::Cli))
                 {
-                    error = "Invalid " + std::string(spec.cliOption) + " value: " + valueError;
+                    error = "Invalid " + std::string(spec.cliOption) + " value: " + *valueError;
                     return true;
                 }
 
@@ -926,10 +935,10 @@ namespace ctrace::stack::cli
             }
             if (const SmtOptionSpec* smtSpec = findSmtOptionByConfigKey(key))
             {
-                std::string localError;
-                if (!applySmtOptionValue(*smtSpec, cfg, value, SmtOptionSource::Config, localError))
+                if (std::optional<std::string> localError =
+                        applySmtOptionValue(*smtSpec, cfg, value, SmtOptionSource::Config))
                 {
-                    error = "invalid " + key + " value: " + localError;
+                    error = "invalid " + key + " value: " + *localError;
                     return false;
                 }
                 return true;
