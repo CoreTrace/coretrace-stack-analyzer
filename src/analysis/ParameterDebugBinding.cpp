@@ -121,41 +121,58 @@ namespace ctrace::stack::analysis
             const unsigned expectedArg = expectedDebugArgIndex(Arg, layout);
             outArgMatchesExpected = var->getArg() == expectedArg;
 
-            int score = 0;
+            std::uint64_t positiveScore = 0;
+            std::uint64_t penaltyScore = 0;
             switch (origin)
             {
             case BindingOrigin::DvrDeclare:
-                score += 60;
+                positiveScore += 60;
                 break;
             case BindingOrigin::DbgUser:
-                score += 55;
+                positiveScore += 55;
                 break;
             case BindingOrigin::DbgRecordUser:
-                score += 52;
+                positiveScore += 52;
                 break;
             case BindingOrigin::DbgDeclare:
-                score += 50;
+                positiveScore += 50;
                 break;
             case BindingOrigin::RetainedNode:
-                score += 30;
+                positiveScore += 30;
                 break;
             case BindingOrigin::None:
                 break;
             }
 
-            score += outArgMatchesExpected ? 120 : -90;
+            if (outArgMatchesExpected)
+                positiveScore += 120;
+            else
+                penaltyScore += 90;
             if (var->getType())
-                score += 30;
+                positiveScore += 30;
             if (!var->getName().empty())
-                score += 20;
+                positiveScore += 20;
             if (loc && loc.getLine() != 0)
-                score += 8;
+                positiveScore += 8;
             else if (var->getLine() != 0)
-                score += 4;
+                positiveScore += 4;
             if (isSyntheticDebugVariable(var))
-                score -= 20;
+                penaltyScore += 20;
 
-            return score;
+            if (positiveScore >= penaltyScore)
+            {
+                const std::uint64_t delta = positiveScore - penaltyScore;
+                if (delta > static_cast<std::uint64_t>(std::numeric_limits<int>::max()))
+                    return std::numeric_limits<int>::max();
+                return static_cast<int>(delta);
+            }
+
+            const std::uint64_t delta = penaltyScore - positiveScore;
+            constexpr std::uint64_t kIntMinMagnitude =
+                static_cast<std::uint64_t>(std::numeric_limits<int>::max()) + 1ull;
+            if (delta >= kIntMinMagnitude)
+                return std::numeric_limits<int>::min();
+            return -static_cast<int>(delta);
         }
 
         static void considerVariableCandidate(VariableCandidate& best,
