@@ -177,12 +177,13 @@ def _collect_cache_dependencies(args):
     return deps
 
 
-def _cache_key_for_args(args):
+def _cache_key_for_args(args, env_overrides: Optional[dict[str, str]] = None):
     payload = {
         "analyzer": str(RUN_CONFIG.analyzer.resolve()),
         "args": list(args),
         "cwd": str(Path.cwd()),
         "deps": _collect_cache_dependencies(args),
+        "env": dict(sorted((env_overrides or {}).items())),
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
@@ -588,13 +589,13 @@ def _effective_analyzer_args(args):
     return base
 
 
-def run_analyzer(args) -> subprocess.CompletedProcess:
+def run_analyzer(args, env_overrides: Optional[dict[str, str]] = None) -> subprocess.CompletedProcess:
     """
     Run analyzer with custom args and return the CompletedProcess.
     """
     effective_args = _effective_analyzer_args(args)
     cmd = [str(RUN_CONFIG.analyzer)] + effective_args
-    key = _cache_key_for_args(effective_args)
+    key = _cache_key_for_args(effective_args, env_overrides)
 
     with _CACHE_LOCK:
         in_memory = _MEM_CACHE.get(key)
@@ -617,7 +618,10 @@ def run_analyzer(args) -> subprocess.CompletedProcess:
             }
         return cached
 
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    env = os.environ.copy()
+    if env_overrides:
+        env.update(env_overrides)
+    result = subprocess.run(cmd, capture_output=True, text=True, env=env)
     with _CACHE_LOCK:
         _MEM_CACHE[key] = {
             "returncode": result.returncode,
@@ -628,13 +632,16 @@ def run_analyzer(args) -> subprocess.CompletedProcess:
     return result
 
 
-def run_analyzer_uncached(args) -> subprocess.CompletedProcess:
+def run_analyzer_uncached(args, env_overrides: Optional[dict[str, str]] = None) -> subprocess.CompletedProcess:
     """
     Run analyzer with custom args and bypass run_test.py cache layer.
     Useful for checks that assert filesystem side effects.
     """
     cmd = [str(RUN_CONFIG.analyzer)] + _effective_analyzer_args(args)
-    return subprocess.run(cmd, capture_output=True, text=True)
+    env = os.environ.copy()
+    if env_overrides:
+        env.update(env_overrides)
+    return subprocess.run(cmd, capture_output=True, text=True, env=env)
 
 
 def fail_check(message: str, output: str = "") -> bool:
@@ -1498,48 +1505,170 @@ def check_cli_parsing_and_filters() -> bool:
 
 def check_compile_ir_format_switch() -> bool:
     """
-    Validate that --compile-ir-format selects the expected source compile IR path.
+    Validate that --compile-ir-format selects the expected source compile IR path
+    and that cache keys invalidate correctly when switching format.
     """
     print("=== Testing compile IR format switch ===")
     sample_c = RUN_CONFIG.test_dir / "alloca/oversized-constant.c"
-
-    def run_and_capture(fmt: str) -> tuple[bool, str]:
-        result = run_analyzer_uncached([str(sample_c), "--timing", f"--compile-ir-format={fmt}"])
-        output = (result.stdout or "") + (result.stderr or "")
-        if result.returncode != 0:
-            print(f"  ❌ --compile-ir-format={fmt} failed (code {result.returncode})")
-            print(output)
-            return False, output
-        return True, output
-
     ok = True
+    with tempfile.TemporaryDirectory(prefix="ct_compile_ir_format_") as tmp:
+        cache_dir = Path(tmp) / "compile-ir-cache"
+        cache_arg = f"--compile-ir-cache-dir={cache_dir}"
 
-    bc_ok, bc_output = run_and_capture("bc")
-    ok = ok and bc_ok
-    if bc_ok:
-        if "Bitcode parse done in" not in bc_output:
-            print("  ❌ --compile-ir-format=bc did not use bitcode parse path")
-            print(bc_output)
-            ok = False
-        else:
-            print("  ✅ --compile-ir-format=bc uses bitcode parse path")
+        def run_and_capture(fmt: str) -> tuple[bool, str]:
+            result = run_analyzer_uncached(
+                [str(sample_c), "--timing", cache_arg, f"--compile-ir-format={fmt}"]
+            )
+            output = (result.stdout or "") + (result.stderr or "")
+            if result.returncode != 0:
+                print(f"  ❌ --compile-ir-format={fmt} failed (code {result.returncode})")
+                print(output)
+                return False, output
+            return True, output
 
-    ll_ok, ll_output = run_and_capture("ll")
-    ok = ok and ll_ok
-    if ll_ok:
-        if "IR parse done in" not in ll_output:
-            print("  ❌ --compile-ir-format=ll did not use textual IR parse path")
-            print(ll_output)
-            ok = False
-        elif "Bitcode parse done in" in ll_output:
-            print("  ❌ --compile-ir-format=ll unexpectedly used bitcode parse path")
-            print(ll_output)
-            ok = False
-        else:
-            print("  ✅ --compile-ir-format=ll uses textual IR parse path")
+        bc_ok, bc_output = run_and_capture("bc")
+        ok = ok and bc_ok
+        if bc_ok:
+            if "Bitcode parse done in" not in bc_output:
+                print("  ❌ --compile-ir-format=bc did not use bitcode parse path")
+                print(bc_output)
+                ok = False
+            else:
+                print("  ✅ --compile-ir-format=bc uses bitcode parse path")
+
+        ll_ok, ll_output = run_and_capture("ll")
+        ok = ok and ll_ok
+        if ll_ok:
+            if "IR parse done in" not in ll_output:
+                print("  ❌ --compile-ir-format=ll did not use textual IR parse path")
+                print(ll_output)
+                ok = False
+            elif "Bitcode parse done in" in ll_output:
+                print("  ❌ --compile-ir-format=ll unexpectedly used bitcode parse path")
+                print(ll_output)
+                ok = False
+            else:
+                print("  ✅ --compile-ir-format=ll uses textual IR parse path")
+
+        # Re-run BC with the same cache directory to ensure format switch is
+        # versioned in cache identity and does not pin the LL parse path.
+        bc2_ok, bc2_output = run_and_capture("bc")
+        ok = ok and bc2_ok
+        if bc2_ok:
+            if "Bitcode parse done in" not in bc2_output:
+                print("  ❌ cache invalidation failed when switching back to bc")
+                print(bc2_output)
+                ok = False
+            elif "IR parse done in" in bc2_output:
+                print("  ❌ bc run unexpectedly reused textual IR parse path")
+                print(bc2_output)
+                ok = False
+            else:
+                print("  ✅ cache invalidation across bc/ll switch OK")
 
     print()
     return ok
+
+
+def check_pipeline_subscriber_rollout_parity() -> bool:
+    """
+    Integration check: diagnostics must remain stable when toggling the
+    subscriber rollout flag.
+    """
+    print("=== Testing pipeline subscriber rollout parity ===")
+    fixtures = [
+        RUN_CONFIG.test_dir / "alloca/oversized-constant.c",
+        RUN_CONFIG.test_dir / "resource-lifetime/local-double-release.c",
+        RUN_CONFIG.test_dir / "integer-overflow/cross-tu-tricky-use.c",
+        RUN_CONFIG.test_dir / "uninitialized-variable/uninitialized-local-unused.c",
+        RUN_CONFIG.test_dir / "diagnostics/duplicate-else-if-basic.c",
+    ]
+
+    ok = True
+    for fixture in fixtures:
+        args = [str(fixture), "--warnings-only", "--format=json"]
+        baseline = run_analyzer(args)
+        baseline_output = (baseline.stdout or "") + (baseline.stderr or "")
+        if baseline.returncode != 0:
+            print(f"  ❌ baseline run failed for {fixture} (code {baseline.returncode})")
+            print(baseline_output)
+            ok = False
+            continue
+        try:
+            baseline_payload = json.loads(baseline.stdout or "")
+        except json.JSONDecodeError as exc:
+            print(f"  ❌ baseline JSON parse failed for {fixture}: {exc}")
+            print(baseline.stdout or "")
+            ok = False
+            continue
+
+        subscriber = run_analyzer(args, env_overrides={"CTRACE_PIPELINE_SUBSCRIBERS": "1"})
+        subscriber_output = (subscriber.stdout or "") + (subscriber.stderr or "")
+        if subscriber.returncode != 0:
+            print(f"  ❌ subscriber run failed for {fixture} (code {subscriber.returncode})")
+            print(subscriber_output)
+            ok = False
+            continue
+        try:
+            subscriber_payload = json.loads(subscriber.stdout or "")
+        except json.JSONDecodeError as exc:
+            print(f"  ❌ subscriber JSON parse failed for {fixture}: {exc}")
+            print(subscriber.stdout or "")
+            ok = False
+            continue
+
+        baseline_norm = json.dumps(baseline_payload, sort_keys=True, separators=(",", ":"))
+        subscriber_norm = json.dumps(subscriber_payload, sort_keys=True, separators=(",", ":"))
+        if baseline_norm != subscriber_norm:
+            print(f"  ❌ parity mismatch with subscriber rollout for {fixture}")
+            print("  --- baseline ---")
+            print(baseline.stdout or "")
+            print("  --- subscriber ---")
+            print(subscriber.stdout or "")
+            ok = False
+            continue
+
+        print(f"  ✅ parity OK with subscriber rollout for {fixture}")
+
+    print()
+    return ok
+
+
+def check_pipeline_timing_traversal_instrumentation() -> bool:
+    """
+    Integration check: timing output must include traversal instrumentation
+    and derived-artifact metadata.
+    """
+    print("=== Testing pipeline traversal instrumentation ===")
+    sample = RUN_CONFIG.test_dir / "alloca/oversized-constant.c"
+    result = run_analyzer_uncached(
+        [str(sample), "--timing", "--quiet"],
+        env_overrides={"CTRACE_PIPELINE_SUBSCRIBERS": "1"},
+    )
+    output = (result.stdout or "") + (result.stderr or "")
+
+    if result.returncode != 0:
+        print(f"  ❌ analyzer failed (code {result.returncode})")
+        print(output)
+        print()
+        return False
+
+    required = [
+        "IR facts mode: subscriber",
+        "Derived artifacts schema: derived-module-artifacts-v1",
+        "Traversal estimate detail: step='Stack buffer overflows'",
+        "Traversal estimate by model:",
+    ]
+
+    for needle in required:
+        if needle not in output:
+            print(f"  ❌ missing traversal instrumentation token: {needle}")
+            print(output)
+            print()
+            return False
+
+    print("  ✅ traversal instrumentation output OK\n")
+    return True
 
 
 def check_only_func_uninitialized() -> bool:
@@ -2191,84 +2320,93 @@ def check_use_after_free_advanced_inter_tu() -> bool:
         return False
 
     model = "models/resource-lifetime/generic.txt"
-    result = run_analyzer(
-        [
-            str(def_file),
-            str(use_file),
-            "--jobs=2",
-            "--analysis-profile=full",
-            "--resource-cross-tu",
-            f"--resource-model={model}",
-            "--warnings-only",
-        ]
-    )
-    output = (result.stdout or "") + (result.stderr or "")
+    with tempfile.TemporaryDirectory(prefix="ct_uaf_cross_tu_") as tmp:
+        tmpdir = Path(tmp)
+        resource_cache_arg = f"--resource-summary-cache-dir={tmpdir / 'resource-cache'}"
+        compile_cache_arg = f"--compile-ir-cache-dir={tmpdir / 'compile-ir-cache'}"
 
-    if not expect_returncode_zero(result, output, "use-after-free inter-TU run failed"):
-        return False
-    if not expect_contains(
-        output,
-        "Resource inter-procedural analysis: enabled (cross-TU summaries across 2 files",
-        "missing resource cross-TU enabled status in use-after-free inter-TU run",
-    ):
-        return False
-    if not expect_contains(
-        output,
-        "Function: io_cross_uaf_nested_if",
-        "missing nested-if cross-TU UAF function in output",
-    ):
-        return False
-    if not expect_contains(
-        output,
-        "potential use-after-release: 'GenericHandle' handle 'h'",
-        "missing cross-TU use-after-release diagnostic",
-    ):
-        return False
-    if not expect_contains(
-        output,
-        "Function: io_cross_double_release_nested_loop",
-        "missing nested-loop cross-TU double-release function in output",
-    ):
-        return False
-    if not expect_contains(
-        output,
-        "potential double release: 'GenericHandle' handle 'h'",
-        "missing cross-TU double-release diagnostic",
-    ):
-        return False
-    if not expect_not_contains(
-        output,
-        "inter-procedural resource analysis incomplete: handle 'h'",
-        "unexpected IncompleteInterproc warning in cross-TU enabled run",
-    ):
-        return False
+        result = run_analyzer(
+            [
+                str(def_file),
+                str(use_file),
+                "--jobs=2",
+                "--analysis-profile=full",
+                "--resource-cross-tu",
+                f"--resource-model={model}",
+                resource_cache_arg,
+                compile_cache_arg,
+                "--warnings-only",
+            ]
+        )
+        output = (result.stdout or "") + (result.stderr or "")
 
-    result = run_analyzer(
-        [
-            str(def_file),
-            str(use_file),
-            "--jobs=2",
-            "--analysis-profile=full",
-            "--no-resource-cross-tu",
-            f"--resource-model={model}",
-            "--warnings-only",
-        ]
-    )
-    output = (result.stdout or "") + (result.stderr or "")
-    if not expect_returncode_zero(result, output, "use-after-free cross-TU disabled run failed"):
-        return False
-    if not expect_not_contains(
-        output,
-        "potential use-after-release: 'GenericHandle' handle 'h'",
-        "unexpected cross-TU use-after-release diagnostic with --no-resource-cross-tu",
-    ):
-        return False
-    if not expect_not_contains(
-        output,
-        "potential double release: 'GenericHandle' handle 'h'",
-        "unexpected cross-TU double-release diagnostic with --no-resource-cross-tu",
-    ):
-        return False
+        if not expect_returncode_zero(result, output, "use-after-free inter-TU run failed"):
+            return False
+        if not expect_contains(
+            output,
+            "Resource inter-procedural analysis: enabled (cross-TU summaries across 2 files",
+            "missing resource cross-TU enabled status in use-after-free inter-TU run",
+        ):
+            return False
+        if not expect_contains(
+            output,
+            "Function: io_cross_uaf_nested_if",
+            "missing nested-if cross-TU UAF function in output",
+        ):
+            return False
+        if not expect_contains(
+            output,
+            "potential use-after-release: 'GenericHandle' handle 'h'",
+            "missing cross-TU use-after-release diagnostic",
+        ):
+            return False
+        if not expect_contains(
+            output,
+            "Function: io_cross_double_release_nested_loop",
+            "missing nested-loop cross-TU double-release function in output",
+        ):
+            return False
+        if not expect_contains(
+            output,
+            "potential double release: 'GenericHandle' handle 'h'",
+            "missing cross-TU double-release diagnostic",
+        ):
+            return False
+        if not expect_not_contains(
+            output,
+            "inter-procedural resource analysis incomplete: handle 'h'",
+            "unexpected IncompleteInterproc warning in cross-TU enabled run",
+        ):
+            return False
+
+        result = run_analyzer(
+            [
+                str(def_file),
+                str(use_file),
+                "--jobs=2",
+                "--analysis-profile=full",
+                "--no-resource-cross-tu",
+                f"--resource-model={model}",
+                resource_cache_arg,
+                compile_cache_arg,
+                "--warnings-only",
+            ]
+        )
+        output = (result.stdout or "") + (result.stderr or "")
+        if not expect_returncode_zero(result, output, "use-after-free cross-TU disabled run failed"):
+            return False
+        if not expect_not_contains(
+            output,
+            "potential use-after-release: 'GenericHandle' handle 'h'",
+            "unexpected cross-TU use-after-release diagnostic with --no-resource-cross-tu",
+        ):
+            return False
+        if not expect_not_contains(
+            output,
+            "potential double release: 'GenericHandle' handle 'h'",
+            "unexpected cross-TU double-release diagnostic with --no-resource-cross-tu",
+        ):
+            return False
 
     print("  ✅ nested use-after-free diagnostics OK in inter-TU mode\n")
     return True
@@ -2965,6 +3103,8 @@ def main() -> int:
         check_multi_file_failure,
         check_cli_parsing_and_filters,
         check_compile_ir_format_switch,
+        check_pipeline_subscriber_rollout_parity,
+        check_pipeline_timing_traversal_instrumentation,
         check_only_func_uninitialized,
         check_warnings_only_filters_function_listing,
         check_uninitialized_verbose_ctor_trace,
