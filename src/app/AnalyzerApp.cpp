@@ -1,6 +1,7 @@
 #include "app/AnalyzerApp.hpp"
 
 #include "StackUsageAnalyzer.hpp"
+#include "analyzer/HotspotProfiler.hpp"
 #include "cli/ArgParser.hpp"
 
 #include <algorithm>
@@ -799,11 +800,14 @@ static AppStatus analyzeWithSharedModuleLoading(const std::vector<std::string>& 
                                                 bool needsCrossTUGlobalReadBeforeWriteSummaries,
                                                 std::vector<AnalysisEntry>& results)
 {
+    const analyzer::ScopedHotspot totalHotspot(cfg.timing, "app.shared_loading.total");
     std::vector<LoadedInputModule> loadedModules(inputFilenames.size());
     std::vector<std::string> loadErrors(inputFilenames.size());
     std::vector<char> loadSucceeded(inputFilenames.size(), 0);
     auto loadSingleModule = [&](std::size_t index)
     {
+        const analyzer::ScopedHotspot moduleLoadHotspot(cfg.timing,
+                                                        "app.shared_loading.load_module");
         const std::string& inputFilename = inputFilenames[index];
         auto moduleContext = std::make_unique<llvm::LLVMContext>();
         llvm::SMDiagnostic localErr;
@@ -863,18 +867,33 @@ static AppStatus analyzeWithSharedModuleLoading(const std::vector<std::string>& 
     loadedModules.swap(orderedLoadedModules);
 
     if (needsCrossTUResourceSummaries)
+    {
+        const analyzer::ScopedHotspot hotspot(cfg.timing,
+                                              "app.shared_loading.cross_tu_resource");
         cfg.resourceSummaryIndex = buildCrossTUSummaryIndex(loadedModules, cfg);
+    }
     if (needsCrossTUUninitializedSummaries)
+    {
+        const analyzer::ScopedHotspot hotspot(cfg.timing,
+                                              "app.shared_loading.cross_tu_uninitialized");
         cfg.uninitializedSummaryIndex = buildCrossTUUninitializedSummaryIndex(loadedModules, cfg);
+    }
     if (needsCrossTUGlobalReadBeforeWriteSummaries)
     {
+        const analyzer::ScopedHotspot hotspot(cfg.timing,
+                                              "app.shared_loading.cross_tu_global_read");
         cfg.globalReadBeforeWriteSummaryIndex =
             buildCrossTUGlobalReadBeforeWriteSummaryIndex(loadedModules, cfg);
     }
 
     for (auto& loaded : loadedModules)
     {
-        AnalysisResult result = analyzeModule(*loaded.module, cfg);
+        AnalysisResult result;
+        {
+            const analyzer::ScopedHotspot hotspot(cfg.timing,
+                                                  "app.shared_loading.analyze_module");
+            result = analyzeModule(*loaded.module, cfg);
+        }
         if (!loaded.frontendDiagnostics.empty())
         {
             result.diagnostics.insert(result.diagnostics.end(), loaded.frontendDiagnostics.begin(),
@@ -893,11 +912,13 @@ static AppStatus analyzeWithoutSharedModuleLoading(const std::vector<std::string
                                                    const AnalysisConfig& cfg, bool hasFilter,
                                                    std::vector<AnalysisEntry>& results)
 {
+    const analyzer::ScopedHotspot totalHotspot(cfg.timing, "app.direct_loading.total");
     const unsigned parallelJobs = resolveConfiguredJobs(cfg);
     if (parallelJobs <= 1 || inputFilenames.size() <= 1)
     {
         for (const auto& inputFilename : inputFilenames)
         {
+            const analyzer::ScopedHotspot fileHotspot(cfg.timing, "app.direct_loading.file");
             llvm::LLVMContext localContext;
             llvm::SMDiagnostic localErr;
             analysis::ModuleLoadResult load =
@@ -922,7 +943,12 @@ static AppStatus analyzeWithoutSharedModuleLoading(const std::vector<std::string
                 return AppStatus::failure(std::move(message));
             }
 
-            AnalysisResult result = analyzeModule(*load.module, cfg);
+            AnalysisResult result;
+            {
+                const analyzer::ScopedHotspot hotspot(cfg.timing,
+                                                      "app.direct_loading.analyze_module");
+                result = analyzeModule(*load.module, cfg);
+            }
             if (!load.frontendDiagnostics.empty())
             {
                 result.diagnostics.insert(result.diagnostics.end(),
@@ -949,6 +975,8 @@ static AppStatus analyzeWithoutSharedModuleLoading(const std::vector<std::string
     runParallelWork(inputFilenames.size(), parallelJobs,
                     [&](std::size_t index)
                     {
+                        const analyzer::ScopedHotspot fileHotspot(cfg.timing,
+                                                                  "app.direct_loading.file");
                         const std::string& inputFilename = inputFilenames[index];
                         llvm::LLVMContext localContext;
                         llvm::SMDiagnostic localErr;
@@ -971,7 +999,12 @@ static AppStatus analyzeWithoutSharedModuleLoading(const std::vector<std::string
                             return;
                         }
 
-                        AnalysisResult result = analyzeModule(*load.module, cfg);
+                        AnalysisResult result;
+                        {
+                            const analyzer::ScopedHotspot hotspot(
+                                cfg.timing, "app.direct_loading.analyze_module");
+                            result = analyzeModule(*load.module, cfg);
+                        }
                         if (!load.frontendDiagnostics.empty())
                         {
                             result.diagnostics.insert(result.diagnostics.end(),
@@ -1441,6 +1474,8 @@ static std::shared_ptr<ctrace::stack::analysis::ResourceSummaryIndex>
 buildCrossTUSummaryIndex(const std::vector<LoadedInputModule>& loadedModules,
                          const AnalysisConfig& cfg)
 {
+    const analyzer::ScopedHotspot totalHotspot(cfg.timing,
+                                               "app.cross_tu.resource_summary.total");
     if (!cfg.resourceCrossTU || cfg.resourceModelPath.empty() || loadedModules.size() < 2)
         return nullptr;
 
@@ -1482,6 +1517,8 @@ buildCrossTUSummaryIndex(const std::vector<LoadedInputModule>& loadedModules,
     bool converged = false;
     for (unsigned iter = 0; iter < kCrossTUMaxIterations; ++iter)
     {
+        const analyzer::ScopedHotspot iterHotspot(cfg.timing,
+                                                  "app.cross_tu.resource_summary.iteration");
         const auto iterStart = Clock::now();
         const std::string externalHash = hashSummaryIndex(globalIndex);
         ctrace::stack::analysis::ResourceSummaryIndex nextGlobal;
@@ -1533,6 +1570,8 @@ buildCrossTUSummaryIndex(const std::vector<LoadedInputModule>& loadedModules,
         auto buildModuleSummary =
             [&](std::size_t moduleIndex) -> ctrace::stack::analysis::ResourceSummaryIndex
         {
+            const analyzer::ScopedHotspot hotspot(
+                cfg.timing, "app.cross_tu.resource_summary.build_module");
             const LoadedInputModule& loaded = loadedModules[moduleIndex];
             analysis::FunctionFilter filter = analysis::buildFunctionFilter(*loaded.module, cfg);
             auto shouldAnalyze = [&](const llvm::Function& F) -> bool
@@ -1640,6 +1679,8 @@ static std::shared_ptr<ctrace::stack::analysis::GlobalReadBeforeWriteSummaryInde
 buildCrossTUGlobalReadBeforeWriteSummaryIndex(const std::vector<LoadedInputModule>& loadedModules,
                                               const AnalysisConfig& cfg)
 {
+    const analyzer::ScopedHotspot totalHotspot(
+        cfg.timing, "app.cross_tu.global_read_before_write.total");
     if (loadedModules.size() < 2)
         return nullptr;
 
@@ -1658,6 +1699,8 @@ buildCrossTUGlobalReadBeforeWriteSummaryIndex(const std::vector<LoadedInputModul
     auto buildModuleSummary =
         [&](std::size_t moduleIndex) -> analysis::GlobalReadBeforeWriteSummaryIndex
     {
+        const analyzer::ScopedHotspot hotspot(
+            cfg.timing, "app.cross_tu.global_read_before_write.build_module");
         const LoadedInputModule& loaded = loadedModules[moduleIndex];
         const analysis::FunctionFilter filter = analysis::buildFunctionFilter(*loaded.module, cfg);
         auto shouldAnalyze = [&](const llvm::Function& F) -> bool
@@ -1700,6 +1743,8 @@ static std::shared_ptr<ctrace::stack::analysis::UninitializedSummaryIndex>
 buildCrossTUUninitializedSummaryIndex(const std::vector<LoadedInputModule>& loadedModules,
                                       const AnalysisConfig& cfg)
 {
+    const analyzer::ScopedHotspot totalHotspot(cfg.timing,
+                                               "app.cross_tu.uninitialized.total");
     if (!cfg.uninitializedCrossTU || loadedModules.size() < 2)
         return nullptr;
 
@@ -1730,6 +1775,8 @@ buildCrossTUUninitializedSummaryIndex(const std::vector<LoadedInputModule>& load
     bool converged = false;
     for (unsigned iter = 0; iter < kCrossTUMaxIterations; ++iter)
     {
+        const analyzer::ScopedHotspot iterHotspot(cfg.timing,
+                                                  "app.cross_tu.uninitialized.iteration");
         const auto iterStart = Clock::now();
         const analysis::PreparedUninitializedExternalSummaries preparedExternal =
             analysis::prepareUninitializedExternalSummaries(&globalIndex);
@@ -1739,6 +1786,8 @@ buildCrossTUUninitializedSummaryIndex(const std::vector<LoadedInputModule>& load
         auto buildModuleSummary =
             [&](std::size_t moduleIndex) -> analysis::UninitializedSummaryIndex
         {
+            const analyzer::ScopedHotspot hotspot(
+                cfg.timing, "app.cross_tu.uninitialized.build_module");
             const LoadedInputModule& loaded = loadedModules[moduleIndex];
             return analysis::buildUninitializedSummaryIndex(
                 *loaded.module, &preparedModules[moduleIndex], &preparedExternal);
@@ -2026,7 +2075,9 @@ class AnalyzerApp
             return AppResult<int>::failure(std::move(executionStatus.error));
 
         std::unique_ptr<OutputStrategy> outputStrategy = makeOutputStrategy(plan.outputFormat);
-        return AppResult<int>::success(outputStrategy->emit(plan, results));
+        const int exitCode = outputStrategy->emit(plan, results);
+        analyzer::dumpHotspotSummary(std::cerr, plan.cfg.timing);
+        return AppResult<int>::success(exitCode);
     }
 };
 

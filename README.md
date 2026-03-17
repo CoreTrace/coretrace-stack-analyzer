@@ -242,7 +242,7 @@ Ready-to-adapt workflow examples:
 --resource-summary-cache-memory-only keeps cross-TU summary cache in memory only (process-local, no files)
 --compile-ir-cache-dir=<path> enables dependency-aware LLVM IR compile cache for unchanged source files
 --compile-ir-format=bc|ll selects source compilation IR format (`bc` default, `ll` for textual LLVM IR)
---timing prints compile/analysis timings to stderr
+--timing prints compile/analysis timings to stderr, including aggregated hotspot ranking
 --config=<path> loads optional key=value config file (CLI flags override config values)
 --print-effective-config prints resolved runtime config to stderr
 --smt=on|off enables or disables SMT-assisted reasoning (default: off)
@@ -276,6 +276,16 @@ based on source/dependency stamps, which reduces repeated C/C++ frontend cost ac
 `--compile-ir-format=bc|ll` controls source compilation output format before module load:
 - `bc` (default): compile to LLVM bitcode then parse bitcode.
 - `ll`: compile to textual LLVM IR then parse text IR.
+`--timing` now also includes pipeline traversal estimates per step
+(`module/function/instruction` estimates) and by execution model
+(`subscriber-compatible` vs `independent`) to help identify repeated scans.
+It also prints a process-level hotspot summary sorted by cumulative time.
+You can control the number of printed hotspots with `CTRACE_HOTSPOT_TOP=<N>`
+(default: 20, max: 200).
+For rollout/A-B checks of the subscriber path, set:
+`CTRACE_PIPELINE_SUBSCRIBERS=1`.
+Reusable A/B benchmark helper:
+`./scripts/bench/pipeline_subscriber_ab.sh ./build/stack_usage_analyzer`.
 When inputs are auto-discovered from `compile_commands.json`, `_deps` entries are skipped by default
 to keep analysis focused on project code; use `--include-compdb-deps` to opt back in.
 

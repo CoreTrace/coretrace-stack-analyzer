@@ -67,6 +67,8 @@ endif()
 set(STACK_ANALYZER_SOURCES
     src/analyzer/AnalysisPipeline.cpp
     src/analyzer/DiagnosticEmitter.cpp
+    src/analyzer/HotspotProfiler.cpp
+    src/analyzer/IRFactCollector.cpp
     src/analyzer/LocationResolver.cpp
     src/analyzer/ModulePreparationService.cpp
     src/app/AnalyzerApp.cpp
