@@ -24,6 +24,7 @@
 #include <unordered_set>
 #include <utility>
 #include <vector>
+#include <llvm/IR/InstrTypes.h>
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
 #include <llvm/Support/ErrorHandling.h>
@@ -1509,10 +1510,40 @@ buildCrossTUSummaryIndex(const std::vector<LoadedInputModule>& loadedModules,
         moduleCompileArgsHashes.push_back(computeCompileArgsSignature(cfg, loaded.filename));
     }
 
+    // Pre-compute per-module callee name sets for delta-based convergence.
+    std::vector<std::unordered_set<std::string>> resourceModuleCalleeNames(loadedModules.size());
+    for (std::size_t i = 0; i < loadedModules.size(); ++i)
+    {
+        const LoadedInputModule& loaded = loadedModules[i];
+        const analysis::FunctionFilter filter = analysis::buildFunctionFilter(*loaded.module, cfg);
+        for (const llvm::Function& F : *loaded.module)
+        {
+            if (F.isDeclaration() || !filter.shouldAnalyze(F))
+                continue;
+            for (const llvm::BasicBlock& BB : F)
+            {
+                for (const llvm::Instruction& I : BB)
+                {
+                    const auto* CB = llvm::dyn_cast<llvm::CallBase>(&I);
+                    if (!CB)
+                        continue;
+                    const llvm::Function* callee = CB->getCalledFunction();
+                    if (!callee || !callee->hasName() || callee->getName().empty())
+                        continue;
+                    resourceModuleCalleeNames[i].insert(
+                        ctrace_tools::canonicalizeMangledName(callee->getName().str()));
+                }
+            }
+        }
+    }
+
     // Empirical safeguard: cross-TU summaries usually stabilize in a few rounds.
     // Keep a bounded worst-case runtime on very large dependency graphs.
     constexpr unsigned kCrossTUMaxIterations = 12;
     ctrace::stack::analysis::ResourceSummaryIndex globalIndex;
+    std::vector<ctrace::stack::analysis::ResourceSummaryIndex> previousResourceModuleSummaries(
+        loadedModules.size());
+    std::unordered_set<std::string> resourceChangedNamesFromPrevIter;
     unsigned iterationsRan = 0;
     bool converged = false;
     for (unsigned iter = 0; iter < kCrossTUMaxIterations; ++iter)
@@ -1526,11 +1557,49 @@ buildCrossTUSummaryIndex(const std::vector<LoadedInputModule>& loadedModules,
             loadedModules.size());
         std::vector<char> summaryReady(loadedModules.size(), 0);
         std::vector<std::string> cacheKeys(loadedModules.size());
+
+        // Delta-based convergence: determine which modules need re-analysis.
+        std::vector<std::size_t> dirtyIndices;
+        std::size_t deltaSkippedCount = 0;
+        if (iter == 0)
+        {
+            // First iteration: all modules need analysis.
+        }
+        else
+        {
+            for (std::size_t i = 0; i < loadedModules.size(); ++i)
+            {
+                bool isDirty = false;
+                if (!resourceChangedNamesFromPrevIter.empty())
+                {
+                    for (const std::string& callee : resourceModuleCalleeNames[i])
+                    {
+                        if (resourceChangedNamesFromPrevIter.count(callee))
+                        {
+                            isDirty = true;
+                            break;
+                        }
+                    }
+                }
+                if (!isDirty)
+                {
+                    // Reuse previous per-module summary, skip cache lookup entirely.
+                    moduleSummaries[i] = previousResourceModuleSummaries[i];
+                    summaryReady[i] = 1;
+                    ++deltaSkippedCount;
+                }
+            }
+        }
+
+        // For modules not already satisfied by delta-skip, try cache then build.
         std::vector<std::size_t> missingIndices;
         missingIndices.reserve(loadedModules.size());
 
         for (std::size_t moduleIndex = 0; moduleIndex < loadedModules.size(); ++moduleIndex)
         {
+            if (summaryReady[moduleIndex])
+                continue;
+
             const std::string cacheKeyPayload = std::string(kCacheSchema) + "|" + modelHash + "|" +
                                                 externalHash + "|" + filterHash + "|" +
                                                 moduleCompileArgsHashes[moduleIndex] + "|" +
@@ -1627,6 +1696,9 @@ buildCrossTUSummaryIndex(const std::vector<LoadedInputModule>& loadedModules,
             }
         }
 
+        // Save per-module summaries for next iteration's delta reuse.
+        previousResourceModuleSummaries = moduleSummaries;
+
         for (std::size_t moduleIndex = 0; moduleIndex < loadedModules.size(); ++moduleIndex)
         {
             if (summaryReady[moduleIndex] == 0)
@@ -1636,14 +1708,23 @@ buildCrossTUSummaryIndex(const std::vector<LoadedInputModule>& loadedModules,
 
         const bool iterConverged = analysis::resourceSummaryIndexEquals(nextGlobal, globalIndex);
         ++iterationsRan;
+
+        // Compute changed function names for next iteration's dirty-module check.
+        resourceChangedNamesFromPrevIter =
+            analysis::computeChangedResourceFunctionNames(globalIndex, nextGlobal);
+
         if (cfg.timing)
         {
             const auto iterEnd = Clock::now();
             const auto ms =
                 std::chrono::duration_cast<std::chrono::milliseconds>(iterEnd - iterStart).count();
             coretrace::log(coretrace::Level::Info,
-                           "Cross-TU summary iteration {} done in {} ms{}\n", iterationsRan, ms,
-                           iterConverged ? " (converged)" : "");
+                           "Cross-TU summary iteration {} done in {} ms{} "
+                           "(dirty={}, delta-skipped={}, cache-hit={})\n",
+                           iterationsRan, ms, iterConverged ? " (converged)" : "",
+                           missingIndices.size(),
+                           deltaSkippedCount,
+                           loadedModules.size() - missingIndices.size() - deltaSkippedCount);
         }
 
         if (iterConverged)
@@ -1770,7 +1851,16 @@ buildCrossTUUninitializedSummaryIndex(const std::vector<LoadedInputModule>& load
         preparedModules.push_back(
             analysis::prepareUninitializedModuleContext(*loaded.module, shouldAnalyze));
     }
+    // Pre-compute per-module callee name sets for delta-based convergence.
+    std::vector<std::unordered_set<std::string>> moduleCalleeNames(loadedModules.size());
+    for (std::size_t i = 0; i < loadedModules.size(); ++i)
+        moduleCalleeNames[i] = analysis::getCanonicalCalleeNames(preparedModules[i]);
+
     analysis::UninitializedSummaryIndex globalIndex;
+    std::vector<analysis::UninitializedSummaryIndex> previousModuleSummaries(loadedModules.size());
+    // Track which function summaries changed between iterations for delta-based convergence.
+    // On iteration 0 this is empty (all modules are dirty).
+    std::unordered_set<std::string> changedNamesFromPrevIter;
     unsigned iterationsRan = 0;
     bool converged = false;
     for (unsigned iter = 0; iter < kCrossTUMaxIterations; ++iter)
@@ -1783,6 +1873,47 @@ buildCrossTUUninitializedSummaryIndex(const std::vector<LoadedInputModule>& load
         analysis::UninitializedSummaryIndex nextGlobal;
         std::vector<analysis::UninitializedSummaryIndex> moduleSummaries(loadedModules.size());
 
+        // Delta-based convergence: on iterations > 0, only re-analyze modules
+        // whose callees had their summaries change in the previous iteration.
+        std::vector<std::size_t> dirtyIndices;
+        std::size_t skippedCount = 0;
+
+        if (iter == 0)
+        {
+            // First iteration: all modules are dirty.
+            dirtyIndices.reserve(loadedModules.size());
+            for (std::size_t i = 0; i < loadedModules.size(); ++i)
+                dirtyIndices.push_back(i);
+        }
+        else
+        {
+            for (std::size_t i = 0; i < loadedModules.size(); ++i)
+            {
+                bool isDirty = false;
+                if (!changedNamesFromPrevIter.empty())
+                {
+                    for (const std::string& callee : moduleCalleeNames[i])
+                    {
+                        if (changedNamesFromPrevIter.count(callee))
+                        {
+                            isDirty = true;
+                            break;
+                        }
+                    }
+                }
+                if (isDirty)
+                {
+                    dirtyIndices.push_back(i);
+                }
+                else
+                {
+                    // Reuse previous iteration's per-module summary.
+                    moduleSummaries[i] = previousModuleSummaries[i];
+                    ++skippedCount;
+                }
+            }
+        }
+
         auto buildModuleSummary =
             [&](std::size_t moduleIndex) -> analysis::UninitializedSummaryIndex
         {
@@ -1793,16 +1924,26 @@ buildCrossTUUninitializedSummaryIndex(const std::vector<LoadedInputModule>& load
                 *loaded.module, &preparedModules[moduleIndex], &preparedExternal);
         };
 
-        if (maxJobs <= 1 || loadedModules.size() <= 1)
+        if (!dirtyIndices.empty())
         {
-            for (std::size_t moduleIndex = 0; moduleIndex < loadedModules.size(); ++moduleIndex)
-                moduleSummaries[moduleIndex] = buildModuleSummary(moduleIndex);
+            if (maxJobs <= 1 || dirtyIndices.size() <= 1)
+            {
+                for (std::size_t moduleIndex : dirtyIndices)
+                    moduleSummaries[moduleIndex] = buildModuleSummary(moduleIndex);
+            }
+            else
+            {
+                runParallelWork(dirtyIndices.size(), maxJobs,
+                                [&](std::size_t slot)
+                                {
+                                    const std::size_t moduleIndex = dirtyIndices[slot];
+                                    moduleSummaries[moduleIndex] = buildModuleSummary(moduleIndex);
+                                });
+            }
         }
-        else
-        {
-            runParallelWork(loadedModules.size(), maxJobs, [&](std::size_t moduleIndex)
-                            { moduleSummaries[moduleIndex] = buildModuleSummary(moduleIndex); });
-        }
+
+        // Save per-module summaries for next iteration's delta reuse.
+        previousModuleSummaries = moduleSummaries;
 
         for (const auto& moduleSummary : moduleSummaries)
         {
@@ -1812,6 +1953,10 @@ buildCrossTUUninitializedSummaryIndex(const std::vector<LoadedInputModule>& load
         const bool iterConverged =
             analysis::uninitializedSummaryIndexEquals(nextGlobal, globalIndex);
         ++iterationsRan;
+
+        // Compute changed function names for the NEXT iteration's dirty-module check.
+        changedNamesFromPrevIter =
+            analysis::computeChangedUninitializedFunctionNames(globalIndex, nextGlobal);
         globalIndex = std::move(nextGlobal);
 
         if (cfg.timing)
@@ -1820,8 +1965,10 @@ buildCrossTUUninitializedSummaryIndex(const std::vector<LoadedInputModule>& load
             const auto ms =
                 std::chrono::duration_cast<std::chrono::milliseconds>(iterEnd - iterStart).count();
             coretrace::log(coretrace::Level::Info,
-                           "Cross-TU uninitialized summary iteration {} done in {} ms{}\n",
-                           iterationsRan, ms, iterConverged ? " (converged)" : "");
+                           "Cross-TU uninitialized summary iteration {} done in {} ms{} "
+                           "(dirty={}, skipped={})\n",
+                           iterationsRan, ms, iterConverged ? " (converged)" : "",
+                           dirtyIndices.size(), skippedCount);
         }
 
         if (iterConverged)

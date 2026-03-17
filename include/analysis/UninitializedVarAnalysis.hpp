@@ -5,6 +5,7 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace llvm
@@ -106,6 +107,13 @@ namespace ctrace::stack::analysis
 
     bool uninitializedSummaryIndexEquals(const UninitializedSummaryIndex& lhs,
                                          const UninitializedSummaryIndex& rhs);
+
+    std::unordered_set<std::string>
+    computeChangedUninitializedFunctionNames(const UninitializedSummaryIndex& prev,
+                                             const UninitializedSummaryIndex& next);
+
+    std::unordered_set<std::string>
+    getCanonicalCalleeNames(const PreparedUninitializedModuleContext& prepared);
 
     std::vector<UninitializedLocalReadIssue>
     analyzeUninitializedLocalReads(llvm::Module& mod,

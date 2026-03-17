@@ -4,6 +4,7 @@
 #include <functional>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace llvm
@@ -69,6 +70,10 @@ namespace ctrace::stack::analysis
     bool mergeResourceSummaryIndex(ResourceSummaryIndex& dst, const ResourceSummaryIndex& src);
     bool resourceSummaryIndexEquals(const ResourceSummaryIndex& lhs,
                                     const ResourceSummaryIndex& rhs);
+
+    std::unordered_set<std::string>
+    computeChangedResourceFunctionNames(const ResourceSummaryIndex& prev,
+                                        const ResourceSummaryIndex& next);
 
     std::vector<ResourceLifetimeIssue> analyzeResourceLifetime(
         llvm::Module& mod, const std::function<bool(const llvm::Function&)>& shouldAnalyze,
