@@ -1329,6 +1329,7 @@ def check_cli_parsing_and_filters() -> bool:
         ("--escape-model", "Missing argument for --escape-model"),
         ("--buffer-model", "Missing argument for --buffer-model"),
         ("--resource-summary-cache-dir", "Missing argument for --resource-summary-cache-dir"),
+        ("--compile-ir-format", "Missing argument for --compile-ir-format"),
         ("--compile-commands", "Missing argument for --compile-commands"),
         ("--compdb", "Missing argument for --compdb"),
         ("--base-dir", "Missing argument for --base-dir"),
@@ -1379,6 +1380,7 @@ def check_cli_parsing_and_filters() -> bool:
         (["--jobs=x", str(sample)], "Invalid --jobs value:"),
         (["--jobs=-1", str(sample)], "Invalid --jobs value:"),
         (["--analysis-profile=unknown", str(sample)], "Invalid --analysis-profile value:"),
+        (["--compile-ir-format=foo", str(sample)], "Invalid --compile-ir-format value:"),
         (["--stack-limit=oops", str(sample)], "Invalid --stack-limit value:"),
         (["--mode=unknown", str(sample)], "Unknown mode: unknown (expected 'ir' or 'abi')"),
     ]
@@ -1439,6 +1441,8 @@ def check_cli_parsing_and_filters() -> bool:
             ("--analysis-profile equals", [str(sample), "--analysis-profile=full", "--only-function=transition"], ["Function:"], "text"),
             ("--jobs space", [str(sample), "--jobs", "2", "--only-function=transition"], ["Function:"], "text"),
             ("--jobs equals", [str(sample), "--jobs=2", "--only-function=transition"], ["Function:"], "text"),
+            ("--compile-ir-format=bc", [str(sample_c), "--compile-ir-format=bc"], ["Function:"], "text"),
+            ("--compile-ir-format=ll", [str(sample_c), "--compile-ir-format=ll"], ["Function:"], "text"),
             ("--timing", [str(sample), "--timing", "--only-function=transition"], ["Function:"], "text"),
             ("--resource-model space", [str(sample), "--resource-model", str(resource_model), "--only-function=transition"], ["Function:"], "text"),
             ("--resource-model equals", [str(sample), f"--resource-model={resource_model}", "--only-function=transition"], ["Function:"], "text"),
@@ -1487,6 +1491,52 @@ def check_cli_parsing_and_filters() -> bool:
             ok = False
         else:
             print("  ✅ --dump-ir equals created file")
+
+    print()
+    return ok
+
+
+def check_compile_ir_format_switch() -> bool:
+    """
+    Validate that --compile-ir-format selects the expected source compile IR path.
+    """
+    print("=== Testing compile IR format switch ===")
+    sample_c = RUN_CONFIG.test_dir / "alloca/oversized-constant.c"
+
+    def run_and_capture(fmt: str) -> tuple[bool, str]:
+        result = run_analyzer_uncached([str(sample_c), "--timing", f"--compile-ir-format={fmt}"])
+        output = (result.stdout or "") + (result.stderr or "")
+        if result.returncode != 0:
+            print(f"  ❌ --compile-ir-format={fmt} failed (code {result.returncode})")
+            print(output)
+            return False, output
+        return True, output
+
+    ok = True
+
+    bc_ok, bc_output = run_and_capture("bc")
+    ok = ok and bc_ok
+    if bc_ok:
+        if "Bitcode parse done in" not in bc_output:
+            print("  ❌ --compile-ir-format=bc did not use bitcode parse path")
+            print(bc_output)
+            ok = False
+        else:
+            print("  ✅ --compile-ir-format=bc uses bitcode parse path")
+
+    ll_ok, ll_output = run_and_capture("ll")
+    ok = ok and ll_ok
+    if ll_ok:
+        if "IR parse done in" not in ll_output:
+            print("  ❌ --compile-ir-format=ll did not use textual IR parse path")
+            print(ll_output)
+            ok = False
+        elif "Bitcode parse done in" in ll_output:
+            print("  ❌ --compile-ir-format=ll unexpectedly used bitcode parse path")
+            print(ll_output)
+            ok = False
+        else:
+            print("  ✅ --compile-ir-format=ll uses textual IR parse path")
 
     print()
     return ok
@@ -1727,145 +1777,169 @@ def check_resource_lifetime_cross_tu() -> bool:
     """
     print("=== Testing resource lifetime cross-TU summaries ===")
     model = "models/resource-lifetime/generic.txt"
+    with tempfile.TemporaryDirectory(prefix="ct_resource_cross_tu_") as tmp:
+        tmpdir = Path(tmp)
+        compile_cache_dir = tmpdir / "compile-ir-cache"
+        resource_cache_dir = tmpdir / "resource-cache"
+        compile_cache_arg = f"--compile-ir-cache-dir={compile_cache_dir}"
+        default_resource_cache_arg = f"--resource-summary-cache-dir={resource_cache_dir}"
 
-    wrapper_use = RUN_CONFIG.test_dir / "resource-lifetime/cross-tu-wrapper-use.c"
-    result = run_analyzer([str(wrapper_use), f"--resource-model={model}", "--warnings-only"])
-    output = (result.stdout or "") + (result.stderr or "")
-    if not expect_returncode_zero(result, output, "single-file wrapper run failed"):
-        return False
-    if not expect_contains(
-        output,
-        "Resource inter-procedural analysis: unavailable",
-        "missing inter-proc unavailable status message in single-file mode",
-    ):
-        return False
-    if not expect_contains(
-        output,
-        "inter-procedural resource analysis incomplete: handle 'h'",
-        "missing IncompleteInterproc warning in single-file wrapper case",
-    ):
-        return False
-    if not expect_not_contains(
-        output,
-        "potential double release: 'GenericHandle' handle 'h'",
-        "unexpected double release in single-file wrapper case",
-    ):
-        return False
+        wrapper_use = RUN_CONFIG.test_dir / "resource-lifetime/cross-tu-wrapper-use.c"
+        result = run_analyzer(
+            [str(wrapper_use), f"--resource-model={model}", "--warnings-only", compile_cache_arg, default_resource_cache_arg]
+        )
+        output = (result.stdout or "") + (result.stderr or "")
+        if not expect_returncode_zero(result, output, "single-file wrapper run failed"):
+            return False
+        if not expect_contains(
+            output,
+            "Resource inter-procedural analysis: unavailable",
+            "missing inter-proc unavailable status message in single-file mode",
+        ):
+            return False
+        if not expect_contains(
+            output,
+            "inter-procedural resource analysis incomplete: handle 'h'",
+            "missing IncompleteInterproc warning in single-file wrapper case",
+        ):
+            return False
+        if not expect_not_contains(
+            output,
+            "potential double release: 'GenericHandle' handle 'h'",
+            "unexpected double release in single-file wrapper case",
+        ):
+            return False
 
-    wrapper_def = RUN_CONFIG.test_dir / "resource-lifetime/cross-tu-wrapper-def.c"
-    result = run_analyzer(
-        [
-            str(wrapper_def),
-            str(wrapper_use),
-            f"--resource-model={model}",
-            "--jobs=2",
-            "--warnings-only",
-        ]
-    )
-    output = (result.stdout or "") + (result.stderr or "")
-    if not expect_returncode_zero(result, output, "wrapper cross-TU run failed"):
-        return False
-    if not expect_contains(
-        output,
-        "Resource inter-procedural analysis: enabled (cross-TU summaries across 2 files",
-        "missing inter-proc enabled status message in cross-TU mode",
-    ):
-        return False
-    if not expect_contains(output, "jobs: 2", "missing jobs count in inter-proc enabled status message"):
-        return False
-    if not expect_not_contains(
-        output,
-        "potential double release: 'GenericHandle' handle 'h'",
-        "unexpected double release in cross-TU wrapper release case",
-    ):
-        return False
+        wrapper_def = RUN_CONFIG.test_dir / "resource-lifetime/cross-tu-wrapper-def.c"
+        result = run_analyzer(
+            [
+                str(wrapper_def),
+                str(wrapper_use),
+                f"--resource-model={model}",
+                "--jobs=2",
+                "--warnings-only",
+                compile_cache_arg,
+                default_resource_cache_arg,
+            ]
+        )
+        output = (result.stdout or "") + (result.stderr or "")
+        if not expect_returncode_zero(result, output, "wrapper cross-TU run failed"):
+            return False
+        if not expect_contains(
+            output,
+            "Resource inter-procedural analysis: enabled (cross-TU summaries across 2 files",
+            "missing inter-proc enabled status message in cross-TU mode",
+        ):
+            return False
+        if not expect_contains(output, "jobs: 2", "missing jobs count in inter-proc enabled status message"):
+            return False
+        if not expect_not_contains(
+            output,
+            "potential double release: 'GenericHandle' handle 'h'",
+            "unexpected double release in cross-TU wrapper release case",
+        ):
+            return False
 
-    wrapper_leak = RUN_CONFIG.test_dir / "resource-lifetime/cross-tu-wrapper-leak-use.c"
-    result = run_analyzer(
-        [str(wrapper_def), str(wrapper_leak), f"--resource-model={model}", "--warnings-only"]
-    )
-    output = (result.stdout or "") + (result.stderr or "")
-    if not expect_returncode_zero(result, output, "wrapper leak cross-TU run failed"):
-        return False
-    if not expect_contains(
-        output,
-        "potential resource leak: 'GenericHandle' acquired in handle 'h'",
-        "missing leak warning in cross-TU wrapper leak case",
-    ):
-        return False
+        wrapper_leak = RUN_CONFIG.test_dir / "resource-lifetime/cross-tu-wrapper-leak-use.c"
+        result = run_analyzer(
+            [
+                str(wrapper_def),
+                str(wrapper_leak),
+                f"--resource-model={model}",
+                "--warnings-only",
+                compile_cache_arg,
+                default_resource_cache_arg,
+            ]
+        )
+        output = (result.stdout or "") + (result.stderr or "")
+        if not expect_returncode_zero(result, output, "wrapper leak cross-TU run failed"):
+            return False
+        if not expect_contains(
+            output,
+            "potential resource leak: 'GenericHandle' acquired in handle 'h'",
+            "missing leak warning in cross-TU wrapper leak case",
+        ):
+            return False
 
-    ret_def = RUN_CONFIG.test_dir / "resource-lifetime/cross-tu-return-def.c"
-    ret_use = RUN_CONFIG.test_dir / "resource-lifetime/cross-tu-return-use.c"
-    result = run_analyzer(
-        [str(ret_def), str(ret_use), f"--resource-model={model}", "--warnings-only"]
-    )
-    output = (result.stdout or "") + (result.stderr or "")
-    if not expect_returncode_zero(result, output, "return cross-TU run failed"):
-        return False
-    if not expect_not_contains(
-        output,
-        "potential double release: 'HeapAlloc' handle 'p'",
-        "unexpected double release in cross-TU acquire_ret case",
-    ):
-        return False
+        ret_def = RUN_CONFIG.test_dir / "resource-lifetime/cross-tu-return-def.c"
+        ret_use = RUN_CONFIG.test_dir / "resource-lifetime/cross-tu-return-use.c"
+        result = run_analyzer(
+            [
+                str(ret_def),
+                str(ret_use),
+                f"--resource-model={model}",
+                "--warnings-only",
+                compile_cache_arg,
+                default_resource_cache_arg,
+            ]
+        )
+        output = (result.stdout or "") + (result.stderr or "")
+        if not expect_returncode_zero(result, output, "return cross-TU run failed"):
+            return False
+        if not expect_not_contains(
+            output,
+            "potential double release: 'HeapAlloc' handle 'p'",
+            "unexpected double release in cross-TU acquire_ret case",
+        ):
+            return False
 
-    result = run_analyzer(
-        [
-            str(ret_def),
-            str(ret_use),
-            f"--resource-model={model}",
-            "--no-resource-cross-tu",
-            "--warnings-only",
-        ]
-    )
-    output = (result.stdout or "") + (result.stderr or "")
-    if not expect_returncode_zero(result, output, "return cross-TU disabled run failed"):
-        return False
-    if not expect_contains(
-        output,
-        "inter-procedural resource analysis incomplete: handle 'p'",
-        "expected local-only incomplete inter-proc warning is missing with --no-resource-cross-tu",
-    ):
-        return False
+        result = run_analyzer(
+            [
+                str(ret_def),
+                str(ret_use),
+                f"--resource-model={model}",
+                "--no-resource-cross-tu",
+                "--warnings-only",
+                compile_cache_arg,
+                default_resource_cache_arg,
+            ]
+        )
+        output = (result.stdout or "") + (result.stderr or "")
+        if not expect_returncode_zero(result, output, "return cross-TU disabled run failed"):
+            return False
+        if not expect_contains(
+            output,
+            "inter-procedural resource analysis incomplete: handle 'p'",
+            "expected local-only incomplete inter-proc warning is missing with --no-resource-cross-tu",
+        ):
+            return False
 
-    cache_dir = Path(".cache/run_test_resource_summary")
-    if cache_dir.exists():
-        shutil.rmtree(cache_dir, ignore_errors=True)
-    result = run_analyzer_uncached(
-        [
-            str(ret_def),
-            str(ret_use),
-            f"--resource-model={model}",
-            f"--resource-summary-cache-dir={cache_dir}",
-            "--warnings-only",
-        ]
-    )
-    output = (result.stdout or "") + (result.stderr or "")
-    if not expect_returncode_zero(result, output, "return cross-TU cache run failed"):
-        return False
-    if not list(cache_dir.glob("*.json")):
-        return fail_check("cross-TU cache directory was not populated", output)
+        cache_dir = tmpdir / "resource-summary-disk-cache"
+        result = run_analyzer_uncached(
+            [
+                str(ret_def),
+                str(ret_use),
+                f"--resource-model={model}",
+                f"--resource-summary-cache-dir={cache_dir}",
+                "--warnings-only",
+                compile_cache_arg,
+            ]
+        )
+        output = (result.stdout or "") + (result.stderr or "")
+        if not expect_returncode_zero(result, output, "return cross-TU cache run failed"):
+            return False
+        if not list(cache_dir.glob("*.json")):
+            return fail_check("cross-TU cache directory was not populated", output)
 
-    memory_only_cache_dir = Path(".cache/run_test_resource_summary_memory_only")
-    if memory_only_cache_dir.exists():
-        shutil.rmtree(memory_only_cache_dir, ignore_errors=True)
-    result = run_analyzer_uncached(
-        [
-            str(ret_def),
-            str(ret_use),
-            f"--resource-model={model}",
-            "--resource-summary-cache-memory-only",
-            f"--resource-summary-cache-dir={memory_only_cache_dir}",
-            "--warnings-only",
-        ]
-    )
-    output = (result.stdout or "") + (result.stderr or "")
-    if not expect_returncode_zero(result, output, "return cross-TU memory-only cache run failed"):
-        return False
-    if not expect_contains(output, "cache: memory-only", "missing memory-only cache status message"):
-        return False
-    if list(memory_only_cache_dir.glob("*.json")):
-        return fail_check("memory-only cache mode unexpectedly wrote summary files", output)
+        memory_only_cache_dir = tmpdir / "resource-summary-memory-only-cache"
+        result = run_analyzer_uncached(
+            [
+                str(ret_def),
+                str(ret_use),
+                f"--resource-model={model}",
+                "--resource-summary-cache-memory-only",
+                f"--resource-summary-cache-dir={memory_only_cache_dir}",
+                "--warnings-only",
+                compile_cache_arg,
+            ]
+        )
+        output = (result.stdout or "") + (result.stderr or "")
+        if not expect_returncode_zero(result, output, "return cross-TU memory-only cache run failed"):
+            return False
+        if not expect_contains(output, "cache: memory-only", "missing memory-only cache status message"):
+            return False
+        if list(memory_only_cache_dir.glob("*.json")):
+            return fail_check("memory-only cache mode unexpectedly wrote summary files", output)
 
     print("  ✅ cross-TU resource summaries OK\n")
     return True
@@ -2890,6 +2964,7 @@ def main() -> int:
         check_multi_file_total_summary,
         check_multi_file_failure,
         check_cli_parsing_and_filters,
+        check_compile_ir_format_switch,
         check_only_func_uninitialized,
         check_warnings_only_filters_function_listing,
         check_uninitialized_verbose_ctor_trace,
