@@ -45,7 +45,7 @@ namespace ctrace::stack::cli
             }
 
           private:
-            static constexpr std::array<OptionCandidate, 54> kCandidates = {
+            static constexpr std::array<OptionCandidate, 57> kCandidates = {
                 {{"-h", "-h"},
                  {"--help", "--help"},
                  {"--demangle", "--demangle"},
@@ -87,6 +87,9 @@ namespace ctrace::stack::cli
                  {"--resource-summary-cache-dir", "--resource-summary-cache-dir"},
                  {"--resource-summary-cache-memory-only", "--resource-summary-cache-memory-only"},
                  {"--compile-ir-cache-dir", "--compile-ir-cache-dir"},
+                 {"--compile-ir-format", "--compile-ir-format"},
+                 {"--compile-ir-format=bc", "--compile-ir-format=bc"},
+                 {"--compile-ir-format=ll", "--compile-ir-format=ll"},
                  {"--config", "--config"},
                  {"--print-effective-config", "--print-effective-config"},
                  {"--compile-commands", "--compile-commands"},
@@ -387,6 +390,32 @@ namespace ctrace::stack::cli
                 return true;
             }
             error = "expected 'fast' or 'full'";
+            return false;
+        }
+
+        bool parseCompileIRFormat(const std::string& input, CompileIRFormat& out,
+                                  std::string& error)
+        {
+            std::string trimmed = trimCopy(input);
+            if (!trimmed.empty() && trimmed.front() == '.')
+                trimmed.erase(trimmed.begin());
+
+            std::string lowered;
+            lowered.reserve(trimmed.size());
+            for (char c : trimmed)
+                lowered.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+
+            if (lowered == "bc")
+            {
+                out = CompileIRFormat::BC;
+                return true;
+            }
+            if (lowered == "ll")
+            {
+                out = CompileIRFormat::LL;
+                return true;
+            }
+            error = "expected 'bc' or 'll'";
             return false;
         }
 
@@ -952,6 +981,16 @@ namespace ctrace::stack::cli
                 cfg.compileIRCacheDir = resolveConfigRelativePath(value, configDir);
                 return true;
             }
+            if (key == "compile-ir-format")
+            {
+                std::string localError;
+                if (!parseCompileIRFormat(value, cfg.compileIRFormat, localError))
+                {
+                    error = "invalid compile-ir-format value: " + localError;
+                    return false;
+                }
+                return true;
+            }
 
             error = "unknown key '" + key + "'";
             return false;
@@ -1455,6 +1494,19 @@ namespace ctrace::stack::cli
                     if (!error.empty())
                         return makeError(error);
                     cfg.compileIRCacheDir = std::move(value);
+                    continue;
+                }
+            }
+            {
+                std::string value;
+                std::string error;
+                if (consumeLongOptionValue(argStr, "--compile-ir-format", i, argc, argv, value,
+                                           error))
+                {
+                    if (!error.empty())
+                        return makeError(error);
+                    if (!parseCompileIRFormat(value, cfg.compileIRFormat, error))
+                        return makeError("Invalid --compile-ir-format value: " + error);
                     continue;
                 }
             }
