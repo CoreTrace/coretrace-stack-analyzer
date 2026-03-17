@@ -7,6 +7,7 @@
 #include "analyzer/IRFactCollector.hpp"
 #include "analyzer/InstructionSubscriber.hpp"
 #include "analyzer/ModulePreparationService.hpp"
+#include "analyzer/PerFunctionInstructionCache.hpp"
 
 #include "analysis/AllocaUsage.hpp"
 #include "analysis/ConstParamAnalysis.hpp"
@@ -146,7 +147,7 @@ namespace ctrace::stack::analyzer
 
         static bool usePipelineSubscribers()
         {
-            static const bool enabled = parseBooleanEnvFlag("CTRACE_PIPELINE_SUBSCRIBERS", false);
+            static const bool enabled = parseBooleanEnvFlag("CTRACE_PIPELINE_SUBSCRIBERS", true);
             return enabled;
         }
 
@@ -263,7 +264,11 @@ namespace ctrace::stack::analyzer
                                  InstructionSubscriberRegistry registry;
                                  PipelineSignalSubscriber signalSubscriber(signals);
                                  registry.add(signalSubscriber);
+                                 PerFunctionInstructionCache instCache;
+                                 registry.add(instCache);
                                  facts = collectIRFacts(state.prepared->ctx, &registry);
+                                 state.artifacts.set<PerFunctionInstructionCache>(
+                                     std::move(instCache));
                              }
                              else
                              {
@@ -332,6 +337,23 @@ namespace ctrace::stack::analyzer
 
         steps.push_back({"Dynamic allocas", [](PipelineData& state)
                          {
+                             if (const auto* cache =
+                                     state.artifacts.get<PerFunctionInstructionCache>())
+                             {
+                                 std::vector<analysis::DynamicAllocaIssue> issues;
+                                 for (const auto& [func, data] : cache->data())
+                                 {
+                                     if (!func || func->isDeclaration())
+                                         continue;
+                                     auto funcIssues =
+                                         analysis::analyzeDynamicAllocasCached(*func, data.allocas);
+                                     issues.insert(issues.end(), funcIssues.begin(),
+                                                   funcIssues.end());
+                                 }
+                                 appendDynamicAllocaDiagnostics(state.result, issues);
+                                 return;
+                             }
+
                              auto shouldAnalyze = [&](const llvm::Function& F) -> bool
                              { return state.prepared->ctx.shouldAnalyze(F); };
                              const std::vector<analysis::DynamicAllocaIssue> issues =
@@ -355,6 +377,48 @@ namespace ctrace::stack::analyzer
 
         steps.push_back({"Mem intrinsic overflows", [](PipelineData& state)
                          {
+                             if (const auto* cache =
+                                     state.artifacts.get<PerFunctionInstructionCache>())
+                             {
+                                 const llvm::DataLayout& dataLayout =
+                                     *state.prepared->ctx.dataLayout;
+
+                                 // Parse model once for all functions.
+                                 analysis::BufferWriteModel externalModel;
+                                 analysis::BufferWriteRuleMatcher ruleMatcher;
+                                 const analysis::BufferWriteModel* modelPtr = nullptr;
+                                 if (!state.config.bufferModelPath.empty())
+                                 {
+                                     std::string parseError;
+                                     if (analysis::parseBufferWriteModel(
+                                             state.config.bufferModelPath,
+                                             externalModel, parseError))
+                                     {
+                                         modelPtr = &externalModel;
+                                     }
+                                     else
+                                     {
+                                         std::cerr << "Buffer model load error: "
+                                                   << parseError << "\n";
+                                     }
+                                 }
+
+                                 std::vector<analysis::MemIntrinsicIssue> issues;
+                                 for (const auto& [func, data] : cache->data())
+                                 {
+                                     if (!func || func->isDeclaration())
+                                         continue;
+                                     auto funcIssues =
+                                         analysis::analyzeMemIntrinsicOverflowsCached(
+                                             *func, dataLayout, data.calls, data.invokes,
+                                             modelPtr, &ruleMatcher);
+                                     issues.insert(issues.end(), funcIssues.begin(),
+                                                   funcIssues.end());
+                                 }
+                                 appendMemIntrinsicDiagnostics(state.result, issues);
+                                 return;
+                             }
+
                              auto shouldAnalyze = [&](const llvm::Function& F) -> bool
                              { return state.prepared->ctx.shouldAnalyze(F); };
                              const llvm::DataLayout& dataLayout = *state.prepared->ctx.dataLayout;
@@ -479,6 +543,24 @@ namespace ctrace::stack::analyzer
 
         steps.push_back({"Command injection", [](PipelineData& state)
                          {
+                             if (const auto* cache =
+                                     state.artifacts.get<PerFunctionInstructionCache>())
+                             {
+                                 std::vector<analysis::CommandInjectionIssue> issues;
+                                 for (const auto& [func, data] : cache->data())
+                                 {
+                                     if (!func || func->isDeclaration())
+                                         continue;
+                                     auto funcIssues =
+                                         analysis::analyzeCommandInjectionCached(
+                                             *func, data.calls, data.invokes);
+                                     issues.insert(issues.end(), funcIssues.begin(),
+                                                   funcIssues.end());
+                                 }
+                                 appendCommandInjectionDiagnostics(state.result, issues);
+                                 return;
+                             }
+
                              auto shouldAnalyze = [&](const llvm::Function& F) -> bool
                              { return state.prepared->ctx.shouldAnalyze(F); };
                              const std::vector<analysis::CommandInjectionIssue> issues =
@@ -488,6 +570,24 @@ namespace ctrace::stack::analyzer
 
         steps.push_back({"TOCTOU", [](PipelineData& state)
                          {
+                             if (const auto* cache =
+                                     state.artifacts.get<PerFunctionInstructionCache>())
+                             {
+                                 std::vector<analysis::TOCTOUIssue> issues;
+                                 for (const auto& [func, data] : cache->data())
+                                 {
+                                     if (!func || func->isDeclaration())
+                                         continue;
+                                     auto funcIssues =
+                                         analysis::analyzeTOCTOUCached(
+                                             *func, data.calls, data.invokes);
+                                     issues.insert(issues.end(), funcIssues.begin(),
+                                                   funcIssues.end());
+                                 }
+                                 appendTOCTOUDiagnostics(state.result, issues);
+                                 return;
+                             }
+
                              auto shouldAnalyze = [&](const llvm::Function& F) -> bool
                              { return state.prepared->ctx.shouldAnalyze(F); };
                              const std::vector<analysis::TOCTOUIssue> issues =

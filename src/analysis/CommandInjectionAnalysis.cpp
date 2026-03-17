@@ -130,4 +130,48 @@ namespace ctrace::stack::analysis
 
         return issues;
     }
+
+    namespace
+    {
+        template <typename CallBaseT>
+        static void collectCommandInjectionFromCallBases(
+            const llvm::Function& function,
+            const std::vector<const CallBaseT*>& callBases,
+            std::vector<CommandInjectionIssue>& issues)
+        {
+            for (const CallBaseT* call : callBases)
+            {
+                const llvm::Function* callee = getDirectCallee(*call);
+                if (!callee)
+                    continue;
+
+                const llvm::StringRef canonicalName = canonicalCalleeName(callee->getName());
+                const std::optional<unsigned> commandArg = shellCommandArgIndex(canonicalName);
+                if (!commandArg || *commandArg >= call->arg_size())
+                    continue;
+
+                const llvm::Value* commandValue = call->getArgOperand(*commandArg);
+                if (isCompileTimeConstantString(commandValue))
+                    continue;
+
+                CommandInjectionIssue issue;
+                issue.funcName = function.getName().str();
+                issue.filePath = getFunctionSourcePath(function);
+                issue.sinkName = canonicalName.str();
+                issue.inst = call;
+                issues.push_back(std::move(issue));
+            }
+        }
+    } // namespace
+
+    std::vector<CommandInjectionIssue>
+    analyzeCommandInjectionCached(const llvm::Function& function,
+                                  const std::vector<const llvm::CallInst*>& calls,
+                                  const std::vector<const llvm::InvokeInst*>& invokes)
+    {
+        std::vector<CommandInjectionIssue> issues;
+        collectCommandInjectionFromCallBases(function, calls, issues);
+        collectCommandInjectionFromCallBases(function, invokes, issues);
+        return issues;
+    }
 } // namespace ctrace::stack::analysis

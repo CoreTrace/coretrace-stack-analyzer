@@ -6,6 +6,7 @@ namespace llvm
 {
     class AllocaInst;
     class CallInst;
+    class Function;
     class InvokeInst;
     class LoadInst;
     class MemIntrinsic;
@@ -19,6 +20,8 @@ namespace ctrace::stack::analyzer
       public:
         virtual ~InstructionSubscriber() = default;
 
+        virtual void onFunctionBegin(const llvm::Function&) {}
+        virtual void onFunctionEnd(const llvm::Function&) {}
         virtual void onAlloca(const llvm::AllocaInst&) {}
         virtual void onLoad(const llvm::LoadInst&) {}
         virtual void onStore(const llvm::StoreInst&) {}
@@ -33,6 +36,18 @@ namespace ctrace::stack::analyzer
         void add(InstructionSubscriber& subscriber) { subscribers_.push_back(&subscriber); }
 
         [[nodiscard]] bool empty() const { return subscribers_.empty(); }
+
+        void notifyFunctionBegin(const llvm::Function& F) const
+        {
+            for (InstructionSubscriber* subscriber : subscribers_)
+                subscriber->onFunctionBegin(F);
+        }
+
+        void notifyFunctionEnd(const llvm::Function& F) const
+        {
+            for (InstructionSubscriber* subscriber : subscribers_)
+                subscriber->onFunctionEnd(F);
+        }
 
         void notifyAlloca(const llvm::AllocaInst& inst) const
         {

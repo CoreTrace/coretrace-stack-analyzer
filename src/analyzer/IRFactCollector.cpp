@@ -22,6 +22,8 @@ namespace ctrace::stack::analyzer
                 continue;
 
             const bool selected = ctx.shouldAnalyze(*function);
+            if (selected && subscribers)
+                subscribers->notifyFunctionBegin(*function);
             for (const llvm::BasicBlock& block : *function)
             {
                 ++facts.basicBlockCountAllDefined;
@@ -77,6 +79,8 @@ namespace ctrace::stack::analyzer
                         ++facts.debugLocCount;
                 }
             }
+            if (selected && subscribers)
+                subscribers->notifyFunctionEnd(*function);
         }
 
         return facts;

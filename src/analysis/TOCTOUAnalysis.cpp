@@ -263,4 +263,90 @@ namespace ctrace::stack::analysis
 
         return issues;
     }
+
+    namespace
+    {
+        template <typename CallBaseT>
+        static void collectTOCTOUEventsFromCallBases(
+            const std::vector<const CallBaseT*>& callBases,
+            std::vector<PathEvent>& checks,
+            std::vector<PathEvent>& uses,
+            unsigned& order)
+        {
+            for (const CallBaseT* call : callBases)
+            {
+                ++order;
+
+                const llvm::Function* callee = getDirectCallee(*call);
+                if (!callee)
+                    continue;
+
+                const llvm::StringRef canonicalName = canonicalCalleeName(callee->getName());
+                const std::optional<unsigned> checkArg = checkPathArgIndex(canonicalName);
+                const std::optional<unsigned> useArg = usePathArgIndex(canonicalName);
+                if (!checkArg && !useArg)
+                    continue;
+
+                const unsigned argIndex = checkArg ? *checkArg : *useArg;
+                if (argIndex >= call->arg_size())
+                    continue;
+
+                const llvm::Value* pathValue =
+                    peelPointerFromSingleStoreSlot(call->getArgOperand(argIndex));
+                PathEvent event;
+                event.inst = call;
+                event.root = llvm::getUnderlyingObject(pathValue, 32);
+                event.literal = tryExtractStringLiteral(pathValue).value_or("");
+                event.api = canonicalName.str();
+                event.order = order;
+
+                if (checkArg)
+                    checks.push_back(std::move(event));
+                else
+                    uses.push_back(std::move(event));
+            }
+        }
+    } // namespace
+
+    std::vector<TOCTOUIssue>
+    analyzeTOCTOUCached(const llvm::Function& function,
+                        const std::vector<const llvm::CallInst*>& calls,
+                        const std::vector<const llvm::InvokeInst*>& invokes)
+    {
+        std::vector<TOCTOUIssue> issues;
+
+        std::vector<PathEvent> checks;
+        std::vector<PathEvent> uses;
+        unsigned order = 0;
+
+        // Calls and invokes are stored in traversal order individually.
+        // Process calls first, then invokes. Relative ordering within each
+        // list is correct; cross-list ordering is approximate but sufficient
+        // since TOCTOU-relevant APIs (access/stat/open/fopen) are virtually
+        // always CallInst, never InvokeInst.
+        collectTOCTOUEventsFromCallBases(calls, checks, uses, order);
+        collectTOCTOUEventsFromCallBases(invokes, checks, uses, order);
+
+        for (const PathEvent& useEvent : uses)
+        {
+            for (const PathEvent& checkEvent : checks)
+            {
+                if (checkEvent.order >= useEvent.order)
+                    continue;
+                if (!likelySamePath(checkEvent, useEvent))
+                    continue;
+
+                TOCTOUIssue issue;
+                issue.funcName = function.getName().str();
+                issue.filePath = getFunctionSourcePath(function);
+                issue.checkApi = checkEvent.api;
+                issue.useApi = useEvent.api;
+                issue.inst = useEvent.inst;
+                issues.push_back(std::move(issue));
+                break;
+            }
+        }
+
+        return issues;
+    }
 } // namespace ctrace::stack::analysis
