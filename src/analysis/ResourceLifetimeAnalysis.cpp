@@ -2378,6 +2378,67 @@ namespace ctrace::stack::analysis
         return true;
     }
 
+    static bool resourceSummaryFunctionEquals(const ResourceSummaryFunction& lhs,
+                                              const ResourceSummaryFunction& rhs)
+    {
+        std::vector<std::string> leftKeys;
+        std::vector<std::string> rightKeys;
+        leftKeys.reserve(lhs.effects.size());
+        rightKeys.reserve(rhs.effects.size());
+
+        for (const ResourceSummaryEffect& effect : lhs.effects)
+        {
+            ParamLifetimeEffect tmp;
+            tmp.action = fromPublicSummaryAction(effect.action);
+            tmp.argIndex = effect.argIndex;
+            tmp.offset = effect.offset;
+            tmp.viaPointerSlot = effect.viaPointerSlot;
+            tmp.resourceKind = effect.resourceKind;
+            leftKeys.push_back(encodeSummaryEffectKey(tmp));
+        }
+        for (const ResourceSummaryEffect& effect : rhs.effects)
+        {
+            ParamLifetimeEffect tmp;
+            tmp.action = fromPublicSummaryAction(effect.action);
+            tmp.argIndex = effect.argIndex;
+            tmp.offset = effect.offset;
+            tmp.viaPointerSlot = effect.viaPointerSlot;
+            tmp.resourceKind = effect.resourceKind;
+            rightKeys.push_back(encodeSummaryEffectKey(tmp));
+        }
+
+        std::sort(leftKeys.begin(), leftKeys.end());
+        std::sort(rightKeys.begin(), rightKeys.end());
+        return leftKeys == rightKeys;
+    }
+
+    std::unordered_set<std::string>
+    computeChangedResourceFunctionNames(const ResourceSummaryIndex& prev,
+                                        const ResourceSummaryIndex& next)
+    {
+        std::unordered_set<std::string> changed;
+
+        for (const auto& entry : next.functions)
+        {
+            auto prevIt = prev.functions.find(entry.first);
+            if (prevIt == prev.functions.end())
+            {
+                changed.insert(entry.first);
+                continue;
+            }
+            if (!resourceSummaryFunctionEquals(entry.second, prevIt->second))
+                changed.insert(entry.first);
+        }
+
+        for (const auto& entry : prev.functions)
+        {
+            if (next.functions.find(entry.first) == next.functions.end())
+                changed.insert(entry.first);
+        }
+
+        return changed;
+    }
+
     std::vector<ResourceLifetimeIssue> analyzeResourceLifetime(
         llvm::Module& mod, const std::function<bool(const llvm::Function&)>& shouldAnalyze,
         const std::string& modelPath, const ResourceSummaryIndex* externalSummaries)

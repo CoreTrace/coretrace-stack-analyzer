@@ -89,4 +89,42 @@ namespace ctrace::stack::analysis
 
         return out;
     }
+
+    std::vector<DynamicAllocaIssue>
+    analyzeDynamicAllocasCached(const llvm::Function& function,
+                                const std::vector<const llvm::AllocaInst*>& allocas)
+    {
+        std::vector<DynamicAllocaIssue> out;
+        using namespace llvm;
+
+        for (const AllocaInst* AI : allocas)
+        {
+            const Value* arraySizeVal = AI->getArraySize();
+
+            if (llvm::isa<llvm::ConstantInt>(arraySizeVal))
+                continue;
+
+            if (tryGetConstFromValue(arraySizeVal, function) != nullptr)
+                continue;
+
+            DynamicAllocaIssue issue;
+            issue.funcName = function.getName().str();
+            issue.varName = deriveAllocaName(AI);
+            if (AI->getAllocatedType())
+            {
+                std::string tyStr;
+                llvm::raw_string_ostream rso(tyStr);
+                AI->getAllocatedType()->print(rso);
+                issue.typeName = rso.str();
+            }
+            else
+            {
+                issue.typeName = "<unknown type>";
+            }
+            issue.allocaInst = AI;
+            out.push_back(std::move(issue));
+        }
+
+        return out;
+    }
 } // namespace ctrace::stack::analysis

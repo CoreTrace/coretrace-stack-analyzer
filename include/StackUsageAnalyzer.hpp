@@ -41,6 +41,12 @@ namespace ctrace::stack
         Full = 1
     };
 
+    enum class CompileIRFormat : std::uint8_t
+    {
+        BC = 0,
+        LL = 1
+    };
+
     // Analysis configuration (mode + stack limit).
     struct AnalysisConfig
     {
@@ -70,29 +76,31 @@ namespace ctrace::stack
         std::string resourceSummaryCacheDir = ".cache/resource-lifetime";
 
         std::uint32_t smtTimeoutMs = 50;
-        std::uint32_t jobs = 1;
+        std::uint32_t jobs = 0; // 0 = auto (hardware_concurrency)
 
         analysis::smt::SolverMode smtMode = analysis::smt::SolverMode::Single;
         AnalysisMode mode = AnalysisMode::IR;
         AnalysisProfile profile = AnalysisProfile::Full;
+        CompileIRFormat compileIRFormat = CompileIRFormat::BC;
+        std::uint8_t reservedBytePadding = 0;
 
-        bool compdbFast : 1 = false;
-        bool demangle : 1 = false;
-        bool dumpFilter : 1 = false;
-        bool dumpIRIsDir : 1 = false;
-        bool includeSTL : 1 = false;
-        bool requireCompilationDatabase : 1 = false;
-        bool jobsAuto : 1 = false;
-        bool quiet : 1 = false;
-        bool smtEnabled : 1 = false;
-        bool timing : 1 = false;
-        bool uninitializedCrossTU : 1 = true;
-        bool resourceCrossTU : 1 = true;
-        bool resourceSummaryMemoryOnly : 1 = false;
-        bool warningsOnly : 1 = false;
-        bool reservedFlags0 : 1 = false;
-        bool reservedFlags1 : 1 = false;
-        std::uint32_t reservedPadding = 0;
+        // Keep flags in one 32-bit storage unit:
+        // 4x u8 enums above + this u32 block keeps tail alignment compact on 64-bit builds.
+        std::uint32_t compdbFast : 1 = 0;
+        std::uint32_t demangle : 1 = 0;
+        std::uint32_t dumpFilter : 1 = 0;
+        std::uint32_t dumpIRIsDir : 1 = 0;
+        std::uint32_t includeSTL : 1 = 0;
+        std::uint32_t requireCompilationDatabase : 1 = 0;
+        std::uint32_t jobsAuto : 1 = 1;
+        std::uint32_t quiet : 1 = 0;
+        std::uint32_t smtEnabled : 1 = 0;
+        std::uint32_t timing : 1 = 0;
+        std::uint32_t uninitializedCrossTU : 1 = 1;
+        std::uint32_t resourceCrossTU : 1 = 1;
+        std::uint32_t resourceSummaryMemoryOnly : 1 = 0;
+        std::uint32_t warningsOnly : 1 = 0;
+        std::uint32_t reservedFlags : 18 = 0;
     };
 
     // Per-function result

@@ -3285,13 +3285,79 @@ namespace ctrace::stack::analysis
             }
 
             const unsigned reachableBlocks = static_cast<unsigned>(outState.size());
+
+            // Leaf function optimization: if no call in this function targets a
+            // function in summaries or externalSummariesByName, the dataflow
+            // converges in exactly 1 iteration (no interprocedural effects).
+            bool isLeaf = true;
+            for (const llvm::BasicBlock& BB : F)
+            {
+                if (!isLeaf)
+                    break;
+                if (!reachable.lookup(&BB))
+                    continue;
+                for (const llvm::Instruction& I : BB)
+                {
+                    const auto* CB = llvm::dyn_cast<llvm::CallBase>(&I);
+                    if (!CB)
+                        continue;
+                    const llvm::Function* callee = CB->getCalledFunction();
+                    if (!callee)
+                        continue;
+                    if (summaries.find(callee) != summaries.end())
+                    {
+                        isLeaf = false;
+                        break;
+                    }
+                    if (externalSummariesByName && canonicalCalleeNames)
+                    {
+                        auto nameIt = canonicalCalleeNames->find(callee);
+                        if (nameIt != canonicalCalleeNames->end() &&
+                            externalSummariesByName->find(nameIt->second) !=
+                                externalSummariesByName->end())
+                        {
+                            isLeaf = false;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // Leaf functions have no inter-procedural deps so the *summary*
+            // converges in one outer iteration, but the intra-function
+            // dataflow (loops, phi-nodes) still needs the full BB iteration
+            // budget to stabilize.
             const unsigned maxIterations = std::max(64u, reachableBlocks * 16u);
+
+            // When in issue-collection mode (outSummary == nullptr), we fuse
+            // the issue collection into the fixpoint loop. On each iteration
+            // we collect issues opportunistically; if the fixpoint hasn't
+            // converged yet, we reset and recollect on the next iteration.
+            // When it converges, the collected issues are final, saving one
+            // full function traversal.
+            const bool fuseIssueCollection = (outSummary == nullptr && outIssues != nullptr);
+
+            llvm::BitVector writeSeen(trackedCount, false);
+            llvm::BitVector constructedSeen(trackedCount, false);
+            llvm::BitVector defaultCtorSeen(trackedCount, false);
+            llvm::BitVector readBeforeInitSeen(trackedCount, false);
+            std::vector<UninitializedLocalReadIssue> pendingIssues;
+
             bool changed = true;
             unsigned iteration = 0;
             while (changed && iteration < maxIterations)
             {
                 ++iteration;
                 changed = false;
+
+                if (fuseIssueCollection)
+                {
+                    writeSeen.reset();
+                    constructedSeen.reset();
+                    defaultCtorSeen.reset();
+                    readBeforeInitSeen.reset();
+                    pendingIssues.clear();
+                }
 
                 for (const llvm::BasicBlock& BB : F)
                 {
@@ -3302,11 +3368,24 @@ namespace ctrace::stack::analysis
                         computeInState(BB, &F.getEntryBlock(), reachable, outState, tracked);
 
                     InitRangeState state = newIn;
-                    for (const llvm::Instruction& I : BB)
+                    if (fuseIssueCollection)
                     {
-                        transferInstruction(I, tracked, DL, summaries, externalSummariesByName,
-                                            canonicalCalleeNames, state, nullptr, nullptr, nullptr,
-                                            nullptr, nullptr, nullptr);
+                        for (const llvm::Instruction& I : BB)
+                        {
+                            transferInstruction(I, tracked, DL, summaries, externalSummariesByName,
+                                                canonicalCalleeNames, state, &writeSeen,
+                                                &constructedSeen, &defaultCtorSeen,
+                                                &readBeforeInitSeen, nullptr, &pendingIssues);
+                        }
+                    }
+                    else
+                    {
+                        for (const llvm::Instruction& I : BB)
+                        {
+                            transferInstruction(I, tracked, DL, summaries, externalSummariesByName,
+                                                canonicalCalleeNames, state, nullptr, nullptr,
+                                                nullptr, nullptr, nullptr, nullptr);
+                        }
                     }
 
                     InitRangeState& oldIn = inState[&BB];
@@ -3342,24 +3421,17 @@ namespace ctrace::stack::analysis
                 return;
             }
 
-            llvm::BitVector writeSeen(trackedCount, false);
-            llvm::BitVector constructedSeen(trackedCount, false);
-            llvm::BitVector defaultCtorSeen(trackedCount, false);
-            llvm::BitVector readBeforeInitSeen(trackedCount, false);
-
-            for (const llvm::BasicBlock& BB : F)
+            if (!fuseIssueCollection)
             {
-                if (!reachable.lookup(&BB))
-                    continue;
-
-                InitRangeState state = inState[&BB];
-                for (const llvm::Instruction& I : BB)
-                {
-                    transferInstruction(I, tracked, DL, summaries, externalSummariesByName,
-                                        canonicalCalleeNames, state, &writeSeen, &constructedSeen,
-                                        &defaultCtorSeen, &readBeforeInitSeen, nullptr, outIssues);
-                }
+                // Fallback: separate issue collection traversal
+                // (only reached if outIssues == nullptr, i.e. no-op mode)
+                return;
             }
+
+            // Issues were collected during the last fixpoint iteration.
+            // Transfer pendingIssues to the output.
+            if (outIssues)
+                outIssues->insert(outIssues->end(), pendingIssues.begin(), pendingIssues.end());
 
             for (unsigned idx = 0; idx < trackedCount; ++idx)
             {
@@ -3427,6 +3499,7 @@ namespace ctrace::stack::analysis
                                  const CanonicalCalleeNameMap* canonicalCalleeNames)
         {
             FunctionSummaryMap summaries;
+            llvm::SmallVector<const llvm::Function*, 64> analysisFunctions;
             for (const llvm::Function& F : mod)
             {
                 if (F.isDeclaration())
@@ -3434,7 +3507,32 @@ namespace ctrace::stack::analysis
                 if (!shouldAnalyze(F))
                     continue;
                 summaries[&F] = makeEmptySummary(F);
+                analysisFunctions.push_back(&F);
             }
+
+            // Build reverse call graph: callerOf[callee] = {callers...}
+            llvm::DenseMap<const llvm::Function*, llvm::SmallVector<const llvm::Function*, 4>>
+                callerOf;
+            for (const llvm::Function* func : analysisFunctions)
+            {
+                for (const llvm::BasicBlock& BB : *func)
+                {
+                    for (const llvm::Instruction& I : BB)
+                    {
+                        const auto* CB = llvm::dyn_cast<llvm::CallBase>(&I);
+                        if (!CB)
+                            continue;
+                        const llvm::Function* callee = CB->getCalledFunction();
+                        if (callee && summaries.find(callee) != summaries.end())
+                            callerOf[callee].push_back(func);
+                    }
+                }
+            }
+
+            // Track which functions need re-analysis.
+            llvm::DenseSet<const llvm::Function*> dirtyFunctions;
+            for (const llvm::Function* func : analysisFunctions)
+                dirtyFunctions.insert(func);
 
             bool changed = true;
             unsigned guard = 0;
@@ -3443,23 +3541,30 @@ namespace ctrace::stack::analysis
                 changed = false;
                 ++guard;
 
-                for (const llvm::Function& F : mod)
+                llvm::DenseSet<const llvm::Function*> nextDirty;
+                for (const llvm::Function* func : analysisFunctions)
                 {
-                    if (F.isDeclaration())
-                        continue;
-                    if (!shouldAnalyze(F))
+                    if (dirtyFunctions.find(func) == dirtyFunctions.end())
                         continue;
 
-                    FunctionSummary next = makeEmptySummary(F);
-                    analyzeFunction(F, mod.getDataLayout(), summaries, externalSummariesByName,
+                    FunctionSummary next = makeEmptySummary(*func);
+                    analyzeFunction(*func, mod.getDataLayout(), summaries, externalSummariesByName,
                                     canonicalCalleeNames, &next, nullptr);
-                    FunctionSummary& cur = summaries[&F];
+                    FunctionSummary& cur = summaries[func];
                     if (!(cur == next))
                     {
                         cur = std::move(next);
                         changed = true;
+                        // Mark callers as dirty for the next iteration.
+                        auto callersIt = callerOf.find(func);
+                        if (callersIt != callerOf.end())
+                        {
+                            for (const llvm::Function* caller : callersIt->second)
+                                nextDirty.insert(caller);
+                        }
                     }
                 }
+                dirtyFunctions = std::move(nextDirty);
             }
 
             return summaries;
@@ -3931,6 +4036,44 @@ namespace ctrace::stack::analysis
         }
 
         return true;
+    }
+
+    std::unordered_set<std::string>
+    computeChangedUninitializedFunctionNames(const UninitializedSummaryIndex& prev,
+                                             const UninitializedSummaryIndex& next)
+    {
+        std::unordered_set<std::string> changed;
+
+        for (const auto& entry : next.functions)
+        {
+            auto prevIt = prev.functions.find(entry.first);
+            if (prevIt == prev.functions.end())
+            {
+                changed.insert(entry.first);
+                continue;
+            }
+            if (!publicFunctionSummaryEquals(entry.second, prevIt->second))
+                changed.insert(entry.first);
+        }
+
+        for (const auto& entry : prev.functions)
+        {
+            if (next.functions.find(entry.first) == next.functions.end())
+                changed.insert(entry.first);
+        }
+
+        return changed;
+    }
+
+    std::unordered_set<std::string>
+    getCanonicalCalleeNames(const PreparedUninitializedModuleContext& prepared)
+    {
+        std::unordered_set<std::string> result;
+        if (!prepared.opaque)
+            return result;
+        for (const auto& entry : prepared.opaque->canonicalCalleeNames)
+            result.insert(entry.second);
+        return result;
     }
 
     std::vector<UninitializedLocalReadIssue>

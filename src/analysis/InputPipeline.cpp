@@ -1,6 +1,7 @@
 #include "analysis/InputPipeline.hpp"
 #include "analysis/CompileCommands.hpp"
 #include "analysis/FrontendDiagnostics.hpp"
+#include "analyzer/HotspotProfiler.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -16,9 +17,12 @@
 #include <unordered_set>
 #include <vector>
 
+#include <llvm/Bitcode/BitcodeReader.h>
+#include <llvm/Bitcode/BitcodeWriter.h>
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
 #include <llvm/IRReader/IRReader.h>
+#include <llvm/Support/Error.h>
 #include <llvm/Support/FileSystem.h>
 #include <llvm/Support/JSON.h>
 #include <llvm/Support/MD5.h>
@@ -48,6 +52,42 @@ namespace ctrace::stack::analysis
         {
             if (std::find(args.begin(), args.end(), flag) == args.end())
                 args.push_back(flag);
+        }
+
+        static void removeOutputPathArgs(std::vector<std::string>& args)
+        {
+            std::vector<std::string> filtered;
+            filtered.reserve(args.size());
+            for (std::size_t i = 0; i < args.size(); ++i)
+            {
+                const std::string& arg = args[i];
+                if (arg == "-o")
+                {
+                    if (i + 1 < args.size())
+                        ++i;
+                    continue;
+                }
+                if (arg.rfind("-o=", 0) == 0)
+                    continue;
+                if (arg.size() > 2 && arg.rfind("-o", 0) == 0)
+                    continue;
+                filtered.push_back(arg);
+            }
+            args.swap(filtered);
+        }
+
+        static std::vector<std::string>
+        buildBitcodeCompileArgs(const std::vector<std::string>& baseArgs,
+                                const std::filesystem::path& outputBitcodePath)
+        {
+            std::vector<std::string> args = baseArgs;
+            args.erase(std::remove(args.begin(), args.end(), "-S"), args.end());
+            removeOutputPathArgs(args);
+            appendIfMissing(args, "-emit-llvm");
+            appendIfMissing(args, "-c");
+            args.push_back("-o");
+            args.push_back(outputBitcodePath.string());
+            return args;
         }
 
         bool hasDebugFlag(const std::vector<std::string>& args)
@@ -152,7 +192,7 @@ namespace ctrace::stack::analysis
             }
         }
 
-        constexpr llvm::StringLiteral kCompileIRCacheSchema = "compile-ir-cache-v1";
+        constexpr llvm::StringLiteral kCompileIRCacheSchema = "compile-ir-cache-v2";
 
         struct FileSnapshot
         {
@@ -165,6 +205,7 @@ namespace ctrace::stack::analysis
         {
             std::filesystem::path directory;
             std::filesystem::path metaFile;
+            std::filesystem::path bcFile;
             std::filesystem::path irFile;
             std::filesystem::path depFile;
             std::uint64_t enabled : 1 = false;
@@ -173,6 +214,7 @@ namespace ctrace::stack::analysis
 
         struct CompileIRCachePayload
         {
+            std::string llvmBitcode;
             std::string llvmIR;
             std::string diagnostics;
         };
@@ -306,6 +348,8 @@ namespace ctrace::stack::analysis
             std::ostringstream keyPayload;
             keyPayload << std::string(kCompileIRCacheSchema) << "\n";
             keyPayload << "language:" << static_cast<int>(language) << "\n";
+            keyPayload << "compileIRFormat:"
+                       << (config.compileIRFormat == CompileIRFormat::LL ? "ll" : "bc") << "\n";
             keyPayload << "file:" << makeAbsolutePathFrom(filename, workingDir) << "\n";
             keyPayload << "workingDir:" << makeAbsolutePathFrom(workingDir, "") << "\n";
             for (const std::string& arg : args)
@@ -316,6 +360,7 @@ namespace ctrace::stack::analysis
             paths.enabled = true;
             paths.directory = directory;
             paths.metaFile = directory / (key + ".json");
+            paths.bcFile = directory / (key + ".bc");
             paths.irFile = directory / (key + ".ll");
             paths.depFile = directory / (key + ".d");
             return paths;
@@ -457,11 +502,16 @@ namespace ctrace::stack::analysis
                     return std::nullopt;
             }
 
+            std::string llvmBitcode;
+            (void)readTextFile(cachePaths.bcFile, llvmBitcode);
+
             std::string llvmIR;
-            if (!readTextFile(cachePaths.irFile, llvmIR))
+            (void)readTextFile(cachePaths.irFile, llvmIR);
+            if (llvmBitcode.empty() && llvmIR.empty())
                 return std::nullopt;
 
             CompileIRCachePayload payload;
+            payload.llvmBitcode = std::move(llvmBitcode);
             payload.llvmIR = std::move(llvmIR);
             if (const auto diagnostics = root->getString("diagnostics"))
                 payload.diagnostics = diagnostics->str();
@@ -472,7 +522,8 @@ namespace ctrace::stack::analysis
                                                const FileSnapshot& sourceSnapshot,
                                                const std::vector<FileSnapshot>& dependencySnapshots,
                                                const std::string& diagnostics,
-                                               const std::string& llvmIR)
+                                               const std::string& llvmIR,
+                                               const std::string& llvmBitcode)
         {
             if (!cachePaths.enabled)
                 return false;
@@ -496,6 +547,8 @@ namespace ctrace::stack::analysis
             metadataStream << llvm::formatv("{0:2}", llvm::json::Value(std::move(root)));
             metadataStream.flush();
 
+            if (!llvmBitcode.empty() && !writeTextFile(cachePaths.bcFile, llvmBitcode))
+                return false;
             if (!writeTextFile(cachePaths.irFile, llvmIR))
                 return false;
             if (!writeTextFile(cachePaths.metaFile, metadataText))
@@ -691,41 +744,65 @@ namespace ctrace::stack::analysis
             std::uint64_t active_ : 1 = false;
             std::uint64_t reservedFlags_ : 63 = 0;
         };
+
+        class ScopedFileCleanup
+        {
+          public:
+            explicit ScopedFileCleanup(const std::filesystem::path& path) : path_(path) {}
+
+            ~ScopedFileCleanup()
+            {
+                std::error_code ec;
+                if (!path_.empty())
+                    std::filesystem::remove(path_, ec);
+            }
+
+          private:
+            std::filesystem::path path_;
+        };
     } // namespace
+
+    static std::string extractExtension(const std::string& path)
+    {
+        const auto pos = path.find_last_of('.');
+        if (pos == std::string::npos || pos + 1 >= path.size())
+            return {};
+        return path.substr(pos + 1);
+    }
+
+    static std::string lowercaseCopy(std::string value)
+    {
+        std::transform(value.begin(), value.end(), value.begin(),
+                       [](unsigned char c) { return std::tolower(c); });
+        return value;
+    }
 
     LanguageType detectFromExtension(const std::string& path)
     {
-        auto pos = path.find_last_of('.');
-        if (pos == std::string::npos)
+        const std::string rawExt = extractExtension(path);
+        if (rawExt.empty())
             return LanguageType::Unknown;
 
-        std::string ext = path.substr(pos + 1);
-        std::transform(ext.begin(), ext.end(), ext.begin(),
-                       [](unsigned char c) { return std::tolower(c); });
+        // Preserve historic ".C" semantics as C++ while still matching lower-case variants.
+        if (rawExt == "C")
+            return LanguageType::CXX;
 
-        if (ext == "ll")
+        const std::string ext = lowercaseCopy(rawExt);
+
+        if (ext == "ll" || ext == "bc")
             return LanguageType::LLVM_IR;
 
         if (ext == "c")
             return LanguageType::C;
 
-        if (ext == "cpp" || ext == "cc" || ext == "cxx" || ext == "c++" || ext == "cp" ||
-            ext == "C")
+        if (ext == "cpp" || ext == "cc" || ext == "cxx" || ext == "c++" || ext == "cp")
             return LanguageType::CXX;
 
         return LanguageType::Unknown;
     }
 
-    LanguageType detectLanguageFromFile(const std::string& path, llvm::LLVMContext& ctx)
+    LanguageType detectLanguageFromFile(const std::string& path, llvm::LLVMContext&)
     {
-        {
-            llvm::SMDiagnostic diag;
-            if (auto mod = llvm::parseIRFile(path, diag, ctx))
-            {
-                return LanguageType::LLVM_IR;
-            }
-        }
-
         return detectFromExtension(path);
     }
 
@@ -733,12 +810,17 @@ namespace ctrace::stack::analysis
                                            const AnalysisConfig& config, llvm::LLVMContext& ctx,
                                            llvm::SMDiagnostic& err)
     {
+        using ctrace::stack::analyzer::ScopedHotspot;
         ModuleLoadResult result;
+        const ScopedHotspot totalHotspot(config.timing, "input.load_module.total");
         std::error_code cwdErr;
         std::filesystem::path baseDir = std::filesystem::current_path(cwdErr);
         using Clock = std::chrono::steady_clock;
         auto compileStart = Clock::now();
-        result.language = detectLanguageFromFile(filename, ctx);
+        {
+            const ScopedHotspot hotspot(config.timing, "input.detect_language");
+            result.language = detectLanguageFromFile(filename, ctx);
+        }
 
         if (result.language == LanguageType::Unknown)
         {
@@ -752,8 +834,13 @@ namespace ctrace::stack::analysis
             std::string workingDir;
             std::string compileError;
             std::string compileDiagnosticsText;
-            if (!buildCompileArgs(filename, result.language, config, args, workingDir,
-                                  compileError))
+            bool compileArgsReady = false;
+            {
+                const ScopedHotspot hotspot(config.timing, "input.build_compile_args");
+                compileArgsReady = buildCompileArgs(filename, result.language, config, args,
+                                                    workingDir, compileError);
+            }
+            if (!compileArgsReady)
             {
                 result.error = compileError + "\n";
                 return result;
@@ -761,16 +848,32 @@ namespace ctrace::stack::analysis
 
             if (config.timing)
                 coretrace::log(coretrace::Level::Info, "Compiling {}...\n", filename);
-            compilerlib::OutputMode mode = compilerlib::OutputMode::ToMemory;
+            const bool preferBitcodeCompile = (config.compileIRFormat == CompileIRFormat::BC);
             const CompileIRCachePaths cachePaths =
                 buildCompileIRCachePaths(config, filename, result.language, args, workingDir);
 
+            std::error_code tempDirErr;
+            std::filesystem::path tempDir = std::filesystem::temp_directory_path(tempDirErr);
+            if (tempDirErr)
+                tempDir = std::filesystem::path(".");
+            const std::string tempBitcodeName =
+                "coretrace-compile-ir-" +
+                md5Hex(filename + "|" + std::to_string(compileStart.time_since_epoch().count())) +
+                ".bc";
+            const std::filesystem::path tempBitcodePath = tempDir / tempBitcodeName;
+            const ScopedFileCleanup tempBitcodeCleanup(tempBitcodePath);
+            const std::vector<std::string> bitcodeArgs =
+                buildBitcodeCompileArgs(args, tempBitcodePath);
+
             auto compileWithOptionalWorkingDir =
-                [&](const std::vector<std::string>& compileArgs,
+                [&](const std::vector<std::string>& compileArgs, compilerlib::OutputMode outputMode,
                     bool useWorkingDir) -> std::optional<compilerlib::CompileResult>
             {
                 if (!useWorkingDir)
-                    return compilerlib::compile(compileArgs, mode);
+                {
+                    const ScopedHotspot hotspot(config.timing, "input.compiler.invoke");
+                    return compilerlib::compile(compileArgs, outputMode);
+                }
 
                 std::string cwdError;
                 ScopedCurrentPath cwdGuard(workingDir, cwdError);
@@ -779,11 +882,12 @@ namespace ctrace::stack::analysis
                     result.error = cwdError + "\n";
                     return std::nullopt;
                 }
-                return compilerlib::compile(compileArgs, mode);
+                const ScopedHotspot hotspot(config.timing, "input.compiler.invoke.cwd");
+                return compilerlib::compile(compileArgs, outputMode);
             };
 
             auto compileWithConfiguredWorkingDir =
-                [&](const std::vector<std::string>& compileArgs,
+                [&](const std::vector<std::string>& compileArgs, compilerlib::OutputMode outputMode,
                     bool& retriedWithWorkingDir) -> std::optional<compilerlib::CompileResult>
             {
                 retriedWithWorkingDir = false;
@@ -793,26 +897,31 @@ namespace ctrace::stack::analysis
                 {
                     // Optimistic fast path for multi-job runs: most compdb commands use absolute
                     // paths.
-                    res = compileWithOptionalWorkingDir(compileArgs, false);
+                    res = compileWithOptionalWorkingDir(compileArgs, outputMode, false);
                     if (!res || !res->success)
                     {
                         // Fallback keeps correctness for relative include paths and avoids process
                         // cwd races.
                         std::lock_guard<std::mutex> lock(gCompileWorkingDirMutex);
-                        res = compileWithOptionalWorkingDir(compileArgs, true);
+                        res = compileWithOptionalWorkingDir(compileArgs, outputMode, true);
                         retriedWithWorkingDir = true;
                     }
                 }
                 else
                 {
-                    res = compileWithOptionalWorkingDir(compileArgs, hasWorkingDir);
+                    res = compileWithOptionalWorkingDir(compileArgs, outputMode, hasWorkingDir);
                 }
                 return res;
             };
 
             if (cachePaths.enabled)
             {
-                if (auto cached = loadCompileIRCachePayload(cachePaths))
+                auto cached = [&]() -> std::optional<CompileIRCachePayload>
+                {
+                    const ScopedHotspot hotspot(config.timing, "input.cache.lookup.compile");
+                    return loadCompileIRCachePayload(cachePaths);
+                }();
+                if (cached)
                 {
                     if (config.timing)
                         coretrace::log(coretrace::Level::Info, "Compilation cache hit for {}\n",
@@ -822,17 +931,74 @@ namespace ctrace::stack::analysis
                     if (!compileDiagnosticsText.empty() && !config.quiet)
                         logText(coretrace::Level::Warn, compileDiagnosticsText);
 
-                    auto buffer = llvm::MemoryBuffer::getMemBuffer(cached->llvmIR, "cached_ir");
-                    llvm::SMDiagnostic diag;
-                    auto parseStart = Clock::now();
-                    result.module = llvm::parseIR(buffer->getMemBufferRef(), diag, ctx);
-                    if (config.timing)
+                    const auto parseStart = Clock::now();
+                    auto tryParseCachedBitcode = [&]()
                     {
-                        const auto parseEnd = Clock::now();
-                        const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                            parseEnd - parseStart)
-                                            .count();
-                        coretrace::log(coretrace::Level::Info, "IR parse done in {} ms\n", ms);
+                        if (result.module || cached->llvmBitcode.empty())
+                            return;
+                        auto bcBuffer = llvm::MemoryBuffer::getMemBufferCopy(
+                            llvm::StringRef(cached->llvmBitcode.data(), cached->llvmBitcode.size()),
+                            "cached_ir_bc");
+                        auto bitcodeModule = [&]()
+                        {
+                            const ScopedHotspot hotspot(config.timing,
+                                                        "input.cache.parse_bitcode_payload");
+                            return llvm::parseBitcodeFile(bcBuffer->getMemBufferRef(), ctx);
+                        }();
+                        if (bitcodeModule)
+                        {
+                            result.module = std::move(*bitcodeModule);
+                            if (config.timing)
+                            {
+                                const auto parseEnd = Clock::now();
+                                const auto ms =
+                                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                                        parseEnd - parseStart)
+                                        .count();
+                                coretrace::log(coretrace::Level::Info,
+                                               "Bitcode parse done in {} ms\n", ms);
+                            }
+                            return;
+                        }
+                        if (config.timing)
+                        {
+                            std::string bitcodeError = llvm::toString(bitcodeModule.takeError());
+                            coretrace::log(coretrace::Level::Warn,
+                                           "Compilation cache bitcode invalid for {}; "
+                                           "falling back to textual IR ({})\n",
+                                           filename, bitcodeError);
+                        }
+                    };
+                    auto tryParseCachedTextIR = [&]()
+                    {
+                        if (result.module || cached->llvmIR.empty())
+                            return;
+                        auto buffer = llvm::MemoryBuffer::getMemBuffer(cached->llvmIR, "cached_ir");
+                        llvm::SMDiagnostic diag;
+                        {
+                            const ScopedHotspot hotspot(config.timing,
+                                                        "input.cache.parse_text_payload");
+                            result.module = llvm::parseIR(buffer->getMemBufferRef(), diag, ctx);
+                        }
+                        if (config.timing)
+                        {
+                            const auto parseEnd = Clock::now();
+                            const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                                parseEnd - parseStart)
+                                                .count();
+                            coretrace::log(coretrace::Level::Info, "IR parse done in {} ms\n", ms);
+                        }
+                    };
+
+                    if (preferBitcodeCompile)
+                    {
+                        tryParseCachedBitcode();
+                        tryParseCachedTextIR();
+                    }
+                    else
+                    {
+                        tryParseCachedTextIR();
+                        tryParseCachedBitcode();
                     }
 
                     if (result.module)
@@ -843,7 +1009,13 @@ namespace ctrace::stack::analysis
                                 compileDiagnosticsText, *result.module, filename);
                         }
 
-                        if (!dumpModuleIR(*result.module, filename, config, baseDir, result.error))
+                        bool dumpOk = false;
+                        {
+                            const ScopedHotspot hotspot(config.timing, "input.dump_module_ir");
+                            dumpOk = dumpModuleIR(*result.module, filename, config, baseDir,
+                                                  result.error);
+                        }
+                        if (!dumpOk)
                             return result;
                         return result;
                     }
@@ -864,6 +1036,7 @@ namespace ctrace::stack::analysis
             }
 
             bool retriedWithWorkingDir = false;
+            bool compiledViaBitcode = false;
             std::optional<compilerlib::CompileResult> res;
             std::optional<FileSnapshot> sourceSnapshot;
             std::optional<std::vector<FileSnapshot>> dependencySnapshots;
@@ -871,36 +1044,71 @@ namespace ctrace::stack::analysis
             {
                 std::error_code removeErr;
                 std::filesystem::remove(cachePaths.depFile, removeErr);
-                std::vector<std::string> cacheCompileArgs = args;
+                std::vector<std::string> cacheCompileArgs =
+                    preferBitcodeCompile ? bitcodeArgs : args;
                 appendDependencyCaptureArgs(cacheCompileArgs, cachePaths.depFile);
 
                 bool retriedForDependencyCompile = false;
-                res =
-                    compileWithConfiguredWorkingDir(cacheCompileArgs, retriedForDependencyCompile);
+                res = compileWithConfiguredWorkingDir(cacheCompileArgs,
+                                                      preferBitcodeCompile
+                                                          ? compilerlib::OutputMode::ToFile
+                                                          : compilerlib::OutputMode::ToMemory,
+                                                      retriedForDependencyCompile);
                 retriedWithWorkingDir = retriedForDependencyCompile;
 
-                if (!res || !res->success)
+                if (preferBitcodeCompile && (!res || !res->success))
                 {
                     bool retriedForFallbackCompile = false;
-                    auto fallbackResult =
-                        compileWithConfiguredWorkingDir(args, retriedForFallbackCompile);
+                    auto fallbackResult = compileWithConfiguredWorkingDir(
+                        args, compilerlib::OutputMode::ToMemory, retriedForFallbackCompile);
                     retriedWithWorkingDir = retriedWithWorkingDir || retriedForFallbackCompile;
                     if (fallbackResult)
                         res = std::move(fallbackResult);
                 }
                 else
                 {
-                    const auto dependencies =
-                        parseDepfileDependencies(cachePaths.depFile, workingDir);
+                    compiledViaBitcode = preferBitcodeCompile;
+                    const auto dependencies = [&]()
+                    {
+                        const ScopedHotspot hotspot(config.timing,
+                                                    "input.cache.parse_dependencies");
+                        return parseDepfileDependencies(cachePaths.depFile, workingDir);
+                    }();
                     const std::string sourcePath = makeAbsolutePathFrom(filename, workingDir);
-                    sourceSnapshot = captureFileSnapshot(sourcePath);
+                    sourceSnapshot = [&]() -> std::optional<FileSnapshot>
+                    {
+                        const ScopedHotspot hotspot(config.timing,
+                                                    "input.cache.capture_source_snapshot");
+                        return captureFileSnapshot(sourcePath);
+                    }();
                     if (dependencies && sourceSnapshot)
+                    {
+                        const ScopedHotspot hotspot(config.timing,
+                                                    "input.cache.build_dependency_snapshots");
                         dependencySnapshots = buildDependencySnapshots(*dependencies);
+                    }
                 }
             }
             else
             {
-                res = compileWithConfiguredWorkingDir(args, retriedWithWorkingDir);
+                res = compileWithConfiguredWorkingDir(preferBitcodeCompile ? bitcodeArgs : args,
+                                                      preferBitcodeCompile
+                                                          ? compilerlib::OutputMode::ToFile
+                                                          : compilerlib::OutputMode::ToMemory,
+                                                      retriedWithWorkingDir);
+                if (res && res->success)
+                {
+                    compiledViaBitcode = preferBitcodeCompile;
+                }
+                else if (preferBitcodeCompile)
+                {
+                    bool retriedForFallbackCompile = false;
+                    auto fallbackResult = compileWithConfiguredWorkingDir(
+                        args, compilerlib::OutputMode::ToMemory, retriedForFallbackCompile);
+                    retriedWithWorkingDir = retriedWithWorkingDir || retriedForFallbackCompile;
+                    if (fallbackResult)
+                        res = std::move(fallbackResult);
+                }
             }
 
             if (!res)
@@ -917,12 +1125,6 @@ namespace ctrace::stack::analysis
             }
             compileDiagnosticsText = res->diagnostics;
 
-            if (res->llvmIR.empty())
-            {
-                result.error = "No LLVM IR produced by compilerlib::compile\n";
-                return result;
-            }
-
             if (config.timing)
             {
                 auto compileEnd = Clock::now();
@@ -933,27 +1135,106 @@ namespace ctrace::stack::analysis
                                retriedWithWorkingDir ? " (retry with working directory)" : "");
             }
 
-            auto buffer = llvm::MemoryBuffer::getMemBuffer(res->llvmIR, "in_memory_ll");
-
-            llvm::SMDiagnostic diag;
-            auto parseStart = Clock::now();
-            result.module = llvm::parseIR(buffer->getMemBufferRef(), diag, ctx);
-            if (config.timing)
+            std::string llvmIRForCache;
+            std::string llvmBitcodeForCache;
+            if (compiledViaBitcode)
             {
-                auto parseEnd = Clock::now();
-                auto ms =
-                    std::chrono::duration_cast<std::chrono::milliseconds>(parseEnd - parseStart)
-                        .count();
-                coretrace::log(coretrace::Level::Info, "IR parse done in {} ms\n", ms);
+                if (readTextFile(tempBitcodePath, llvmBitcodeForCache) &&
+                    !llvmBitcodeForCache.empty())
+                {
+                    const auto parseStart = Clock::now();
+                    auto bcBuffer = llvm::MemoryBuffer::getMemBufferCopy(
+                        llvm::StringRef(llvmBitcodeForCache.data(), llvmBitcodeForCache.size()),
+                        "compiled_bc");
+                    auto bitcodeModule = [&]()
+                    {
+                        const ScopedHotspot hotspot(config.timing,
+                                                    "input.compile.parse_bitcode_output");
+                        return llvm::parseBitcodeFile(bcBuffer->getMemBufferRef(), ctx);
+                    }();
+                    if (bitcodeModule)
+                    {
+                        result.module = std::move(*bitcodeModule);
+                        if (config.timing)
+                        {
+                            const auto parseEnd = Clock::now();
+                            const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                                parseEnd - parseStart)
+                                                .count();
+                            coretrace::log(coretrace::Level::Info, "Bitcode parse done in {} ms\n",
+                                           ms);
+                        }
+                    }
+                    else if (config.timing)
+                    {
+                        std::string bitcodeError = llvm::toString(bitcodeModule.takeError());
+                        coretrace::log(coretrace::Level::Warn,
+                                       "Bitcode output invalid for {}; "
+                                       "falling back to textual IR ({})\n",
+                                       filename, bitcodeError);
+                    }
+                }
+                else if (config.timing)
+                {
+                    coretrace::log(coretrace::Level::Warn,
+                                   "Missing bitcode output for {}; falling back to textual IR\n",
+                                   filename);
+                }
             }
 
             if (!result.module)
             {
-                std::string msg;
-                llvm::raw_string_ostream os(msg);
-                diag.print("in_memory_ll", os);
-                result.error = "Failed to parse in-memory LLVM IR:\n" + os.str();
-                return result;
+                if (compiledViaBitcode)
+                {
+                    bool retriedForTextFallback = false;
+                    auto textFallback = compileWithConfiguredWorkingDir(
+                        args, compilerlib::OutputMode::ToMemory, retriedForTextFallback);
+                    retriedWithWorkingDir = retriedWithWorkingDir || retriedForTextFallback;
+                    if (!textFallback)
+                        return result;
+                    res = std::move(textFallback);
+                    if (!res->success)
+                    {
+                        result.error = "Compilation failed:\n" + res->diagnostics + '\n';
+                        return result;
+                    }
+                    if (!res->diagnostics.empty() && !config.quiet)
+                        logText(coretrace::Level::Warn, res->diagnostics);
+                    compileDiagnosticsText = res->diagnostics;
+                }
+
+                if (res->llvmIR.empty())
+                {
+                    result.error = "No LLVM IR produced by compilerlib::compile\n";
+                    return result;
+                }
+
+                llvmIRForCache = res->llvmIR;
+                auto buffer = llvm::MemoryBuffer::getMemBuffer(llvmIRForCache, "in_memory_ll");
+
+                llvm::SMDiagnostic diag;
+                const auto parseStart = Clock::now();
+                {
+                    const ScopedHotspot hotspot(config.timing, "input.compile.parse_text_output");
+                    result.module = llvm::parseIR(buffer->getMemBufferRef(), diag, ctx);
+                }
+                if (config.timing)
+                {
+                    const auto parseEnd = Clock::now();
+                    const auto ms =
+                        std::chrono::duration_cast<std::chrono::milliseconds>(parseEnd - parseStart)
+                            .count();
+                    coretrace::log(coretrace::Level::Info, "IR parse done in {} ms\n", ms);
+                }
+
+                if (!result.module)
+                {
+                    std::string msg;
+                    llvm::raw_string_ostream os(msg);
+                    diag.print("in_memory_ll", os);
+                    result.error = "Failed to parse in-memory LLVM IR:\n" + os.str();
+                    return result;
+                }
             }
             if (!compileDiagnosticsText.empty())
             {
@@ -963,9 +1244,20 @@ namespace ctrace::stack::analysis
 
             if (cachePaths.enabled && sourceSnapshot && dependencySnapshots)
             {
-                const bool stored =
-                    storeCompileIRCachePayload(cachePaths, *sourceSnapshot, *dependencySnapshots,
-                                               compileDiagnosticsText, res->llvmIR);
+                if (llvmBitcodeForCache.empty())
+                {
+                    llvm::raw_string_ostream bitcodeStream(llvmBitcodeForCache);
+                    llvm::WriteBitcodeToFile(*result.module, bitcodeStream);
+                    bitcodeStream.flush();
+                }
+
+                const bool stored = [&]()
+                {
+                    const ScopedHotspot hotspot(config.timing, "input.cache.store_compile");
+                    return storeCompileIRCachePayload(cachePaths, *sourceSnapshot,
+                                                      *dependencySnapshots, compileDiagnosticsText,
+                                                      llvmIRForCache, llvmBitcodeForCache);
+                }();
                 if (config.timing && stored)
                 {
                     coretrace::log(coretrace::Level::Info,
@@ -978,26 +1270,172 @@ namespace ctrace::stack::analysis
                 std::filesystem::remove(cachePaths.depFile, removeErr);
             }
 
-            if (!dumpModuleIR(*result.module, filename, config, baseDir, result.error))
+            bool dumpOk = false;
+            {
+                const ScopedHotspot hotspot(config.timing, "input.dump_module_ir");
+                dumpOk = dumpModuleIR(*result.module, filename, config, baseDir, result.error);
+            }
+            if (!dumpOk)
                 return result;
 
             return result;
         }
 
+        const std::string inputExt = lowercaseCopy(extractExtension(filename));
+        const bool isTextIRInput = (inputExt == "ll");
+        const std::string cacheWorkingDir =
+            cwdErr ? std::string() : baseDir.lexically_normal().generic_string();
+        const CompileIRCachePaths cachePaths =
+            isTextIRInput
+                ? buildCompileIRCachePaths(config, filename, result.language, {}, cacheWorkingDir)
+                : CompileIRCachePaths{};
+
+        if (isTextIRInput && cachePaths.enabled)
+        {
+            auto cached = [&]() -> std::optional<CompileIRCachePayload>
+            {
+                const ScopedHotspot hotspot(config.timing, "input.cache.lookup_ir_input");
+                return loadCompileIRCachePayload(cachePaths);
+            }();
+            if (cached)
+            {
+                if (config.timing)
+                    coretrace::log(coretrace::Level::Info, "IR parse cache hit for {}\n", filename);
+
+                const auto cacheParseStart = Clock::now();
+                if (!cached->llvmBitcode.empty())
+                {
+                    auto bcBuffer = llvm::MemoryBuffer::getMemBufferCopy(
+                        llvm::StringRef(cached->llvmBitcode.data(), cached->llvmBitcode.size()),
+                        "cached_input_ir_bc");
+                    auto bitcodeModule = [&]()
+                    {
+                        const ScopedHotspot hotspot(config.timing,
+                                                    "input.cache.parse_bitcode_ir_input");
+                        return llvm::parseBitcodeFile(bcBuffer->getMemBufferRef(), ctx);
+                    }();
+                    if (bitcodeModule)
+                    {
+                        result.module = std::move(*bitcodeModule);
+                        if (config.timing)
+                        {
+                            const auto cacheParseEnd = Clock::now();
+                            const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                                cacheParseEnd - cacheParseStart)
+                                                .count();
+                            coretrace::log(coretrace::Level::Info, "Bitcode parse done in {} ms\n",
+                                           ms);
+                        }
+                    }
+                    else if (config.timing)
+                    {
+                        std::string bitcodeError = llvm::toString(bitcodeModule.takeError());
+                        coretrace::log(coretrace::Level::Warn,
+                                       "IR parse cache bitcode invalid for {}; "
+                                       "falling back to textual IR ({})\n",
+                                       filename, bitcodeError);
+                    }
+                }
+
+                if (!result.module && !cached->llvmIR.empty())
+                {
+                    auto buffer =
+                        llvm::MemoryBuffer::getMemBuffer(cached->llvmIR, "cached_input_ir");
+                    llvm::SMDiagnostic diag;
+                    {
+                        const ScopedHotspot hotspot(config.timing,
+                                                    "input.cache.parse_text_ir_input");
+                        result.module = llvm::parseIR(buffer->getMemBufferRef(), diag, ctx);
+                    }
+                    if (config.timing)
+                    {
+                        const auto cacheParseEnd = Clock::now();
+                        const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                            cacheParseEnd - cacheParseStart)
+                                            .count();
+                        coretrace::log(coretrace::Level::Info, "IR parse done in {} ms\n", ms);
+                    }
+                }
+
+                if (result.module)
+                {
+                    bool dumpOk = false;
+                    {
+                        const ScopedHotspot hotspot(config.timing, "input.dump_module_ir");
+                        dumpOk =
+                            dumpModuleIR(*result.module, filename, config, baseDir, result.error);
+                    }
+                    if (!dumpOk)
+                        return result;
+                    return result;
+                }
+
+                if (config.timing)
+                {
+                    coretrace::log(coretrace::Level::Warn,
+                                   "IR parse cache entry invalid for {}; reparsing input\n",
+                                   filename);
+                }
+                result.module.reset();
+            }
+            else if (config.timing)
+            {
+                coretrace::log(coretrace::Level::Info, "IR parse cache miss for {}\n", filename);
+            }
+        }
+
         if (config.timing)
             coretrace::log(coretrace::Level::Info, "Parsing IR {}...\n", filename);
-        auto parseStart = Clock::now();
-        result.module = llvm::parseIRFile(filename, err, ctx);
+        const auto parseStart = Clock::now();
+        {
+            const ScopedHotspot hotspot(config.timing, "input.parse_ir_file");
+            result.module = llvm::parseIRFile(filename, err, ctx);
+        }
         if (config.timing)
         {
-            auto parseEnd = Clock::now();
-            auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(parseEnd - parseStart)
-                          .count();
+            const auto parseEnd = Clock::now();
+            const auto ms =
+                std::chrono::duration_cast<std::chrono::milliseconds>(parseEnd - parseStart)
+                    .count();
             coretrace::log(coretrace::Level::Info, "IR parse done in {} ms\n", ms);
         }
         if (result.module)
         {
-            if (!dumpModuleIR(*result.module, filename, config, baseDir, result.error))
+            if (isTextIRInput && cachePaths.enabled)
+            {
+                if (const auto sourceSnapshot = captureFileSnapshot(filename))
+                {
+                    std::string sourceIR;
+                    (void)readTextFile(filename, sourceIR);
+
+                    std::string llvmBitcode;
+                    llvm::raw_string_ostream bitcodeStream(llvmBitcode);
+                    llvm::WriteBitcodeToFile(*result.module, bitcodeStream);
+                    bitcodeStream.flush();
+
+                    std::vector<FileSnapshot> dependencySnapshots;
+                    dependencySnapshots.push_back(*sourceSnapshot);
+                    const bool stored = [&]()
+                    {
+                        const ScopedHotspot hotspot(config.timing, "input.cache.store_ir_parse");
+                        return storeCompileIRCachePayload(cachePaths, *sourceSnapshot,
+                                                          dependencySnapshots, "", sourceIR,
+                                                          llvmBitcode);
+                    }();
+                    if (config.timing && stored)
+                    {
+                        coretrace::log(coretrace::Level::Info,
+                                       "Stored IR parse cache entry for {}\n", filename);
+                    }
+                }
+            }
+
+            bool dumpOk = false;
+            {
+                const ScopedHotspot hotspot(config.timing, "input.dump_module_ir");
+                dumpOk = dumpModuleIR(*result.module, filename, config, baseDir, result.error);
+            }
+            if (!dumpOk)
                 return result;
         }
         return result;
