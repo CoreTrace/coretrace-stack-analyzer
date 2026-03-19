@@ -18,9 +18,15 @@ namespace ctrace::stack::analyzer
             return *artifact;
         }
 
-        template <typename T> void set(const T& value) { (void)emplace<T>(value); }
+        template <typename T> void set(const T& value)
+        {
+            (void)emplace<T>(value);
+        }
 
-        template <typename T> void set(T&& value) { (void)emplace<T>(std::move(value)); }
+        template <typename T> void set(T&& value)
+        {
+            (void)emplace<T>(std::move(value));
+        }
 
         template <typename T> [[nodiscard]] bool has() const
         {
@@ -43,7 +49,10 @@ namespace ctrace::stack::analyzer
             return static_cast<const T*>(it->second.get());
         }
 
-        void clear() { artifacts_.clear(); }
+        void clear()
+        {
+            artifacts_.clear();
+        }
 
       private:
         std::unordered_map<std::type_index, std::shared_ptr<void>> artifacts_;

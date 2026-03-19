@@ -267,11 +267,9 @@ namespace ctrace::stack::analysis
     namespace
     {
         template <typename CallBaseT>
-        static void collectTOCTOUEventsFromCallBases(
-            const std::vector<const CallBaseT*>& callBases,
-            std::vector<PathEvent>& checks,
-            std::vector<PathEvent>& uses,
-            unsigned& order)
+        static void collectTOCTOUEventsFromCallBases(const std::vector<const CallBaseT*>& callBases,
+                                                     std::vector<PathEvent>& checks,
+                                                     std::vector<PathEvent>& uses, unsigned& order)
         {
             for (const CallBaseT* call : callBases)
             {

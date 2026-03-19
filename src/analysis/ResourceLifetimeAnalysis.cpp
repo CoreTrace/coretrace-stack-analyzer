@@ -2379,7 +2379,7 @@ namespace ctrace::stack::analysis
     }
 
     static bool resourceSummaryFunctionEquals(const ResourceSummaryFunction& lhs,
-                                               const ResourceSummaryFunction& rhs)
+                                              const ResourceSummaryFunction& rhs)
     {
         std::vector<std::string> leftKeys;
         std::vector<std::string> rightKeys;

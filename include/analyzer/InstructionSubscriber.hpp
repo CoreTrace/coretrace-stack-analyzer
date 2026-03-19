@@ -33,9 +33,15 @@ namespace ctrace::stack::analyzer
     class InstructionSubscriberRegistry
     {
       public:
-        void add(InstructionSubscriber& subscriber) { subscribers_.push_back(&subscriber); }
+        void add(InstructionSubscriber& subscriber)
+        {
+            subscribers_.push_back(&subscriber);
+        }
 
-        [[nodiscard]] bool empty() const { return subscribers_.empty(); }
+        [[nodiscard]] bool empty() const
+        {
+            return subscribers_.empty();
+        }
 
         void notifyFunctionBegin(const llvm::Function& F) const
         {

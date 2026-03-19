@@ -103,8 +103,8 @@ namespace ctrace::stack::analyzer
             }
         }
 
-        std::sort(rows.begin(), rows.end(), [](const NamedHotspotSample& lhs,
-                                               const NamedHotspotSample& rhs)
+        std::sort(rows.begin(), rows.end(),
+                  [](const NamedHotspotSample& lhs, const NamedHotspotSample& rhs)
                   {
                       if (lhs.sample.totalNs != rhs.sample.totalNs)
                           return lhs.sample.totalNs > rhs.sample.totalNs;
@@ -113,8 +113,8 @@ namespace ctrace::stack::analyzer
 
         const std::size_t count = std::min(topN, rows.size());
         os << "Hotspot summary (top " << count << " / " << rows.size()
-           << ", tracked_total_ms=" << std::fixed << std::setprecision(3)
-           << nsToMs(trackedTotalNs) << "):\n";
+           << ", tracked_total_ms=" << std::fixed << std::setprecision(3) << nsToMs(trackedTotalNs)
+           << "):\n";
 
         if (rows.empty())
             return;
@@ -123,18 +123,16 @@ namespace ctrace::stack::analyzer
         {
             const NamedHotspotSample& row = rows[idx];
             const double totalMs = nsToMs(row.sample.totalNs);
-            const double avgMs = row.sample.calls == 0
-                                     ? 0.0
-                                     : totalMs / static_cast<double>(row.sample.calls);
+            const double avgMs =
+                row.sample.calls == 0 ? 0.0 : totalMs / static_cast<double>(row.sample.calls);
             const double maxMs = nsToMs(row.sample.maxNs);
             const double share = trackedTotalNs == 0
                                      ? 0.0
                                      : (100.0 * static_cast<double>(row.sample.totalNs) /
                                         static_cast<double>(trackedTotalNs));
             os << "  " << (idx + 1) << ". " << row.name << " total_ms=" << std::fixed
-               << std::setprecision(3) << totalMs << " avg_ms=" << avgMs
-               << " max_ms=" << maxMs << " calls=" << row.sample.calls << " share_pct=" << share
-               << "\n";
+               << std::setprecision(3) << totalMs << " avg_ms=" << avgMs << " max_ms=" << maxMs
+               << " calls=" << row.sample.calls << " share_pct=" << share << "\n";
         }
     }
 
@@ -155,8 +153,8 @@ namespace ctrace::stack::analyzer
         if (enabled_ == 0)
             return;
         const auto end = std::chrono::steady_clock::now();
-        HotspotProfiler::record(
-            name_, std::chrono::duration_cast<std::chrono::nanoseconds>(end - start_));
+        HotspotProfiler::record(name_,
+                                std::chrono::duration_cast<std::chrono::nanoseconds>(end - start_));
     }
 
     void dumpHotspotSummary(std::ostream& os, bool enabled)

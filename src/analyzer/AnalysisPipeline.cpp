@@ -104,11 +104,26 @@ namespace ctrace::stack::analyzer
             {
             }
 
-            void onAlloca(const llvm::AllocaInst&) override { ++signals_.bufferRelevantCount; }
-            void onLoad(const llvm::LoadInst&) override { ++signals_.loadCount; }
-            void onStore(const llvm::StoreInst&) override { ++signals_.bufferRelevantCount; }
-            void onCall(const llvm::CallInst&) override { ++signals_.callSiteCount; }
-            void onInvoke(const llvm::InvokeInst&) override { ++signals_.callSiteCount; }
+            void onAlloca(const llvm::AllocaInst&) override
+            {
+                ++signals_.bufferRelevantCount;
+            }
+            void onLoad(const llvm::LoadInst&) override
+            {
+                ++signals_.loadCount;
+            }
+            void onStore(const llvm::StoreInst&) override
+            {
+                ++signals_.bufferRelevantCount;
+            }
+            void onCall(const llvm::CallInst&) override
+            {
+                ++signals_.callSiteCount;
+            }
+            void onInvoke(const llvm::InvokeInst&) override
+            {
+                ++signals_.callSiteCount;
+            }
             void onMemIntrinsic(const llvm::MemIntrinsic&) override
             {
                 ++signals_.bufferRelevantCount;
@@ -218,85 +233,77 @@ namespace ctrace::stack::analyzer
         steps.push_back({"Function attrs pass",
                          [](const PipelineData& state) { runFunctionAttrsPass(state.mod); }});
 
-        steps.push_back({"Prepare module", [](PipelineData& state)
-                         {
-                             ModulePreparationService preparationService;
-                             state.prepared = std::make_unique<PreparedModule>(
-                                 preparationService.prepare(state.mod, state.config));
-                             state.artifacts.set<PreparedModule*>(state.prepared.get());
-                             state.artifacts.set<const DerivedModuleArtifacts*>(
-                                 &state.prepared->derivedArtifacts);
+        steps.push_back(
+            {"Prepare module", [](PipelineData& state)
+             {
+                 ModulePreparationService preparationService;
+                 state.prepared = std::make_unique<PreparedModule>(
+                     preparationService.prepare(state.mod, state.config));
+                 state.artifacts.set<PreparedModule*>(state.prepared.get());
+                 state.artifacts.set<const DerivedModuleArtifacts*>(
+                     &state.prepared->derivedArtifacts);
 
-                             if (state.config.timing)
-                             {
-                                 const DerivedModuleArtifacts& derived =
-                                     state.prepared->derivedArtifacts;
-                                 if (!derived.hasCompatibleSchema())
-                                 {
-                                     std::cerr << "Derived artifacts schema mismatch: expected "
-                                               << DerivedModuleArtifacts::schemaKey()
-                                               << ", got version " << derived.schemaVersion << "\n";
-                                 }
-                                 std::cerr << "Derived artifacts schema: "
-                                           << DerivedModuleArtifacts::schemaKey() << "\n";
-                                 std::cerr << "Derived artifacts: debug_functions="
-                                           << derived.debugIndex.allDefinedFunctionsWithSubprogram
-                                           << ", selected_debug_functions="
-                                           << derived.debugIndex.selectedFunctionsWithSubprogram
-                                           << ", source_files="
-                                           << derived.debugIndex.distinctSourceFiles
-                                           << ", symbols="
-                                           << derived.symbolIndex.distinctMangledNames
-                                           << ", ptr_params="
-                                           << derived.typeFacts.pointerParameterCount
-                                           << ", aggregate_params="
-                                           << derived.typeFacts.aggregateParameterCount << "\n";
-                             }
-                         }});
+                 if (state.config.timing)
+                 {
+                     const DerivedModuleArtifacts& derived = state.prepared->derivedArtifacts;
+                     if (!derived.hasCompatibleSchema())
+                     {
+                         std::cerr << "Derived artifacts schema mismatch: expected "
+                                   << DerivedModuleArtifacts::schemaKey() << ", got version "
+                                   << derived.schemaVersion << "\n";
+                     }
+                     std::cerr << "Derived artifacts schema: "
+                               << DerivedModuleArtifacts::schemaKey() << "\n";
+                     std::cerr << "Derived artifacts: debug_functions="
+                               << derived.debugIndex.allDefinedFunctionsWithSubprogram
+                               << ", selected_debug_functions="
+                               << derived.debugIndex.selectedFunctionsWithSubprogram
+                               << ", source_files=" << derived.debugIndex.distinctSourceFiles
+                               << ", symbols=" << derived.symbolIndex.distinctMangledNames
+                               << ", ptr_params=" << derived.typeFacts.pointerParameterCount
+                               << ", aggregate_params=" << derived.typeFacts.aggregateParameterCount
+                               << "\n";
+                 }
+             }});
 
-        steps.push_back({"Collect IR facts", [subscribersEnabled](PipelineData& state)
-                         {
-                             IRFacts facts;
-                             PipelineSubscriberSignals signals;
+        steps.push_back(
+            {"Collect IR facts", [subscribersEnabled](PipelineData& state)
+             {
+                 IRFacts facts;
+                 PipelineSubscriberSignals signals;
 
-                             if (subscribersEnabled)
-                             {
-                                 InstructionSubscriberRegistry registry;
-                                 PipelineSignalSubscriber signalSubscriber(signals);
-                                 registry.add(signalSubscriber);
-                                 PerFunctionInstructionCache instCache;
-                                 registry.add(instCache);
-                                 facts = collectIRFacts(state.prepared->ctx, &registry);
-                                 state.artifacts.set<PerFunctionInstructionCache>(
-                                     std::move(instCache));
-                             }
-                             else
-                             {
-                                 facts = collectIRFacts(state.prepared->ctx);
-                                 signals = derivePipelineSignals(facts);
-                             }
+                 if (subscribersEnabled)
+                 {
+                     InstructionSubscriberRegistry registry;
+                     PipelineSignalSubscriber signalSubscriber(signals);
+                     registry.add(signalSubscriber);
+                     PerFunctionInstructionCache instCache;
+                     registry.add(instCache);
+                     facts = collectIRFacts(state.prepared->ctx, &registry);
+                     state.artifacts.set<PerFunctionInstructionCache>(std::move(instCache));
+                 }
+                 else
+                 {
+                     facts = collectIRFacts(state.prepared->ctx);
+                     signals = derivePipelineSignals(facts);
+                 }
 
-                             state.artifacts.set<IRFacts>(facts);
-                             state.artifacts.set<PipelineSubscriberSignals>(signals);
+                 state.artifacts.set<IRFacts>(facts);
+                 state.artifacts.set<PipelineSubscriberSignals>(signals);
 
-                             if (state.config.timing)
-                             {
-                                 std::cerr << "IR facts mode: "
-                                           << (subscribersEnabled ? "subscriber" : "direct")
-                                           << "\n";
-                                 std::cerr << "IR facts: selected funcs="
-                                           << facts.selectedFunctionCount
-                                           << ", selected BB="
-                                           << facts.basicBlockCountSelected
-                                           << ", selected inst="
-                                           << facts.instructionCountSelected
-                                           << ", alloca=" << facts.allocaInstCount
-                                           << ", loads=" << facts.loadInstCount
-                                           << ", stores=" << facts.storeInstCount
-                                           << ", memintrinsics=" << facts.memIntrinsicCount
-                                           << "\n";
-                             }
-                         }});
+                 if (state.config.timing)
+                 {
+                     std::cerr << "IR facts mode: "
+                               << (subscribersEnabled ? "subscriber" : "direct") << "\n";
+                     std::cerr << "IR facts: selected funcs=" << facts.selectedFunctionCount
+                               << ", selected BB=" << facts.basicBlockCountSelected
+                               << ", selected inst=" << facts.instructionCountSelected
+                               << ", alloca=" << facts.allocaInstCount
+                               << ", loads=" << facts.loadInstCount
+                               << ", stores=" << facts.storeInstCount
+                               << ", memintrinsics=" << facts.memIntrinsicCount << "\n";
+                 }
+             }});
 
         steps.push_back({"Build results", [](PipelineData& state)
                          { state.result = buildResults(*state.prepared, state.aux); }});
@@ -311,55 +318,52 @@ namespace ctrace::stack::analyzer
                              state.artifacts.set<StackSize>(state.allocaLargeThreshold);
                          }});
 
-        steps.push_back({"Stack buffer overflows", [](PipelineData& state)
-                         {
-                             if (const auto* signals =
-                                     state.artifacts.get<PipelineSubscriberSignals>())
-                             {
-                                 const bool noBufferRelevantInsts =
-                                     signals->bufferRelevantCount == 0;
-                                 if (noBufferRelevantInsts)
-                                 {
-                                     if (state.config.timing)
-                                         std::cerr << "Stack buffer overflows skipped: no relevant "
-                                                      "alloca/store/memintrinsic\n";
-                                     return;
-                                 }
-                             }
+        steps.push_back(
+            {"Stack buffer overflows", [](PipelineData& state)
+             {
+                 if (const auto* signals = state.artifacts.get<PipelineSubscriberSignals>())
+                 {
+                     const bool noBufferRelevantInsts = signals->bufferRelevantCount == 0;
+                     if (noBufferRelevantInsts)
+                     {
+                         if (state.config.timing)
+                             std::cerr << "Stack buffer overflows skipped: no relevant "
+                                          "alloca/store/memintrinsic\n";
+                         return;
+                     }
+                 }
 
-                             auto shouldAnalyze = [&](const llvm::Function& F) -> bool
-                             { return state.prepared->ctx.shouldAnalyze(F); };
-                             const std::vector<analysis::StackBufferOverflowIssue> issues =
-                                 analysis::analyzeStackBufferOverflows(state.mod, shouldAnalyze,
-                                                                       state.config);
-                             appendStackBufferDiagnostics(state.result, issues);
-                         }});
+                 auto shouldAnalyze = [&](const llvm::Function& F) -> bool
+                 { return state.prepared->ctx.shouldAnalyze(F); };
+                 const std::vector<analysis::StackBufferOverflowIssue> issues =
+                     analysis::analyzeStackBufferOverflows(state.mod, shouldAnalyze, state.config);
+                 appendStackBufferDiagnostics(state.result, issues);
+             }});
 
-        steps.push_back({"Dynamic allocas", [](PipelineData& state)
-                         {
-                             if (const auto* cache =
-                                     state.artifacts.get<PerFunctionInstructionCache>())
-                             {
-                                 std::vector<analysis::DynamicAllocaIssue> issues;
-                                 for (const auto& [func, data] : cache->data())
-                                 {
-                                     if (!func || func->isDeclaration())
-                                         continue;
-                                     auto funcIssues =
-                                         analysis::analyzeDynamicAllocasCached(*func, data.allocas);
-                                     issues.insert(issues.end(), funcIssues.begin(),
-                                                   funcIssues.end());
-                                 }
-                                 appendDynamicAllocaDiagnostics(state.result, issues);
-                                 return;
-                             }
+        steps.push_back(
+            {"Dynamic allocas", [](PipelineData& state)
+             {
+                 if (const auto* cache = state.artifacts.get<PerFunctionInstructionCache>())
+                 {
+                     std::vector<analysis::DynamicAllocaIssue> issues;
+                     for (const auto& [func, data] : cache->data())
+                     {
+                         if (!func || func->isDeclaration())
+                             continue;
+                         auto funcIssues =
+                             analysis::analyzeDynamicAllocasCached(*func, data.allocas);
+                         issues.insert(issues.end(), funcIssues.begin(), funcIssues.end());
+                     }
+                     appendDynamicAllocaDiagnostics(state.result, issues);
+                     return;
+                 }
 
-                             auto shouldAnalyze = [&](const llvm::Function& F) -> bool
-                             { return state.prepared->ctx.shouldAnalyze(F); };
-                             const std::vector<analysis::DynamicAllocaIssue> issues =
-                                 analysis::analyzeDynamicAllocas(state.mod, shouldAnalyze);
-                             appendDynamicAllocaDiagnostics(state.result, issues);
-                         }});
+                 auto shouldAnalyze = [&](const llvm::Function& F) -> bool
+                 { return state.prepared->ctx.shouldAnalyze(F); };
+                 const std::vector<analysis::DynamicAllocaIssue> issues =
+                     analysis::analyzeDynamicAllocas(state.mod, shouldAnalyze);
+                 appendDynamicAllocaDiagnostics(state.result, issues);
+             }});
 
         steps.push_back(
             {"Alloca usage", [](PipelineData& state)
@@ -375,59 +379,52 @@ namespace ctrace::stack::analyzer
                                               state.allocaLargeThreshold, issues);
              }});
 
-        steps.push_back({"Mem intrinsic overflows", [](PipelineData& state)
+        steps.push_back(
+            {"Mem intrinsic overflows", [](PipelineData& state)
+             {
+                 if (const auto* cache = state.artifacts.get<PerFunctionInstructionCache>())
+                 {
+                     const llvm::DataLayout& dataLayout = *state.prepared->ctx.dataLayout;
+
+                     // Parse model once for all functions.
+                     analysis::BufferWriteModel externalModel;
+                     analysis::BufferWriteRuleMatcher ruleMatcher;
+                     const analysis::BufferWriteModel* modelPtr = nullptr;
+                     if (!state.config.bufferModelPath.empty())
+                     {
+                         std::string parseError;
+                         if (analysis::parseBufferWriteModel(state.config.bufferModelPath,
+                                                             externalModel, parseError))
                          {
-                             if (const auto* cache =
-                                     state.artifacts.get<PerFunctionInstructionCache>())
-                             {
-                                 const llvm::DataLayout& dataLayout =
-                                     *state.prepared->ctx.dataLayout;
+                             modelPtr = &externalModel;
+                         }
+                         else
+                         {
+                             std::cerr << "Buffer model load error: " << parseError << "\n";
+                         }
+                     }
 
-                                 // Parse model once for all functions.
-                                 analysis::BufferWriteModel externalModel;
-                                 analysis::BufferWriteRuleMatcher ruleMatcher;
-                                 const analysis::BufferWriteModel* modelPtr = nullptr;
-                                 if (!state.config.bufferModelPath.empty())
-                                 {
-                                     std::string parseError;
-                                     if (analysis::parseBufferWriteModel(
-                                             state.config.bufferModelPath,
-                                             externalModel, parseError))
-                                     {
-                                         modelPtr = &externalModel;
-                                     }
-                                     else
-                                     {
-                                         std::cerr << "Buffer model load error: "
-                                                   << parseError << "\n";
-                                     }
-                                 }
+                     std::vector<analysis::MemIntrinsicIssue> issues;
+                     for (const auto& [func, data] : cache->data())
+                     {
+                         if (!func || func->isDeclaration())
+                             continue;
+                         auto funcIssues = analysis::analyzeMemIntrinsicOverflowsCached(
+                             *func, dataLayout, data.calls, data.invokes, modelPtr, &ruleMatcher);
+                         issues.insert(issues.end(), funcIssues.begin(), funcIssues.end());
+                     }
+                     appendMemIntrinsicDiagnostics(state.result, issues);
+                     return;
+                 }
 
-                                 std::vector<analysis::MemIntrinsicIssue> issues;
-                                 for (const auto& [func, data] : cache->data())
-                                 {
-                                     if (!func || func->isDeclaration())
-                                         continue;
-                                     auto funcIssues =
-                                         analysis::analyzeMemIntrinsicOverflowsCached(
-                                             *func, dataLayout, data.calls, data.invokes,
-                                             modelPtr, &ruleMatcher);
-                                     issues.insert(issues.end(), funcIssues.begin(),
-                                                   funcIssues.end());
-                                 }
-                                 appendMemIntrinsicDiagnostics(state.result, issues);
-                                 return;
-                             }
-
-                             auto shouldAnalyze = [&](const llvm::Function& F) -> bool
-                             { return state.prepared->ctx.shouldAnalyze(F); };
-                             const llvm::DataLayout& dataLayout = *state.prepared->ctx.dataLayout;
-                             const std::vector<analysis::MemIntrinsicIssue> issues =
-                                 analysis::analyzeMemIntrinsicOverflows(
-                                     state.mod, dataLayout, shouldAnalyze,
-                                     state.config.bufferModelPath);
-                             appendMemIntrinsicDiagnostics(state.result, issues);
-                         }});
+                 auto shouldAnalyze = [&](const llvm::Function& F) -> bool
+                 { return state.prepared->ctx.shouldAnalyze(F); };
+                 const llvm::DataLayout& dataLayout = *state.prepared->ctx.dataLayout;
+                 const std::vector<analysis::MemIntrinsicIssue> issues =
+                     analysis::analyzeMemIntrinsicOverflows(state.mod, dataLayout, shouldAnalyze,
+                                                            state.config.bufferModelPath);
+                 appendMemIntrinsicDiagnostics(state.result, issues);
+             }});
 
         steps.push_back({"Integer overflows", [](PipelineData& state)
                          {
@@ -541,59 +538,55 @@ namespace ctrace::stack::analyzer
                              appendOOBReadDiagnostics(state.result, issues);
                          }});
 
-        steps.push_back({"Command injection", [](PipelineData& state)
-                         {
-                             if (const auto* cache =
-                                     state.artifacts.get<PerFunctionInstructionCache>())
-                             {
-                                 std::vector<analysis::CommandInjectionIssue> issues;
-                                 for (const auto& [func, data] : cache->data())
-                                 {
-                                     if (!func || func->isDeclaration())
-                                         continue;
-                                     auto funcIssues =
-                                         analysis::analyzeCommandInjectionCached(
-                                             *func, data.calls, data.invokes);
-                                     issues.insert(issues.end(), funcIssues.begin(),
-                                                   funcIssues.end());
-                                 }
-                                 appendCommandInjectionDiagnostics(state.result, issues);
-                                 return;
-                             }
+        steps.push_back(
+            {"Command injection", [](PipelineData& state)
+             {
+                 if (const auto* cache = state.artifacts.get<PerFunctionInstructionCache>())
+                 {
+                     std::vector<analysis::CommandInjectionIssue> issues;
+                     for (const auto& [func, data] : cache->data())
+                     {
+                         if (!func || func->isDeclaration())
+                             continue;
+                         auto funcIssues = analysis::analyzeCommandInjectionCached(
+                             *func, data.calls, data.invokes);
+                         issues.insert(issues.end(), funcIssues.begin(), funcIssues.end());
+                     }
+                     appendCommandInjectionDiagnostics(state.result, issues);
+                     return;
+                 }
 
-                             auto shouldAnalyze = [&](const llvm::Function& F) -> bool
-                             { return state.prepared->ctx.shouldAnalyze(F); };
-                             const std::vector<analysis::CommandInjectionIssue> issues =
-                                 analysis::analyzeCommandInjection(state.mod, shouldAnalyze);
-                             appendCommandInjectionDiagnostics(state.result, issues);
-                         }});
+                 auto shouldAnalyze = [&](const llvm::Function& F) -> bool
+                 { return state.prepared->ctx.shouldAnalyze(F); };
+                 const std::vector<analysis::CommandInjectionIssue> issues =
+                     analysis::analyzeCommandInjection(state.mod, shouldAnalyze);
+                 appendCommandInjectionDiagnostics(state.result, issues);
+             }});
 
-        steps.push_back({"TOCTOU", [](PipelineData& state)
-                         {
-                             if (const auto* cache =
-                                     state.artifacts.get<PerFunctionInstructionCache>())
-                             {
-                                 std::vector<analysis::TOCTOUIssue> issues;
-                                 for (const auto& [func, data] : cache->data())
-                                 {
-                                     if (!func || func->isDeclaration())
-                                         continue;
-                                     auto funcIssues =
-                                         analysis::analyzeTOCTOUCached(
-                                             *func, data.calls, data.invokes);
-                                     issues.insert(issues.end(), funcIssues.begin(),
-                                                   funcIssues.end());
-                                 }
-                                 appendTOCTOUDiagnostics(state.result, issues);
-                                 return;
-                             }
+        steps.push_back(
+            {"TOCTOU", [](PipelineData& state)
+             {
+                 if (const auto* cache = state.artifacts.get<PerFunctionInstructionCache>())
+                 {
+                     std::vector<analysis::TOCTOUIssue> issues;
+                     for (const auto& [func, data] : cache->data())
+                     {
+                         if (!func || func->isDeclaration())
+                             continue;
+                         auto funcIssues =
+                             analysis::analyzeTOCTOUCached(*func, data.calls, data.invokes);
+                         issues.insert(issues.end(), funcIssues.begin(), funcIssues.end());
+                     }
+                     appendTOCTOUDiagnostics(state.result, issues);
+                     return;
+                 }
 
-                             auto shouldAnalyze = [&](const llvm::Function& F) -> bool
-                             { return state.prepared->ctx.shouldAnalyze(F); };
-                             const std::vector<analysis::TOCTOUIssue> issues =
-                                 analysis::analyzeTOCTOU(state.mod, shouldAnalyze);
-                             appendTOCTOUDiagnostics(state.result, issues);
-                         }});
+                 auto shouldAnalyze = [&](const llvm::Function& F) -> bool
+                 { return state.prepared->ctx.shouldAnalyze(F); };
+                 const std::vector<analysis::TOCTOUIssue> issues =
+                     analysis::analyzeTOCTOU(state.mod, shouldAnalyze);
+                 appendTOCTOUDiagnostics(state.result, issues);
+             }});
 
         steps.push_back({"Type confusion", [](PipelineData& state)
                          {
@@ -606,27 +599,27 @@ namespace ctrace::stack::analyzer
                              appendTypeConfusionDiagnostics(state.result, issues);
                          }});
 
-        steps.push_back({"Resource lifetime", [](PipelineData& state)
-                         {
-                             if (const auto* signals =
-                                     state.artifacts.get<PipelineSubscriberSignals>())
-                             {
-                                 if (signals->callSiteCount == 0)
-                                 {
-                                     if (state.config.timing)
-                                         std::cerr << "Resource lifetime skipped: no call sites\n";
-                                     return;
-                                 }
-                             }
+        steps.push_back(
+            {"Resource lifetime", [](PipelineData& state)
+             {
+                 if (const auto* signals = state.artifacts.get<PipelineSubscriberSignals>())
+                 {
+                     if (signals->callSiteCount == 0)
+                     {
+                         if (state.config.timing)
+                             std::cerr << "Resource lifetime skipped: no call sites\n";
+                         return;
+                     }
+                 }
 
-                             auto shouldAnalyze = [&](const llvm::Function& F) -> bool
-                             { return state.prepared->ctx.shouldAnalyze(F); };
-                             const std::vector<analysis::ResourceLifetimeIssue> issues =
-                                 analysis::analyzeResourceLifetime(
-                                     state.mod, shouldAnalyze, state.config.resourceModelPath,
-                                     state.config.resourceSummaryIndex.get());
-                             appendResourceLifetimeDiagnostics(state.result, issues);
-                         }});
+                 auto shouldAnalyze = [&](const llvm::Function& F) -> bool
+                 { return state.prepared->ctx.shouldAnalyze(F); };
+                 const std::vector<analysis::ResourceLifetimeIssue> issues =
+                     analysis::analyzeResourceLifetime(state.mod, shouldAnalyze,
+                                                       state.config.resourceModelPath,
+                                                       state.config.resourceSummaryIndex.get());
+                 appendResourceLifetimeDiagnostics(state.result, issues);
+             }});
 
         const ArtifactMask kNone = maskOf(ArtifactId::None);
         const ArtifactMask kPrepared = maskOf(ArtifactId::PreparedModule);
@@ -636,8 +629,8 @@ namespace ctrace::stack::analyzer
         const ArtifactMask kDerivedArtifacts = maskOf(ArtifactId::DerivedModuleArtifacts);
 
         auto setStepMeta = [&](std::string_view label, ArtifactMask requiredMask,
-                               ArtifactMask providedMask,
-                               bool traversalEstimate, ExecutionModel executionModel)
+                               ArtifactMask providedMask, bool traversalEstimate,
+                               ExecutionModel executionModel)
         {
             if (PipelineStep* step = findStep(steps, label))
             {
@@ -678,15 +671,14 @@ namespace ctrace::stack::analyzer
         setStepMeta("Invalid base reconstructions", kPrepared, kNone, true,
                     ExecutionModel::SubscriberCompatible);
         setStepMeta("Stack pointer escapes", kPrepared, kNone, true, ExecutionModel::Independent);
-        setStepMeta("Const params", kPrepared, kNone, true,
-                    ExecutionModel::SubscriberCompatible);
-        setStepMeta("Null pointer dereferences", kPrepared, kNone, true, ExecutionModel::Independent);
+        setStepMeta("Const params", kPrepared, kNone, true, ExecutionModel::SubscriberCompatible);
+        setStepMeta("Null pointer dereferences", kPrepared, kNone, true,
+                    ExecutionModel::Independent);
         setStepMeta("Out-of-bounds reads", kPrepared, kNone, true, ExecutionModel::Independent);
         setStepMeta("Command injection", kPrepared, kNone, true,
                     ExecutionModel::SubscriberCompatible);
         setStepMeta("TOCTOU", kPrepared, kNone, true, ExecutionModel::SubscriberCompatible);
-        setStepMeta("Type confusion", kPrepared, kNone, true,
-                    ExecutionModel::SubscriberCompatible);
+        setStepMeta("Type confusion", kPrepared, kNone, true, ExecutionModel::SubscriberCompatible);
         setStepMeta("Resource lifetime", kPrepared | kPipelineSignals, kNone, true,
                     ExecutionModel::Independent);
 
@@ -746,8 +738,7 @@ namespace ctrace::stack::analyzer
             std::uint64_t independentInstructionVisits = 0;
             for (const StepTraversalStats& stats : data.stepStats)
             {
-                std::cerr << "Traversal estimate detail: step='" << stats.label
-                          << "', model="
+                std::cerr << "Traversal estimate detail: step='" << stats.label << "', model="
                           << executionModelName(static_cast<ExecutionModel>(stats.executionModel))
                           << ", modules=" << stats.moduleVisits
                           << ", functions=" << stats.functionVisits

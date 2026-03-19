@@ -134,10 +134,10 @@ namespace ctrace::stack::analysis
     namespace
     {
         template <typename CallBaseT>
-        static void collectCommandInjectionFromCallBases(
-            const llvm::Function& function,
-            const std::vector<const CallBaseT*>& callBases,
-            std::vector<CommandInjectionIssue>& issues)
+        static void
+        collectCommandInjectionFromCallBases(const llvm::Function& function,
+                                             const std::vector<const CallBaseT*>& callBases,
+                                             std::vector<CommandInjectionIssue>& issues)
         {
             for (const CallBaseT* call : callBases)
             {

@@ -3372,21 +3372,19 @@ namespace ctrace::stack::analysis
                     {
                         for (const llvm::Instruction& I : BB)
                         {
-                            transferInstruction(I, tracked, DL, summaries,
-                                                externalSummariesByName, canonicalCalleeNames,
-                                                state, &writeSeen, &constructedSeen,
-                                                &defaultCtorSeen, &readBeforeInitSeen, nullptr,
-                                                &pendingIssues);
+                            transferInstruction(I, tracked, DL, summaries, externalSummariesByName,
+                                                canonicalCalleeNames, state, &writeSeen,
+                                                &constructedSeen, &defaultCtorSeen,
+                                                &readBeforeInitSeen, nullptr, &pendingIssues);
                         }
                     }
                     else
                     {
                         for (const llvm::Instruction& I : BB)
                         {
-                            transferInstruction(I, tracked, DL, summaries,
-                                                externalSummariesByName, canonicalCalleeNames,
-                                                state, nullptr, nullptr, nullptr, nullptr,
-                                                nullptr, nullptr);
+                            transferInstruction(I, tracked, DL, summaries, externalSummariesByName,
+                                                canonicalCalleeNames, state, nullptr, nullptr,
+                                                nullptr, nullptr, nullptr, nullptr);
                         }
                     }
 
@@ -3513,8 +3511,8 @@ namespace ctrace::stack::analysis
             }
 
             // Build reverse call graph: callerOf[callee] = {callers...}
-            llvm::DenseMap<const llvm::Function*,
-                           llvm::SmallVector<const llvm::Function*, 4>> callerOf;
+            llvm::DenseMap<const llvm::Function*, llvm::SmallVector<const llvm::Function*, 4>>
+                callerOf;
             for (const llvm::Function* func : analysisFunctions)
             {
                 for (const llvm::BasicBlock& BB : *func)

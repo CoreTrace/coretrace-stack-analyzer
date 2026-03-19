@@ -283,13 +283,12 @@ namespace ctrace::stack::analysis
     namespace
     {
         template <typename CallBaseT>
-        static void analyzeMemIntrinsicFromCallBases(
-            const llvm::Function& function,
-            const llvm::DataLayout& DL,
-            const std::vector<const CallBaseT*>& callBases,
-            const BufferWriteModel* externalModel,
-            BufferWriteRuleMatcher* ruleMatcher,
-            std::vector<MemIntrinsicIssue>& out)
+        static void analyzeMemIntrinsicFromCallBases(const llvm::Function& function,
+                                                     const llvm::DataLayout& DL,
+                                                     const std::vector<const CallBaseT*>& callBases,
+                                                     const BufferWriteModel* externalModel,
+                                                     BufferWriteRuleMatcher* ruleMatcher,
+                                                     std::vector<MemIntrinsicIssue>& out)
         {
             using namespace llvm;
 
@@ -300,8 +299,7 @@ namespace ctrace::stack::analysis
                 auto* CB = const_cast<CallBaseT*>(constCB);
 
                 ResolvedSink sink = resolveBuiltInSink(CB);
-                const ResolvedSink modeledSink =
-                    resolveModelSink(CB, externalModel, ruleMatcher);
+                const ResolvedSink modeledSink = resolveModelSink(CB, externalModel, ruleMatcher);
                 if (modeledSink.valid)
                     sink = modeledSink;
 
@@ -323,8 +321,7 @@ namespace ctrace::stack::analysis
 
                 MemIntrinsicIssue issue;
                 issue.funcName = function.getName().str();
-                issue.varName = AI->hasName() ? AI->getName().str()
-                                              : std::string("<unnamed>");
+                issue.varName = AI->hasName() ? AI->getName().str() : std::string("<unnamed>");
                 issue.destSizeBytes = destBytes;
                 issue.inst = constCB;
                 issue.intrinsicName = sink.displayName;
@@ -355,18 +352,15 @@ namespace ctrace::stack::analysis
     } // namespace
 
     std::vector<MemIntrinsicIssue>
-    analyzeMemIntrinsicOverflowsCached(const llvm::Function& function,
-                                       const llvm::DataLayout& DL,
+    analyzeMemIntrinsicOverflowsCached(const llvm::Function& function, const llvm::DataLayout& DL,
                                        const std::vector<const llvm::CallInst*>& calls,
                                        const std::vector<const llvm::InvokeInst*>& invokes,
                                        const BufferWriteModel* externalModel,
                                        BufferWriteRuleMatcher* ruleMatcher)
     {
         std::vector<MemIntrinsicIssue> issues;
-        analyzeMemIntrinsicFromCallBases(function, DL, calls,
-                                          externalModel, ruleMatcher, issues);
-        analyzeMemIntrinsicFromCallBases(function, DL, invokes,
-                                          externalModel, ruleMatcher, issues);
+        analyzeMemIntrinsicFromCallBases(function, DL, calls, externalModel, ruleMatcher, issues);
+        analyzeMemIntrinsicFromCallBases(function, DL, invokes, externalModel, ruleMatcher, issues);
         return issues;
     }
 } // namespace ctrace::stack::analysis

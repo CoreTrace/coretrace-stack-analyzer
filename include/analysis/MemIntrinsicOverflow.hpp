@@ -38,8 +38,7 @@ namespace ctrace::stack::analysis
                                  const std::string& bufferModelPath = "");
 
     std::vector<MemIntrinsicIssue>
-    analyzeMemIntrinsicOverflowsCached(const llvm::Function& function,
-                                       const llvm::DataLayout& DL,
+    analyzeMemIntrinsicOverflowsCached(const llvm::Function& function, const llvm::DataLayout& DL,
                                        const std::vector<const llvm::CallInst*>& calls,
                                        const std::vector<const llvm::InvokeInst*>& invokes,
                                        const BufferWriteModel* externalModel,

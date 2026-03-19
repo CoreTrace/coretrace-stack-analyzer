@@ -837,9 +837,8 @@ namespace ctrace::stack::analysis
             bool compileArgsReady = false;
             {
                 const ScopedHotspot hotspot(config.timing, "input.build_compile_args");
-                compileArgsReady =
-                    buildCompileArgs(filename, result.language, config, args, workingDir,
-                                     compileError);
+                compileArgsReady = buildCompileArgs(filename, result.language, config, args,
+                                                    workingDir, compileError);
             }
             if (!compileArgsReady)
             {
@@ -857,19 +856,17 @@ namespace ctrace::stack::analysis
             std::filesystem::path tempDir = std::filesystem::temp_directory_path(tempDirErr);
             if (tempDirErr)
                 tempDir = std::filesystem::path(".");
-            const std::string tempBitcodeName = "coretrace-compile-ir-" +
-                                                md5Hex(filename + "|" +
-                                                       std::to_string(compileStart.time_since_epoch()
-                                                                          .count())) +
-                                                ".bc";
+            const std::string tempBitcodeName =
+                "coretrace-compile-ir-" +
+                md5Hex(filename + "|" + std::to_string(compileStart.time_since_epoch().count())) +
+                ".bc";
             const std::filesystem::path tempBitcodePath = tempDir / tempBitcodeName;
             const ScopedFileCleanup tempBitcodeCleanup(tempBitcodePath);
             const std::vector<std::string> bitcodeArgs =
                 buildBitcodeCompileArgs(args, tempBitcodePath);
 
             auto compileWithOptionalWorkingDir =
-                [&](const std::vector<std::string>& compileArgs,
-                    compilerlib::OutputMode outputMode,
+                [&](const std::vector<std::string>& compileArgs, compilerlib::OutputMode outputMode,
                     bool useWorkingDir) -> std::optional<compilerlib::CompileResult>
             {
                 if (!useWorkingDir)
@@ -890,8 +887,7 @@ namespace ctrace::stack::analysis
             };
 
             auto compileWithConfiguredWorkingDir =
-                [&](const std::vector<std::string>& compileArgs,
-                    compilerlib::OutputMode outputMode,
+                [&](const std::vector<std::string>& compileArgs, compilerlib::OutputMode outputMode,
                     bool& retriedWithWorkingDir) -> std::optional<compilerlib::CompileResult>
             {
                 retriedWithWorkingDir = false;
@@ -945,8 +941,8 @@ namespace ctrace::stack::analysis
                             "cached_ir_bc");
                         auto bitcodeModule = [&]()
                         {
-                            const ScopedHotspot hotspot(
-                                config.timing, "input.cache.parse_bitcode_payload");
+                            const ScopedHotspot hotspot(config.timing,
+                                                        "input.cache.parse_bitcode_payload");
                             return llvm::parseBitcodeFile(bcBuffer->getMemBufferRef(), ctx);
                         }();
                         if (bitcodeModule)
@@ -980,17 +976,16 @@ namespace ctrace::stack::analysis
                         auto buffer = llvm::MemoryBuffer::getMemBuffer(cached->llvmIR, "cached_ir");
                         llvm::SMDiagnostic diag;
                         {
-                            const ScopedHotspot hotspot(
-                                config.timing, "input.cache.parse_text_payload");
+                            const ScopedHotspot hotspot(config.timing,
+                                                        "input.cache.parse_text_payload");
                             result.module = llvm::parseIR(buffer->getMemBufferRef(), diag, ctx);
                         }
                         if (config.timing)
                         {
                             const auto parseEnd = Clock::now();
-                            const auto ms =
-                                std::chrono::duration_cast<std::chrono::milliseconds>(
-                                    parseEnd - parseStart)
-                                    .count();
+                            const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                                parseEnd - parseStart)
+                                                .count();
                             coretrace::log(coretrace::Level::Info, "IR parse done in {} ms\n", ms);
                         }
                     };
@@ -1049,15 +1044,16 @@ namespace ctrace::stack::analysis
             {
                 std::error_code removeErr;
                 std::filesystem::remove(cachePaths.depFile, removeErr);
-                std::vector<std::string> cacheCompileArgs = preferBitcodeCompile ? bitcodeArgs : args;
+                std::vector<std::string> cacheCompileArgs =
+                    preferBitcodeCompile ? bitcodeArgs : args;
                 appendDependencyCaptureArgs(cacheCompileArgs, cachePaths.depFile);
 
                 bool retriedForDependencyCompile = false;
-                res = compileWithConfiguredWorkingDir(
-                    cacheCompileArgs,
-                    preferBitcodeCompile ? compilerlib::OutputMode::ToFile
-                                         : compilerlib::OutputMode::ToMemory,
-                    retriedForDependencyCompile);
+                res = compileWithConfiguredWorkingDir(cacheCompileArgs,
+                                                      preferBitcodeCompile
+                                                          ? compilerlib::OutputMode::ToFile
+                                                          : compilerlib::OutputMode::ToMemory,
+                                                      retriedForDependencyCompile);
                 retriedWithWorkingDir = retriedForDependencyCompile;
 
                 if (preferBitcodeCompile && (!res || !res->success))
@@ -1095,11 +1091,11 @@ namespace ctrace::stack::analysis
             }
             else
             {
-                res = compileWithConfiguredWorkingDir(
-                    preferBitcodeCompile ? bitcodeArgs : args,
-                    preferBitcodeCompile ? compilerlib::OutputMode::ToFile
-                                         : compilerlib::OutputMode::ToMemory,
-                    retriedWithWorkingDir);
+                res = compileWithConfiguredWorkingDir(preferBitcodeCompile ? bitcodeArgs : args,
+                                                      preferBitcodeCompile
+                                                          ? compilerlib::OutputMode::ToFile
+                                                          : compilerlib::OutputMode::ToMemory,
+                                                      retriedWithWorkingDir);
                 if (res && res->success)
                 {
                     compiledViaBitcode = preferBitcodeCompile;
@@ -1143,7 +1139,8 @@ namespace ctrace::stack::analysis
             std::string llvmBitcodeForCache;
             if (compiledViaBitcode)
             {
-                if (readTextFile(tempBitcodePath, llvmBitcodeForCache) && !llvmBitcodeForCache.empty())
+                if (readTextFile(tempBitcodePath, llvmBitcodeForCache) &&
+                    !llvmBitcodeForCache.empty())
                 {
                     const auto parseStart = Clock::now();
                     auto bcBuffer = llvm::MemoryBuffer::getMemBufferCopy(
@@ -1161,12 +1158,11 @@ namespace ctrace::stack::analysis
                         if (config.timing)
                         {
                             const auto parseEnd = Clock::now();
-                            const auto ms =
-                                std::chrono::duration_cast<std::chrono::milliseconds>(
-                                    parseEnd - parseStart)
-                                    .count();
-                            coretrace::log(coretrace::Level::Info,
-                                           "Bitcode parse done in {} ms\n", ms);
+                            const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                                parseEnd - parseStart)
+                                                .count();
+                            coretrace::log(coretrace::Level::Info, "Bitcode parse done in {} ms\n",
+                                           ms);
                         }
                     }
                     else if (config.timing)
@@ -1255,13 +1251,12 @@ namespace ctrace::stack::analysis
                     bitcodeStream.flush();
                 }
 
-                const bool stored =
-                    [&]()
+                const bool stored = [&]()
                 {
                     const ScopedHotspot hotspot(config.timing, "input.cache.store_compile");
-                    return storeCompileIRCachePayload(
-                        cachePaths, *sourceSnapshot, *dependencySnapshots, compileDiagnosticsText,
-                        llvmIRForCache, llvmBitcodeForCache);
+                    return storeCompileIRCachePayload(cachePaths, *sourceSnapshot,
+                                                      *dependencySnapshots, compileDiagnosticsText,
+                                                      llvmIRForCache, llvmBitcodeForCache);
                 }();
                 if (config.timing && stored)
                 {
@@ -1325,12 +1320,11 @@ namespace ctrace::stack::analysis
                         if (config.timing)
                         {
                             const auto cacheParseEnd = Clock::now();
-                            const auto ms =
-                                std::chrono::duration_cast<std::chrono::milliseconds>(
-                                    cacheParseEnd - cacheParseStart)
-                                    .count();
-                            coretrace::log(coretrace::Level::Info,
-                                           "Bitcode parse done in {} ms\n", ms);
+                            const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                                cacheParseEnd - cacheParseStart)
+                                                .count();
+                            coretrace::log(coretrace::Level::Info, "Bitcode parse done in {} ms\n",
+                                           ms);
                         }
                     }
                     else if (config.timing)
@@ -1345,7 +1339,8 @@ namespace ctrace::stack::analysis
 
                 if (!result.module && !cached->llvmIR.empty())
                 {
-                    auto buffer = llvm::MemoryBuffer::getMemBuffer(cached->llvmIR, "cached_input_ir");
+                    auto buffer =
+                        llvm::MemoryBuffer::getMemBuffer(cached->llvmIR, "cached_input_ir");
                     llvm::SMDiagnostic diag;
                     {
                         const ScopedHotspot hotspot(config.timing,
@@ -1367,8 +1362,8 @@ namespace ctrace::stack::analysis
                     bool dumpOk = false;
                     {
                         const ScopedHotspot hotspot(config.timing, "input.dump_module_ir");
-                        dumpOk = dumpModuleIR(*result.module, filename, config, baseDir,
-                                              result.error);
+                        dumpOk =
+                            dumpModuleIR(*result.module, filename, config, baseDir, result.error);
                     }
                     if (!dumpOk)
                         return result;
@@ -1399,8 +1394,9 @@ namespace ctrace::stack::analysis
         if (config.timing)
         {
             const auto parseEnd = Clock::now();
-            const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(parseEnd - parseStart)
-                                .count();
+            const auto ms =
+                std::chrono::duration_cast<std::chrono::milliseconds>(parseEnd - parseStart)
+                    .count();
             coretrace::log(coretrace::Level::Info, "IR parse done in {} ms\n", ms);
         }
         if (result.module)
@@ -1419,8 +1415,7 @@ namespace ctrace::stack::analysis
 
                     std::vector<FileSnapshot> dependencySnapshots;
                     dependencySnapshots.push_back(*sourceSnapshot);
-                    const bool stored =
-                        [&]()
+                    const bool stored = [&]()
                     {
                         const ScopedHotspot hotspot(config.timing, "input.cache.store_ir_parse");
                         return storeCompileIRCachePayload(cachePaths, *sourceSnapshot,

@@ -168,8 +168,7 @@ struct ModuleTarjan
         }
     }
 
-    void strongConnect(std::size_t v,
-                       const std::vector<std::unordered_set<std::size_t>>& edges)
+    void strongConnect(std::size_t v, const std::vector<std::unordered_set<std::size_t>>& edges)
     {
         index[v] = lowlink[v] = nextIndex++;
         stack.push_back(v);
@@ -211,10 +210,8 @@ struct ModuleTarjan
 // are included. Multi-def functions (inline, template, weak) are excluded
 // because their summaries are identical in all TUs and don't create real
 // cross-module data dependencies.
-static std::vector<std::unordered_set<std::size_t>>
-buildSingleDefFilteredEdges(
-    std::size_t N,
-    const std::vector<std::unordered_set<std::string>>& moduleCalleeNames,
+static std::vector<std::unordered_set<std::size_t>> buildSingleDefFilteredEdges(
+    std::size_t N, const std::vector<std::unordered_set<std::string>>& moduleCalleeNames,
     const std::unordered_map<std::string, std::vector<std::size_t>>& definedBy)
 {
     std::vector<std::unordered_set<std::size_t>> edges(N);
@@ -253,8 +250,7 @@ computeTopologicalSCCOrder(std::size_t N,
 // levelGroups: levelGroups[level] = {indices into sccOrder}.
 static std::vector<unsigned>
 computeSCCLevels(const std::vector<std::vector<std::size_t>>& sccOrder,
-                 const std::vector<std::unordered_set<std::size_t>>& filteredEdges,
-                 std::size_t N)
+                 const std::vector<std::unordered_set<std::size_t>>& filteredEdges, std::size_t N)
 {
     // Map each module index to its SCC index in sccOrder.
     std::vector<std::size_t> moduleToSCC(N);
@@ -1011,8 +1007,7 @@ static AppStatus analyzeWithSharedModuleLoading(const std::vector<std::string>& 
 
     if (needsCrossTUResourceSummaries)
     {
-        const analyzer::ScopedHotspot hotspot(cfg.timing,
-                                              "app.shared_loading.cross_tu_resource");
+        const analyzer::ScopedHotspot hotspot(cfg.timing, "app.shared_loading.cross_tu_resource");
         cfg.resourceSummaryIndex = buildCrossTUSummaryIndex(loadedModules, cfg);
     }
     if (needsCrossTUUninitializedSummaries)
@@ -1033,8 +1028,7 @@ static AppStatus analyzeWithSharedModuleLoading(const std::vector<std::string>& 
     {
         AnalysisResult result;
         {
-            const analyzer::ScopedHotspot hotspot(cfg.timing,
-                                                  "app.shared_loading.analyze_module");
+            const analyzer::ScopedHotspot hotspot(cfg.timing, "app.shared_loading.analyze_module");
             result = analyzeModule(*loaded.module, cfg);
         }
         if (!loaded.frontendDiagnostics.empty())
@@ -1115,50 +1109,49 @@ static AppStatus analyzeWithoutSharedModuleLoading(const std::vector<std::string
     };
 
     std::vector<ParallelAnalysisSlot> slots(inputFilenames.size());
-    runParallelWork(inputFilenames.size(), parallelJobs,
-                    [&](std::size_t index)
-                    {
-                        const analyzer::ScopedHotspot fileHotspot(cfg.timing,
-                                                                  "app.direct_loading.file");
-                        const std::string& inputFilename = inputFilenames[index];
-                        llvm::LLVMContext localContext;
-                        llvm::SMDiagnostic localErr;
-                        analysis::ModuleLoadResult load = analysis::loadModuleForAnalysis(
-                            inputFilename, cfg, localContext, localErr);
-                        if (!load.module)
-                        {
-                            std::string err;
-                            if (!load.error.empty())
-                                err += load.error;
-                            if (localErr.getLineNo() != 0 || !localErr.getFilename().empty())
-                            {
-                                std::string diagText;
-                                llvm::raw_string_ostream os(diagText);
-                                localErr.print("stack_usage_analyzer", os);
-                                os.flush();
-                                err += diagText;
-                            }
-                            slots[index].loadError = std::move(err);
-                            return;
-                        }
+    runParallelWork(
+        inputFilenames.size(), parallelJobs,
+        [&](std::size_t index)
+        {
+            const analyzer::ScopedHotspot fileHotspot(cfg.timing, "app.direct_loading.file");
+            const std::string& inputFilename = inputFilenames[index];
+            llvm::LLVMContext localContext;
+            llvm::SMDiagnostic localErr;
+            analysis::ModuleLoadResult load =
+                analysis::loadModuleForAnalysis(inputFilename, cfg, localContext, localErr);
+            if (!load.module)
+            {
+                std::string err;
+                if (!load.error.empty())
+                    err += load.error;
+                if (localErr.getLineNo() != 0 || !localErr.getFilename().empty())
+                {
+                    std::string diagText;
+                    llvm::raw_string_ostream os(diagText);
+                    localErr.print("stack_usage_analyzer", os);
+                    os.flush();
+                    err += diagText;
+                }
+                slots[index].loadError = std::move(err);
+                return;
+            }
 
-                        AnalysisResult result;
-                        {
-                            const analyzer::ScopedHotspot hotspot(
-                                cfg.timing, "app.direct_loading.analyze_module");
-                            result = analyzeModule(*load.module, cfg);
-                        }
-                        if (!load.frontendDiagnostics.empty())
-                        {
-                            result.diagnostics.insert(result.diagnostics.end(),
-                                                      load.frontendDiagnostics.begin(),
-                                                      load.frontendDiagnostics.end());
-                        }
-                        stampResultFilePaths(result, inputFilename);
-                        slots[index].noFunctionMsg =
-                            noFunctionMessage(result, inputFilename, hasFilter);
-                        slots[index].result = std::make_unique<AnalysisResult>(std::move(result));
-                    });
+            AnalysisResult result;
+            {
+                const analyzer::ScopedHotspot hotspot(cfg.timing,
+                                                      "app.direct_loading.analyze_module");
+                result = analyzeModule(*load.module, cfg);
+            }
+            if (!load.frontendDiagnostics.empty())
+            {
+                result.diagnostics.insert(result.diagnostics.end(),
+                                          load.frontendDiagnostics.begin(),
+                                          load.frontendDiagnostics.end());
+            }
+            stampResultFilePaths(result, inputFilename);
+            slots[index].noFunctionMsg = noFunctionMessage(result, inputFilename, hasFilter);
+            slots[index].result = std::make_unique<AnalysisResult>(std::move(result));
+        });
 
     for (std::size_t index = 0; index < inputFilenames.size(); ++index)
     {
@@ -1617,8 +1610,7 @@ static std::shared_ptr<ctrace::stack::analysis::ResourceSummaryIndex>
 buildCrossTUSummaryIndex(const std::vector<LoadedInputModule>& loadedModules,
                          const AnalysisConfig& cfg)
 {
-    const analyzer::ScopedHotspot totalHotspot(cfg.timing,
-                                               "app.cross_tu.resource_summary.total");
+    const analyzer::ScopedHotspot totalHotspot(cfg.timing, "app.cross_tu.resource_summary.total");
     if (!cfg.resourceCrossTU || cfg.resourceModelPath.empty() || loadedModules.size() < 2)
         return nullptr;
 
@@ -1676,8 +1668,7 @@ buildCrossTUSummaryIndex(const std::vector<LoadedInputModule>& loadedModules,
         {
             if (F.isDeclaration() || !F.hasName() || F.getName().empty())
                 continue;
-            const std::string canon =
-                ctrace_tools::canonicalizeMangledName(F.getName().str());
+            const std::string canon = ctrace_tools::canonicalizeMangledName(F.getName().str());
             definedBy[canon].push_back(i);
         }
     }
@@ -1777,8 +1768,8 @@ buildCrossTUSummaryIndex(const std::vector<LoadedInputModule>& loadedModules,
         auto buildModuleSummary =
             [&](std::size_t moduleIndex) -> ctrace::stack::analysis::ResourceSummaryIndex
         {
-            const analyzer::ScopedHotspot hotspot(
-                cfg.timing, "app.cross_tu.resource_summary.build_module");
+            const analyzer::ScopedHotspot hotspot(cfg.timing,
+                                                  "app.cross_tu.resource_summary.build_module");
             const LoadedInputModule& loaded = loadedModules[moduleIndex];
             analysis::FunctionFilter filter = analysis::buildFunctionFilter(*loaded.module, cfg);
             auto shouldAnalyze = [&](const llvm::Function& F) -> bool
@@ -1938,8 +1929,7 @@ buildCrossTUSummaryIndex(const std::vector<LoadedInputModule>& loadedModules,
                 {
                     coretrace::log(coretrace::Level::Info,
                                    "  Resource cyclic SCC (size={}) iteration {}{} (dirty={})\n",
-                                   scc.size(), sccIter + 1,
-                                   iterConverged ? " converged" : "",
+                                   scc.size(), sccIter + 1, iterConverged ? " converged" : "",
                                    dirtyInSCC.size());
                 }
 
@@ -1969,18 +1959,21 @@ buildCrossTUSummaryIndex(const std::vector<LoadedInputModule>& loadedModules,
         {
             const auto levelEnd = Clock::now();
             const auto ms =
-                std::chrono::duration_cast<std::chrono::milliseconds>(levelEnd - levelStart).count();
-            coretrace::log(coretrace::Level::Info,
-                           "  Resource level {}: {} trivial, {} cyclic ({} modules) in {} ms\n",
-                           level, trivialModules.size(), cyclicSCCIndices.size(),
-                           trivialModules.size() + [&]()
-                           {
-                               std::size_t n = 0;
-                               for (std::size_t s : cyclicSCCIndices)
-                                   n += sccOrder[s].size();
-                               return n;
-                           }(),
-                           ms);
+                std::chrono::duration_cast<std::chrono::milliseconds>(levelEnd - levelStart)
+                    .count();
+            coretrace::log(
+                coretrace::Level::Info,
+                "  Resource level {}: {} trivial, {} cyclic ({} modules) in {} ms\n", level,
+                trivialModules.size(), cyclicSCCIndices.size(),
+                trivialModules.size() +
+                    [&]()
+                    {
+                        std::size_t n = 0;
+                        for (std::size_t s : cyclicSCCIndices)
+                            n += sccOrder[s].size();
+                        return n;
+                    }(),
+                ms);
         }
     }
 
@@ -2002,8 +1995,8 @@ static std::shared_ptr<ctrace::stack::analysis::GlobalReadBeforeWriteSummaryInde
 buildCrossTUGlobalReadBeforeWriteSummaryIndex(const std::vector<LoadedInputModule>& loadedModules,
                                               const AnalysisConfig& cfg)
 {
-    const analyzer::ScopedHotspot totalHotspot(
-        cfg.timing, "app.cross_tu.global_read_before_write.total");
+    const analyzer::ScopedHotspot totalHotspot(cfg.timing,
+                                               "app.cross_tu.global_read_before_write.total");
     if (loadedModules.size() < 2)
         return nullptr;
 
@@ -2022,8 +2015,8 @@ buildCrossTUGlobalReadBeforeWriteSummaryIndex(const std::vector<LoadedInputModul
     auto buildModuleSummary =
         [&](std::size_t moduleIndex) -> analysis::GlobalReadBeforeWriteSummaryIndex
     {
-        const analyzer::ScopedHotspot hotspot(
-            cfg.timing, "app.cross_tu.global_read_before_write.build_module");
+        const analyzer::ScopedHotspot hotspot(cfg.timing,
+                                              "app.cross_tu.global_read_before_write.build_module");
         const LoadedInputModule& loaded = loadedModules[moduleIndex];
         const analysis::FunctionFilter filter = analysis::buildFunctionFilter(*loaded.module, cfg);
         auto shouldAnalyze = [&](const llvm::Function& F) -> bool
@@ -2066,8 +2059,7 @@ static std::shared_ptr<ctrace::stack::analysis::UninitializedSummaryIndex>
 buildCrossTUUninitializedSummaryIndex(const std::vector<LoadedInputModule>& loadedModules,
                                       const AnalysisConfig& cfg)
 {
-    const analyzer::ScopedHotspot totalHotspot(cfg.timing,
-                                               "app.cross_tu.uninitialized.total");
+    const analyzer::ScopedHotspot totalHotspot(cfg.timing, "app.cross_tu.uninitialized.total");
     if (!cfg.uninitializedCrossTU || loadedModules.size() < 2)
         return nullptr;
 
@@ -2111,8 +2103,7 @@ buildCrossTUUninitializedSummaryIndex(const std::vector<LoadedInputModule>& load
         {
             if (F.isDeclaration() || !F.hasName() || F.getName().empty())
                 continue;
-            const std::string canon =
-                ctrace_tools::canonicalizeMangledName(F.getName().str());
+            const std::string canon = ctrace_tools::canonicalizeMangledName(F.getName().str());
             definedBy[canon].push_back(i);
         }
     }
@@ -2167,9 +2158,9 @@ buildCrossTUUninitializedSummaryIndex(const std::vector<LoadedInputModule>& load
         tarjan.run(N, moduleEdges);
 
         // 4. Classify and log SCC distribution.
-        std::size_t trivialSCCs = 0;   // size == 1, no self-edge
-        std::size_t selfLoopSCCs = 0;  // size == 1, has self-edge
-        std::size_t cyclicSCCs = 0;    // size > 1
+        std::size_t trivialSCCs = 0;  // size == 1, no self-edge
+        std::size_t selfLoopSCCs = 0; // size == 1, has self-edge
+        std::size_t cyclicSCCs = 0;   // size > 1
         std::size_t maxSCCSize = 0;
         std::size_t totalModulesInCyclicSCCs = 0;
 
@@ -2200,8 +2191,8 @@ buildCrossTUUninitializedSummaryIndex(const std::vector<LoadedInputModule>& load
                        "  Cyclic (size>1, need iteration): {}\n"
                        "  Max cyclic SCC size: {}\n"
                        "  Total modules in cyclic SCCs: {}\n",
-                       N, tarjan.sccs.size(), trivialSCCs, selfLoopSCCs,
-                       cyclicSCCs, maxSCCSize, totalModulesInCyclicSCCs);
+                       N, tarjan.sccs.size(), trivialSCCs, selfLoopSCCs, cyclicSCCs, maxSCCSize,
+                       totalModulesInCyclicSCCs);
 
         // Log cyclic SCCs with module names for investigation.
         for (const auto& scc : tarjan.sccs)
@@ -2215,9 +2206,8 @@ buildCrossTUUninitializedSummaryIndex(const std::vector<LoadedInputModule>& load
                         members += ", ";
                     members += loadedModules[idx].filename;
                 }
-                coretrace::log(coretrace::Level::Info,
-                               "  Cyclic SCC (size={}): [{}]\n",
-                               scc.size(), members);
+                coretrace::log(coretrace::Level::Info, "  Cyclic SCC (size={}): [{}]\n", scc.size(),
+                               members);
             }
         }
 
@@ -2225,10 +2215,8 @@ buildCrossTUUninitializedSummaryIndex(const std::vector<LoadedInputModule>& load
         std::size_t totalEdges = 0;
         for (const auto& e : moduleEdges)
             totalEdges += e.size();
-        coretrace::log(coretrace::Level::Info,
-                       "  Inter-module edges: {} (density: {:.1f}%)\n",
-                       totalEdges,
-                       N > 1 ? (100.0 * totalEdges / (N * (N - 1))) : 0.0);
+        coretrace::log(coretrace::Level::Info, "  Inter-module edges: {} (density: {:.1f}%)\n",
+                       totalEdges, N > 1 ? (100.0 * totalEdges / (N * (N - 1))) : 0.0);
 
         // 5. Identify "hub" functions that create the most cross-module edges.
         //    These are functions defined in many modules (inline/template) that
@@ -2236,9 +2224,9 @@ buildCrossTUUninitializedSummaryIndex(const std::vector<LoadedInputModule>& load
         struct HubInfo
         {
             std::string name;
-            std::size_t definedInModules;  // how many modules define it
-            std::size_t calledByModules;   // how many modules call it
-            std::size_t edgesCreated;      // definedIn × calledBy (cross-module)
+            std::size_t definedInModules; // how many modules define it
+            std::size_t calledByModules;  // how many modules call it
+            std::size_t edgesCreated;     // definedIn × calledBy (cross-module)
         };
         std::vector<HubInfo> hubs;
         for (const auto& [funcName, defModules] : definedBy)
@@ -2267,18 +2255,16 @@ buildCrossTUUninitializedSummaryIndex(const std::vector<LoadedInputModule>& load
                 hubs.push_back({funcName, defModules.size(), callerCount, edges});
             }
         }
-        std::sort(hubs.begin(), hubs.end(),
-                  [](const HubInfo& a, const HubInfo& b)
+        std::sort(hubs.begin(), hubs.end(), [](const HubInfo& a, const HubInfo& b)
                   { return a.edgesCreated > b.edgesCreated; });
 
-        coretrace::log(coretrace::Level::Info,
-                       "  Multi-defined hub functions (top 15):\n");
+        coretrace::log(coretrace::Level::Info, "  Multi-defined hub functions (top 15):\n");
         for (std::size_t i = 0; i < std::min(hubs.size(), std::size_t(15)); ++i)
         {
             coretrace::log(coretrace::Level::Info,
                            "    {:4} edges | defined-in={:2} called-by={:2} | {}\n",
-                           hubs[i].edgesCreated, hubs[i].definedInModules,
-                           hubs[i].calledByModules, hubs[i].name);
+                           hubs[i].edgesCreated, hubs[i].definedInModules, hubs[i].calledByModules,
+                           hubs[i].name);
         }
 
         // Also count: how many edges come from single-def functions vs multi-def?
@@ -2302,8 +2288,7 @@ buildCrossTUUninitializedSummaryIndex(const std::vector<LoadedInputModule>& load
                 }
             }
         }
-        coretrace::log(coretrace::Level::Info,
-                       "  Edge source: single-def={} multi-def={}\n",
+        coretrace::log(coretrace::Level::Info, "  Edge source: single-def={} multi-def={}\n",
                        edgesFromSingleDef, edgesFromMultiDef);
 
         // 6. Filtered SCC analysis: only single-def functions (real dependencies).
@@ -2337,18 +2322,17 @@ buildCrossTUUninitializedSummaryIndex(const std::vector<LoadedInputModule>& load
             }
         }
 
-        coretrace::log(coretrace::Level::Info,
-                       "  FILTERED SCC (single-def only, {} edges, density {:.1f}%):\n"
-                       "    Total SCCs: {}\n"
-                       "    Trivial (acyclic): {}\n"
-                       "    Self-loop: {}\n"
-                       "    Cyclic (size>1): {}\n"
-                       "    Max cyclic SCC size: {}\n"
-                       "    Modules in cyclic SCCs: {}\n",
-                       filteredTotalEdges,
-                       N > 1 ? (100.0 * filteredTotalEdges / (N * (N - 1))) : 0.0,
-                       filteredTarjan.sccs.size(), fTrivial, fSelfLoop,
-                       fCyclic, fMaxSCC, fTotalInCyclic);
+        coretrace::log(
+            coretrace::Level::Info,
+            "  FILTERED SCC (single-def only, {} edges, density {:.1f}%):\n"
+            "    Total SCCs: {}\n"
+            "    Trivial (acyclic): {}\n"
+            "    Self-loop: {}\n"
+            "    Cyclic (size>1): {}\n"
+            "    Max cyclic SCC size: {}\n"
+            "    Modules in cyclic SCCs: {}\n",
+            filteredTotalEdges, N > 1 ? (100.0 * filteredTotalEdges / (N * (N - 1))) : 0.0,
+            filteredTarjan.sccs.size(), fTrivial, fSelfLoop, fCyclic, fMaxSCC, fTotalInCyclic);
 
         for (const auto& scc : filteredTarjan.sccs)
         {
@@ -2362,12 +2346,9 @@ buildCrossTUUninitializedSummaryIndex(const std::vector<LoadedInputModule>& load
                     // Show just the filename, not the full path.
                     const std::string& path = loadedModules[idx].filename;
                     auto slash = path.rfind('/');
-                    members += (slash != std::string::npos)
-                                   ? path.substr(slash + 1)
-                                   : path;
+                    members += (slash != std::string::npos) ? path.substr(slash + 1) : path;
                 }
-                coretrace::log(coretrace::Level::Info,
-                               "    Cyclic SCC (size={}): [{}]\n",
+                coretrace::log(coretrace::Level::Info, "    Cyclic SCC (size={}): [{}]\n",
                                scc.size(), members);
             }
         }
@@ -2444,8 +2425,8 @@ buildCrossTUUninitializedSummaryIndex(const std::vector<LoadedInputModule>& load
         auto buildModuleSummary =
             [&](std::size_t moduleIndex) -> analysis::UninitializedSummaryIndex
         {
-            const analyzer::ScopedHotspot hotspot(
-                cfg.timing, "app.cross_tu.uninitialized.build_module");
+            const analyzer::ScopedHotspot hotspot(cfg.timing,
+                                                  "app.cross_tu.uninitialized.build_module");
             const LoadedInputModule& loaded = loadedModules[moduleIndex];
             return analysis::buildUninitializedSummaryIndex(
                 *loaded.module, &preparedModules[moduleIndex], &preparedExternal);
@@ -2487,7 +2468,8 @@ buildCrossTUUninitializedSummaryIndex(const std::vector<LoadedInputModule>& load
 
         // Merge trivial SCC summaries into globalIndex.
         for (std::size_t moduleIndex : trivialModules)
-            (void)analysis::mergeUninitializedSummaryIndex(globalIndex, moduleSummaries[moduleIndex]);
+            (void)analysis::mergeUninitializedSummaryIndex(globalIndex,
+                                                           moduleSummaries[moduleIndex]);
 
         // Process cyclic SCCs (or modules with indirect calls) with internal iteration.
         for (std::size_t sccIdx : cyclicSCCIndices)
@@ -2555,7 +2537,8 @@ buildCrossTUUninitializedSummaryIndex(const std::vector<LoadedInputModule>& load
                 // Check if SCC summaries changed from previous iteration.
                 analysis::UninitializedSummaryIndex prevSccMerged;
                 for (std::size_t m : scc)
-                    (void)analysis::mergeUninitializedSummaryIndex(prevSccMerged, sccPrevSummaries[m]);
+                    (void)analysis::mergeUninitializedSummaryIndex(prevSccMerged,
+                                                                   sccPrevSummaries[m]);
                 const bool iterConverged =
                     analysis::uninitializedSummaryIndexEquals(sccMerged, prevSccMerged);
 
@@ -2568,9 +2551,8 @@ buildCrossTUUninitializedSummaryIndex(const std::vector<LoadedInputModule>& load
                 if (cfg.timing)
                 {
                     coretrace::log(coretrace::Level::Info,
-                                   "  Cyclic SCC (size={}) iteration {}{} (dirty={})\n",
-                                   scc.size(), sccIter + 1,
-                                   iterConverged ? " converged" : "",
+                                   "  Cyclic SCC (size={}) iteration {}{} (dirty={})\n", scc.size(),
+                                   sccIter + 1, iterConverged ? " converged" : "",
                                    dirtyInSCC.size());
                 }
 
@@ -2603,18 +2585,21 @@ buildCrossTUUninitializedSummaryIndex(const std::vector<LoadedInputModule>& load
         {
             const auto levelEnd = Clock::now();
             const auto ms =
-                std::chrono::duration_cast<std::chrono::milliseconds>(levelEnd - levelStart).count();
-            coretrace::log(coretrace::Level::Info,
-                           "  Level {}: {} trivial SCCs, {} cyclic SCCs ({} modules) in {} ms\n",
-                           level, trivialModules.size(), cyclicSCCIndices.size(),
-                           trivialModules.size() + [&]()
-                           {
-                               std::size_t n = 0;
-                               for (std::size_t s : cyclicSCCIndices)
-                                   n += sccOrder[s].size();
-                               return n;
-                           }(),
-                           ms);
+                std::chrono::duration_cast<std::chrono::milliseconds>(levelEnd - levelStart)
+                    .count();
+            coretrace::log(
+                coretrace::Level::Info,
+                "  Level {}: {} trivial SCCs, {} cyclic SCCs ({} modules) in {} ms\n", level,
+                trivialModules.size(), cyclicSCCIndices.size(),
+                trivialModules.size() +
+                    [&]()
+                    {
+                        std::size_t n = 0;
+                        for (std::size_t s : cyclicSCCIndices)
+                            n += sccOrder[s].size();
+                        return n;
+                    }(),
+                ms);
         }
     }
 
