@@ -1,6 +1,7 @@
 #pragma once
 
 #include "StackUsageAnalyzer.hpp"
+#include "analyzer/DerivedModuleArtifacts.hpp"
 #include "analysis/FunctionFilter.hpp"
 #include "analysis/StackComputation.hpp"
 
@@ -38,6 +39,7 @@ namespace ctrace::stack::analyzer
     struct PreparedModule
     {
         ModuleAnalysisContext ctx;
+        DerivedModuleArtifacts derivedArtifacts;
         LocalStackMap localStack;
         analysis::CallGraph callGraph;
         analysis::InternalAnalysisState recursionState;

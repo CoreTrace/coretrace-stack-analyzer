@@ -24,4 +24,8 @@ namespace ctrace::stack::analysis
     std::vector<DynamicAllocaIssue>
     analyzeDynamicAllocas(llvm::Module& mod,
                           const std::function<bool(const llvm::Function&)>& shouldAnalyze);
+
+    std::vector<DynamicAllocaIssue>
+    analyzeDynamicAllocasCached(const llvm::Function& function,
+                                const std::vector<const llvm::AllocaInst*>& allocas);
 } // namespace ctrace::stack::analysis

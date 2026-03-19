@@ -45,7 +45,7 @@ namespace ctrace::stack::cli
             }
 
           private:
-            static constexpr std::array<OptionCandidate, 54> kCandidates = {
+            static constexpr std::array<OptionCandidate, 57> kCandidates = {
                 {{"-h", "-h"},
                  {"--help", "--help"},
                  {"--demangle", "--demangle"},
@@ -87,6 +87,9 @@ namespace ctrace::stack::cli
                  {"--resource-summary-cache-dir", "--resource-summary-cache-dir"},
                  {"--resource-summary-cache-memory-only", "--resource-summary-cache-memory-only"},
                  {"--compile-ir-cache-dir", "--compile-ir-cache-dir"},
+                 {"--compile-ir-format", "--compile-ir-format"},
+                 {"--compile-ir-format=bc", "--compile-ir-format=bc"},
+                 {"--compile-ir-format=ll", "--compile-ir-format=ll"},
                  {"--config", "--config"},
                  {"--print-effective-config", "--print-effective-config"},
                  {"--compile-commands", "--compile-commands"},
@@ -390,6 +393,32 @@ namespace ctrace::stack::cli
             return false;
         }
 
+        bool parseCompileIRFormat(const std::string& input, CompileIRFormat& out,
+                                  std::string& error)
+        {
+            std::string trimmed = trimCopy(input);
+            if (!trimmed.empty() && trimmed.front() == '.')
+                trimmed.erase(trimmed.begin());
+
+            std::string lowered;
+            lowered.reserve(trimmed.size());
+            for (char c : trimmed)
+                lowered.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+
+            if (lowered == "bc")
+            {
+                out = CompileIRFormat::BC;
+                return true;
+            }
+            if (lowered == "ll")
+            {
+                out = CompileIRFormat::LL;
+                return true;
+            }
+            error = "expected 'bc' or 'll'";
+            return false;
+        }
+
         bool parseStackLimitValue(const std::string& input, StackSize& out, std::string& error)
         {
             std::string trimmed = trimCopy(input);
@@ -577,8 +606,10 @@ namespace ctrace::stack::cli
             Cli
         };
 
-        using SmtOptionApplyFn = bool (*)(AnalysisConfig& cfg, const std::string& value,
-                                          SmtOptionSource source, std::string& error);
+        using SmtOptionApplyResult = std::optional<std::string>;
+        using SmtOptionApplyFn = SmtOptionApplyResult (*)(AnalysisConfig& cfg,
+                                                          const std::string& value,
+                                                          SmtOptionSource source);
 
         struct SmtOptionSpec
         {
@@ -589,75 +620,80 @@ namespace ctrace::stack::cli
             std::uint64_t reservedFlags : 63 = 0;
         };
 
-        bool applySmtSwitchOption(AnalysisConfig& cfg, const std::string& value,
-                                  SmtOptionSource source, std::string& error)
+        SmtOptionApplyResult applySmtSwitchOption(AnalysisConfig& cfg, const std::string& value,
+                                                  SmtOptionSource source)
         {
             bool parsedValue = false;
+            std::string error;
             if (source == SmtOptionSource::Cli)
             {
                 if (!parseSmtSwitch(value, parsedValue, error))
-                    return false;
+                    return error;
             }
             else
             {
                 if (!parseBoolSwitch(value, parsedValue, error))
-                    return false;
+                    return error;
             }
             cfg.smtEnabled = parsedValue;
-            return true;
+            return std::nullopt;
         }
 
-        bool applySmtBackendOption(AnalysisConfig& cfg, const std::string& value, SmtOptionSource,
-                                   std::string&)
+        SmtOptionApplyResult applySmtBackendOption(AnalysisConfig& cfg, const std::string& value,
+                                                   SmtOptionSource)
         {
             cfg.smtBackend = value;
-            return true;
+            return std::nullopt;
         }
 
-        bool applySmtSecondaryBackendOption(AnalysisConfig& cfg, const std::string& value,
-                                            SmtOptionSource, std::string&)
+        SmtOptionApplyResult applySmtSecondaryBackendOption(AnalysisConfig& cfg,
+                                                            const std::string& value,
+                                                            SmtOptionSource)
         {
             cfg.smtSecondaryBackend = value;
-            return true;
+            return std::nullopt;
         }
 
-        bool applySmtModeOption(AnalysisConfig& cfg, const std::string& value, SmtOptionSource,
-                                std::string& error)
+        SmtOptionApplyResult applySmtModeOption(AnalysisConfig& cfg, const std::string& value,
+                                                SmtOptionSource)
         {
             analysis::smt::SolverMode parsedMode = cfg.smtMode;
+            std::string error;
             if (!parseSmtMode(value, parsedMode, error))
-                return false;
+                return error;
             cfg.smtMode = parsedMode;
-            return true;
+            return std::nullopt;
         }
 
-        bool applySmtTimeoutOption(AnalysisConfig& cfg, const std::string& value, SmtOptionSource,
-                                   std::string& error)
+        SmtOptionApplyResult applySmtTimeoutOption(AnalysisConfig& cfg, const std::string& value,
+                                                   SmtOptionSource)
         {
             unsigned parsedTimeout = 0;
+            std::string error;
             if (!parsePositiveUnsigned(value, parsedTimeout, error))
-                return false;
+                return error;
             cfg.smtTimeoutMs = parsedTimeout;
-            return true;
+            return std::nullopt;
         }
 
-        bool applySmtBudgetOption(AnalysisConfig& cfg, const std::string& value, SmtOptionSource,
-                                  std::string& error)
+        SmtOptionApplyResult applySmtBudgetOption(AnalysisConfig& cfg, const std::string& value,
+                                                  SmtOptionSource)
         {
             std::uint64_t parsedBudget = 0;
+            std::string error;
             if (!parsePositiveU64(value, parsedBudget, error))
-                return false;
+                return error;
             cfg.smtBudgetNodes = parsedBudget;
-            return true;
+            return std::nullopt;
         }
 
-        bool applySmtRulesOption(AnalysisConfig& cfg, const std::string& value,
-                                 SmtOptionSource source, std::string&)
+        SmtOptionApplyResult applySmtRulesOption(AnalysisConfig& cfg, const std::string& value,
+                                                 SmtOptionSource source)
         {
             if (source == SmtOptionSource::Config)
                 cfg.smtRules.clear();
             addCsvFilters(cfg.smtRules, value);
-            return true;
+            return std::nullopt;
         }
 
         constexpr std::array<SmtOptionSpec, 7> kSmtOptionSpecs = {{
@@ -681,15 +717,16 @@ namespace ctrace::stack::cli
             return nullptr;
         }
 
-        bool applySmtOptionValue(const SmtOptionSpec& spec, AnalysisConfig& cfg,
-                                 const std::string& value, SmtOptionSource source,
-                                 std::string& error)
+        SmtOptionApplyResult applySmtOptionValue(const SmtOptionSpec& spec, AnalysisConfig& cfg,
+                                                 const std::string& value, SmtOptionSource source)
         {
-            if (!spec.apply || !spec.apply(cfg, value, source, error))
-                return false;
+            if (!spec.apply)
+                return "SMT option handler is not configured";
+            if (std::optional<std::string> applyError = spec.apply(cfg, value, source))
+                return applyError;
             if (spec.impliesSmtEnabled)
                 cfg.smtEnabled = true;
-            return true;
+            return std::nullopt;
         }
 
         bool tryConsumeAndApplySmtCliOption(const std::string& argStr, int& i, int argc,
@@ -711,10 +748,10 @@ namespace ctrace::stack::cli
                     return true;
                 }
 
-                std::string valueError;
-                if (!applySmtOptionValue(spec, cfg, value, SmtOptionSource::Cli, valueError))
+                if (std::optional<std::string> valueError =
+                        applySmtOptionValue(spec, cfg, value, SmtOptionSource::Cli))
                 {
-                    error = "Invalid " + std::string(spec.cliOption) + " value: " + valueError;
+                    error = "Invalid " + std::string(spec.cliOption) + " value: " + *valueError;
                     return true;
                 }
 
@@ -926,10 +963,10 @@ namespace ctrace::stack::cli
             }
             if (const SmtOptionSpec* smtSpec = findSmtOptionByConfigKey(key))
             {
-                std::string localError;
-                if (!applySmtOptionValue(*smtSpec, cfg, value, SmtOptionSource::Config, localError))
+                if (std::optional<std::string> localError =
+                        applySmtOptionValue(*smtSpec, cfg, value, SmtOptionSource::Config))
                 {
-                    error = "invalid " + key + " value: " + localError;
+                    error = "invalid " + key + " value: " + *localError;
                     return false;
                 }
                 return true;
@@ -942,6 +979,16 @@ namespace ctrace::stack::cli
             if (key == "compile-ir-cache-dir")
             {
                 cfg.compileIRCacheDir = resolveConfigRelativePath(value, configDir);
+                return true;
+            }
+            if (key == "compile-ir-format")
+            {
+                std::string localError;
+                if (!parseCompileIRFormat(value, cfg.compileIRFormat, localError))
+                {
+                    error = "invalid compile-ir-format value: " + localError;
+                    return false;
+                }
                 return true;
             }
 
@@ -1447,6 +1494,19 @@ namespace ctrace::stack::cli
                     if (!error.empty())
                         return makeError(error);
                     cfg.compileIRCacheDir = std::move(value);
+                    continue;
+                }
+            }
+            {
+                std::string value;
+                std::string error;
+                if (consumeLongOptionValue(argStr, "--compile-ir-format", i, argc, argv, value,
+                                           error))
+                {
+                    if (!error.empty())
+                        return makeError(error);
+                    if (!parseCompileIRFormat(value, cfg.compileIRFormat, error))
+                        return makeError("Invalid --compile-ir-format value: " + error);
                     continue;
                 }
             }

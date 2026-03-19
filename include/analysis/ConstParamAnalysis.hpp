@@ -5,6 +5,8 @@
 #include <string>
 #include <vector>
 
+#include "analysis/ParameterDebugBinding.hpp"
+
 namespace llvm
 {
     class Function;
@@ -16,12 +18,11 @@ namespace ctrace::stack::analysis
     struct ConstParamIssue
     {
         std::string funcName;
-        std::string paramName;
+        ParameterDebugBinding binding;
         std::string currentType;
         std::string suggestedType;
         std::string suggestedTypeAlt;
-        unsigned line = 0;
-        unsigned column = 0;
+        double confidence = -1.0;
         std::uint64_t pointerConstOnly : 1 = false; // ex: T * const param
         std::uint64_t isReference : 1 = false;
         std::uint64_t isRvalueRef : 1 = false;

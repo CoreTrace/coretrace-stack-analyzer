@@ -50,14 +50,14 @@ namespace ctrace::stack::analysis
             return std::nullopt;
         }
 
-        static llvm::Function* resolveDirectCallee(llvm::CallBase* CB)
+        static const llvm::Function* resolveDirectCallee(const llvm::CallBase* CB)
         {
             using namespace llvm;
             if (!CB)
                 return nullptr;
-            if (Function* direct = CB->getCalledFunction())
+            if (const Function* direct = CB->getCalledFunction())
                 return direct;
-            Value* callee = CB->getCalledOperand();
+            const Value* callee = CB->getCalledOperand();
             if (!callee)
                 return nullptr;
             return dyn_cast<Function>(callee->stripPointerCasts());
@@ -100,7 +100,7 @@ namespace ctrace::stack::analysis
                 }
             }
 
-            Function* callee = resolveDirectCallee(CB);
+            const Function* callee = resolveDirectCallee(CB);
             if (!callee)
                 return sink;
 
@@ -136,14 +136,15 @@ namespace ctrace::stack::analysis
             return sink;
         }
 
-        static ResolvedSink resolveModelSink(llvm::CallBase* CB, const BufferWriteModel* model,
+        static ResolvedSink resolveModelSink(const llvm::CallBase* CB,
+                                             const BufferWriteModel* model,
                                              BufferWriteRuleMatcher* matcher)
         {
             ResolvedSink sink;
             if (!CB || !model || !matcher)
                 return sink;
 
-            llvm::Function* callee = resolveDirectCallee(CB);
+            const llvm::Function* callee = resolveDirectCallee(CB);
             if (!callee)
                 return sink;
 
@@ -276,6 +277,90 @@ namespace ctrace::stack::analysis
                 continue;
             analyzeMemIntrinsicOverflowsInFunction(F, DL, externalModelPtr, &ruleMatcher, issues);
         }
+        return issues;
+    }
+
+    namespace
+    {
+        template <typename CallBaseT>
+        static void analyzeMemIntrinsicFromCallBases(const llvm::Function& function,
+                                                     const llvm::DataLayout& DL,
+                                                     const std::vector<const CallBaseT*>& callBases,
+                                                     const BufferWriteModel* externalModel,
+                                                     BufferWriteRuleMatcher* ruleMatcher,
+                                                     std::vector<MemIntrinsicIssue>& out)
+        {
+            using namespace llvm;
+
+            for (const CallBaseT* constCB : callBases)
+            {
+                // The existing helpers take non-const CallBase* but do not
+                // modify the instruction. Use const_cast for API compat.
+                auto* CB = const_cast<CallBaseT*>(constCB);
+
+                ResolvedSink sink = resolveBuiltInSink(CB);
+                const ResolvedSink modeledSink = resolveModelSink(CB, externalModel, ruleMatcher);
+                if (modeledSink.valid)
+                    sink = modeledSink;
+
+                if (!sink.valid)
+                    continue;
+
+                if (CB->arg_size() <= sink.destArgIndex)
+                    continue;
+
+                Value* dest = CB->getArgOperand(sink.destArgIndex);
+                const AllocaInst* AI = resolveStackDestinationAlloca(dest);
+                if (!AI)
+                    continue;
+
+                auto maybeSize = getAllocaTotalSizeBytes(AI, DL);
+                if (!maybeSize)
+                    continue;
+                StackSize destBytes = *maybeSize;
+
+                MemIntrinsicIssue issue;
+                issue.funcName = function.getName().str();
+                issue.varName = AI->hasName() ? AI->getName().str() : std::string("<unnamed>");
+                issue.destSizeBytes = destBytes;
+                issue.inst = constCB;
+                issue.intrinsicName = sink.displayName;
+
+                if (sink.hasExplicitLength)
+                {
+                    if (CB->arg_size() <= sink.sizeArgIndex)
+                        continue;
+                    Value* lenV = CB->getArgOperand(sink.sizeArgIndex);
+                    auto* lenC = dyn_cast<ConstantInt>(lenV);
+                    if (!lenC)
+                        continue;
+
+                    const uint64_t len = lenC->getZExtValue();
+                    if (len <= destBytes)
+                        continue;
+                    issue.lengthBytes = len;
+                    issue.hasExplicitLength = true;
+                }
+                else
+                {
+                    issue.hasExplicitLength = false;
+                }
+
+                out.push_back(std::move(issue));
+            }
+        }
+    } // namespace
+
+    std::vector<MemIntrinsicIssue>
+    analyzeMemIntrinsicOverflowsCached(const llvm::Function& function, const llvm::DataLayout& DL,
+                                       const std::vector<const llvm::CallInst*>& calls,
+                                       const std::vector<const llvm::InvokeInst*>& invokes,
+                                       const BufferWriteModel* externalModel,
+                                       BufferWriteRuleMatcher* ruleMatcher)
+    {
+        std::vector<MemIntrinsicIssue> issues;
+        analyzeMemIntrinsicFromCallBases(function, DL, calls, externalModel, ruleMatcher, issues);
+        analyzeMemIntrinsicFromCallBases(function, DL, invokes, externalModel, ruleMatcher, issues);
         return issues;
     }
 } // namespace ctrace::stack::analysis

@@ -15,12 +15,16 @@ This document describes the module split introduced around `StackUsageAnalyzer` 
 Role:
 - Entry point for module-level analysis execution.
 - Coordinates preparation, analysis passes, and diagnostic emission.
+- Declares step-level `requires/provides` artifact dependencies.
+- Tracks per-step traversal estimates (`module/function/instruction`) for timing mode.
 
 Pattern:
 - `Facade` over lower-level analysis services.
+- `Pipeline Orchestrator` with explicit dependency metadata.
 
 Why:
 - A single coordinator makes control flow explicit while avoiding a very large `StackUsageAnalyzer.cpp`.
+- Dependency declarations reduce accidental ordering coupling and make rollout of shared passes safer.
 
 ### `src/analyzer/ModulePreparationService.cpp`
 
@@ -33,6 +37,30 @@ Pattern:
 
 Why:
 - Preparation logic is pure module state derivation and should be reusable without triggering diagnostic side effects.
+- Precomputed `DerivedModuleArtifacts` provide reusable debug/symbol/type indexes with a versioned schema key.
+
+### `src/analyzer/IRFactCollector.cpp`
+
+Role:
+- Executes a single shared pass over selected IR to collect shared counters (`IRFacts`).
+- Supports optional subscriber notifications during the same traversal.
+
+Pattern:
+- `Collector` + `Observer dispatcher` integration point.
+
+Why:
+- Centralizing common IR facts avoids repeated lightweight scans in individual analyses.
+
+### `include/analyzer/InstructionSubscriber.hpp`
+
+Role:
+- Defines subscriber callbacks for instruction categories used by rollout passes.
+
+Pattern:
+- `Observer` (`Subscriber/Registry`).
+
+Why:
+- Allows incremental migration of analysis pre-filters to a shared event stream without changing diagnostic semantics.
 
 ### `src/analyzer/LocationResolver.cpp`
 

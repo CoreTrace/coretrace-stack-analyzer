@@ -67,7 +67,10 @@ endif()
 set(STACK_ANALYZER_SOURCES
     src/analyzer/AnalysisPipeline.cpp
     src/analyzer/DiagnosticEmitter.cpp
+    src/analyzer/HotspotProfiler.cpp
+    src/analyzer/IRFactCollector.cpp
     src/analyzer/LocationResolver.cpp
+    src/analyzer/PerFunctionInstructionCache.cpp
     src/analyzer/ModulePreparationService.cpp
     src/app/AnalyzerApp.cpp
     src/cli/ArgParser.cpp
@@ -91,6 +94,7 @@ set(STACK_ANALYZER_SOURCES
     src/analysis/MemIntrinsicOverflow.cpp
     src/analysis/NullDerefAnalysis.cpp
     src/analysis/OOBReadAnalysis.cpp
+    src/analysis/ParameterDebugBinding.cpp
     src/analysis/ResourceLifetimeAnalysis.cpp
     src/analysis/Reachability.cpp
     src/analysis/SizeMinusKWrites.cpp

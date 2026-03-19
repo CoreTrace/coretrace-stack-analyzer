@@ -349,9 +349,9 @@ namespace ctrace::stack::analysis
         }
 
         static void
-        collectParamEscapeFacts(llvm::Function& F, llvm::Argument& arg,
+        collectParamEscapeFacts(const llvm::Function& F, const llvm::Argument& arg,
                                 const std::function<bool(const llvm::Function&)>& shouldAnalyze,
-                                IndirectTargetResolver& targetResolver,
+                                const IndirectTargetResolver& targetResolver,
                                 const ReturnedPointerArgAliasMap& returnedArgAliases,
                                 const StackEscapeModel& model, StackEscapeRuleMatcher& ruleMatcher,
                                 ParamEscapeFacts& facts)
@@ -555,13 +555,13 @@ namespace ctrace::stack::analysis
         static FunctionEscapeFactsMap
         buildFunctionEscapeFacts(llvm::Module& mod,
                                  const std::function<bool(const llvm::Function&)>& shouldAnalyze,
-                                 IndirectTargetResolver& targetResolver,
+                                 const IndirectTargetResolver& targetResolver,
                                  const ReturnedPointerArgAliasMap& returnedArgAliases,
                                  const StackEscapeModel& model, StackEscapeRuleMatcher& ruleMatcher)
         {
             FunctionEscapeFactsMap factsMap;
 
-            for (llvm::Function& F : mod)
+            for (const llvm::Function& F : mod)
             {
                 if (F.isDeclaration())
                     continue;
@@ -570,7 +570,7 @@ namespace ctrace::stack::analysis
 
                 FunctionEscapeFacts facts;
                 facts.perArg.resize(F.arg_size());
-                for (llvm::Argument& arg : F.args())
+                for (const llvm::Argument& arg : F.args())
                 {
                     if (!isPointerLikeArgument(arg))
                         continue;
@@ -585,7 +585,7 @@ namespace ctrace::stack::analysis
 
         static FunctionEscapeSummaryMap buildFunctionEscapeSummaries(
             llvm::Module& mod, const std::function<bool(const llvm::Function&)>& shouldAnalyze,
-            IndirectTargetResolver& targetResolver,
+            const IndirectTargetResolver& targetResolver,
             const ReturnedPointerArgAliasMap& returnedArgAliases, const StackEscapeModel& model,
             StackEscapeRuleMatcher& ruleMatcher, FunctionArgHardEscapeMap* hardEscapesOut)
         {

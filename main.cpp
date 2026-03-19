@@ -6,7 +6,6 @@
 #include <string>
 #include <utility>
 
-#include <llvm/IR/LLVMContext.h>
 #include <llvm/Support/raw_ostream.h>
 
 #include <coretrace/logger.hpp>
@@ -73,6 +72,7 @@ static void printHelp()
         << "  --resource-summary-cache-dir=<path>  Cache directory for cross-TU summaries\n"
         << "  --compile-ir-cache-dir=<path>  Cache directory for compiled LLVM IR per source "
            "file\n"
+        << "  --compile-ir-format=bc|ll  Compilation IR format for source inputs (default: bc)\n"
         << "  --resource-summary-cache-memory-only  Use in-memory cache only for cross-TU "
            "summaries\n"
         << "  --uninitialized-cross-tu    Enable cross-TU uninitialized summaries (default: on)\n"
@@ -118,6 +118,18 @@ static const char* solverModeName(ctrace::stack::analysis::smt::SolverMode mode)
     return "single";
 }
 
+static const char* compileIRFormatName(CompileIRFormat format)
+{
+    switch (format)
+    {
+    case CompileIRFormat::BC:
+        return "bc";
+    case CompileIRFormat::LL:
+        return "ll";
+    }
+    return "bc";
+}
+
 static std::string joinCsv(const std::vector<std::string>& values)
 {
     if (values.empty())
@@ -158,6 +170,7 @@ static void printEffectiveConfig(const ctrace::stack::cli::ParsedArguments& pars
                  << (cfg.bufferModelPath.empty() ? "<none>" : cfg.bufferModelPath) << "\n";
     llvm::errs() << "compile-ir-cache-dir: "
                  << (cfg.compileIRCacheDir.empty() ? "<none>" : cfg.compileIRCacheDir) << "\n";
+    llvm::errs() << "compile-ir-format: " << compileIRFormatName(cfg.compileIRFormat) << "\n";
     llvm::errs() << "smt-enabled: " << (cfg.smtEnabled ? "true" : "false") << "\n";
     llvm::errs() << "smt-backend: " << cfg.smtBackend << "\n";
     llvm::errs() << "smt-secondary-backend: "
@@ -179,8 +192,6 @@ int main(int argc, char** argv)
 
     coretrace::log(coretrace::Level::Debug, coretrace::Module("cli"),
                    "Starting analysis for {} input(s)\n", argc - 1);
-
-    llvm::LLVMContext context;
 
     if (argc < 2)
     {
@@ -207,7 +218,7 @@ int main(int argc, char** argv)
         printEffectiveConfig(parseResult.parsed);
 
     ctrace::stack::app::RunResult runResult =
-        ctrace::stack::app::runAnalyzerApp(std::move(parseResult.parsed), context);
+        ctrace::stack::app::runAnalyzerApp(std::move(parseResult.parsed));
     if (!runResult.isOk())
     {
         logText(coretrace::Level::Error, runResult.error);

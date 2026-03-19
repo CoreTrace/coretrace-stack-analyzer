@@ -411,7 +411,7 @@ namespace ctrace::stack::analysis
             return std::nullopt;
         }
 
-        static bool shouldUseAllocaFallback(const llvm::AllocaInst* AI, llvm::Function& F)
+        static bool shouldUseAllocaFallback(const llvm::AllocaInst* AI, const llvm::Function& F)
         {
             if (auto debugArray = isAllocaArrayByDebugInfo(AI, F); debugArray.has_value())
             {
