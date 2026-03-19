@@ -76,7 +76,7 @@ namespace ctrace::stack
         std::string resourceSummaryCacheDir = ".cache/resource-lifetime";
 
         std::uint32_t smtTimeoutMs = 50;
-        std::uint32_t jobs = 1;
+        std::uint32_t jobs = 0; // 0 = auto (hardware_concurrency)
 
         analysis::smt::SolverMode smtMode = analysis::smt::SolverMode::Single;
         AnalysisMode mode = AnalysisMode::IR;
@@ -92,7 +92,7 @@ namespace ctrace::stack
         std::uint32_t dumpIRIsDir : 1 = 0;
         std::uint32_t includeSTL : 1 = 0;
         std::uint32_t requireCompilationDatabase : 1 = 0;
-        std::uint32_t jobsAuto : 1 = 0;
+        std::uint32_t jobsAuto : 1 = 1;
         std::uint32_t quiet : 1 = 0;
         std::uint32_t smtEnabled : 1 = 0;
         std::uint32_t timing : 1 = 0;
