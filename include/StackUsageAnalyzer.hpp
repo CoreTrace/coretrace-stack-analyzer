@@ -1,8 +1,10 @@
 // StackUsageAnalyzer.hpp
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -239,6 +241,35 @@ namespace ctrace::stack
         std::string message;
     };
 
+    struct DiagnosticSummary
+    {
+        std::size_t info = 0;
+        std::size_t warning = 0;
+        std::size_t error = 0;
+    };
+
+    [[nodiscard]] constexpr DiagnosticSummary
+    summarizeDiagnostics(std::span<const Diagnostic> diagnostics) noexcept
+    {
+        DiagnosticSummary summary;
+        for (const Diagnostic& diagnostic : diagnostics)
+        {
+            switch (diagnostic.severity)
+            {
+            case DiagnosticSeverity::Info:
+                ++summary.info;
+                break;
+            case DiagnosticSeverity::Warning:
+                ++summary.warning;
+                break;
+            case DiagnosticSeverity::Error:
+                ++summary.error;
+                break;
+            }
+        }
+        return summary;
+    }
+
     // Global result for a module
     struct AnalysisResult
     {
@@ -249,6 +280,13 @@ namespace ctrace::stack
         // std::vector<std::string> diagnostics;
         std::vector<Diagnostic> diagnostics;
     };
+
+    [[nodiscard]] constexpr DiagnosticSummary
+    summarizeDiagnostics(const AnalysisResult& result) noexcept
+    {
+        return summarizeDiagnostics(
+            std::span<const Diagnostic>(result.diagnostics.data(), result.diagnostics.size()));
+    }
 
     // Serialize an AnalysisResult to a simple JSON format (for CI / GitHub Actions).
     // `inputFile`: path of the analyzed file (the one you pass to analyzeFile).
