@@ -132,6 +132,7 @@ namespace ctrace::stack
     static std::string toJsonImpl(const AnalysisResult& result, const std::string* inputFile,
                                   const std::vector<std::string>* inputFiles)
     {
+        const DiagnosticSummary diagnosticsSummary = summarizeDiagnostics(result);
         std::ostringstream os;
         os << "{\n";
         os << "  \"meta\": {\n";
@@ -281,7 +282,12 @@ namespace ctrace::stack
                 os << ",";
             os << "\n";
         }
-        os << "  ]\n";
+        os << "  ],\n";
+        os << "  \"diagnosticsSummary\": {\n";
+        os << "    \"info\": " << diagnosticsSummary.info << ",\n";
+        os << "    \"warning\": " << diagnosticsSummary.warning << ",\n";
+        os << "    \"error\": " << diagnosticsSummary.error << "\n";
+        os << "  }\n";
         os << "}\n";
         return os.str();
     }
