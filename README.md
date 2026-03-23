@@ -264,6 +264,10 @@ Ready-to-adapt workflow examples:
 --dump-filter prints filter decisions (stderr)
 ```
 
+JSON reports include a root-level `diagnosticsSummary` object:
+`{"info": <count>, "warning": <count>, "error": <count>}`.
+These counters are computed from emitted diagnostics (post-filter), matching human summary totals.
+
 To generate `compile_commands.json` with CMake, configure with
 `-DCMAKE_EXPORT_COMPILE_COMMANDS=ON` and point to the resulting file
 (often under `build/`).
