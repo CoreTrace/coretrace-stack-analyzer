@@ -154,6 +154,7 @@ struct ModuleTarjan
     std::vector<std::size_t> stack;
     std::vector<std::vector<std::size_t>> sccs;
     int nextIndex = 0;
+    std::byte padding1[64 - sizeof(int)]{}; // cache line isolation
 
     void run(std::size_t N, const std::vector<std::unordered_set<std::size_t>>& edges)
     {
@@ -668,15 +669,7 @@ static std::shared_ptr<ctrace::stack::analysis::GlobalReadBeforeWriteSummaryInde
 buildCrossTUGlobalReadBeforeWriteSummaryIndex(const std::vector<LoadedInputModule>& loadedModules,
                                               const AnalysisConfig& cfg);
 
-struct DiagnosticSummary
-{
-    std::size_t info = 0;
-    std::size_t warning = 0;
-    std::size_t error = 0;
-};
-
 static void accumulateSummary(DiagnosticSummary& total, const DiagnosticSummary& add);
-static DiagnosticSummary summarizeDiagnostics(const AnalysisResult& result);
 
 static void stampResultFilePaths(AnalysisResult& result, const std::string& inputFilename)
 {
@@ -1512,7 +1505,7 @@ static bool writeSummaryCacheFile(const std::filesystem::path& cacheFile,
             effectObj["action"] = encodeSummaryActionName(effect.action);
             effectObj["argIndex"] = static_cast<int64_t>(effect.argIndex);
             effectObj["offset"] = static_cast<int64_t>(effect.offset);
-            effectObj["viaPointerSlot"] = effect.viaPointerSlot;
+            effectObj["viaPointerSlot"] = static_cast<bool>(effect.viaPointerSlot);
             effectObj["resourceKind"] = effect.resourceKind;
             effectArray.push_back(std::move(effectObj));
         }
@@ -1524,7 +1517,7 @@ static bool writeSummaryCacheFile(const std::filesystem::path& cacheFile,
     }
 
     llvm::json::Object root;
-    root["schema"] = "resource-summary-cache-v1";
+    root["schema"] = "resource-summary-cache-v2";
     root["functions"] = std::move(functionArray);
 
     std::ofstream out(cacheFile, std::ios::out | std::ios::trunc | std::ios::binary);
@@ -1555,7 +1548,7 @@ readSummaryCacheFile(const std::filesystem::path& cacheFile)
     if (!obj)
         return std::nullopt;
     auto schema = obj->getString("schema");
-    if (!schema || *schema != "resource-summary-cache-v1")
+    if (!schema || *schema != "resource-summary-cache-v2")
         return std::nullopt;
 
     const auto* functions = obj->getArray("functions");
@@ -1633,6 +1626,7 @@ buildCrossTUSummaryIndex(const std::vector<LoadedInputModule>& loadedModules,
         !cfg.resourceSummaryMemoryOnly && !cfg.resourceSummaryCacheDir.empty();
     const unsigned maxJobs = resolveConfiguredJobs(cfg);
     std::unordered_map<std::string, ctrace::stack::analysis::ResourceSummaryIndex> memoryCache;
+    std::unordered_map<std::string, ctrace::stack::analysis::ResourceSummaryIndex> finalCacheWrites;
     std::vector<std::string> moduleIRHashes;
     std::vector<std::string> moduleCompileArgsHashes;
     const std::string filterHash = computeFunctionFilterSignature(cfg);
@@ -1756,224 +1750,274 @@ buildCrossTUSummaryIndex(const std::vector<LoadedInputModule>& loadedModules,
     std::vector<ctrace::stack::analysis::ResourceSummaryIndex> moduleSummaries(N);
     std::size_t totalModuleAnalyses = 0;
 
-    for (unsigned level = 0; level <= maxLevel; ++level)
+    constexpr unsigned kCrossTUGlobalMaxIterations = 12;
+    bool globalConverged = false;
+    for (unsigned globalIter = 0; globalIter < kCrossTUGlobalMaxIterations; ++globalIter)
     {
-        const auto& group = levelGroups[level];
-        if (group.empty())
-            continue;
-
-        const auto levelStart = Clock::now();
-        const std::string externalHash = hashSummaryIndex(globalIndex);
-
-        auto buildModuleSummary =
-            [&](std::size_t moduleIndex) -> ctrace::stack::analysis::ResourceSummaryIndex
+        const std::string beforePassHash = hashSummaryIndex(globalIndex);
+        for (unsigned level = 0; level <= maxLevel; ++level)
         {
-            const analyzer::ScopedHotspot hotspot(cfg.timing,
-                                                  "app.cross_tu.resource_summary.build_module");
-            const LoadedInputModule& loaded = loadedModules[moduleIndex];
-            analysis::FunctionFilter filter = analysis::buildFunctionFilter(*loaded.module, cfg);
-            auto shouldAnalyze = [&](const llvm::Function& F) -> bool
-            { return filter.shouldAnalyze(F); };
-            return analysis::buildResourceLifetimeSummaryIndex(*loaded.module, shouldAnalyze,
-                                                               cfg.resourceModelPath, &globalIndex);
-        };
+            const auto& group = levelGroups[level];
+            if (group.empty())
+                continue;
 
-        // Try cache for each module at this level, collect modules that need building.
-        auto tryCacheForModule = [&](std::size_t moduleIndex) -> bool
-        {
-            const std::string cacheKeyPayload = std::string(kCacheSchema) + "|" + modelHash + "|" +
-                                                externalHash + "|" + filterHash + "|" +
-                                                moduleCompileArgsHashes[moduleIndex] + "|" +
-                                                moduleIRHashes[moduleIndex];
-            const std::string cacheKey = md5Hex(cacheKeyPayload);
+            const auto levelStart = Clock::now();
+            const std::string externalHash = hashSummaryIndex(globalIndex);
 
-            if (const auto memIt = memoryCache.find(cacheKey); memIt != memoryCache.end())
+            auto buildModuleSummary =
+                [&](std::size_t moduleIndex) -> ctrace::stack::analysis::ResourceSummaryIndex
             {
-                moduleSummaries[moduleIndex] = memIt->second;
-                return true;
-            }
-            if (allowDiskCache)
+                const analyzer::ScopedHotspot hotspot(cfg.timing,
+                                                      "app.cross_tu.resource_summary.build_module");
+                const LoadedInputModule& loaded = loadedModules[moduleIndex];
+                analysis::FunctionFilter filter =
+                    analysis::buildFunctionFilter(*loaded.module, cfg);
+                auto shouldAnalyze = [&](const llvm::Function& F) -> bool
+                { return filter.shouldAnalyze(F); };
+                return analysis::buildResourceLifetimeSummaryIndex(
+                    *loaded.module, shouldAnalyze, cfg.resourceModelPath, &globalIndex);
+            };
+
+            // Try cache for each module at this level, collect modules that need building.
+            auto tryCacheForModule = [&](std::size_t moduleIndex) -> bool
             {
-                const std::filesystem::path cacheFile =
-                    std::filesystem::path(cfg.resourceSummaryCacheDir) / (cacheKey + ".json");
-                auto cached = readSummaryCacheFile(cacheFile);
-                if (cached)
+                const std::string cacheKeyPayload = std::string(kCacheSchema) + "|" + modelHash +
+                                                    "|" + externalHash + "|" + filterHash + "|" +
+                                                    moduleCompileArgsHashes[moduleIndex] + "|" +
+                                                    moduleIRHashes[moduleIndex];
+                const std::string cacheKey = md5Hex(cacheKeyPayload);
+
+                if (const auto memIt = memoryCache.find(cacheKey); memIt != memoryCache.end())
                 {
-                    moduleSummaries[moduleIndex] = std::move(*cached);
-                    memoryCache.emplace(cacheKey, moduleSummaries[moduleIndex]);
+                    moduleSummaries[moduleIndex] = memIt->second;
                     return true;
                 }
-            }
-            return false;
-        };
-
-        auto cacheAndStoreModule = [&](std::size_t moduleIndex)
-        {
-            const std::string cacheKeyPayload = std::string(kCacheSchema) + "|" + modelHash + "|" +
-                                                externalHash + "|" + filterHash + "|" +
-                                                moduleCompileArgsHashes[moduleIndex] + "|" +
-                                                moduleIRHashes[moduleIndex];
-            const std::string cacheKey = md5Hex(cacheKeyPayload);
-            memoryCache.emplace(cacheKey, moduleSummaries[moduleIndex]);
-            if (allowDiskCache)
-            {
-                const std::filesystem::path cacheFile =
-                    std::filesystem::path(cfg.resourceSummaryCacheDir) / (cacheKey + ".json");
-                (void)writeSummaryCacheFile(cacheFile, moduleSummaries[moduleIndex]);
-            }
-        };
-
-        // Collect trivial and cyclic SCCs.
-        std::vector<std::size_t> trivialModules;
-        std::vector<std::size_t> cyclicSCCIndices;
-
-        for (std::size_t sccIdx : group)
-        {
-            const auto& scc = sccOrder[sccIdx];
-            const bool isTrivial = scc.size() == 1 && !filteredEdges[scc[0]].count(scc[0]);
-            if (isTrivial)
-                trivialModules.push_back(scc[0]);
-            else
-                cyclicSCCIndices.push_back(sccIdx);
-        }
-
-        // Process trivial SCCs: try cache, then build missing ones in parallel.
-        std::vector<std::size_t> missingTrivial;
-        for (std::size_t moduleIndex : trivialModules)
-        {
-            if (!tryCacheForModule(moduleIndex))
-                missingTrivial.push_back(moduleIndex);
-        }
-
-        if (!missingTrivial.empty())
-        {
-            if (maxJobs <= 1 || missingTrivial.size() <= 1)
-            {
-                for (std::size_t moduleIndex : missingTrivial)
-                    moduleSummaries[moduleIndex] = buildModuleSummary(moduleIndex);
-            }
-            else
-            {
-                runParallelWork(missingTrivial.size(), maxJobs,
-                                [&](std::size_t slot)
-                                {
-                                    const std::size_t moduleIndex = missingTrivial[slot];
-                                    moduleSummaries[moduleIndex] = buildModuleSummary(moduleIndex);
-                                });
-            }
-            for (std::size_t moduleIndex : missingTrivial)
-                cacheAndStoreModule(moduleIndex);
-        }
-        totalModuleAnalyses += missingTrivial.size();
-
-        // Merge trivial SCCs into globalIndex.
-        for (std::size_t moduleIndex : trivialModules)
-            (void)analysis::mergeResourceSummaryIndex(globalIndex, moduleSummaries[moduleIndex]);
-
-        // Process cyclic SCCs with internal iteration.
-        for (std::size_t sccIdx : cyclicSCCIndices)
-        {
-            const auto& scc = sccOrder[sccIdx];
-            std::vector<analysis::ResourceSummaryIndex> sccPrevSummaries(N);
-            std::unordered_set<std::string> sccChangedNames;
-            bool sccConverged = false;
-
-            for (unsigned sccIter = 0; sccIter < kCrossTUMaxIterations; ++sccIter)
-            {
-                std::vector<std::size_t> dirtyInSCC;
-                if (sccIter == 0)
+                if (allowDiskCache)
                 {
-                    dirtyInSCC = std::vector<std::size_t>(scc.begin(), scc.end());
+                    const std::filesystem::path cacheFile =
+                        std::filesystem::path(cfg.resourceSummaryCacheDir) / (cacheKey + ".json");
+                    auto cached = readSummaryCacheFile(cacheFile);
+                    if (cached)
+                    {
+                        moduleSummaries[moduleIndex] = std::move(*cached);
+                        memoryCache.insert_or_assign(cacheKey, moduleSummaries[moduleIndex]);
+                        return true;
+                    }
+                }
+                return false;
+            };
+
+            auto cacheAndStoreModule = [&](std::size_t moduleIndex)
+            {
+                const std::string cacheKeyPayload = std::string(kCacheSchema) + "|" + modelHash +
+                                                    "|" + externalHash + "|" + filterHash + "|" +
+                                                    moduleCompileArgsHashes[moduleIndex] + "|" +
+                                                    moduleIRHashes[moduleIndex];
+                const std::string cacheKey = md5Hex(cacheKeyPayload);
+                memoryCache.insert_or_assign(cacheKey, moduleSummaries[moduleIndex]);
+                finalCacheWrites.insert_or_assign(cacheKey, moduleSummaries[moduleIndex]);
+            };
+
+            // Collect trivial and cyclic SCCs.
+            std::vector<std::size_t> trivialModules;
+            std::vector<std::size_t> cyclicSCCIndices;
+
+            for (std::size_t sccIdx : group)
+            {
+                const auto& scc = sccOrder[sccIdx];
+                const bool isTrivial = scc.size() == 1 && !filteredEdges[scc[0]].count(scc[0]);
+                if (isTrivial)
+                    trivialModules.push_back(scc[0]);
+                else
+                    cyclicSCCIndices.push_back(sccIdx);
+            }
+
+            // Sort cyclic SCCs by minimum module index for deterministic processing order.
+            // Cyclic SCCs at the same level are processed sequentially, and each SCC sees
+            // the globalIndex effects of previously processed SCCs. Non-deterministic ordering
+            // (from Tarjan DFS over unordered_set) causes different summaries between runs.
+            // SCC members are already sorted, so sccOrder[sccIdx][0] is the minimum index.
+            std::sort(cyclicSCCIndices.begin(), cyclicSCCIndices.end(),
+                      [&](std::size_t a, std::size_t b)
+                      { return sccOrder[a][0] < sccOrder[b][0]; });
+
+            // Process trivial SCCs: try cache, then build missing ones in parallel.
+            std::vector<std::size_t> missingTrivial;
+            for (std::size_t moduleIndex : trivialModules)
+            {
+                if (!tryCacheForModule(moduleIndex))
+                    missingTrivial.push_back(moduleIndex);
+            }
+
+            if (!missingTrivial.empty())
+            {
+                if (maxJobs <= 1 || missingTrivial.size() <= 1)
+                {
+                    for (std::size_t moduleIndex : missingTrivial)
+                        moduleSummaries[moduleIndex] = buildModuleSummary(moduleIndex);
                 }
                 else
                 {
+                    runParallelWork(missingTrivial.size(), maxJobs,
+                                    [&](std::size_t slot)
+                                    {
+                                        const std::size_t moduleIndex = missingTrivial[slot];
+                                        moduleSummaries[moduleIndex] =
+                                            buildModuleSummary(moduleIndex);
+                                    });
+                }
+                for (std::size_t moduleIndex : missingTrivial)
+                    cacheAndStoreModule(moduleIndex);
+            }
+            totalModuleAnalyses += missingTrivial.size();
+
+            // Merge trivial SCCs into globalIndex.
+            for (std::size_t moduleIndex : trivialModules)
+            {
+                (void)analysis::mergeResourceSummaryIndex(globalIndex,
+                                                          moduleSummaries[moduleIndex]);
+            }
+
+            // Process cyclic SCCs with internal iteration.
+            for (std::size_t sccIdx : cyclicSCCIndices)
+            {
+                const auto& scc = sccOrder[sccIdx];
+                std::vector<analysis::ResourceSummaryIndex> sccPrevSummaries(N);
+                std::unordered_set<std::string> sccChangedNames;
+                bool sccConverged = false;
+
+                for (unsigned sccIter = 0; sccIter < kCrossTUMaxIterations; ++sccIter)
+                {
+                    std::vector<std::size_t> dirtyInSCC;
+                    if (sccIter == 0)
+                    {
+                        dirtyInSCC = std::vector<std::size_t>(scc.begin(), scc.end());
+                    }
+                    else
+                    {
+                        for (std::size_t m : scc)
+                        {
+                            bool isDirty = false;
+                            for (const std::string& callee : filteredResourceCalleeNames[m])
+                            {
+                                if (sccChangedNames.count(callee))
+                                {
+                                    isDirty = true;
+                                    break;
+                                }
+                            }
+                            if (isDirty)
+                                dirtyInSCC.push_back(m);
+                            else
+                                moduleSummaries[m] = sccPrevSummaries[m];
+                        }
+                    }
+
+                    for (std::size_t m : dirtyInSCC)
+                        moduleSummaries[m] = buildModuleSummary(m);
+                    totalModuleAnalyses += dirtyInSCC.size();
+
+                    analysis::ResourceSummaryIndex sccMerged;
+                    for (std::size_t m : scc)
+                        (void)analysis::mergeResourceSummaryIndex(sccMerged, moduleSummaries[m]);
+
+                    analysis::ResourceSummaryIndex prevSccMerged;
                     for (std::size_t m : scc)
                     {
-                        bool isDirty = false;
-                        for (const std::string& callee : filteredResourceCalleeNames[m])
-                        {
-                            if (sccChangedNames.count(callee))
-                            {
-                                isDirty = true;
-                                break;
-                            }
-                        }
-                        if (isDirty)
-                            dirtyInSCC.push_back(m);
-                        else
-                            moduleSummaries[m] = sccPrevSummaries[m];
+                        (void)analysis::mergeResourceSummaryIndex(prevSccMerged,
+                                                                  sccPrevSummaries[m]);
                     }
+                    const bool iterConverged =
+                        analysis::resourceSummaryIndexEquals(sccMerged, prevSccMerged);
+
+                    sccChangedNames =
+                        analysis::computeChangedResourceFunctionNames(prevSccMerged, sccMerged);
+
+                    for (std::size_t m : scc)
+                        sccPrevSummaries[m] = moduleSummaries[m];
+
+                    if (cfg.timing)
+                    {
+                        coretrace::log(
+                            coretrace::Level::Info,
+                            "  Resource cyclic SCC (size={}) iteration {}{} (dirty={})\n",
+                            scc.size(), sccIter + 1, iterConverged ? " converged" : "",
+                            dirtyInSCC.size());
+                    }
+
+                    if (iterConverged)
+                    {
+                        sccConverged = true;
+                        break;
+                    }
+
+                    for (std::size_t m : scc)
+                        (void)analysis::mergeResourceSummaryIndex(globalIndex, moduleSummaries[m]);
                 }
 
-                for (std::size_t m : dirtyInSCC)
-                    moduleSummaries[m] = buildModuleSummary(m);
-                totalModuleAnalyses += dirtyInSCC.size();
-
-                analysis::ResourceSummaryIndex sccMerged;
-                for (std::size_t m : scc)
-                    (void)analysis::mergeResourceSummaryIndex(sccMerged, moduleSummaries[m]);
-
-                analysis::ResourceSummaryIndex prevSccMerged;
-                for (std::size_t m : scc)
-                    (void)analysis::mergeResourceSummaryIndex(prevSccMerged, sccPrevSummaries[m]);
-                const bool iterConverged =
-                    analysis::resourceSummaryIndexEquals(sccMerged, prevSccMerged);
-
-                sccChangedNames =
-                    analysis::computeChangedResourceFunctionNames(prevSccMerged, sccMerged);
-
-                for (std::size_t m : scc)
-                    sccPrevSummaries[m] = moduleSummaries[m];
-
-                if (cfg.timing)
+                if (!sccConverged)
                 {
-                    coretrace::log(coretrace::Level::Info,
-                                   "  Resource cyclic SCC (size={}) iteration {}{} (dirty={})\n",
-                                   scc.size(), sccIter + 1, iterConverged ? " converged" : "",
-                                   dirtyInSCC.size());
-                }
-
-                if (iterConverged)
-                {
-                    sccConverged = true;
-                    break;
+                    coretrace::log(coretrace::Level::Warn,
+                                   "Resource cross-TU: cyclic SCC (size={}) reached "
+                                   "iteration cap ({})\n",
+                                   scc.size(), kCrossTUMaxIterations);
                 }
 
                 for (std::size_t m : scc)
                     (void)analysis::mergeResourceSummaryIndex(globalIndex, moduleSummaries[m]);
             }
 
-            if (!sccConverged)
+            if (cfg.timing)
             {
-                coretrace::log(coretrace::Level::Warn,
-                               "Resource cross-TU: cyclic SCC (size={}) reached "
-                               "iteration cap ({})\n",
-                               scc.size(), kCrossTUMaxIterations);
+                const auto levelEnd = Clock::now();
+                const auto ms =
+                    std::chrono::duration_cast<std::chrono::milliseconds>(levelEnd - levelStart)
+                        .count();
+                coretrace::log(
+                    coretrace::Level::Info,
+                    "  Resource level {}: {} trivial, {} cyclic ({} modules) in {} ms\n", level,
+                    trivialModules.size(), cyclicSCCIndices.size(),
+                    trivialModules.size() +
+                        [&]()
+                        {
+                            std::size_t n = 0;
+                            for (std::size_t s : cyclicSCCIndices)
+                                n += sccOrder[s].size();
+                            return n;
+                        }(),
+                    ms);
             }
-
-            for (std::size_t m : scc)
-                (void)analysis::mergeResourceSummaryIndex(globalIndex, moduleSummaries[m]);
         }
 
+        const std::string afterPassHash = hashSummaryIndex(globalIndex);
         if (cfg.timing)
         {
-            const auto levelEnd = Clock::now();
-            const auto ms =
-                std::chrono::duration_cast<std::chrono::milliseconds>(levelEnd - levelStart)
-                    .count();
-            coretrace::log(
-                coretrace::Level::Info,
-                "  Resource level {}: {} trivial, {} cyclic ({} modules) in {} ms\n", level,
-                trivialModules.size(), cyclicSCCIndices.size(),
-                trivialModules.size() +
-                    [&]()
-                    {
-                        std::size_t n = 0;
-                        for (std::size_t s : cyclicSCCIndices)
-                            n += sccOrder[s].size();
-                        return n;
-                    }(),
-                ms);
+            coretrace::log(coretrace::Level::Info,
+                           "Resource global convergence pass {}{} (summary size: {})\n",
+                           globalIter + 1, (afterPassHash == beforePassHash) ? " converged" : "",
+                           globalIndex.functions.size());
+        }
+        if (afterPassHash == beforePassHash)
+        {
+            globalConverged = true;
+            break;
+        }
+    }
+
+    if (!globalConverged && cfg.timing)
+    {
+        coretrace::log(coretrace::Level::Warn,
+                       "Resource cross-TU: global convergence reached iteration cap ({})\n",
+                       kCrossTUGlobalMaxIterations);
+    }
+
+    if (allowDiskCache)
+    {
+        for (const auto& entry : finalCacheWrites)
+        {
+            const std::filesystem::path cacheFile =
+                std::filesystem::path(cfg.resourceSummaryCacheDir) / (entry.first + ".json");
+            (void)writeSummaryCacheFile(cacheFile, entry.second);
         }
     }
 
@@ -2446,6 +2490,10 @@ buildCrossTUUninitializedSummaryIndex(const std::vector<LoadedInputModule>& load
                 cyclicSCCIndices.push_back(sccIdx);
         }
 
+        // Sort cyclic SCCs by minimum module index for deterministic processing order.
+        std::sort(cyclicSCCIndices.begin(), cyclicSCCIndices.end(),
+                  [&](std::size_t a, std::size_t b) { return sccOrder[a][0] < sccOrder[b][0]; });
+
         // Process trivial SCCs in parallel.
         if (!trivialModules.empty())
         {
@@ -2624,27 +2672,6 @@ static void accumulateSummary(DiagnosticSummary& total, const DiagnosticSummary&
     total.info += add.info;
     total.warning += add.warning;
     total.error += add.error;
-}
-
-static DiagnosticSummary summarizeDiagnostics(const AnalysisResult& result)
-{
-    DiagnosticSummary summary;
-    for (const auto& d : result.diagnostics)
-    {
-        switch (d.severity)
-        {
-        case DiagnosticSeverity::Info:
-            ++summary.info;
-            break;
-        case DiagnosticSeverity::Warning:
-            ++summary.warning;
-            break;
-        case DiagnosticSeverity::Error:
-            ++summary.error;
-            break;
-        }
-    }
-    return summary;
 }
 
 struct RunPlan
