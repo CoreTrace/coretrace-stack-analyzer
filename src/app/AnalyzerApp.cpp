@@ -1231,6 +1231,44 @@ static int emitSarifOutput(const std::vector<AnalysisEntry>& results, const Anal
     return 0;
 }
 
+static bool writeSarifToFile(const std::vector<AnalysisEntry>& results, const AnalysisConfig& cfg,
+                             const std::vector<std::string>& inputFilenames,
+                             const std::string& sarifBaseDir,
+                             const NormalizedPathFilters& normalizedFilters,
+                             const std::string& outPath)
+{
+    const bool applyFilter =
+        cfg.onlyFiles.empty() && cfg.onlyDirs.empty() && cfg.onlyFunctions.empty();
+    std::string sarifContent;
+    if (results.size() == 1)
+    {
+        AnalysisResult filtered = applyFilter
+                                      ? filterResult(results[0].second, cfg, normalizedFilters)
+                                      : results[0].second;
+        filtered = filterWarningsOnly(filtered, cfg);
+        sarifContent = ctrace::stack::toSarif(filtered, results[0].first,
+                                              "coretrace-stack-analyzer", "0.1.0", sarifBaseDir);
+    }
+    else
+    {
+        AnalysisResult merged = mergeAnalysisResults(results, cfg);
+        AnalysisResult filtered =
+            applyFilter ? filterResult(merged, cfg, normalizedFilters) : merged;
+        filtered = filterWarningsOnly(filtered, cfg);
+        sarifContent = ctrace::stack::toSarif(filtered, inputFilenames.front(),
+                                              "coretrace-stack-analyzer", "0.1.0", sarifBaseDir);
+    }
+
+    std::ofstream ofs(outPath, std::ios::binary);
+    if (!ofs)
+    {
+        coretrace::log(coretrace::Level::Error, "Failed to open SARIF output file: {}\n", outPath);
+        return false;
+    }
+    ofs << sarifContent;
+    return ofs.good();
+}
+
 static int emitHumanOutput(const std::vector<AnalysisEntry>& results, const AnalysisConfig& cfg,
                            const NormalizedPathFilters& normalizedFilters)
 {
@@ -2680,6 +2718,7 @@ struct RunPlan
     std::vector<std::string> inputFilenames;
     NormalizedPathFilters normalizedFilters;
     std::string sarifBaseDir;
+    std::string sarifOutPath;
     ctrace::stack::cli::OutputFormat outputFormat = ctrace::stack::cli::OutputFormat::Human;
     std::uint64_t hasFilter : 1 = false;
     std::uint64_t needsCrossTUResourceSummaries : 1 = false;
@@ -2704,6 +2743,7 @@ class RunPlanBuilder
         plan.inputFilenames = std::move(parsedArgs_.inputFilenames);
         plan.outputFormat = parsedArgs_.outputFormat;
         plan.sarifBaseDir = std::move(parsedArgs_.sarifBaseDir);
+        plan.sarifOutPath = std::move(parsedArgs_.sarifOutPath);
 
         if (parsedArgs_.compileCommandsExplicit)
         {
@@ -2870,6 +2910,17 @@ class AnalyzerApp
 
         std::unique_ptr<OutputStrategy> outputStrategy = makeOutputStrategy(plan.outputFormat);
         const int exitCode = outputStrategy->emit(plan, results);
+
+        if (!plan.sarifOutPath.empty())
+        {
+            if (!writeSarifToFile(results, plan.cfg, plan.inputFilenames, plan.sarifBaseDir,
+                                  plan.normalizedFilters, plan.sarifOutPath))
+            {
+                return AppResult<int>::failure(
+                    "Failed to write SARIF output to: " + plan.sarifOutPath);
+            }
+        }
+
         analyzer::dumpHotspotSummary(std::cerr, plan.cfg.timing);
         return AppResult<int>::success(exitCode);
     }
