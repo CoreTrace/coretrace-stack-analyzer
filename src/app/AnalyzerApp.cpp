@@ -2916,8 +2916,8 @@ class AnalyzerApp
             if (!writeSarifToFile(results, plan.cfg, plan.inputFilenames, plan.sarifBaseDir,
                                   plan.normalizedFilters, plan.sarifOutPath))
             {
-                return AppResult<int>::failure(
-                    "Failed to write SARIF output to: " + plan.sarifOutPath);
+                return AppResult<int>::failure("Failed to write SARIF output to: " +
+                                               plan.sarifOutPath);
             }
         }
 
