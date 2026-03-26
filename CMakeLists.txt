@@ -49,13 +49,24 @@ FetchContent_MakeAvailable(coretrace-logger)
 message(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION}")
 message(STATUS "Using LLVMConfig.cmake in: ${LLVM_DIR}")
 
-# Options de build
+# ===========================
+#  Build Options
+# ===========================
+
 option(BUILD_CLI "Build stack_usage_analyzer CLI tool" ON)
 option(BUILD_SHARED_LIB "Build shared library variant" ON)
 option(ENABLE_STACK_USAGE "Emit per-function stack usage (.su) files" ON)
 option(ENABLE_WARN_PADDED "Enable -Wpadded warnings" ON)
 option(ENABLE_WARN_REORDER_INIT_LIST "Enable -Wreorder-init-list when supported" ON)
 option(ENABLE_Z3_BACKEND "Enable optional Z3 SMT backend if Z3 is available" ON)
+
+message("Building CLI Tool                      = ${BUILD_CLI}")
+message("Building Shared Library                = ${BUILD_SHARED_LIB}")
+message("Emitting Stack Usage (.su) Files       = ${ENABLE_STACK_USAGE}")
+message("Enabling -Wpadded Warnings             = ${ENABLE_WARN_PADDED}")
+message("Enabling -Wreorder-init-list           = ${ENABLE_WARN_REORDER_INIT_LIST}")
+message("Enabling Z3 SMT Backend                = ${ENABLE_Z3_BACKEND}")
+
 
 if(ENABLE_WARN_REORDER_INIT_LIST)
     check_cxx_compiler_flag("-Wreorder-init-list" CTRACE_STACK_HAS_WREORDER_INIT_LIST)
