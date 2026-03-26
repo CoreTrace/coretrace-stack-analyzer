@@ -1579,6 +1579,17 @@ namespace ctrace::stack::cli
                     continue;
                 }
             }
+            {
+                std::string value;
+                std::string error;
+                if (consumeLongOptionValue(argStr, "--sarif-out", i, argc, argv, value, error))
+                {
+                    if (!error.empty())
+                        return makeError(error);
+                    parsed.sarifOutPath = std::move(value);
+                    continue;
+                }
+            }
             if (std::strncmp(arg, "--mode=", 7) == 0)
             {
                 const char* modeStr = arg + 7;

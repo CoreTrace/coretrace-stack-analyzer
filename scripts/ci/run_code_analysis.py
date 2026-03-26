@@ -300,12 +300,15 @@ def analyzer_cmd(
     compdb_path: Path | None,
     base_dir: str | None,
     extra_args: list[str],
+    sarif_out: str | None = None,
 ) -> list[str]:
     cmd = [str(analyzer), *[str(x) for x in inputs], f"--format={fmt}"]
     if compdb_path:
         cmd.append(f"--compdb={compdb_path}")
     if base_dir:
         cmd.append(f"--base-dir={base_dir}")
+    if sarif_out:
+        cmd.append(f"--sarif-out={sarif_out}")
     cmd.extend(extra_args)
     return cmd
 
@@ -371,25 +374,31 @@ def main() -> int:
         print("No input files selected.", file=sys.stderr)
         return 2
 
-    print(f"Running analyzer (JSON) on {len(selected_inputs)} file(s).")
-    json_cmd = analyzer_cmd(
+    sarif_out_path: str | None = None
+    if args.sarif_out:
+        ensure_parent(Path(args.sarif_out))
+        sarif_out_path = str(Path(args.sarif_out).resolve())
+
+    print(f"Running analyzer on {len(selected_inputs)} file(s).")
+    cmd = analyzer_cmd(
         analyzer=analyzer,
         inputs=selected_inputs,
         fmt="json",
         compdb_path=compdb_path,
         base_dir=args.base_dir,
         extra_args=args.analyzer_arg,
+        sarif_out=sarif_out_path,
     )
-    json_run = subprocess.run(json_cmd, check=False, capture_output=True, text=True)
-    if json_run.returncode != 0:
-        if json_run.stdout:
-            sys.stdout.write(json_run.stdout)
-        if json_run.stderr:
-            sys.stderr.write(json_run.stderr)
-        return json_run.returncode
+    run = subprocess.run(cmd, check=False, capture_output=True, text=True)
+    if run.returncode != 0:
+        if run.stdout:
+            sys.stdout.write(run.stdout)
+        if run.stderr:
+            sys.stderr.write(run.stderr)
+        return run.returncode
 
     try:
-        payload = json.loads(json_run.stdout)
+        payload = json.loads(run.stdout)
     except json.JSONDecodeError as exc:
         print(f"Analyzer returned invalid JSON: {exc}", file=sys.stderr)
         return 2
@@ -397,7 +406,7 @@ def main() -> int:
     if args.json_out:
         json_output_path = Path(args.json_out)
         ensure_parent(json_output_path)
-        json_output_path.write_text(json_run.stdout, encoding="utf-8")
+        json_output_path.write_text(run.stdout, encoding="utf-8")
 
     diags = payload.get("diagnostics", [])
     if not isinstance(diags, list):
@@ -409,27 +418,6 @@ def main() -> int:
     print(f"Findings summary: errors={errors}, warnings={warnings}, infos={infos}")
 
     print_diags(diags, args.print_diagnostics)
-
-    if args.sarif_out:
-        print("Running analyzer (SARIF export).")
-        sarif_cmd = analyzer_cmd(
-            analyzer=analyzer,
-            inputs=selected_inputs,
-            fmt="sarif",
-            compdb_path=compdb_path,
-            base_dir=args.base_dir,
-            extra_args=args.analyzer_arg,
-        )
-        sarif_run = subprocess.run(sarif_cmd, check=False, capture_output=True, text=True)
-        if sarif_run.returncode != 0:
-            if sarif_run.stdout:
-                sys.stdout.write(sarif_run.stdout)
-            if sarif_run.stderr:
-                sys.stderr.write(sarif_run.stderr)
-            return sarif_run.returncode
-        sarif_output_path = Path(args.sarif_out)
-        ensure_parent(sarif_output_path)
-        sarif_output_path.write_text(sarif_run.stdout, encoding="utf-8")
 
     failed = (args.fail_on == "error" and errors > 0) or (
         args.fail_on == "warning" and (errors > 0 or warnings > 0)

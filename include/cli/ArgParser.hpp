@@ -26,6 +26,7 @@ namespace ctrace::stack::cli
         std::vector<std::string> inputFilenames;
 
         std::string sarifBaseDir;
+        std::string sarifOutPath;
         std::string configPath;
         std::string compileCommandsPath;
 

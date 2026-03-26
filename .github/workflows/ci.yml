@@ -117,6 +117,18 @@ jobs:
           python3 -u run_test.py --jobs="${TEST_JOBS}"
 
     # Self-analysis (Linux only)
+
+    # Resource summary cache — stale entries are harmless (cache key includes
+    # schema + model + IR hash, so mismatches simply trigger a rebuild).
+    - name: Restore resource summary cache
+      if: runner.os == 'Linux'
+      uses: actions/cache@v4
+      with:
+        path: .cache/resource-lifetime
+        key: resource-cache-${{ runner.os }}-${{ hashFiles('models/resource-lifetime/**') }}
+        restore-keys: |
+          resource-cache-${{ runner.os }}-
+
     - name: Self-analysis (analyze own source code)
       if: runner.os == 'Linux'
       run: |
@@ -130,7 +142,6 @@ jobs:
           --json-out artifacts/self-analysis.json \
           --fail-on error \
           --analyzer-arg=--analysis-profile=fast \
-          --analyzer-arg=--resource-summary-cache-memory-only \
           --analyzer-arg=--resource-model=models/resource-lifetime/generic.txt
 
     - name: Upload SARIF to Code Scanning

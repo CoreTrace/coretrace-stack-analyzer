@@ -21,41 +21,35 @@ set(LLVM_LINK_LLVM_DYLIB ON)
 
 find_package(LLVM REQUIRED CONFIG)
 
-include(FetchContent)
-
-# Optional ASAN enablement at the top-level to match the cc dependency.
-option(ENABLE_DEBUG_ASAN "Enable debug symbols and AddressSanitizer" OFF)
-if(DEFINED DEBUG_ASAN)
-    set(ENABLE_DEBUG_ASAN ${DEBUG_ASAN} CACHE BOOL
-        "Enable debug symbols and AddressSanitizer" FORCE)
-endif()
-
-FetchContent_Declare(
-    cc
-    GIT_REPOSITORY https://github.com/CoreTrace/coretrace-compiler.git
-    GIT_TAG main
-)
-FetchContent_MakeAvailable(cc)
-
-set(CORETRACE_LOGGER_BUILD_EXAMPLES OFF CACHE BOOL "Disable logger examples" FORCE)
-set(CORETRACE_LOGGER_BUILD_TESTS OFF CACHE BOOL "Disable logger tests" FORCE)
-include(FetchContent)
-FetchContent_Declare(coretrace-logger
-  GIT_REPOSITORY https://github.com/CoreTrace/coretrace-log.git
-  GIT_TAG        main
-)
-FetchContent_MakeAvailable(coretrace-logger)
-
 message(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION}")
 message(STATUS "Using LLVMConfig.cmake in: ${LLVM_DIR}")
 
-# Options de build
+# ===========================
+# INCLUDE .CMAKE
+# ===========================
+
+include(${CMAKE_SOURCE_DIR}/cmake/compiler/coretrace-compiler.cmake)
+
+include(${CMAKE_SOURCE_DIR}/cmake/logger/coretraceLog.cmake)
+
+# ===========================
+#  Build Options
+# ===========================
+
 option(BUILD_CLI "Build stack_usage_analyzer CLI tool" ON)
 option(BUILD_SHARED_LIB "Build shared library variant" ON)
 option(ENABLE_STACK_USAGE "Emit per-function stack usage (.su) files" ON)
 option(ENABLE_WARN_PADDED "Enable -Wpadded warnings" ON)
 option(ENABLE_WARN_REORDER_INIT_LIST "Enable -Wreorder-init-list when supported" ON)
 option(ENABLE_Z3_BACKEND "Enable optional Z3 SMT backend if Z3 is available" ON)
+
+message("Building CLI Tool                      = ${BUILD_CLI}")
+message("Building Shared Library                = ${BUILD_SHARED_LIB}")
+message("Emitting Stack Usage (.su) Files       = ${ENABLE_STACK_USAGE}")
+message("Enabling -Wpadded Warnings             = ${ENABLE_WARN_PADDED}")
+message("Enabling -Wreorder-init-list           = ${ENABLE_WARN_REORDER_INIT_LIST}")
+message("Enabling Z3 SMT Backend                = ${ENABLE_Z3_BACKEND}")
+
 
 if(ENABLE_WARN_REORDER_INIT_LIST)
     check_cxx_compiler_flag("-Wreorder-init-list" CTRACE_STACK_HAS_WREORDER_INIT_LIST)
