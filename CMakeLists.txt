@@ -28,9 +28,9 @@ message(STATUS "Using LLVMConfig.cmake in: ${LLVM_DIR}")
 # INCLUDE .CMAKE
 # ===========================
 
-include(${CMAKE_SOURCE_DIR}/cmake/compiler/coretrace-compiler.cmake)
+include(${CMAKE_CURRENT_LIST_DIR}/cmake/compiler/coretrace-compiler.cmake)
 
-include(${CMAKE_SOURCE_DIR}/cmake/logger/coretraceLog.cmake)
+include(${CMAKE_CURRENT_LIST_DIR}/cmake/logger/coretraceLog.cmake)
 
 # ===========================
 #  Build Options
