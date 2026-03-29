@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // pointer_cmp.c
 #include <stdlib.h>
 #include <stdio.h>

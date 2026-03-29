@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 #define SIZE_LARGE 8192000000
 #define SIZE_SMALL (SIZE_LARGE / 2)
 

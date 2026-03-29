@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 void leak_out_param(char** out)
 {
     char buf[10];

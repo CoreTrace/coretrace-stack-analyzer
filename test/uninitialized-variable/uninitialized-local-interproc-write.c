@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 static void init_value(int* p)
 {
     *p = 42;

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 include(FetchContent)
 
 # Optional ASAN enablement at the top-level to match the cc dependency.

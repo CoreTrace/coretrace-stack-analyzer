@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 #include <limits.h>
 
 int io_cross_signed_overflow(int a, int b, int gate1, int gate2);

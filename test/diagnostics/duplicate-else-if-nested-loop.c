@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 #define IS_ZERO(x) ((x) == 0)
 
 int main(int argc, char* argv[])

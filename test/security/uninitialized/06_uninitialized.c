@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /**
  * 06 - UNINITIALIZED MEMORY (CWE-457, CWE-908, CWE-200)
  *

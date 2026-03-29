@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // tests/stack_escape_global.c
 static char* g;
 

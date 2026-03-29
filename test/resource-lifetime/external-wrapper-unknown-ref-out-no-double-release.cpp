@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 extern "C" void release_handle(void* handle);
 
 using handle_t = void*;

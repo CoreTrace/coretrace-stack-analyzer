@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 typedef void (*cb_t)(char*);
 
 void use_callback(cb_t cb)

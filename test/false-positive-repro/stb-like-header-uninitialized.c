@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 typedef unsigned char u8;
 
 typedef struct Z

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 int memcpy_reads_initialized_source(void)
 {
     int src = 7;

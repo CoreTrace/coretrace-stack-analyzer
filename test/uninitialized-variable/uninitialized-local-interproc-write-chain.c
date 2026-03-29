@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 static void init_leaf(int* p)
 {
     *p = 7;

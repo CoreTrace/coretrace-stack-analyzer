@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /**
  * 18 - ADVANCED USE-AFTER-FREE / DOUBLE FREE CASES (nested if/loop/tricky)
  *

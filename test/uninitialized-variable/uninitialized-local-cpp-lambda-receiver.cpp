@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 #include <limits.h>
 
 int lambda_receiver_object_should_not_warn_never_initialized(void)

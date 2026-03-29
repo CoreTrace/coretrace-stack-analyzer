@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // null_pointer_subtle.c
 #include <stdlib.h>
 

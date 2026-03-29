@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 void leak_pointer_slot(int*** out)
 {
     int* p = 0;

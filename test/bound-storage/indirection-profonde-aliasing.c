@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // [!Info] multiple stores to stack buffer 'test' in this function (6 store instruction(s), 6 distinct index expression(s))
 //     stores use different index expressions; verify indices are correct and non-overlapping
 int main(void)

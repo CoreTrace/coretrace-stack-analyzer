@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 #include <stddef.h>
 
 void telemetry_memcpy(char* dst, const char* src, size_t n)

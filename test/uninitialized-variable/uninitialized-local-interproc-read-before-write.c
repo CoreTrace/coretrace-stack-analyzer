@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 static int read_value(const int* p)
 {
     return *p;

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 #pragma once
 
 #include "StackUsageAnalyzer.hpp"
@@ -15,9 +16,9 @@ namespace ctrace::stack::analysis::smt
 {
     enum class SmtFeasibility
     {
-        Feasible,
-        Infeasible,
-        Inconclusive
+        Feasible = 0,
+        Infeasible = 1,
+        Inconclusive = 2
     };
 
     inline bool smtRuleEnabled(const ctrace::stack::AnalysisConfig& config, std::string_view ruleId)

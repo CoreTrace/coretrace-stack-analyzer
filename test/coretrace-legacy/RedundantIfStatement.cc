@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 bool isPositive(int x_test)
 {
     if (x_test > 0)

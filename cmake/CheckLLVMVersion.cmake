@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # cmake/CheckLLVMVersion.cmake
 function(check_llvm_version MIN_REQUIRED)
     message(STATUS "Checking for LLVM >= ${MIN_REQUIRED}...")

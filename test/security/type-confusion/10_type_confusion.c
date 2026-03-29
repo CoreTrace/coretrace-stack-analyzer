@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /**
  * 10 - TYPE CONFUSION / MAUVAIS CAST (CWE-843)
  *

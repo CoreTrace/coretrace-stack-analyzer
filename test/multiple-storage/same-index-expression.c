@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 void same_index_store(void)
 {
     char buf[10];

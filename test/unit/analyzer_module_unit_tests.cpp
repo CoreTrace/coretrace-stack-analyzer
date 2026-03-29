@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 #include "StackUsageAnalyzer.hpp"
 #include "analysis/InputPipeline.hpp"
 #include "analysis/Reachability.hpp"

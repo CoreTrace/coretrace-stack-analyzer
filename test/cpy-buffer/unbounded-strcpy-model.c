@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 #include <string.h>
 
 // buffer-model: models/buffer-overflow/generic.txt

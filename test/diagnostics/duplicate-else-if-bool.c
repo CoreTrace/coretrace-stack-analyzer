@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 #include <stdbool.h>
 
 int main(int argc, char* argv[])

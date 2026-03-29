@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 #include "analysis/StackPointerEscape.hpp"
 #include "analysis/IRValueUtils.hpp"
 #include "StackPointerEscapeInternal.hpp"

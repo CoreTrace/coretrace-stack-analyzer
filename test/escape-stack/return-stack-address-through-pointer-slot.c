@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 char* leak_through_slot(void)
 {
     char buf[8];

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 typedef void (*cb_t)(char*);
 
 static void safe_cb(char* p)

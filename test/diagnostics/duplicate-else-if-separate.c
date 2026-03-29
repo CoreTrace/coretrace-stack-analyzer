@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 #include <stdio.h>
 
 // not contains: [!] unreachable else-if branch: condition is equivalent to a previous 'if' condition

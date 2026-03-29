@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 #include <stdbool.h>
 
 bool isPositive(int x_test)

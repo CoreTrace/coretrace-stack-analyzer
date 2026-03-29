@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 #include "analyzer/ModulePreparationService.hpp"
 
 #include "analyzer/HotspotProfiler.hpp"

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 int read_array_fully_initialized(void)
 {
     int arr[2];

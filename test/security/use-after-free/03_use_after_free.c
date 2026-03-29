@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /**
  * 03 - USE-AFTER-FREE / DOUBLE FREE (CWE-415, CWE-416)
  *

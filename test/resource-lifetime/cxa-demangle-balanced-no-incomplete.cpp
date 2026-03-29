@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 extern "C" char* __cxa_demangle(const char* mangled, char* outputBuffer, unsigned long* length,
                                 int* status);
 extern "C" void free(void*);

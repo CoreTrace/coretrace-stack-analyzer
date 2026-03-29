@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // escape-model: models/stack-escape/generic.txt
 
 typedef void* VkDevice;

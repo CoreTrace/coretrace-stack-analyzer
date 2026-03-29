@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Test: lambda capturing local variables by reference should NOT trigger
 // StackPointerEscape, because the closure lives on the same stack frame.
 

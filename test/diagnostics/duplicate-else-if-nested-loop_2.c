@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 #include <stdio.h>
 #define IS_ZERO(x) ((x) == 0)
 

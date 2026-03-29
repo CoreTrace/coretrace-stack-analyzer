@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // // case_call_arg.c
 // void sink(char* p);
 
