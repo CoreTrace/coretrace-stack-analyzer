@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /**
  * 05 - NULL POINTER DEREFERENCE (CWE-476)
  *

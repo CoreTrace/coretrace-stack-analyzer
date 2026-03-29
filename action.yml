@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 name: "CoreTrace Stack Analyzer"
 description: "Static stack usage analysis for C/C++ code — detects stack overflows, VLAs, recursion, and more."
 author: "CoreTrace"

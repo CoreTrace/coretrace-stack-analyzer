@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 int read_cpp_ref(int cond, int& out)
 {
     int value;

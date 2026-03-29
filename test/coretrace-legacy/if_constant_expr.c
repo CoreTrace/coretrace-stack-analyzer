@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 int main()
 {
     const int c_test = 1;

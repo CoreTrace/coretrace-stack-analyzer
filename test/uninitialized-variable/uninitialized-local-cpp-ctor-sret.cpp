@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 #include <string>
 
 int ctor_and_sret_should_not_warn(void)

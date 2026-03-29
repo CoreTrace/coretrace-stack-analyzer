@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 #include <vector>
 
 int wrap_iter_temps_should_not_warn(void)

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // resource-model: models/resource-lifetime/generic.txt
 int new_balanced_delete()
 {

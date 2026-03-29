@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 typedef struct VkDevice_T* VkDevice;
 typedef struct VkShaderModule_T* VkShaderModule;
 typedef struct VkShaderModuleCreateInfo

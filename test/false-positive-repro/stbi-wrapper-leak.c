@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 typedef unsigned long size_t;
 
 extern void* malloc(size_t size);

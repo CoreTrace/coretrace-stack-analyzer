@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 struct AnalysisConfigLike
 {
     unsigned long long stackLimit = 8ull * 1024ull * 1024ull;

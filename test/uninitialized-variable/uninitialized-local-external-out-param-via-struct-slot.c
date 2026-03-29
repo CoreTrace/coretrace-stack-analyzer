@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 typedef int Status;
 
 extern Status ext_status_fill(int* outValue);

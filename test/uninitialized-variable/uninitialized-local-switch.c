@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 int read_switch(int tag)
 {
     int value;

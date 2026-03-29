@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 #include "analysis/DuplicateIfCondition.hpp"
 
 #include <algorithm>

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 static void make_unique_sink(char* p)
 {
     (void)p;

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 int foo(void)
 {
     // local stack: 8192000000 bytes

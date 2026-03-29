@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 void unreachable_validation_local_const(void)
 {
     int i = 11;

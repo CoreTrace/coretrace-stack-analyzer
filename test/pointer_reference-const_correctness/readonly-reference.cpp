@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // at line 5, column 0
 // [ !Info! ] ConstParameterNotModified.Reference: parameter 'inc' in function 'increment(int&, int&)' is never used to modify the referred object
 //          ↳ current type: int &inc

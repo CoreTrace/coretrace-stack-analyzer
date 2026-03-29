@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 int read_nested_loops(int n, int m)
 {
     int value;

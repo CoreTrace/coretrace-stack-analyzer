@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 #include <initializer_list>
 
 static int sum_values(std::initializer_list<int> values)

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 #include "StackUsageAnalyzer.hpp"
 #include "cli/ArgParser.hpp"
 #include <llvm/Support/SourceMgr.h>

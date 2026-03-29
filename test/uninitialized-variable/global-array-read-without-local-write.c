@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 #include <stdio.h>
 
 int g_zero_cross_state[8];

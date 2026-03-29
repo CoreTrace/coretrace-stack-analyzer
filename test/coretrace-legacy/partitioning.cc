@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // init_with_error.c
 #include <stdlib.h>
 

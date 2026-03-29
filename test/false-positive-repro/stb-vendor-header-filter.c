@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 #include "vendor/stb_image.h"
 
 int fp_stb_vendor_header_filter(void)

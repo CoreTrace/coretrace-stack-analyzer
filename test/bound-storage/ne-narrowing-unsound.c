@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 void ne_must_not_narrow_range(int i)
 {
     char buf[200];

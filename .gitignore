@@ -33,3 +33,8 @@
 
 # Build directories
 /build/
+
+# Python cache and temporary files
+__pycache__/
+*.py[cod]
+*.tmp

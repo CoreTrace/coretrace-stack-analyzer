@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 typedef unsigned int uint32_t;
 typedef void* VkDevice;
 typedef int VkResult;

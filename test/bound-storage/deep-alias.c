@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // at line 5, column 0
 // [ !Info! ] ConstParameterNotModified.Pointer: parameter 'src' in function 'deep_alias' is never used to modify the pointed object
 //          ↳ current type: char *src

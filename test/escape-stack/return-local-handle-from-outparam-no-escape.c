@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 typedef void* Handle;
 
 void acquire_handle(Handle* out);

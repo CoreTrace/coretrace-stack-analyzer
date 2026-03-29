@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 int compute_range(int input)
 {
     int pred = input;

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 typedef enum DiagnosticSeverity
 {
     Info = 0,

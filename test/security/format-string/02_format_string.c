@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /**
  * 02 - FORMAT STRING (CWE-134)
  *

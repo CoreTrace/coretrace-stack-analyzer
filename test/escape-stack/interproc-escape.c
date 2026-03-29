@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // static char* g_ptr;
 
 // static void store_global(char* p)

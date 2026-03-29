@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /**
  * 11 - RETURN POINTER TO LOCAL (CWE-562)
  *

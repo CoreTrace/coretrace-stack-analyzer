@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 static const int* g_ptr = nullptr;
 
 struct Base

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 int read_pointer_target(int cond)
 {
     int fallback = 0;

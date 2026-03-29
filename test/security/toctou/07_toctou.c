@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /**
  * 07 - RACE CONDITION / TOCTOU (CWE-367)
  *

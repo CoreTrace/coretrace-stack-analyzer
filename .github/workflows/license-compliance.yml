@@ -1,0 +1,17 @@
+# SPDX-License-Identifier: Apache-2.0
+name: license-compliance
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  license-compliance:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify Apache-2.0 license compliance
+        run: bash ./scripts/check-license-compliance.sh

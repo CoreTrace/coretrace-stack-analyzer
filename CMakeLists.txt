@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 cmake_minimum_required(VERSION 3.21)
 project(stack_usage_analyzer)
 

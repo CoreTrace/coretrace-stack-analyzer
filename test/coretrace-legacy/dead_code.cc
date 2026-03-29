@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 int compute(int x)
 {
     int y = x + 1;

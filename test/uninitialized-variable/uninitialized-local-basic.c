@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 int read_uninitialized_basic(void)
 {
     int value;

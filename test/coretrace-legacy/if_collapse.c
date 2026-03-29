@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 int main()
 {
     int iii = 0, jjj = 1;

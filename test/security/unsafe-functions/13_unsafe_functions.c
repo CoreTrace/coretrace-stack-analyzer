@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /**
  * 13 - UNSAFE / DEPRECATED FUNCTIONS (CWE-676)
  *
