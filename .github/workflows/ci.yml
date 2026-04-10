@@ -300,17 +300,19 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-
-          $help = & .\dist\windows\bin\stack_usage_analyzer.exe --help 2>&1
-          $help | Select-Object -First 20
-
+      
+          $helpLines = & .\dist\windows\bin\stack_usage_analyzer.exe --help 2>&1
+          $helpLines | Select-Object -First 20
+      
+          $help = $helpLines -join "`n"
           if ($help -notmatch "usage|Usage|--help") {
             throw "help output invalid"
           }
-
-          $analysis = & .\dist\windows\bin\stack_usage_analyzer.exe test\false-positif\unique_ptr_state.cpp --warnings-only 2>&1
-          $analysis | Select-Object -First 20
-
+      
+          $analysisLines = & .\dist\windows\bin\stack_usage_analyzer.exe test\false-positif\unique_ptr_state.cpp --warnings-only 2>&1
+          $analysisLines | Select-Object -First 20
+      
+          $analysis = $analysisLines -join "`n"
           if ($analysis -notmatch "Diagnostics summary:") {
             throw "analysis output missing summary"
           }
