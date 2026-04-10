@@ -59,19 +59,20 @@ function New-PatchedCMakePackageDir {
         $updated = $content.Replace($OldValue, $NewValue)
         if ($ImportPrefix -ne "")
         {
+            # Updated Regex to handle 'REALPATH' form in LLVM 20.1.0 using non-greedy match .*?
             $updated = [regex]::Replace(
                 $updated,
-                '(?ms)# Compute the installation prefix relative to this file\.\r?\nget_filename_component\(_IMPORT_PREFIX "\$\{CMAKE_CURRENT_LIST_FILE\}" PATH\)\r?\nget_filename_component\(_IMPORT_PREFIX "\$\{_IMPORT_PREFIX\}" PATH\)\r?\nget_filename_component\(_IMPORT_PREFIX "\$\{_IMPORT_PREFIX\}" PATH\)\r?\nget_filename_component\(_IMPORT_PREFIX "\$\{_IMPORT_PREFIX\}" PATH\)\r?\nif\(_IMPORT_PREFIX STREQUAL "/"\)\r?\n\s*set\(_IMPORT_PREFIX ""\)\r?\nendif\(\)',
+                '(?ms)# Compute the installation prefix relative to this file\..*?if\(_IMPORT_PREFIX STREQUAL "/"\)\r?\n\s*set\(_IMPORT_PREFIX ""\)\r?\nendif\(\)',
                 "# Compute the installation prefix relative to this file.`nset(_IMPORT_PREFIX `"$ImportPrefix`")"
             )
             $updated = [regex]::Replace(
                 $updated,
-                '(?ms)# Compute the installation prefix from this LLVMConfig\.cmake file location\.\r?\nget_filename_component\(LLVM_INSTALL_PREFIX "\$\{CMAKE_CURRENT_LIST_FILE\}" PATH\)\r?\nget_filename_component\(LLVM_INSTALL_PREFIX "\$\{LLVM_INSTALL_PREFIX\}" PATH\)\r?\nget_filename_component\(LLVM_INSTALL_PREFIX "\$\{LLVM_INSTALL_PREFIX\}" PATH\)\r?\nget_filename_component\(LLVM_INSTALL_PREFIX "\$\{LLVM_INSTALL_PREFIX\}" PATH\)',
+                '(?ms)# Compute the installation prefix from this LLVMConfig\.cmake file location\..*?get_filename_component\(LLVM_INSTALL_PREFIX "\$\{LLVM_INSTALL_PREFIX\}" PATH\)',
                 "# Compute the installation prefix from this LLVMConfig.cmake file location.`nset(LLVM_INSTALL_PREFIX `"$ImportPrefix`")"
             )
             $updated = [regex]::Replace(
                 $updated,
-                '(?ms)# Compute the installation prefix from this LLVMConfig\.cmake file location\.\r?\nget_filename_component\(CLANG_INSTALL_PREFIX "\$\{CMAKE_CURRENT_LIST_FILE\}" PATH\)\r?\nget_filename_component\(CLANG_INSTALL_PREFIX "\$\{CLANG_INSTALL_PREFIX\}" PATH\)\r?\nget_filename_component\(CLANG_INSTALL_PREFIX "\$\{CLANG_INSTALL_PREFIX\}" PATH\)\r?\nget_filename_component\(CLANG_INSTALL_PREFIX "\$\{CLANG_INSTALL_PREFIX\}" PATH\)',
+                '(?ms)# Compute the installation prefix from this LLVMConfig\.cmake file location\..*?get_filename_component\(CLANG_INSTALL_PREFIX "\$\{CLANG_INSTALL_PREFIX\}" PATH\)',
                 "# Compute the installation prefix from this LLVMConfig.cmake file location.`nset(CLANG_INSTALL_PREFIX `"$ImportPrefix`")"
             )
         }

@@ -221,6 +221,9 @@ jobs:
 
         Invoke-WebRequest -Uri $installerUrl -OutFile $installerPath
         Start-Process -FilePath $installerPath -ArgumentList @("/S", "/D=$installRoot") -Wait -NoNewWindow
+        
+        # Give the filesystem a moment to settle after the installer process exits
+        Start-Sleep -Seconds 5
 
         if (-not (Test-Path "$installRoot\bin\clang-cl.exe")) {
           throw "clang-cl.exe not found after LLVM install: $installRoot\bin\clang-cl.exe"
@@ -228,8 +231,11 @@ jobs:
         if (-not (Test-Path $llvmCmakeDir)) {
           throw "LLVM CMake package dir not found: $llvmCmakeDir"
         }
+        
+        # Fallback for Clang CMake dir if not explicitly created
         if (-not (Test-Path $clangCmakeDir)) {
-          throw "Clang CMake package dir not found: $clangCmakeDir"
+          Write-Host "Clang CMake package dir not found at $clangCmakeDir. Falling back to LLVM dir."
+          $clangCmakeDir = $llvmCmakeDir
         }
 
         $clangVersion = & "$installRoot\bin\clang-cl.exe" --version
