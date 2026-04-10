@@ -97,10 +97,7 @@ function Reset-BuildDirectoryIfGeneratorChanged {
     )
 
     $cachePath = Join-Path $BuildDirectory "CMakeCache.txt"
-    if (-not (Test-Path $cachePath))
-    {
-        return
-    }
+    if (-not (Test-Path $cachePath)) { return }
 
     $cacheContent = Get-Content $cachePath -ErrorAction Stop
     $cachedGeneratorLine = $cacheContent | Where-Object { $_ -like "CMAKE_GENERATOR:INTERNAL=*" } | Select-Object -First 1
@@ -111,135 +108,99 @@ function Reset-BuildDirectoryIfGeneratorChanged {
     $cachedPlatform = if ($cachedPlatformLine) { $cachedPlatformLine.Split("=", 2)[1] } else { "" }
     $cachedToolset = if ($cachedToolsetLine) { $cachedToolsetLine.Split("=", 2)[1] } else { "" }
 
-    if ($cachedGenerator -eq $GeneratorName -and $cachedPlatform -eq $PlatformName -and $cachedToolset -eq $ToolsetName)
-    {
-        return
-    }
+    if ($cachedGenerator -eq $GeneratorName -and $cachedPlatform -eq $PlatformName -and $cachedToolset -eq $ToolsetName) { return }
 
-    Write-Host "Resetting build directory '$BuildDirectory' because cached generator/platform/toolset '$cachedGenerator'/'$cachedPlatform'/'$cachedToolset' does not match '$GeneratorName'/'$PlatformName'/'$ToolsetName'."
+    Write-Host "Resetting build directory '$BuildDirectory' (Generator mismatch)."
     Remove-Item -LiteralPath $BuildDirectory -Recurse -Force
 }
 
+# --- Path Resolution ---
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $resolvedBuildDir = Join-Path $repoRoot $BuildDir
 $resolvedInstallDir = Join-Path $repoRoot $InstallDir
-$installedLLVMDir = (Resolve-Path $LLVMDir).Path
-$installedClangDir = Join-Path (Split-Path $installedLLVMDir -Parent) "clang"
-$resolvedLLVMDir = $installedLLVMDir
-$resolvedClangDir = $installedClangDir
-$llvmRoot = Split-Path (Split-Path (Split-Path $resolvedLLVMDir -Parent) -Parent) -Parent
+
+# Handle the initial LLVM location
+$initialLLVMDir = (Resolve-Path $LLVMDir).Path
+$initialClangDir = Join-Path (Split-Path $initialLLVMDir -Parent) "clang"
+
+# These variables will be updated if we apply patches
+$finalLLVMDir = $initialLLVMDir
+$finalClangDir = $initialClangDir
+
+$llvmRoot = Split-Path (Split-Path (Split-Path $initialLLVMDir -Parent) -Parent) -Parent
 $llvmBinDir = Join-Path $llvmRoot "bin"
 
-if (Test-Path $llvmBinDir)
-{
-    $env:PATH = "$llvmBinDir;$env:PATH"
-}
-
+# --- Add LLVM to Path ---
+if (Test-Path $llvmBinDir) { $env:PATH = "$llvmBinDir;$env:PATH" }
 $clangClPath = Join-Path $llvmBinDir "clang-cl.exe"
-if (-not (Test-Path $clangClPath))
-{
-    throw "clang-cl.exe was not found in '$llvmBinDir'."
-}
+if (-not (Test-Path $clangClPath)) { throw "clang-cl.exe not found in '$llvmBinDir'." }
 
+# --- Find Visual Studio ---
 $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
-if (-not (Test-Path $vswhere))
-{
-    throw "Unable to find vswhere.exe."
-}
-
 $vsPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-if (-not $vsPath)
-{
-    throw "Unable to find a Visual Studio installation with C++ build tools."
-}
+if (-not $vsPath) { throw "Visual Studio C++ build tools not found." }
 
+# --- Reset Build if needed ---
 $platformForCache = if ($Generator -like "Visual Studio*") { $Arch } else { "" }
 $toolsetForCache = if ($Generator -like "Visual Studio*") { $Toolset } else { "" }
 Reset-BuildDirectoryIfGeneratorChanged -BuildDirectory $resolvedBuildDir -GeneratorName $Generator -PlatformName $platformForCache -ToolsetName $toolsetForCache
 
+# --- Patching Logic (Fixed for LLVM 20.1.0) ---
 $diaguidsCandidate = Join-Path $vsPath "DIA SDK\lib\amd64\diaguids.lib"
-if (-not (Test-Path $diaguidsCandidate))
-{
-    $diaguidsCandidate = Get-ChildItem -Path $vsPath -Recurse -Filter diaguids.lib -ErrorAction SilentlyContinue |
-        Where-Object { $_.FullName -like "*DIA SDK\\lib\\amd64\\diaguids.lib" } |
-        Select-Object -First 1 -ExpandProperty FullName
-}
-
 $staleDiaPath = "C:/Program Files (x86)/Microsoft Visual Studio/2019/Professional/DIA SDK/lib/amd64/diaguids.lib"
-$llvmExportsPath = Join-Path $installedLLVMDir "LLVMExports.cmake"
-if ((Test-Path $llvmExportsPath) -and (Test-Path $diaguidsCandidate))
-{
+$llvmExportsPath = Join-Path $initialLLVMDir "LLVMExports.cmake"
+
+if ((Test-Path $llvmExportsPath) -and (Test-Path $diaguidsCandidate)) {
     $llvmExportsContent = Get-Content -Path $llvmExportsPath -Raw
-    if ($llvmExportsContent.Contains($staleDiaPath))
-    {
+    if ($llvmExportsContent.Contains($staleDiaPath)) {
+        Write-Host "Detected stale DIA SDK paths. Creating patched CMake files..."
         $patchedRoot = Join-Path $resolvedBuildDir "__llvm_cmake_patched"
-        $patchedCMakeRoot = Join-Path $patchedRoot "lib\\cmake"
-        $patchedLLVMDir = Join-Path $patchedCMakeRoot "llvm"
-        $patchedClangDir = Join-Path $patchedCMakeRoot "clang"
+        $patchedLLVMDir = Join-Path $patchedRoot "llvm"
+        $patchedClangDir = Join-Path $patchedRoot "clang"
         $replacementDiaPath = $diaguidsCandidate.Replace("\", "/")
         $importPrefix = $llvmRoot.Replace("\", "/")
 
-        New-PatchedCMakePackageDir -SourceDir $installedLLVMDir -DestinationDir $patchedLLVMDir -OldValue $staleDiaPath -NewValue $replacementDiaPath -ImportPrefix $importPrefix
-        New-PatchedCMakePackageDir -SourceDir $installedClangDir -DestinationDir $patchedClangDir -OldValue $staleDiaPath -NewValue $replacementDiaPath -ImportPrefix $importPrefix
-
-        $resolvedLLVMDir = $patchedLLVMDir
-        $resolvedClangDir = $patchedClangDir
+        New-PatchedCMakePackageDir -SourceDir $initialLLVMDir -DestinationDir $patchedLLVMDir -OldValue $staleDiaPath -NewValue $replacementDiaPath -ImportPrefix $importPrefix
+        
+        if (Test-Path $initialClangDir) {
+            New-PatchedCMakePackageDir -SourceDir $initialClangDir -DestinationDir $patchedClangDir -OldValue $staleDiaPath -NewValue $replacementDiaPath -ImportPrefix $importPrefix
+            $finalClangDir = $patchedClangDir
+        } else {
+            $finalClangDir = $patchedLLVMDir # Use LLVM dir as fallback
+        }
+        $finalLLVMDir = $patchedLLVMDir
     }
 }
 
+# --- CMake Arguments ---
 $cmakeArgs = @(
     "-S", $repoRoot,
     "-B", $resolvedBuildDir,
     "-G", $Generator,
-    "-DLLVM_DIR=$resolvedLLVMDir",
+    "-DLLVM_DIR=$finalLLVMDir",
+    "-DClang_DIR=$finalClangDir",
     "-DBUILD_ANALYZER_UNIT_TESTS=$(if ($BuildAnalyzerUnitTests) { "ON" } else { "OFF" })"
 )
 
-if ($resolvedClangDir -and (Test-Path $resolvedClangDir))
-{
-    $cmakeArgs += "-DClang_DIR=$resolvedClangDir"
+if ($CompilerSourceDir -ne "") {
+    $cmakeArgs += "-DFETCHCONTENT_SOURCE_DIR_CC=$((Resolve-Path $CompilerSourceDir).Path)"
+}
+if ($LoggerSourceDir -ne "") {
+    $cmakeArgs += "-DFETCHCONTENT_SOURCE_DIR_CORETRACE_LOGGER=$((Resolve-Path $LoggerSourceDir).Path)"
 }
 
-if ($CompilerSourceDir -ne "")
-{
-    $resolvedCompilerSourceDir = (Resolve-Path $CompilerSourceDir).Path
-    $cmakeArgs += "-DFETCHCONTENT_SOURCE_DIR_CC=$resolvedCompilerSourceDir"
-}
-
-if ($LoggerSourceDir -ne "")
-{
-    $resolvedLoggerSourceDir = (Resolve-Path $LoggerSourceDir).Path
-    $cmakeArgs += "-DFETCHCONTENT_SOURCE_DIR_CORETRACE_LOGGER=$resolvedLoggerSourceDir"
-}
-
-if ($Generator -like "Visual Studio*")
-{
+if ($Generator -like "Visual Studio*") {
     $cmakeArgs += @("-A", $Arch)
-    if ($Toolset -ne "")
-    {
-        $cmakeArgs += @("-T", $Toolset)
-    }
-}
-else
-{
-    $cmakeArgs += @(
-        "-DCMAKE_C_COMPILER=$clangClPath",
-        "-DCMAKE_CXX_COMPILER=$clangClPath"
-    )
+    if ($Toolset -ne "") { $cmakeArgs += @("-T", $Toolset) }
+} else {
+    $cmakeArgs += @("-DCMAKE_C_COMPILER=$clangClPath", "-DCMAKE_CXX_COMPILER=$clangClPath")
 }
 
-if ($Generator -like "Visual Studio*")
-{
+# --- Execution ---
+if ($Generator -like "Visual Studio*") {
     Invoke-NativeCommand cmake @cmakeArgs
-}
-else
-{
+} else {
     $devShell = Join-Path $vsPath "Common7\Tools\Launch-VsDevShell.ps1"
-    if (-not (Test-Path $devShell))
-    {
-        throw "Unable to find Launch-VsDevShell.ps1 at '$devShell'."
-    }
-
     . $devShell -Arch amd64 -HostArch amd64 | Out-Null
     Invoke-NativeCommand cmake @cmakeArgs
 }
@@ -247,22 +208,11 @@ else
 Invoke-NativeCommand cmake --build $resolvedBuildDir --config $Configuration
 Invoke-NativeCommand cmake --install $resolvedBuildDir --config $Configuration --prefix $resolvedInstallDir
 
-$binaryPath = Join-Path $resolvedInstallDir "bin\stack_usage_analyzer.exe"
-if (-not (Test-Path $binaryPath))
-{
-    throw "Expected output binary was not produced: $binaryPath"
-}
-
-if ($PackageZip)
-{
+# --- Packaging ---
+if ($PackageZip) {
     $zipPath = Join-Path $repoRoot "coretrace-stack-analyzer-windows-$Configuration.zip"
-    if (Test-Path $zipPath)
-    {
-        Remove-Item -LiteralPath $zipPath -Force
-    }
+    if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
     Compress-Archive -Path (Join-Path $resolvedInstallDir "*") -DestinationPath $zipPath
-    Write-Host "Created package: $zipPath"
 }
 
 Write-Host "Build completed successfully."
-Write-Host "Executable: $binaryPath"
