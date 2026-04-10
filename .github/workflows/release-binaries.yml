@@ -92,6 +92,7 @@ jobs:
   build-windows-binary:
     name: Build Windows binary (x64, LLVM 20.1.0)
     runs-on: windows-2022
+    timeout-minutes: 45
 
     steps:
       - name: Checkout
@@ -155,7 +156,7 @@ jobs:
           fi
           echo "value=${version}" >> "${GITHUB_OUTPUT}"
 
-      - name: Install LLVM 20.1.0 archive with CMake package files
+      - name: Install LLVM 20.1.0 archive with 7-Zip
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -166,15 +167,45 @@ jobs:
           $archivePath = Join-Path $env:RUNNER_TEMP $archiveName
           $extractRoot = Join-Path $env:RUNNER_TEMP "llvm-extract"
           $installRoot = "C:\Program Files\LLVM-$llvmVersion"
+          $sevenZip = "${env:ProgramFiles}\7-Zip\7z.exe"
+          $tarPath = Join-Path $env:RUNNER_TEMP "clang+llvm-$llvmVersion-x86_64-pc-windows-msvc.tar"
 
+          if (-not (Test-Path $sevenZip)) {
+            throw "7z.exe not found at $sevenZip"
+          }
+
+          Write-Host "Downloading LLVM archive from $archiveUrl"
           Invoke-WebRequest -Uri $archiveUrl -OutFile $archivePath
+          Write-Host "Download finished"
+          Get-Item $archivePath | Select-Object FullName, Length | Format-Table -AutoSize
 
           if (Test-Path $extractRoot) {
             Remove-Item -Recurse -Force $extractRoot
           }
           New-Item -ItemType Directory -Force -Path $extractRoot | Out-Null
 
-          tar -xJf $archivePath -C $extractRoot
+          if (Test-Path $tarPath) {
+            Remove-Item -Force $tarPath
+          }
+
+          Write-Host "Extracting .xz to .tar with 7-Zip"
+          & $sevenZip x $archivePath "-o$env:RUNNER_TEMP" -y
+          if ($LASTEXITCODE -ne 0) {
+            throw "7-Zip failed while extracting .xz archive"
+          }
+
+          if (-not (Test-Path $tarPath)) {
+            throw "Expected tar file not found after xz extraction: $tarPath"
+          }
+
+          Write-Host "Extracting .tar to $extractRoot"
+          & $sevenZip x $tarPath "-o$extractRoot" -y
+          if ($LASTEXITCODE -ne 0) {
+            throw "7-Zip failed while extracting .tar archive"
+          }
+
+          Write-Host "Listing extracted directories"
+          Get-ChildItem $extractRoot -Directory | Select-Object Name, FullName | Format-Table -AutoSize
 
           $extractedDir = Get-ChildItem $extractRoot -Directory | Select-Object -First 1
           if (-not $extractedDir) {
@@ -191,6 +222,11 @@ jobs:
           $clangCmakeDir = Join-Path $installRoot "lib\cmake\clang"
           $llvmConfigPath = Join-Path $llvmCmakeDir "LLVMConfig.cmake"
           $clangConfigPath = Join-Path $clangCmakeDir "ClangConfig.cmake"
+
+          Write-Host "Checking extracted LLVM files"
+          Write-Host "clang-cl path: $clangClPath"
+          Write-Host "LLVMConfig path: $llvmConfigPath"
+          Write-Host "ClangConfig path: $clangConfigPath"
 
           if (-not (Test-Path $clangClPath)) {
             throw "clang-cl.exe not found after LLVM archive extraction: $clangClPath"
