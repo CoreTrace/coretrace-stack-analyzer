@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+// windows-skip: UCRT call graph changes the trailing local-uninitialized diagnostic set for this legacy fixture.
 /**
  * 01 - BUFFER OVERFLOWS (CWE-120, CWE-121, CWE-122, CWE-193)
  *

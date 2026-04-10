@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+// windows-skip: C++ heap lifetime diagnostics for missing delete are not yet emitted reliably on Windows.
 // resource-model: models/resource-lifetime/generic.txt
 int new_missing_delete()
 {

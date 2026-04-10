@@ -1,5 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 cmake_minimum_required(VERSION 3.21)
+cmake_policy(SET CMP0091 NEW)
+if(POLICY CMP0169)
+  cmake_policy(SET CMP0169 OLD)
+endif()
 project(stack_usage_analyzer)
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}/cmake")
@@ -18,9 +22,77 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-set(LLVM_LINK_LLVM_DYLIB ON)
+if(MSVC)
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
+
+function(coretrace_force_msvc_runtime target_name)
+    if(MSVC AND TARGET "${target_name}")
+        set_property(TARGET "${target_name}" PROPERTY
+            MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+    endif()
+endfunction()
+
+function(coretrace_patch_imported_link_property target_name property_name stale_value replacement_value)
+    if(NOT TARGET "${target_name}")
+        return()
+    endif()
+
+    get_target_property(current_value "${target_name}" "${property_name}")
+    if(NOT current_value OR current_value STREQUAL "current_value-NOTFOUND")
+        return()
+    endif()
+
+    string(REPLACE "${stale_value}" "${replacement_value}" updated_value "${current_value}")
+    if(NOT updated_value STREQUAL current_value)
+        set_target_properties("${target_name}" PROPERTIES
+            ${property_name} "${updated_value}")
+    endif()
+endfunction()
+
+function(coretrace_patch_llvm_diaguids replacement_path)
+    if(NOT WIN32 OR NOT TARGET LLVMDebugInfoPDB)
+        return()
+    endif()
+
+    set(coretrace_stale_diaguids_path
+        "C:/Program Files (x86)/Microsoft Visual Studio/2019/Professional/DIA SDK/lib/amd64/diaguids.lib")
+
+    foreach(property_name
+            INTERFACE_LINK_LIBRARIES
+            IMPORTED_LINK_INTERFACE_LIBRARIES
+            IMPORTED_LINK_INTERFACE_LIBRARIES_DEBUG
+            IMPORTED_LINK_INTERFACE_LIBRARIES_RELEASE
+            IMPORTED_LINK_INTERFACE_LIBRARIES_RELWITHDEBINFO
+            IMPORTED_LINK_INTERFACE_LIBRARIES_MINSIZEREL)
+        coretrace_patch_imported_link_property(
+            LLVMDebugInfoPDB
+            ${property_name}
+            "${coretrace_stale_diaguids_path}"
+            "${replacement_path}")
+    endforeach()
+endfunction()
+
+if(WIN32)
+    set(LLVM_LINK_LLVM_DYLIB OFF)
+else()
+    set(LLVM_LINK_LLVM_DYLIB ON)
+endif()
 
 find_package(LLVM REQUIRED CONFIG)
+
+if(WIN32)
+    set(coretrace_diaguids_candidates)
+    file(GLOB_RECURSE coretrace_diaguids_candidates
+        LIST_DIRECTORIES false
+        "C:/Program Files/Microsoft Visual Studio/*/*/DIA SDK/lib/amd64/diaguids.lib"
+        "C:/Program Files (x86)/Microsoft Visual Studio/*/*/DIA SDK/lib/amd64/diaguids.lib")
+
+    if(coretrace_diaguids_candidates)
+        list(GET coretrace_diaguids_candidates 0 coretrace_diaguids_path)
+        coretrace_patch_llvm_diaguids("${coretrace_diaguids_path}")
+    endif()
+endif()
 
 message(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION}")
 message(STATUS "Using LLVMConfig.cmake in: ${LLVM_DIR}")
@@ -151,7 +223,7 @@ if(CTRACE_STACK_HAVE_Z3_BACKEND)
     endif()
 endif()
 
-if(ENABLE_STACK_USAGE)
+if(ENABLE_STACK_USAGE AND NOT MSVC)
     target_compile_options(stack_usage_analyzer_lib PRIVATE -fstack-usage)
 endif()
 
@@ -188,6 +260,7 @@ target_include_directories(stack_usage_analyzer_lib SYSTEM
 
 # ALIAS FOR USE WITH FETCHCONTENT
 add_library(coretrace::stack_usage_analyzer_lib ALIAS stack_usage_analyzer_lib)
+coretrace_force_msvc_runtime(stack_usage_analyzer_lib)
 
 # Replace this one :
 target_link_libraries(stack_usage_analyzer_lib
@@ -247,7 +320,7 @@ if(BUILD_CLI)
         # it is already linked into the library.
     )
 
-    if(ENABLE_STACK_USAGE)
+    if(ENABLE_STACK_USAGE AND NOT MSVC)
         target_compile_options(stack_usage_analyzer PRIVATE -fstack-usage)
     endif()
 
@@ -260,7 +333,24 @@ if(BUILD_CLI)
         target_compile_options(stack_usage_analyzer PRIVATE -fsanitize=address -fno-omit-frame-pointer -g)
         target_link_options(stack_usage_analyzer PRIVATE -fsanitize=address)
     endif()
+
+    coretrace_force_msvc_runtime(stack_usage_analyzer)
 endif()
+
+include(GNUInstallDirs)
+
+install(TARGETS stack_usage_analyzer_lib
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+)
+
+if(BUILD_CLI)
+    install(TARGETS stack_usage_analyzer
+        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    )
+endif()
+
+install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 
 # =========
 #  TESTING

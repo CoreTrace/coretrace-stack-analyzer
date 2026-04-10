@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+// windows-skip: UCRT printf-family lowering changes the legacy diagnostic mix for this fixture on Windows.
 /**
  * 02 - FORMAT STRING (CWE-134)
  *

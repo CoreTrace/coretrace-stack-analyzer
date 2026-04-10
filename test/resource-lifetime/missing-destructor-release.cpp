@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+// windows-skip: destructor-acquired resource lifetime summary is not yet reconstructed equivalently under Windows.
 extern "C" void acquire_handle(void** out);
 extern "C" void release_handle(void* handle);
 

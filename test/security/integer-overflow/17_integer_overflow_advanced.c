@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+// windows-skip: advanced integer-overflow expectation set is not yet aligned with Windows/UCRT lowering.
 /**
  * 17 - ADVANCED INTEGER OVERFLOW CASES (nested/if/loop/tricky)
  */

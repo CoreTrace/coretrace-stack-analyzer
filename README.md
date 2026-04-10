@@ -6,6 +6,16 @@
 ./build.sh
 ```
 
+#### BUILD (Windows native)
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\build-windows.ps1 `
+  -LLVMDir "C:\LLVM\lib\cmake\llvm" `
+  -CompilerSourceDir "C:\Users\shookapic\Documents\coretrace-compiler" `
+  -LoggerSourceDir "C:\Users\shookapic\Documents\coretrace-log" `
+  -Configuration Release
+```
+
 The build script auto-detects LLVM/Clang using Homebrew (macOS) or
 `llvm-config` (Linux). If detection fails, set `LLVM_DIR` and `Clang_DIR`.
 
