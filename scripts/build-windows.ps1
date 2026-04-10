@@ -46,9 +46,7 @@ function New-PatchedCMakePackageDir {
         [string]$OldValue,
 
         [Parameter(Mandatory = $true)]
-        [string]$NewValue,
-
-        [string]$ImportPrefix = ""
+        [string]$NewValue
     )
 
     New-Item -ItemType Directory -Force -Path $DestinationDir | Out-Null
@@ -57,27 +55,6 @@ function New-PatchedCMakePackageDir {
     Get-ChildItem -Path $DestinationDir -Recurse -Filter *.cmake | ForEach-Object {
         $content = Get-Content -Path $_.FullName -Raw
         $updated = $content.Replace($OldValue, $NewValue)
-
-        if ($ImportPrefix -ne "")
-        {
-            $updated = [regex]::Replace(
-                $updated,
-                '(?ms)# Compute the installation prefix relative to this file\..*?if\(_IMPORT_PREFIX STREQUAL "/"\)\r?\n\s*set\(_IMPORT_PREFIX ""\)\r?\nendif\(\)',
-                "# Compute the installation prefix relative to this file.`nset(_IMPORT_PREFIX `"$ImportPrefix`")"
-            )
-
-            $updated = [regex]::Replace(
-                $updated,
-                '(?ms)# Compute the installation prefix from this LLVMConfig\.cmake file location\..*?get_filename_component\(LLVM_INSTALL_PREFIX "\$\{LLVM_INSTALL_PREFIX\}" PATH\)',
-                "# Compute the installation prefix from this LLVMConfig.cmake file location.`nset(LLVM_INSTALL_PREFIX `"$ImportPrefix`")"
-            )
-
-            $updated = [regex]::Replace(
-                $updated,
-                '(?ms)# Compute the installation prefix from this LLVMConfig\.cmake file location\..*?get_filename_component\(CLANG_INSTALL_PREFIX "\$\{CLANG_INSTALL_PREFIX\}" PATH\)',
-                "# Compute the installation prefix from this LLVMConfig.cmake file location.`nset(CLANG_INSTALL_PREFIX `"$ImportPrefix`")"
-            )
-        }
 
         if ($updated -ne $content)
         {
@@ -146,6 +123,9 @@ if (-not (Test-Path $clangClPath)) {
     throw "clang-cl.exe not found in '$llvmBinDir'."
 }
 
+# Also keep clang.exe handy for projects that search for it explicitly.
+$clangExePath = Join-Path $llvmBinDir "clang.exe"
+
 # --- Find Visual Studio ---
 $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
 $vsPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
@@ -163,7 +143,7 @@ Reset-BuildDirectoryIfGeneratorChanged `
     -PlatformName $platformForCache `
     -ToolsetName $toolsetForCache
 
-# --- Patching Logic (LLVM 20.1.0 stale DIA path fix) ---
+# --- Patching Logic (LLVM 20.1.0 stale DIA path fix only) ---
 $diaguidsCandidate = Join-Path $vsPath "DIA SDK\lib\amd64\diaguids.lib"
 $staleDiaPath = "C:/Program Files (x86)/Microsoft Visual Studio/2019/Professional/DIA SDK/lib/amd64/diaguids.lib"
 $llvmExportsPath = Join-Path $initialLLVMDir "LLVMExports.cmake"
@@ -178,22 +158,19 @@ if ((Test-Path $llvmExportsPath) -and (Test-Path $diaguidsCandidate)) {
         $patchedLLVMDir = Join-Path $patchedRoot "llvm"
         $patchedClangDir = Join-Path $patchedRoot "clang"
         $replacementDiaPath = $diaguidsCandidate.Replace("\", "/")
-        $importPrefix = $llvmRoot.Replace("\", "/")
 
         New-PatchedCMakePackageDir `
             -SourceDir $initialLLVMDir `
             -DestinationDir $patchedLLVMDir `
             -OldValue $staleDiaPath `
-            -NewValue $replacementDiaPath `
-            -ImportPrefix $importPrefix
+            -NewValue $replacementDiaPath
 
         if (Test-Path $initialClangDir) {
             New-PatchedCMakePackageDir `
                 -SourceDir $initialClangDir `
                 -DestinationDir $patchedClangDir `
                 -OldValue $staleDiaPath `
-                -NewValue $replacementDiaPath `
-                -ImportPrefix $importPrefix
+                -NewValue $replacementDiaPath
 
             $finalClangDir = $patchedClangDir
         } else {
@@ -220,6 +197,7 @@ $cmakeArgs = @(
     "-DLLVM_DIR=$finalLLVMDir",
     "-DClang_DIR=$finalClangDir",
     "-DCMAKE_PREFIX_PATH=$llvmRoot",
+    "-DCLANG_EXECUTABLE=$clangExePath",
     "-DBUILD_ANALYZER_UNIT_TESTS=$(if ($BuildAnalyzerUnitTests) { "ON" } else { "OFF" })"
 )
 
@@ -250,6 +228,8 @@ Write-Host "Resolved final LLVM dir: $finalLLVMDir"
 Write-Host "Resolved final Clang dir: $finalClangDir"
 Write-Host "clang-cl path: $clangClPath"
 Write-Host "clang-cl exists: $(Test-Path $clangClPath)"
+Write-Host "clang.exe path: $clangExePath"
+Write-Host "clang.exe exists: $(Test-Path $clangExePath)"
 Write-Host "llvmRoot: $llvmRoot"
 Write-Host "llvmBinDir: $llvmBinDir"
 Write-Host "LLVMConfig path: $llvmConfigPath"
