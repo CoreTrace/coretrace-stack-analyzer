@@ -185,7 +185,10 @@ jobs:
             $clangCmakeDir = $llvmCmakeDir
           }
 
-          $clangVersion = & "$installRoot\bin\clang-cl.exe" --version
+          # Fix: Join the multi-line output into a single string before matching
+          $clangVersionArray = & "$installRoot\bin\clang-cl.exe" --version
+          $clangVersion = $clangVersionArray -join " "
+          
           if ($clangVersion -notmatch "clang version 20\.1\.0") {
             throw "Unexpected clang-cl version. Got: $clangVersion"
           }
