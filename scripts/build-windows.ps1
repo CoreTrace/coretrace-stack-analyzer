@@ -143,43 +143,9 @@ Reset-BuildDirectoryIfGeneratorChanged `
     -PlatformName $platformForCache `
     -ToolsetName $toolsetForCache
 
-# --- Patching Logic (LLVM 20.1.0 stale DIA path fix only) ---
-$diaguidsCandidate = Join-Path $vsPath "DIA SDK\lib\amd64\diaguids.lib"
-$staleDiaPath = "C:/Program Files (x86)/Microsoft Visual Studio/2019/Professional/DIA SDK/lib/amd64/diaguids.lib"
-$llvmExportsPath = Join-Path $initialLLVMDir "LLVMExports.cmake"
-
-if ((Test-Path $llvmExportsPath) -and (Test-Path $diaguidsCandidate)) {
-    $llvmExportsContent = Get-Content -Path $llvmExportsPath -Raw
-
-    if ($llvmExportsContent.Contains($staleDiaPath)) {
-        Write-Host "Detected stale DIA SDK paths. Creating patched CMake files..."
-
-        $patchedRoot = Join-Path $resolvedBuildDir "__llvm_cmake_patched"
-        $patchedLLVMDir = Join-Path $patchedRoot "llvm"
-        $patchedClangDir = Join-Path $patchedRoot "clang"
-        $replacementDiaPath = $diaguidsCandidate.Replace("\", "/")
-
-        New-PatchedCMakePackageDir `
-            -SourceDir $initialLLVMDir `
-            -DestinationDir $patchedLLVMDir `
-            -OldValue $staleDiaPath `
-            -NewValue $replacementDiaPath
-
-        if (Test-Path $initialClangDir) {
-            New-PatchedCMakePackageDir `
-                -SourceDir $initialClangDir `
-                -DestinationDir $patchedClangDir `
-                -OldValue $staleDiaPath `
-                -NewValue $replacementDiaPath
-
-            $finalClangDir = $patchedClangDir
-        } else {
-            $finalClangDir = $patchedLLVMDir
-        }
-
-        $finalLLVMDir = $patchedLLVMDir
-    }
-}
+# --- No patching needed anymore ---
+$finalLLVMDir = $initialLLVMDir
+$finalClangDir = $initialClangDir
 
 # --- Validate package files early ---
 $llvmConfigPath = Join-Path $finalLLVMDir "LLVMConfig.cmake"
