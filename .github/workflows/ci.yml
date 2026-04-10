@@ -28,129 +28,115 @@ jobs:
         os: [ubuntu-latest, macos-latest]
 
     steps:
-    - uses: actions/checkout@v4
-      with:
-        # Shallow clone is enough for building. Steps that need history
-        # (changelog, merge-base) should override with their own fetch.
-        fetch-depth: 1
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
 
-    # Linux: install toolchain + accelerators
-    - name: Install dependencies (Linux)
-      if: runner.os == 'Linux'
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y build-essential cmake python3 \
-          ninja-build ccache lld
-        # Install LLVM and Clang 20
-        wget -O - https://apt.llvm.org/llvm-snapshot.gpg.key | sudo apt-key add -
-        sudo apt-add-repository "deb http://apt.llvm.org/jammy/ llvm-toolchain-jammy-20 main"
-        sudo apt-get update
-        sudo apt-get install -y llvm-20 llvm-20-dev clang-20 libclang-20-dev
-        echo "LLVM_DIR=/usr/lib/llvm-20/lib/cmake/llvm" >> $GITHUB_ENV
-        echo "Clang_DIR=/usr/lib/llvm-20/lib/cmake/clang" >> $GITHUB_ENV
+      - name: Install dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake python3 \
+            ninja-build ccache lld
+          wget -O - https://apt.llvm.org/llvm-snapshot.gpg.key | sudo apt-key add -
+          sudo apt-add-repository "deb http://apt.llvm.org/jammy/ llvm-toolchain-jammy-20 main"
+          sudo apt-get update
+          sudo apt-get install -y llvm-20 llvm-20-dev clang-20 libclang-20-dev
+          echo "LLVM_DIR=/usr/lib/llvm-20/lib/cmake/llvm" >> $GITHUB_ENV
+          echo "Clang_DIR=/usr/lib/llvm-20/lib/cmake/clang" >> $GITHUB_ENV
 
-    # macOS: install toolchain
-    - name: Install dependencies (macOS)
-      if: runner.os == 'macOS'
-      run: |
-        brew install cmake python llvm@20 ninja ccache
-        echo "LLVM_DIR=$(brew --prefix llvm@20)/lib/cmake/llvm" >> $GITHUB_ENV
-        echo "Clang_DIR=$(brew --prefix llvm@20)/lib/cmake/clang" >> $GITHUB_ENV
-        echo "$(brew --prefix llvm@20)/bin" >> $GITHUB_PATH
+      - name: Install dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install cmake python llvm@20 ninja ccache
+          echo "LLVM_DIR=$(brew --prefix llvm@20)/lib/cmake/llvm" >> $GITHUB_ENV
+          echo "Clang_DIR=$(brew --prefix llvm@20)/lib/cmake/clang" >> $GITHUB_ENV
+          echo "$(brew --prefix llvm@20)/bin" >> $GITHUB_PATH
 
-    # ccache: restore + configure
-    - name: Restore ccache
-      uses: actions/cache@v4
-      with:
-        path: ${{ env.CCACHE_DIR }}
-        key: ccache-${{ runner.os }}-${{ github.ref_name }}-${{ hashFiles('CMakeLists.txt', 'src/**', 'include/**') }}
-        restore-keys: |
-          ccache-${{ runner.os }}-${{ github.ref_name }}-
-          ccache-${{ runner.os }}-
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-${{ runner.os }}-${{ github.ref_name }}-${{ hashFiles('CMakeLists.txt', 'src/**', 'include/**') }}
+          restore-keys: |
+            ccache-${{ runner.os }}-${{ github.ref_name }}-
+            ccache-${{ runner.os }}-
 
-    - name: Configure ccache
-      run: |
-        ccache --set-config=cache_dir=${{ env.CCACHE_DIR }}
-        ccache --set-config=max_size=500M
-        ccache --set-config=compression=true
-        ccache -z
+      - name: Configure ccache
+        run: |
+          ccache --set-config=cache_dir=${{ env.CCACHE_DIR }}
+          ccache --set-config=max_size=500M
+          ccache --set-config=compression=true
+          ccache -z
 
-    # FetchContent cache (sources only)
-    - name: Restore FetchContent sources
-      uses: actions/cache@v4
-      with:
-        path: |
-          build/_deps/cc-src
-          build/_deps/coretrace-logger-src
-        key: fetchcontent-${{ runner.os }}-llvm20-${{ hashFiles('CMakeLists.txt', 'cmake/**') }}
-        restore-keys: |
-          fetchcontent-${{ runner.os }}-llvm20-
+      - name: Restore FetchContent sources
+        uses: actions/cache@v4
+        with:
+          path: |
+            build/_deps/cc-src
+            build/_deps/coretrace-logger-src
+          key: fetchcontent-${{ runner.os }}-llvm20-${{ hashFiles('CMakeLists.txt', 'cmake/**') }}
+          restore-keys: |
+            fetchcontent-${{ runner.os }}-llvm20-
 
-    # Configure
-    - name: Configure
-      run: |
-        cmake -S . -B build -G Ninja \
-          -DCMAKE_BUILD_TYPE=Release \
-          -DLLVM_DIR=${{ env.LLVM_DIR }} \
-          -DClang_DIR=${{ env.Clang_DIR }} \
-          -DCMAKE_C_COMPILER_LAUNCHER=ccache \
-          -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
-          -DUSE_SHARED_LIB=OFF \
-          -DBUILD_TESTS=OFF \
-          ${{ runner.os == 'Linux' && '-DCMAKE_EXE_LINKER_FLAGS=-fuse-ld=lld -DCMAKE_SHARED_LINKER_FLAGS=-fuse-ld=lld' || '' }}
+      - name: Configure
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DLLVM_DIR=${{ env.LLVM_DIR }} \
+            -DClang_DIR=${{ env.Clang_DIR }} \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DUSE_SHARED_LIB=OFF \
+            -DBUILD_TESTS=OFF \
+            ${{ runner.os == 'Linux' && '-DCMAKE_EXE_LINKER_FLAGS=-fuse-ld=lld -DCMAKE_SHARED_LINKER_FLAGS=-fuse-ld=lld' || '' }}
 
-    # Build
-    - name: Build
-      run: cmake --build build --config Release
+      - name: Build
+        run: cmake --build build --config Release
 
-    - name: Show ccache stats
-      if: always()
-      run: ccache -s
+      - name: Show ccache stats
+        if: always()
+        run: ccache -s
 
-    # Tests
-    - name: Test Stack Usage Analyzer
-      timeout-minutes: 45
-      run: |
-        TEST_JOBS="$(python3 -c 'import os; print(max(1, min(8, os.cpu_count() or 1)))')"
-        echo "Running run_test.py with ${TEST_JOBS} job(s)"
-        EXTRA_ANALYZER_ARGS=""
-        CORETRACE_RUN_TEST_EXTRA_ANALYZER_ARGS="${EXTRA_ANALYZER_ARGS}" \
-          python3 -u run_test.py --jobs="${TEST_JOBS}"
+      - name: Test Stack Usage Analyzer
+        timeout-minutes: 45
+        run: |
+          TEST_JOBS="$(python3 -c 'import os; print(max(1, min(8, os.cpu_count() or 1)))')"
+          echo "Running run_test.py with ${TEST_JOBS} job(s)"
+          EXTRA_ANALYZER_ARGS=""
+          CORETRACE_RUN_TEST_EXTRA_ANALYZER_ARGS="${EXTRA_ANALYZER_ARGS}" \
+            python3 -u run_test.py --jobs="${TEST_JOBS}"
 
-    # Self-analysis (Linux only)
+      - name: Restore resource summary cache
+        if: runner.os == 'Linux'
+        uses: actions/cache@v4
+        with:
+          path: .cache/resource-lifetime
+          key: resource-cache-${{ runner.os }}-${{ hashFiles('models/resource-lifetime/**') }}
+          restore-keys: |
+            resource-cache-${{ runner.os }}-
 
-    # Resource summary cache — stale entries are harmless (cache key includes
-    # schema + model + IR hash, so mismatches simply trigger a rebuild).
-    - name: Restore resource summary cache
-      if: runner.os == 'Linux'
-      uses: actions/cache@v4
-      with:
-        path: .cache/resource-lifetime
-        key: resource-cache-${{ runner.os }}-${{ hashFiles('models/resource-lifetime/**') }}
-        restore-keys: |
-          resource-cache-${{ runner.os }}-
+      - name: Self-analysis (analyze own source code)
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p artifacts
+          python3 scripts/ci/run_code_analysis.py \
+            --analyzer build/stack_usage_analyzer \
+            --compdb build/compile_commands.json \
+            --exclude build/_deps/ \
+            --base-dir ${{ github.workspace }} \
+            --sarif-out artifacts/self-analysis.sarif \
+            --json-out artifacts/self-analysis.json \
+            --fail-on error \
+            --analyzer-arg=--analysis-profile=fast \
+            --analyzer-arg=--resource-model=models/resource-lifetime/generic.txt
 
-    - name: Self-analysis (analyze own source code)
-      if: runner.os == 'Linux'
-      run: |
-        mkdir -p artifacts
-        python3 scripts/ci/run_code_analysis.py \
-          --analyzer build/stack_usage_analyzer \
-          --compdb build/compile_commands.json \
-          --exclude build/_deps/ \
-          --base-dir ${{ github.workspace }} \
-          --sarif-out artifacts/self-analysis.sarif \
-          --json-out artifacts/self-analysis.json \
-          --fail-on error \
-          --analyzer-arg=--analysis-profile=fast \
-          --analyzer-arg=--resource-model=models/resource-lifetime/generic.txt
-
-    - name: Upload SARIF to Code Scanning
-      if: runner.os == 'Linux' && always() && hashFiles('artifacts/self-analysis.sarif') != ''
-      uses: github/codeql-action/upload-sarif@v3
-      with:
-        sarif_file: artifacts/self-analysis.sarif
-        category: coretrace-self-analysis
+      - name: Upload SARIF to Code Scanning
+        if: runner.os == 'Linux' && always() && hashFiles('artifacts/self-analysis.sarif') != ''
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: artifacts/self-analysis.sarif
+          category: coretrace-self-analysis
 
   build-windows:
     name: Build on Windows (pinned LLVM 20.1.0)
@@ -159,127 +145,143 @@ jobs:
       contents: read
 
     steps:
-    - uses: actions/checkout@v4
-      with:
-        fetch-depth: 1
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
 
-    - name: Resolve dependency ref
-      shell: pwsh
-      run: |
-        $ErrorActionPreference = "Stop"
-        $ref = if ($env:GITHUB_HEAD_REF) { $env:GITHUB_HEAD_REF } else { $env:GITHUB_REF_NAME }
-        "DEPENDENCY_REF=$ref" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Resolve dependency ref
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $ref = if ($env:GITHUB_HEAD_REF) { $env:GITHUB_HEAD_REF } else { $env:GITHUB_REF_NAME }
+          "DEPENDENCY_REF=$ref" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-    - name: Checkout coretrace-compiler matching ref
-      id: checkout_compiler_ref
-      continue-on-error: true
-      uses: actions/checkout@v4
-      with:
-        repository: CoreTrace/coretrace-compiler
-        ref: ${{ env.DEPENDENCY_REF }}
-        path: deps/coretrace-compiler
-        fetch-depth: 1
+      - name: Checkout coretrace-compiler matching ref
+        id: checkout_compiler_ref
+        continue-on-error: true
+        uses: actions/checkout@v4
+        with:
+          repository: CoreTrace/coretrace-compiler
+          ref: ${{ env.DEPENDENCY_REF }}
+          path: deps/coretrace-compiler
+          fetch-depth: 1
 
-    - name: Checkout coretrace-compiler main fallback
-      if: steps.checkout_compiler_ref.outcome == 'failure'
-      uses: actions/checkout@v4
-      with:
-        repository: CoreTrace/coretrace-compiler
-        ref: main
-        path: deps/coretrace-compiler
-        fetch-depth: 1
+      - name: Checkout coretrace-compiler main fallback
+        if: steps.checkout_compiler_ref.outcome == 'failure'
+        uses: actions/checkout@v4
+        with:
+          repository: CoreTrace/coretrace-compiler
+          ref: main
+          path: deps/coretrace-compiler
+          fetch-depth: 1
 
-    - name: Checkout coretrace-log matching ref
-      id: checkout_logger_ref
-      continue-on-error: true
-      uses: actions/checkout@v4
-      with:
-        repository: CoreTrace/coretrace-log
-        ref: ${{ env.DEPENDENCY_REF }}
-        path: deps/coretrace-log
-        fetch-depth: 1
+      - name: Checkout coretrace-log matching ref
+        id: checkout_logger_ref
+        continue-on-error: true
+        uses: actions/checkout@v4
+        with:
+          repository: CoreTrace/coretrace-log
+          ref: ${{ env.DEPENDENCY_REF }}
+          path: deps/coretrace-log
+          fetch-depth: 1
 
-    - name: Checkout coretrace-log main fallback
-      if: steps.checkout_logger_ref.outcome == 'failure'
-      uses: actions/checkout@v4
-      with:
-        repository: CoreTrace/coretrace-log
-        ref: main
-        path: deps/coretrace-log
-        fetch-depth: 1
+      - name: Checkout coretrace-log main fallback
+        if: steps.checkout_logger_ref.outcome == 'failure'
+        uses: actions/checkout@v4
+        with:
+          repository: CoreTrace/coretrace-log
+          ref: main
+          path: deps/coretrace-log
+          fetch-depth: 1
 
-    - name: Install LLVM 20.1.0 to fixed location
-      shell: pwsh
-      run: |
-        $ErrorActionPreference = "Stop"
-        $llvmVersion = "20.1.0"
-        $installerUrl = "https://github.com/llvm/llvm-project/releases/download/llvmorg-$llvmVersion/LLVM-$llvmVersion-win64.exe"
-        $installerPath = "$env:RUNNER_TEMP\LLVM-$llvmVersion-win64.exe"
-        $installRoot = "C:\Program Files\LLVM-$llvmVersion"
-        $llvmCmakeDir = "$installRoot\lib\cmake\llvm"
-        $clangCmakeDir = "$installRoot\lib\cmake\clang"
+      - name: Install LLVM 20.1.0 to fixed location
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
 
-        Invoke-WebRequest -Uri $installerUrl -OutFile $installerPath
-        Start-Process -FilePath $installerPath -ArgumentList @("/S", "/D=$installRoot") -Wait -NoNewWindow
-        
-        # Give the filesystem a moment to settle after the installer process exits
-        Start-Sleep -Seconds 5
+          $llvmVersion = "20.1.0"
+          $installerUrl = "https://github.com/llvm/llvm-project/releases/download/llvmorg-$llvmVersion/LLVM-$llvmVersion-win64.exe"
+          $installerPath = "$env:RUNNER_TEMP\LLVM-$llvmVersion-win64.exe"
+          $installRoot = "C:\Program Files\LLVM-$llvmVersion"
 
-        if (-not (Test-Path "$installRoot\bin\clang-cl.exe")) {
-          throw "clang-cl.exe not found after LLVM install: $installRoot\bin\clang-cl.exe"
-        }
-        if (-not (Test-Path $llvmCmakeDir)) {
-          throw "LLVM CMake package dir not found: $llvmCmakeDir"
-        }
-        
-        # Fallback for Clang CMake dir if not explicitly created
-        if (-not (Test-Path $clangCmakeDir)) {
-          Write-Host "Clang CMake package dir not found at $clangCmakeDir. Falling back to LLVM dir."
-          $clangCmakeDir = $llvmCmakeDir
-        }
+          $llvmCmakeDir = "$installRoot\lib\cmake\llvm"
+          $clangCmakeDir = "$installRoot\lib\cmake\clang"
+          $llvmConfigPath = Join-Path $llvmCmakeDir "LLVMConfig.cmake"
+          $clangConfigPath = Join-Path $clangCmakeDir "ClangConfig.cmake"
+          $clangClPath = "$installRoot\bin\clang-cl.exe"
 
-        # Fix: Join the multi-line output into a single string before matching
-        $clangVersionArray = & "$installRoot\bin\clang-cl.exe" --version
-        $clangVersion = $clangVersionArray -join " "
-        
-        if ($clangVersion -notmatch "clang version 20\.1\.0") {
-          throw "Unexpected clang-cl version. Got: $clangVersion"
-        }
+          Invoke-WebRequest -Uri $installerUrl -OutFile $installerPath
+          Start-Process -FilePath $installerPath -ArgumentList @("/S", "/D=$installRoot") -Wait -NoNewWindow
 
-        "LLVM_CMAKE_DIR=$llvmCmakeDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-        "LLVM_DIR=$llvmCmakeDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-        "Clang_DIR=$clangCmakeDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Start-Sleep -Seconds 5
 
-    - name: Configure + Build + Install
-      shell: pwsh
-      run: |
-        $ErrorActionPreference = "Stop"
-        powershell -ExecutionPolicy Bypass -File .\scripts\build-windows.ps1 `
-          -LLVMDir "${env:LLVM_CMAKE_DIR}" `
-          -CompilerSourceDir "${PWD}\deps\coretrace-compiler" `
-          -LoggerSourceDir "${PWD}\deps\coretrace-log" `
-          -Configuration Release
+          if (-not (Test-Path $clangClPath)) {
+            throw "clang-cl.exe not found after LLVM install: $clangClPath"
+          }
 
-    - name: Smoke test
-      shell: pwsh
-      run: |
-        $ErrorActionPreference = "Stop"
-        $help = .\dist\windows\bin\stack_usage_analyzer.exe --help
-        if ($help -notmatch "Stack Usage Analyzer") {
-          throw "help output did not contain the expected banner"
-        }
+          Write-Host "Inspecting LLVM installation root..."
+          if (Test-Path $installRoot) {
+            Get-ChildItem $installRoot | Select-Object Name, FullName | Format-Table -AutoSize
+          }
 
-        $analysis = .\dist\windows\bin\stack_usage_analyzer.exe test\false-positif\unique_ptr_state.cpp --warnings-only
-        if ($analysis -notmatch "Diagnostics summary:") {
-          throw "analysis output did not include a diagnostics summary"
-        }
-        $analysis | Select-Object -First 20
+          Write-Host "Inspecting LLVM CMake tree..."
+          if (Test-Path "$installRoot\lib\cmake") {
+            Get-ChildItem "$installRoot\lib\cmake" -Recurse -ErrorAction SilentlyContinue |
+              Select-Object FullName |
+              Format-Table -AutoSize
+          } else {
+            Write-Host "No lib\cmake directory found under $installRoot"
+          }
 
-    - name: Run Windows regression suite
-      shell: pwsh
-      run: |
-        $ErrorActionPreference = "Stop"
-        $env:PYTHONUTF8 = "1"
-        $env:CORETRACE_RUN_TEST_ANALYZER = (Resolve-Path .\dist\windows\bin\stack_usage_analyzer.exe).Path
-        $jobs = [Math]::Max(1, [Math]::Min(6, [Environment]::ProcessorCount))
-        python -u run_test.py --jobs=$jobs
+          if (-not (Test-Path $llvmConfigPath)) {
+            throw "LLVMConfig.cmake not found after LLVM install: $llvmConfigPath"
+          }
+
+          if (-not (Test-Path $clangConfigPath)) {
+            throw "ClangConfig.cmake not found after LLVM install: $clangConfigPath"
+          }
+
+          $clangVersionArray = & $clangClPath --version
+          $clangVersion = $clangVersionArray -join " "
+
+          if ($clangVersion -notmatch "clang version 20\.1\.0") {
+            throw "Unexpected clang-cl version. Got: $clangVersion"
+          }
+
+          "LLVM_CMAKE_DIR=$llvmCmakeDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "LLVM_DIR=$llvmCmakeDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "Clang_DIR=$clangCmakeDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Configure + Build + Install
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          powershell -ExecutionPolicy Bypass -File .\scripts\build-windows.ps1 `
+            -LLVMDir "${env:LLVM_CMAKE_DIR}" `
+            -CompilerSourceDir "${PWD}\deps\coretrace-compiler" `
+            -LoggerSourceDir "${PWD}\deps\coretrace-log" `
+            -Configuration Release
+
+      - name: Smoke test
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $help = .\dist\windows\bin\stack_usage_analyzer.exe --help
+          if ($help -notmatch "Stack Usage Analyzer") {
+            throw "help output did not contain the expected banner"
+          }
+
+          $analysis = .\dist\windows\bin\stack_usage_analyzer.exe test\false-positif\unique_ptr_state.cpp --warnings-only
+          if ($analysis -notmatch "Diagnostics summary:") {
+            throw "analysis output did not include a diagnostics summary"
+          }
+          $analysis | Select-Object -First 20
+
+      - name: Run Windows regression suite
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $env:PYTHONUTF8 = "1"
+          $env:CORETRACE_RUN_TEST_ANALYZER = (Resolve-Path .\dist\windows\bin\stack_usage_analyzer.exe).Path
+          $jobs = [Math]::Max(1, [Math]::Min(6, [Environment]::ProcessorCount))
+          python -u run_test.py --jobs=$jobs

@@ -159,36 +159,52 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
+
           $llvmVersion = "20.1.0"
           $installerUrl = "https://github.com/llvm/llvm-project/releases/download/llvmorg-$llvmVersion/LLVM-$llvmVersion-win64.exe"
           $installerPath = "$env:RUNNER_TEMP\LLVM-$llvmVersion-win64.exe"
           $installRoot = "C:\Program Files\LLVM-$llvmVersion"
+
           $llvmCmakeDir = "$installRoot\lib\cmake\llvm"
           $clangCmakeDir = "$installRoot\lib\cmake\clang"
+          $llvmConfigPath = Join-Path $llvmCmakeDir "LLVMConfig.cmake"
+          $clangConfigPath = Join-Path $clangCmakeDir "ClangConfig.cmake"
+          $clangClPath = "$installRoot\bin\clang-cl.exe"
 
           Invoke-WebRequest -Uri $installerUrl -OutFile $installerPath
           Start-Process -FilePath $installerPath -ArgumentList @("/S", "/D=$installRoot") -Wait -NoNewWindow
-          
-          # Give the filesystem a moment to settle after the installer process exits
+
           Start-Sleep -Seconds 5
 
-          if (-not (Test-Path "$installRoot\bin\clang-cl.exe")) {
-            throw "clang-cl.exe not found after LLVM install: $installRoot\bin\clang-cl.exe"
-          }
-          if (-not (Test-Path $llvmCmakeDir)) {
-            throw "LLVM CMake package dir not found: $llvmCmakeDir"
-          }
-          
-          # Fallback for Clang CMake dir if not explicitly created
-          if (-not (Test-Path $clangCmakeDir)) {
-            Write-Host "Clang CMake package dir not found at $clangCmakeDir. Falling back to LLVM dir."
-            $clangCmakeDir = $llvmCmakeDir
+          if (-not (Test-Path $clangClPath)) {
+            throw "clang-cl.exe not found after LLVM install: $clangClPath"
           }
 
-          # Fix: Join the multi-line output into a single string before matching
-          $clangVersionArray = & "$installRoot\bin\clang-cl.exe" --version
+          Write-Host "Inspecting LLVM installation root..."
+          if (Test-Path $installRoot) {
+            Get-ChildItem $installRoot | Select-Object Name, FullName | Format-Table -AutoSize
+          }
+
+          Write-Host "Inspecting LLVM CMake tree..."
+          if (Test-Path "$installRoot\lib\cmake") {
+            Get-ChildItem "$installRoot\lib\cmake" -Recurse -ErrorAction SilentlyContinue |
+              Select-Object FullName |
+              Format-Table -AutoSize
+          } else {
+            Write-Host "No lib\cmake directory found under $installRoot"
+          }
+
+          if (-not (Test-Path $llvmConfigPath)) {
+            throw "LLVMConfig.cmake not found after LLVM install: $llvmConfigPath"
+          }
+
+          if (-not (Test-Path $clangConfigPath)) {
+            throw "ClangConfig.cmake not found after LLVM install: $clangConfigPath"
+          }
+
+          $clangVersionArray = & $clangClPath --version
           $clangVersion = $clangVersionArray -join " "
-          
+
           if ($clangVersion -notmatch "clang version 20\.1\.0") {
             throw "Unexpected clang-cl version. Got: $clangVersion"
           }
