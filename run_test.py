@@ -38,6 +38,29 @@ class TestRunConfig:
 RUN_CONFIG = TestRunConfig()
 _CACHE_LOCK = threading.Lock()
 _MEM_CACHE = {}
+_FILE_HASH_CACHE = {}
+
+def _get_file_hash(p: Path) -> str:
+    path_str = str(p)
+    try:
+        st = p.stat()
+    except OSError:
+        return ""
+    
+    # Use st_mtime_ns as a cache key for the hash
+    cache_key = (path_str, st.st_mtime_ns, st.st_size)
+    with _CACHE_LOCK:
+        if cache_key in _FILE_HASH_CACHE:
+            return _FILE_HASH_CACHE[cache_key]
+        
+    try:
+        h = hashlib.sha256(p.read_bytes()).hexdigest()
+    except OSError:
+        h = ""
+        
+    with _CACHE_LOCK:
+        _FILE_HASH_CACHE[cache_key] = h
+    return h
 # Set to True while the top-level parallel check phase is running.
 # Prevents nested ThreadPoolExecutor creation (N² process explosion).
 _PARALLEL_PHASE = False
@@ -170,11 +193,9 @@ def _collect_cache_dependencies(args):
             candidates.add(p.resolve())
 
     for p in sorted(candidates, key=lambda x: str(x)):
-        try:
-            st = p.stat()
-        except OSError:
-            continue
-        deps.append([str(p), st.st_mtime_ns, st.st_size])
+        h = _get_file_hash(p)
+        if h:
+            deps.append([str(p), h])
     return deps
 
 

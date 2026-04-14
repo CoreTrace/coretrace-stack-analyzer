@@ -109,6 +109,14 @@ jobs:
       run: ccache -s
 
     # Tests
+    - name: Restore run_test cache
+      uses: actions/cache@v4
+      with:
+        path: .cache/run_test
+        key: run-test-${{ runner.os }}-${{ hashFiles('build/stack_usage_analyzer', 'test/**', 'run_test.py') }}
+        restore-keys: |
+          run-test-${{ runner.os }}-
+
     - name: Test Stack Usage Analyzer
       timeout-minutes: 45
       run: |
