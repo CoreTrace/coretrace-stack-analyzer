@@ -7,6 +7,9 @@ import fnmatch
 import json
 import subprocess
 import sys
+import os
+import math
+import concurrent.futures
 from pathlib import Path
 from typing import Iterable
 
@@ -380,38 +383,80 @@ def main() -> int:
         ensure_parent(Path(args.sarif_out))
         sarif_out_path = str(Path(args.sarif_out).resolve())
 
-    print(f"Running analyzer on {len(selected_inputs)} file(s).")
-    cmd = analyzer_cmd(
-        analyzer=analyzer,
-        inputs=selected_inputs,
-        fmt="json",
-        compdb_path=compdb_path,
-        base_dir=args.base_dir,
-        extra_args=args.analyzer_arg,
-        sarif_out=sarif_out_path,
-    )
-    run = subprocess.run(cmd, check=False, capture_output=True, text=True)
-    if run.returncode != 0:
-        if run.stdout:
-            sys.stdout.write(run.stdout)
-        if run.stderr:
-            sys.stderr.write(run.stderr)
-        return run.returncode
+    jobs = int(os.environ.get("ANALYZER_JOBS", os.cpu_count() or 1))
+    chunk_size = max(1, math.ceil(len(selected_inputs) / jobs))
+    chunks = [selected_inputs[i:i + chunk_size] for i in range(0, len(selected_inputs), chunk_size)]
+    
+    print(f"Running analyzer on {len(selected_inputs)} file(s) across {len(chunks)} job(s).")
+    
+    def run_chunk(i, chunk):
+        chunk_sarif = f"{sarif_out_path}.chunk{i}" if sarif_out_path else None
+        
+        cmd = analyzer_cmd(
+            analyzer=analyzer,
+            inputs=chunk,
+            fmt="json",
+            compdb_path=compdb_path,
+            base_dir=args.base_dir,
+            extra_args=args.analyzer_arg,
+            sarif_out=chunk_sarif,
+        )
+        run = subprocess.run(cmd, check=False, capture_output=True, text=True)
+        return i, run, chunk_sarif
 
-    try:
-        payload = json.loads(run.stdout)
-    except json.JSONDecodeError as exc:
-        print(f"Analyzer returned invalid JSON: {exc}", file=sys.stderr)
+    diags = []
+    has_error = False
+    all_sarif_files = []
+    
+    with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as executor:
+        futures = [executor.submit(run_chunk, i, c) for i, c in enumerate(chunks)]
+        for fut in concurrent.futures.as_completed(futures):
+            i, run, chunk_sarif = fut.result()
+            
+            if chunk_sarif and os.path.exists(chunk_sarif):
+                all_sarif_files.append(chunk_sarif)
+
+            if run.returncode != 0:
+                if run.stdout:
+                    sys.stdout.write(run.stdout)
+                if run.stderr:
+                    sys.stderr.write(run.stderr)
+                has_error = True
+            else:
+                try:
+                    payload = json.loads(run.stdout)
+                    d = payload.get("diagnostics", [])
+                    if isinstance(d, list):
+                        diags.extend(d)
+                except json.JSONDecodeError as exc:
+                    print(f"Analyzer returned invalid JSON: {exc}", file=sys.stderr)
+                    has_error = True
+
+    if has_error:
         return 2
+
+    if sarif_out_path and all_sarif_files:
+        merged = None
+        for p in all_sarif_files:
+            with open(p, 'r') as f:
+                try:
+                    data = json.load(f)
+                    if merged is None:
+                        merged = data
+                    else:
+                        if data.get("runs") and merged.get("runs"):
+                            merged["runs"][0].setdefault("results", []).extend(data["runs"][0].get("results", []))
+                except json.JSONDecodeError:
+                    pass
+            os.unlink(p)
+        if merged:
+            with open(sarif_out_path, 'w') as f:
+                json.dump(merged, f)
 
     if args.json_out:
         json_output_path = Path(args.json_out)
         ensure_parent(json_output_path)
-        json_output_path.write_text(run.stdout, encoding="utf-8")
-
-    diags = payload.get("diagnostics", [])
-    if not isinstance(diags, list):
-        diags = []
+        json_output_path.write_text(json.dumps({"diagnostics": diags}, indent=2), encoding="utf-8")
 
     errors = sum(1 for d in diags if sev(d) == "ERROR")
     warnings = sum(1 for d in diags if sev(d) == "WARNING")
