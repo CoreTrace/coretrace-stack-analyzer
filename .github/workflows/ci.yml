@@ -5,7 +5,7 @@ on:
   pull_request:
     branches: [main]
   push:
-    branches: [main]
+    branches: [main, "70-investigation-excessive-ci-execution-time-on-ubuntu-runners"]
   workflow_dispatch:
 
 concurrency:
@@ -43,7 +43,8 @@ jobs:
           ninja-build ccache lld
         # Install LLVM and Clang 20
         wget -O - https://apt.llvm.org/llvm-snapshot.gpg.key | sudo apt-key add -
-        sudo apt-add-repository "deb http://apt.llvm.org/jammy/ llvm-toolchain-jammy-20 main"
+        UBUNTU_CODENAME=$(lsb_release -cs)
+        sudo apt-add-repository "deb http://apt.llvm.org/${UBUNTU_CODENAME}/ llvm-toolchain-${UBUNTU_CODENAME}-20 main"
         sudo apt-get update
         sudo apt-get install -y llvm-20 llvm-20-dev clang-20 libclang-20-dev
         echo "LLVM_DIR=/usr/lib/llvm-20/lib/cmake/llvm" >> $GITHUB_ENV
