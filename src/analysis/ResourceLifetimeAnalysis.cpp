@@ -1276,12 +1276,12 @@ namespace ctrace::stack::analysis
 #if LLVM_VERSION_MAJOR >= 21
             // NoCapture replaced by Captures attribute in LLVM 21
             auto capturesAttr = CB.getParamAttr(argIndex, llvm::Attribute::Captures);
-            bool noCapture = capturesAttr.isValid() && llvm::capturesNothing(capturesAttr.getCaptureInfo());
+            bool noCapture =
+                capturesAttr.isValid() && llvm::capturesNothing(capturesAttr.getCaptureInfo());
 #else
             bool noCapture = CB.paramHasAttr(argIndex, llvm::Attribute::NoCapture);
 #endif
-            return noCapture ||
-                   CB.paramHasAttr(argIndex, llvm::Attribute::ByVal) ||
+            return noCapture || CB.paramHasAttr(argIndex, llvm::Attribute::ByVal) ||
                    CB.paramHasAttr(argIndex, llvm::Attribute::ByRef) ||
                    CB.paramHasAttr(argIndex, llvm::Attribute::StructRet);
         }
@@ -1632,7 +1632,8 @@ namespace ctrace::stack::analysis
             // in that case, no unmodeled call can acquire through its address.
 #if LLVM_VERSION_MAJOR >= 21
             // isNonEscapingLocalObject removed in LLVM 21; use PointerMayBeCaptured instead
-            if (!llvm::PointerMayBeCaptured(&sourceSlot, /*ReturnCaptures=*/false, /*StoreCaptures=*/true))
+            if (!llvm::PointerMayBeCaptured(&sourceSlot, /*ReturnCaptures=*/false,
+                                            /*StoreCaptures=*/true))
                 return false;
 #else
             if (llvm::isNonEscapingLocalObject(&sourceSlot))
