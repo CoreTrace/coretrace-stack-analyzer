@@ -51,12 +51,15 @@ function(coretrace_patch_imported_link_property target_name property_name stale_
 endfunction()
 
 function(coretrace_patch_llvm_diaguids replacement_path)
+    # Replace *any* diaguids.lib entry embedded in the imported target's link
+    # properties with the caller-provided replacement path.  This is
+    # deliberately generic: it does not match a single hard-coded VS edition /
+    # version / layout, so it keeps working when the LLVM CMake package was
+    # built against a different Visual Studio installation than the one present
+    # on the current machine.
     if(NOT WIN32 OR NOT TARGET LLVMDebugInfoPDB)
         return()
     endif()
-
-    set(coretrace_stale_diaguids_path
-        "C:/Program Files (x86)/Microsoft Visual Studio/2019/Professional/DIA SDK/lib/amd64/diaguids.lib")
 
     foreach(property_name
             INTERFACE_LINK_LIBRARIES
@@ -65,11 +68,25 @@ function(coretrace_patch_llvm_diaguids replacement_path)
             IMPORTED_LINK_INTERFACE_LIBRARIES_RELEASE
             IMPORTED_LINK_INTERFACE_LIBRARIES_RELWITHDEBINFO
             IMPORTED_LINK_INTERFACE_LIBRARIES_MINSIZEREL)
-        coretrace_patch_imported_link_property(
-            LLVMDebugInfoPDB
-            ${property_name}
-            "${coretrace_stale_diaguids_path}"
-            "${replacement_path}")
+        get_target_property(coretrace_entries LLVMDebugInfoPDB "${property_name}")
+        if(NOT coretrace_entries OR coretrace_entries STREQUAL "coretrace_entries-NOTFOUND")
+            continue()
+        endif()
+        set(coretrace_updated "")
+        set(coretrace_patched FALSE)
+        foreach(coretrace_entry IN LISTS coretrace_entries)
+            string(TOLOWER "${coretrace_entry}" coretrace_entry_lower)
+            if(coretrace_entry_lower MATCHES "diaguids\\.lib$")
+                list(APPEND coretrace_updated "${replacement_path}")
+                set(coretrace_patched TRUE)
+            else()
+                list(APPEND coretrace_updated "${coretrace_entry}")
+            endif()
+        endforeach()
+        if(coretrace_patched)
+            set_target_properties(LLVMDebugInfoPDB PROPERTIES
+                "${property_name}" "${coretrace_updated}")
+        endif()
     endforeach()
 endfunction()
 

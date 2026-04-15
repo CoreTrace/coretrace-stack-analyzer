@@ -130,18 +130,21 @@ def _read_fixture_text(path: Path) -> str:
 
 
 def fixture_skip_reason(path: Path) -> Optional[str]:
+    """
+    Return a non-None string when this fixture is unsupported on the current
+    platform (via the ``// platforms: …`` directive).  Returns None when the
+    fixture should run.
+
+    Note: ``// windows-skip`` is handled separately by
+    ``fixture_windows_xfail_reason`` — those fixtures are *expected* failures
+    rather than hard skips, so they still appear in the suite output.
+    """
     text = _read_fixture_text(path)
-    platform_name = current_platform_name()
-
-    if platform_name == "windows":
-        match = _RE_WINDOWS_SKIP.search(text)
-        if match:
-            return match.group(1).strip()
-
     platforms_match = _RE_PLATFORMS.search(text)
     if not platforms_match:
         return None
 
+    platform_name = current_platform_name()
     tokens = {
         token.strip().lower()
         for token in platforms_match.group(1).split(",")
@@ -150,18 +153,36 @@ def fixture_skip_reason(path: Path) -> Optional[str]:
     if not tokens:
         return None
 
-    normalized_current = platform_name
-    if normalized_current in tokens:
+    if platform_name in tokens:
         return None
-    if normalized_current in {"linux", "macos"} and "posix" in tokens:
+    if platform_name in {"linux", "macos"} and "posix" in tokens:
         return None
 
     return f"fixture platforms={','.join(sorted(tokens))}"
 
 
+def fixture_windows_xfail_reason(path: Path) -> Optional[str]:
+    """
+    Return the ``// windows-skip`` reason string when running on Windows,
+    or None otherwise.  Fixtures with this annotation are run as expected
+    failures: a failure is reported as [xfail] and does not count against
+    the suite; an unexpected pass is reported as [xpass].
+    """
+    if not is_windows_platform():
+        return None
+    text = _read_fixture_text(path)
+    match = _RE_WINDOWS_SKIP.search(text)
+    if match:
+        return match.group(1).strip()
+    return None
+
+
 def collect_fixture_sources():
     """
-    Collect C/C++ fixtures under test/, excluding helper/unit-test sources.
+    Collect C/C++ fixtures under test/ that are fully supported on the current
+    platform, excluding helper/unit-test sources, platform-filtered fixtures,
+    and windows-skip fixtures (those are handled by
+    ``collect_windows_xfail_fixtures``).
     """
     fixture_sources = []
     for pattern in ("**/*.c", "**/*.cc", "**/*.cpp", "**/*.cxx"):
@@ -169,7 +190,30 @@ def collect_fixture_sources():
     return [
         path
         for path in sorted(fixture_sources)
-        if is_fixture_source(path) and fixture_skip_reason(path) is None
+        if is_fixture_source(path)
+        and fixture_skip_reason(path) is None
+        and fixture_windows_xfail_reason(path) is None
+    ]
+
+
+def collect_windows_xfail_fixtures():
+    """
+    Return ``// windows-skip`` fixtures on Windows.  These are run as
+    expected failures: the suite still exercises them and surfaces the
+    result, but failures are not counted against the overall pass/fail
+    status.  Returns an empty list on non-Windows platforms.
+    """
+    if not is_windows_platform():
+        return []
+    fixture_sources = []
+    for pattern in ("**/*.c", "**/*.cc", "**/*.cpp", "**/*.cxx"):
+        fixture_sources.extend(RUN_CONFIG.test_dir.glob(pattern))
+    return [
+        path
+        for path in sorted(fixture_sources)
+        if is_fixture_source(path)
+        and fixture_skip_reason(path) is None
+        and fixture_windows_xfail_reason(path) is not None
     ]
 
 
@@ -577,10 +621,8 @@ def _parse_total_warning_error_count(output: str):
 def _default_strict_diagnostic_count(c_path: Path) -> bool:
     """
     Enable strict warning/error count by default for all fixture files.
-    Suites can opt-out per-file via: // strict-diagnostic-count: false
+    Opt out per-file via: // strict-diagnostic-count: false
     """
-    if os.name == "nt":
-        return False
     return True
 
 
@@ -2950,63 +2992,88 @@ def check_diagnostic_rule_coverage_regression() -> bool:
         ),
     ]
 
-    if not is_windows_platform():
-        cases.insert(
-            1,
-            (
-                "VLAUsage",
-                ["test/vla/vla-unknown-stack.c", "--format=json"],
-                {"VLAUsage"},
-            ),
-        )
-        cases.insert(
-            2,
-            (
-                "AllocaTooLarge",
-                ["test/alloca/oversized-constant.c", "--format=json"],
-                {"AllocaTooLarge"},
-            ),
-        )
+    # VLAUsage and AllocaTooLarge are not yet supported on Windows; they are
+    # included as expected failures so the coverage check still exercises them
+    # and surfaces whether they start working in the future.
+    windows_xfail_cases = [
+        (
+            "VLAUsage",
+            ["test/vla/vla-unknown-stack.c", "--format=json"],
+            {"VLAUsage"},
+        ),
+        (
+            "AllocaTooLarge",
+            ["test/alloca/oversized-constant.c", "--format=json"],
+            {"AllocaTooLarge"},
+        ),
+    ]
+    if is_windows_platform():
+        xfail_cases = windows_xfail_cases
+    else:
+        cases.insert(1, windows_xfail_cases[0])
+        cases.insert(2, windows_xfail_cases[1])
+        xfail_cases = []
 
-    for label, args, expected in cases:
+    def _run_coverage_case(label, args, expected, *, is_xfail: bool) -> bool:
         result = run_analyzer(args)
         output = (result.stdout or "") + (result.stderr or "")
         if result.returncode != 0:
-            print(f"  ❌ {label} run failed (code {result.returncode})")
+            msg = f"  ❌ {label} run failed (code {result.returncode})"
+            if is_xfail:
+                print(f"  [xfail] {label} run failed (code {result.returncode}) — not yet supported on windows")
+                return True
+            print(msg)
             print(output)
-            ok = False
-            continue
+            return False
 
         try:
             payload = json.loads(result.stdout or "")
         except json.JSONDecodeError as exc:
+            if is_xfail:
+                print(f"  [xfail] {label} invalid JSON output: {exc} — not yet supported on windows")
+                return True
             print(f"  ❌ {label} invalid JSON output: {exc}")
             print(result.stdout or "")
-            ok = False
-            continue
+            return False
 
         diagnostics = payload.get("diagnostics", [])
         rule_ids = {diag.get("ruleId", "") for diag in diagnostics}
         if not any(rule in rule_ids for rule in expected):
+            if is_xfail:
+                print(
+                    f"  [xfail] {label} missing expected rule — not yet supported on windows"
+                    f" (expected one of: {sorted(expected)}, got: {sorted(rule_ids)})"
+                )
+                return True
             print(f"  ❌ {label} missing expected rule")
             print(f"     expected one of: {sorted(expected)}")
             print(f"     got: {sorted(rule_ids)}")
-            ok = False
-            continue
+            return False
 
-        has_loc = False
-        for diag in diagnostics:
-            location = diag.get("location", {})
-            if int(location.get("startLine", 0) or 0) > 0:
-                has_loc = True
-                break
+        has_loc = any(
+            int(diag.get("location", {}).get("startLine", 0) or 0) > 0
+            for diag in diagnostics
+        )
         if not has_loc:
+            if is_xfail:
+                print(f"  [xfail] {label} has no diagnostic with source location — not yet supported on windows")
+                return True
             print(f"  ❌ {label} has no diagnostic with source location")
             print(result.stdout or "")
-            ok = False
-            continue
+            return False
 
-        print(f"  ✅ {label} rule coverage OK")
+        if is_xfail:
+            print(f"  [xpass] {label} rule coverage OK — windows-skip no longer needed")
+        else:
+            print(f"  ✅ {label} rule coverage OK")
+        return True
+
+    for label, args, expected in cases:
+        if not _run_coverage_case(label, args, expected, is_xfail=False):
+            ok = False
+
+    for label, args, expected in xfail_cases:
+        _run_coverage_case(label, args, expected, is_xfail=True)
 
     print()
     return ok
@@ -3215,6 +3282,27 @@ def check_file(c_path: Path):
     return all_ok, total, passed, "\n".join(report_lines) + "\n\n"
 
 
+def check_file_xfail(c_path: Path):
+    """
+    Run a ``// windows-skip`` fixture as an expected failure.
+
+    The fixture is exercised fully (both the default and smt-z3 passes).
+    If it fails, the result is marked [xfail] and does not count against
+    the global pass/fail status.  If it unexpectedly passes, the result
+    is marked [xpass] and is counted as a success.
+    """
+    ok, total, passed, report = check_file(c_path)
+    xfail_reason = fixture_windows_xfail_reason(c_path) or "windows-skip"
+    report = report.rstrip("\n")
+    if not ok:
+        report += f"\n  [xfail] expected failure on windows: {xfail_reason}\n\n"
+        # Treat as passed so the suite is not failed by expected failures.
+        return True, total, passed, report
+    else:
+        report += f"\n  [xpass] fixture passed despite windows-skip: {xfail_reason}\n\n"
+        return True, total, passed, report
+
+
 def _run_check_parallel(dispatch, fn):
     """Run a check function in a worker thread with output capture."""
     dispatch.register_thread()
@@ -3341,6 +3429,28 @@ def main() -> int:
             total_tests += total
             if not ok:
                 global_ok = False
+
+    # Run windows-skip fixtures as expected failures so they are visible in
+    # the suite output rather than silently dropped from the sweep.
+    xfail_files = collect_windows_xfail_fixtures()
+    if xfail_files:
+        print(
+            f"=== Running {len(xfail_files)} windows-skip fixture(s) as expected failures ==="
+        )
+        print()
+        if RUN_CONFIG.jobs <= 1:
+            for f in xfail_files:
+                _ok, total, passed, report = check_file_xfail(f)
+                print(report, end="")
+                passed_tests += passed
+                total_tests += total
+        else:
+            with ThreadPoolExecutor(max_workers=RUN_CONFIG.jobs) as executor:
+                xfail_results = list(executor.map(check_file_xfail, xfail_files))
+            for _ok, total, passed, report in xfail_results:
+                print(report, end="")
+                passed_tests += passed
+                total_tests += total
 
     if global_ok:
         print("✅ All tests passed.")

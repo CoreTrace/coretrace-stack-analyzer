@@ -106,40 +106,18 @@ jobs:
           "DEPENDENCY_REF=$ref" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Checkout coretrace-compiler matching ref
-        id: checkout_compiler_ref
-        continue-on-error: true
         uses: actions/checkout@v4
         with:
           repository: CoreTrace/coretrace-compiler
           ref: ${{ env.DEPENDENCY_REF }}
-          path: deps/coretrace-compiler
-          fetch-depth: 1
-
-      - name: Checkout coretrace-compiler main fallback
-        if: steps.checkout_compiler_ref.outcome == 'failure'
-        uses: actions/checkout@v4
-        with:
-          repository: CoreTrace/coretrace-compiler
-          ref: main
           path: deps/coretrace-compiler
           fetch-depth: 1
 
       - name: Checkout coretrace-log matching ref
-        id: checkout_logger_ref
-        continue-on-error: true
         uses: actions/checkout@v4
         with:
           repository: CoreTrace/coretrace-log
           ref: ${{ env.DEPENDENCY_REF }}
-          path: deps/coretrace-log
-          fetch-depth: 1
-
-      - name: Checkout coretrace-log main fallback
-        if: steps.checkout_logger_ref.outcome == 'failure'
-        uses: actions/checkout@v4
-        with:
-          repository: CoreTrace/coretrace-log
-          ref: main
           path: deps/coretrace-log
           fetch-depth: 1
 
