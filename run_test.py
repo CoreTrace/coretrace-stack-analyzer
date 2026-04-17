@@ -54,11 +54,7 @@ def _get_file_hash(p: Path) -> str:
             return _FILE_HASH_CACHE[cache_key]
         
     try:
-        h_obj = hashlib.sha256()
-        with p.open('rb') as f:
-            for byte_block in iter(lambda: f.read(65536), b""):
-                h_obj.update(byte_block)
-        h = h_obj.hexdigest()
+        h = hashlib.sha256(p.read_bytes()).hexdigest()
     except OSError:
         h = ""
         
@@ -2926,8 +2922,6 @@ def check_file(c_path: Path):
     """
     Check that, for this file, all expectations are present in the analyzer output.
     """
-    sys.stderr.write(f"[DEBUG] Started check_file for: {c_path.name}\n")
-    sys.stderr.flush()
     report_lines = [f"=== Testing {c_path} ==="]
     (
         expectations,
@@ -2943,8 +2937,6 @@ def check_file(c_path: Path):
     )
     if not expectations and not negative_expectations and not strict_enabled:
         report_lines.append("  (no expectations found, skipping)")
-        sys.stderr.write(f"[DEBUG] Finished check_file (skip) for: {c_path.name}\n")
-        sys.stderr.flush()
         return True, 0, 0, "\n".join(report_lines) + "\n\n"
 
     def evaluate_pass(pass_name: str, analyzer_output: str):
@@ -3087,22 +3079,16 @@ def check_file(c_path: Path):
         total += smt_total
         passed += smt_passed
 
-    sys.stderr.write(f"[DEBUG] Finished check_file for: {c_path.name}\n")
-    sys.stderr.flush()
     return all_ok, total, passed, "\n".join(report_lines) + "\n\n"
 
 
 def _run_check_parallel(dispatch, fn):
     """Run a check function in a worker thread with output capture."""
-    sys.stderr.write(f"[DEBUG] Starting check: {fn.__name__}\n")
-    sys.stderr.flush()
     dispatch.register_thread()
     try:
         ok = fn()
     finally:
         output = dispatch.unregister_thread()
-        sys.stderr.write(f"[DEBUG] Finished check: {fn.__name__}\n")
-        sys.stderr.flush()
     return ok, output
 
 
