@@ -17,3 +17,14 @@ error:
 
     return 1;
 }
+
+// at line 9, column 25
+// [ !!Warn ] dynamic stack allocation detected for variable 'buff'
+//             ↳ allocated type: i8
+//             ↳ size of this allocation is not compile-time constant (VLA / variable alloca) and may lead to unbounded stack usage
+
+// at line 9, column 25
+// [ !!Warn ] user-controlled alloca size for variable 'buff'
+//             ↳ allocation performed via alloca/VLA; stack usage grows with runtime value
+//             ↳ size is unbounded at compile time
+//             ↳ size depends on user-controlled input (function argument or non-local value)
