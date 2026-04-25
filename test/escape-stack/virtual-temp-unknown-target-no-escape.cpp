@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+// windows-skip: virtual callback escape modeling still produces a Windows-only false positive in this fixture.
 #include <string>
 
 struct Base

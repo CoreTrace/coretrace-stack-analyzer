@@ -157,8 +157,7 @@ namespace ctrace::stack::analysis
 
     bool callParamHasNonCaptureLikeAttr(const llvm::CallBase& CB, unsigned argIndex)
     {
-        return CB.paramHasAttr(argIndex, llvm::Attribute::NoCapture) ||
-               CB.paramHasAttr(argIndex, llvm::Attribute::ByVal) ||
+        return CB.doesNotCapture(argIndex) || CB.paramHasAttr(argIndex, llvm::Attribute::ByVal) ||
                CB.paramHasAttr(argIndex, llvm::Attribute::ByRef) ||
                CB.paramHasAttr(argIndex, llvm::Attribute::StructRet);
     }

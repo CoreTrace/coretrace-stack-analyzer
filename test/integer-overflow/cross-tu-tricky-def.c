@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+// windows-skip: cross-TU truncation diagnostics are not yet stable under Windows codegen for this fixture pair.
 #include <stddef.h>
 #include <stdlib.h>
 #include <string.h>

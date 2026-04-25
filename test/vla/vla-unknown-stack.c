@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+// windows-skip: relies on POSIX getpid semantics for this first-wave Windows tier.
 #include <unistd.h>
 
 int consume(int n)

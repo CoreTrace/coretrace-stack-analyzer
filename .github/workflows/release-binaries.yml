@@ -89,10 +89,184 @@ jobs:
             dist/${{ matrix.arch }}/*.sha256
           if-no-files-found: error
 
+  build-windows-binary:
+    name: Build Windows binary (x64, LLVM 20.1.0)
+    runs-on: windows-2022
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve dependency ref
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $ref = if ($env:GITHUB_HEAD_REF) { $env:GITHUB_HEAD_REF } else { $env:GITHUB_REF_NAME }
+          "DEPENDENCY_REF=$ref" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Checkout coretrace-compiler matching ref
+        uses: actions/checkout@v4
+        with:
+          repository: CoreTrace/coretrace-compiler
+          ref: ${{ env.DEPENDENCY_REF }}
+          path: deps/coretrace-compiler
+          fetch-depth: 1
+
+      - name: Checkout coretrace-log matching ref
+        uses: actions/checkout@v4
+        with:
+          repository: CoreTrace/coretrace-log
+          ref: ${{ env.DEPENDENCY_REF }}
+          path: deps/coretrace-log
+          fetch-depth: 1
+
+      - name: Resolve artifact version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          short_sha="$(git rev-parse --short=12 HEAD)"
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            version="${GITHUB_REF_NAME}"
+          else
+            version="sha-${short_sha}"
+          fi
+          echo "value=${version}" >> "${GITHUB_OUTPUT}"
+
+      - name: Install LLVM 20.1.0 archive with 7-Zip
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $llvmVersion = "20.1.0"
+          $archiveName = "clang+llvm-$llvmVersion-x86_64-pc-windows-msvc.tar.xz"
+          $archiveUrl = "https://github.com/llvm/llvm-project/releases/download/llvmorg-$llvmVersion/$archiveName"
+          $archivePath = Join-Path $env:RUNNER_TEMP $archiveName
+          $extractRoot = Join-Path $env:RUNNER_TEMP "llvm-extract"
+          $installRoot = "C:\Program Files\LLVM-$llvmVersion"
+          $sevenZip = "${env:ProgramFiles}\7-Zip\7z.exe"
+          $tarPath = Join-Path $env:RUNNER_TEMP "clang+llvm-$llvmVersion-x86_64-pc-windows-msvc.tar"
+
+          if (-not (Test-Path $sevenZip)) {
+            throw "7z.exe not found at $sevenZip"
+          }
+
+          Write-Host "Downloading LLVM archive from $archiveUrl"
+          Invoke-WebRequest -Uri $archiveUrl -OutFile $archivePath
+          Write-Host "Download finished"
+          Get-Item $archivePath | Select-Object FullName, Length | Format-Table -AutoSize
+
+          if (Test-Path $extractRoot) {
+            Remove-Item -Recurse -Force $extractRoot
+          }
+          New-Item -ItemType Directory -Force -Path $extractRoot | Out-Null
+
+          if (Test-Path $tarPath) {
+            Remove-Item -Force $tarPath
+          }
+
+          Write-Host "Extracting .xz to .tar with 7-Zip"
+          & $sevenZip x $archivePath "-o$env:RUNNER_TEMP" -y
+          if ($LASTEXITCODE -ne 0) {
+            throw "7-Zip failed while extracting .xz archive"
+          }
+
+          if (-not (Test-Path $tarPath)) {
+            throw "Expected tar file not found after xz extraction: $tarPath"
+          }
+
+          Write-Host "Extracting .tar to $extractRoot"
+          & $sevenZip x $tarPath "-o$extractRoot" -y
+          if ($LASTEXITCODE -ne 0) {
+            throw "7-Zip failed while extracting .tar archive"
+          }
+
+          Write-Host "Listing extracted directories"
+          Get-ChildItem $extractRoot -Directory | Select-Object Name, FullName | Format-Table -AutoSize
+
+          $extractedDir = Get-ChildItem $extractRoot -Directory | Select-Object -First 1
+          if (-not $extractedDir) {
+            throw "Failed to find extracted LLVM directory under $extractRoot"
+          }
+
+          if (Test-Path $installRoot) {
+            Remove-Item -Recurse -Force $installRoot
+          }
+          Move-Item -Path $extractedDir.FullName -Destination $installRoot
+
+          $clangClPath = Join-Path $installRoot "bin\clang-cl.exe"
+          $llvmCmakeDir = Join-Path $installRoot "lib\cmake\llvm"
+          $clangCmakeDir = Join-Path $installRoot "lib\cmake\clang"
+          $llvmConfigPath = Join-Path $llvmCmakeDir "LLVMConfig.cmake"
+          $clangConfigPath = Join-Path $clangCmakeDir "ClangConfig.cmake"
+
+          Write-Host "Checking extracted LLVM files"
+          Write-Host "clang-cl path: $clangClPath"
+          Write-Host "LLVMConfig path: $llvmConfigPath"
+          Write-Host "ClangConfig path: $clangConfigPath"
+
+          if (-not (Test-Path $clangClPath)) {
+            throw "clang-cl.exe not found after LLVM archive extraction: $clangClPath"
+          }
+          if (-not (Test-Path $llvmConfigPath)) {
+            throw "LLVMConfig.cmake not found after LLVM archive extraction: $llvmConfigPath"
+          }
+          if (-not (Test-Path $clangConfigPath)) {
+            throw "ClangConfig.cmake not found after LLVM archive extraction: $clangConfigPath"
+          }
+
+          $clangVersion = (& $clangClPath --version) -join " "
+          if ($clangVersion -notmatch "clang version 20\.1\.0") {
+            throw "Unexpected clang-cl version. Got: $clangVersion"
+          }
+
+          "LLVM_CMAKE_DIR=$llvmCmakeDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "LLVM_DIR=$llvmCmakeDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "Clang_DIR=$clangCmakeDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Build packaged binary
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          powershell -ExecutionPolicy Bypass -File .\scripts\build-windows.ps1 `
+            -LLVMDir "${env:LLVM_CMAKE_DIR}" `
+            -CompilerSourceDir "${PWD}\deps\coretrace-compiler" `
+            -LoggerSourceDir "${PWD}\deps\coretrace-log" `
+            -Configuration Release
+
+      - name: Stage release assets
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $version = "${{ steps.version.outputs.value }}"
+          $packageName = "coretrace-stack-analyzer-$version-windows-amd64"
+          $stageRoot = Join-Path $PWD "dist\windows"
+          $packageDir = Join-Path $stageRoot $packageName
+          $zipPath = Join-Path $stageRoot "$packageName.zip"
+
+          New-Item -ItemType Directory -Force -Path $packageDir | Out-Null
+          Copy-Item -LiteralPath ".\dist\windows\bin\stack_usage_analyzer.exe" -Destination (Join-Path $packageDir "stack_usage_analyzer.exe") -Force
+          Copy-Item -LiteralPath ".\README.md" -Destination (Join-Path $packageDir "README.md") -Force
+
+          if (Test-Path $zipPath) {
+            Remove-Item -LiteralPath $zipPath -Force
+          }
+          Compress-Archive -Path $packageDir -DestinationPath $zipPath
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: coretrace-stack-analyzer-${{ steps.version.outputs.value }}-windows-amd64
+          path: dist/windows/*.zip
+          if-no-files-found: error
+
   publish-release-assets:
     name: Attach binaries to GitHub Release
     runs-on: ubuntu-24.04
-    needs: build-linux-binaries
+    needs:
+      - build-linux-binaries
+      - build-windows-binary
     if: startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: write
@@ -101,7 +275,7 @@ jobs:
       - name: Download build artifacts
         uses: actions/download-artifact@v4
         with:
-          pattern: coretrace-stack-analyzer-*-linux-*
+          pattern: coretrace-stack-analyzer-*
           path: dist
           merge-multiple: true
 
@@ -117,5 +291,6 @@ jobs:
           files: |
             dist/*.tar.gz
             dist/*.sha256
+            dist/*.zip
           fail_on_unmatched_files: true
           generate_release_notes: true

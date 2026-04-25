@@ -20,6 +20,7 @@
 #include <llvm/Analysis/CFG.h>
 #include <llvm/Analysis/CaptureTracking.h>
 #include <llvm/Analysis/ValueTracking.h>
+#include <llvm/Config/llvm-config.h>
 #include <llvm/IR/Argument.h>
 #include <llvm/IR/Function.h>
 #include <llvm/IR/IntrinsicInst.h>
@@ -1272,8 +1273,15 @@ namespace ctrace::stack::analysis
 
         static bool callParamHasNonCaptureLikeAttr(const llvm::CallBase& CB, unsigned argIndex)
         {
-            return CB.paramHasAttr(argIndex, llvm::Attribute::NoCapture) ||
-                   CB.paramHasAttr(argIndex, llvm::Attribute::ByVal) ||
+#if LLVM_VERSION_MAJOR >= 21
+            // NoCapture replaced by Captures attribute in LLVM 21
+            auto capturesAttr = CB.getParamAttr(argIndex, llvm::Attribute::Captures);
+            bool noCapture =
+                capturesAttr.isValid() && llvm::capturesNothing(capturesAttr.getCaptureInfo());
+#else
+            bool noCapture = CB.paramHasAttr(argIndex, llvm::Attribute::NoCapture);
+#endif
+            return noCapture || CB.paramHasAttr(argIndex, llvm::Attribute::ByVal) ||
                    CB.paramHasAttr(argIndex, llvm::Attribute::ByRef) ||
                    CB.paramHasAttr(argIndex, llvm::Attribute::StructRet);
         }
@@ -1622,8 +1630,15 @@ namespace ctrace::stack::analysis
         {
             // LLVM capture tracking can prove that a local object never escapes;
             // in that case, no unmodeled call can acquire through its address.
+#if LLVM_VERSION_MAJOR >= 21
+            // isNonEscapingLocalObject removed in LLVM 21; use PointerMayBeCaptured instead
+            if (!llvm::PointerMayBeCaptured(&sourceSlot, /*ReturnCaptures=*/false,
+                                            /*StoreCaptures=*/true))
+                return false;
+#else
             if (llvm::isNonEscapingLocalObject(&sourceSlot))
                 return false;
+#endif
 
             for (const llvm::BasicBlock& BB : F)
             {

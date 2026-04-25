@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+// windows-skip: relies on POSIX write/STDOUT file descriptor semantics for this first-wave Windows tier.
 /**
  * 06 - UNINITIALIZED MEMORY (CWE-457, CWE-908, CWE-200)
  *

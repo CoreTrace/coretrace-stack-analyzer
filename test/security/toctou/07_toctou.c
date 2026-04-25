@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+// windows-skip: relies on POSIX access/stat/open/read semantics for this first-wave Windows tier.
 /**
  * 07 - RACE CONDITION / TOCTOU (CWE-367)
  *

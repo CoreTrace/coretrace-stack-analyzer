@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+// windows-skip: fixture redeclares size_t in a way that collides with Windows/UCRT typedefs.
 typedef unsigned long size_t;
 
 extern void* malloc(size_t size);

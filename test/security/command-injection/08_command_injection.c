@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+// windows-skip: uses POSIX popen/pclose names and semantics; Windows needs a dedicated _popen/_pclose fixture.
 /**
  * 08 - COMMAND INJECTION (CWE-78)
  *

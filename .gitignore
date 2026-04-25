@@ -38,3 +38,8 @@
 __pycache__/
 *.py[cod]
 *.tmp
+
+# Build artifacts
+dist
+build-vs
+build-win

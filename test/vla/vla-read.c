@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+// windows-skip: relies on POSIX read/STDIN file descriptor semantics for this first-wave Windows tier.
 #include <unistd.h>
 #include <stdlib.h>
 

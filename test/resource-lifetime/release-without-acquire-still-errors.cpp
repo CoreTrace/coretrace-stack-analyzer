@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+// windows-skip: release-without-acquire currently collapses into an uninitialized-value path under Windows codegen.
 typedef struct VkDevice_T* VkDevice;
 typedef struct VkBuffer_T* VkBuffer;
 

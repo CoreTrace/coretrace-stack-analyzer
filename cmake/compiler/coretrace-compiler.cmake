@@ -8,9 +8,13 @@ if(DEFINED DEBUG_ASAN)
         "Enable debug symbols and AddressSanitizer" FORCE)
 endif()
 
+set(CORETRACE_COMPILER_GIT_TAG "main" CACHE STRING
+    "Git ref used when fetching coretrace-compiler")
+
 FetchContent_Declare(
     cc
     GIT_REPOSITORY https://github.com/CoreTrace/coretrace-compiler.git
-    GIT_TAG main
+    GIT_TAG ${CORETRACE_COMPILER_GIT_TAG}
+    EXCLUDE_FROM_ALL
 )
 FetchContent_MakeAvailable(cc)

@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+// windows-skip: relies on POSIX alloca header semantics for this first-wave Windows tier.
 #include <alloca.h>
 #include <stddef.h>
 
