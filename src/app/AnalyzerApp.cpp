@@ -19,12 +19,19 @@
 #include <new>
 #include <optional>
 #include <sstream>
+#include <string>
 #include <system_error>
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
+
+#if defined(__APPLE__) || defined(__unix__)
+#include <pthread.h>
+#define CTRACE_STACK_ANALYZER_HAS_PTHREAD 1
+#endif
+
 #include <llvm/IR/InstrTypes.h>
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
@@ -86,6 +93,18 @@ static unsigned resolveConfiguredJobs(const AnalysisConfig& cfg)
     const unsigned hw = std::thread::hardware_concurrency();
     return hw == 0 ? 1u : hw;
 }
+
+#if defined(CTRACE_STACK_ANALYZER_HAS_PTHREAD)
+static std::size_t resolveParallelWorkerStackBytes()
+{
+    constexpr std::size_t kDefaultWorkerStackBytes = 8u * 1024u * 1024u;
+#if defined(PTHREAD_STACK_MIN)
+    return std::max(kDefaultWorkerStackBytes, static_cast<std::size_t>(PTHREAD_STACK_MIN));
+#else
+    return kDefaultWorkerStackBytes;
+#endif
+}
+#endif
 
 template <typename T> struct AppResult
 {
@@ -310,29 +329,76 @@ static void runParallelWork(std::size_t workItemCount, unsigned maxJobs, WorkFn&
 
     std::vector<WorkerState> workerStates(workerCount);
     std::atomic_size_t nextIndex{0};
+
+    auto workerBody = [&](WorkerState* workerState)
+    {
+        WorkerState& state = *workerState;
+        while (true)
+        {
+            const std::size_t index = nextIndex.fetch_add(1, std::memory_order_relaxed);
+            if (index >= workItemCount)
+                break;
+            workFn(index);
+            ++state.processedCount;
+        }
+    };
+
+#if defined(CTRACE_STACK_ANALYZER_HAS_PTHREAD)
+    struct PthreadWorkerContext
+    {
+        decltype(workerBody)* body = nullptr;
+        WorkerState* state = nullptr;
+    };
+
+    pthread_attr_t attr;
+    if (pthread_attr_init(&attr) != 0)
+    {
+        llvm::report_fatal_error("failed to initialize parallel worker thread attributes");
+    }
+    const int stackErr = pthread_attr_setstacksize(&attr, resolveParallelWorkerStackBytes());
+    if (stackErr != 0)
+    {
+        pthread_attr_destroy(&attr);
+        llvm::report_fatal_error("failed to configure parallel worker stack size");
+    }
+
+    std::vector<PthreadWorkerContext> contexts(workerCount);
+    std::vector<pthread_t> workers(workerCount);
+    for (unsigned workerId = 0; workerId < workerCount; ++workerId)
+    {
+        contexts[workerId] = {&workerBody, &workerStates[workerId]};
+        const int createErr = pthread_create(
+            &workers[workerId], &attr,
+            [](void* rawContext) -> void*
+            {
+                auto* context = static_cast<PthreadWorkerContext*>(rawContext);
+                (*context->body)(context->state);
+                return nullptr;
+            },
+            &contexts[workerId]);
+        if (createErr != 0)
+        {
+            pthread_attr_destroy(&attr);
+            llvm::report_fatal_error("failed to create parallel worker thread");
+        }
+    }
+    pthread_attr_destroy(&attr);
+
+    for (pthread_t worker : workers)
+        pthread_join(worker, nullptr);
+#else
     std::vector<std::thread> workers;
     workers.reserve(workerCount);
 
     for (unsigned workerId = 0; workerId < workerCount; ++workerId)
     {
         WorkerState* const workerState = &workerStates[workerId];
-        workers.emplace_back(
-            [&, workerState]()
-            {
-                WorkerState& state = *workerState;
-                while (true)
-                {
-                    const std::size_t index = nextIndex.fetch_add(1, std::memory_order_relaxed);
-                    if (index >= workItemCount)
-                        break;
-                    workFn(index);
-                    ++state.processedCount;
-                }
-            });
+        workers.emplace_back([&, workerState]() { workerBody(workerState); });
     }
 
     for (auto& worker : workers)
         worker.join();
+#endif
 
     std::uint64_t processedTotal = 0;
     for (const WorkerState& state : workerStates)
