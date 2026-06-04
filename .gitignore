@@ -38,3 +38,6 @@
 __pycache__/
 *.py[cod]
 *.tmp
+
+# Coretrace StackAnalyzer cache and temporary files
+*.cache
