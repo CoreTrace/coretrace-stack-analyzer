@@ -426,6 +426,57 @@ namespace ctrace::stack::analysis
             int64_t offset = 0;
         };
 
+        static bool matchPointerSlotInductionStore(const llvm::Value* storedValue,
+                                                   const llvm::AllocaInst* pointerSlot,
+                                                   const llvm::DataLayout& DL)
+        {
+            using namespace llvm;
+
+            const Value* base = nullptr;
+            int64_t offset = 0;
+            if (!getGEPConstantOffsetAndBase(storedValue, DL, offset, base))
+                return false;
+            if (offset == 0)
+                return false;
+
+            const Value* strippedBase = base ? base->stripPointerCasts() : nullptr;
+            if (!isLoadFromAlloca(strippedBase, pointerSlot))
+                return false;
+
+            return true;
+        }
+
+        static std::string formatSourceOffsets(const std::set<int64_t>& offsets)
+        {
+            constexpr std::size_t kMaxDisplayedOffsets = 12;
+
+            auto formatOffset = [](int64_t offset)
+            { return offset != 0 ? "+" + std::to_string(offset) : std::string("base"); };
+
+            if (offsets.size() == 1)
+            {
+                const int64_t offset = *offsets.begin();
+                return offset != 0 ? "offset +" + std::to_string(offset) : std::string("base");
+            }
+
+            std::ostringstream out;
+            out << "offsets ";
+            std::size_t printed = 0;
+            for (int64_t offset : offsets)
+            {
+                if (printed >= kMaxDisplayedOffsets)
+                {
+                    out << ", ... (+" << (offsets.size() - printed) << " more)";
+                    break;
+                }
+                if (printed != 0)
+                    out << ", ";
+                out << formatOffset(offset);
+                ++printed;
+            }
+            return out.str();
+        }
+
         static void collectPointerOrigins(const llvm::Value* V, const llvm::DataLayout& DL,
                                           llvm::SmallVectorImpl<PtrOrigin>& out, WorkBudget& budget)
         {
@@ -450,6 +501,7 @@ namespace ctrace::stack::analysis
                     Type* allocaTy = AI->getAllocatedType();
                     if (allocaTy->isPointerTy())
                     {
+                        SmallVector<const Value*, 8> seedStores;
                         for (const User* Usr : AI->users())
                         {
                             if (auto* SI = dyn_cast<StoreInst>(Usr))
@@ -457,11 +509,15 @@ namespace ctrace::stack::analysis
                                 if (SI->getPointerOperand() != AI)
                                     continue;
                                 const Value* StoredVal = SI->getValueOperand();
-                                if (recordVisitedOffset(visited, StoredVal, currentOffset))
-                                {
-                                    worklist.push_back({StoredVal, currentOffset});
-                                }
+                                if (matchPointerSlotInductionStore(StoredVal, AI, DL))
+                                    continue;
+                                seedStores.push_back(StoredVal);
                             }
+                        }
+                        for (const Value* StoredVal : seedStores)
+                        {
+                            if (recordVisitedOffset(visited, StoredVal, currentOffset))
+                                worklist.push_back({StoredVal, currentOffset});
                         }
                         continue;
                     }
@@ -1049,29 +1105,10 @@ namespace ctrace::stack::analysis
                             if (!entry.anyOutOfBounds && !entry.anyNonZeroResult)
                                 continue;
 
-                            std::ostringstream memberStr;
-                            if (entry.memberOffsets.size() == 1)
-                            {
-                                int64_t mo = *entry.memberOffsets.begin();
-                                memberStr << (mo != 0 ? "offset +" + std::to_string(mo) : "base");
-                            }
-                            else
-                            {
-                                memberStr << "offsets ";
-                                bool first = true;
-                                for (int64_t mo : entry.memberOffsets)
-                                {
-                                    if (!first)
-                                        memberStr << ", ";
-                                    memberStr << (mo != 0 ? "+" + std::to_string(mo) : "base");
-                                    first = false;
-                                }
-                            }
-
                             InvalidBaseReconstructionIssue issue;
                             issue.funcName = F.getName().str();
                             issue.varName = entry.varName;
-                            issue.sourceMember = memberStr.str();
+                            issue.sourceMember = formatSourceOffsets(entry.memberOffsets);
                             issue.offsetUsed = kv.first.second;
                             issue.targetType = entry.targetType;
                             issue.isOutOfBounds = entry.anyOutOfBounds;
@@ -1157,29 +1194,10 @@ namespace ctrace::stack::analysis
                             if (!entry.anyOutOfBounds && !entry.anyNonZeroResult)
                                 continue;
 
-                            std::ostringstream memberStr;
-                            if (entry.memberOffsets.size() == 1)
-                            {
-                                int64_t mo = *entry.memberOffsets.begin();
-                                memberStr << (mo != 0 ? "offset +" + std::to_string(mo) : "base");
-                            }
-                            else
-                            {
-                                memberStr << "offsets ";
-                                bool first = true;
-                                for (int64_t mo : entry.memberOffsets)
-                                {
-                                    if (!first)
-                                        memberStr << ", ";
-                                    memberStr << (mo != 0 ? "+" + std::to_string(mo) : "base");
-                                    first = false;
-                                }
-                            }
-
                             InvalidBaseReconstructionIssue issue;
                             issue.funcName = F.getName().str();
                             issue.varName = entry.varName;
-                            issue.sourceMember = memberStr.str();
+                            issue.sourceMember = formatSourceOffsets(entry.memberOffsets);
                             issue.offsetUsed = gepOffset;
                             issue.targetType = entry.targetType;
                             issue.isOutOfBounds = entry.anyOutOfBounds;
