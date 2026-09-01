@@ -21,6 +21,7 @@
 #include <llvm/IR/Type.h>
 
 #include "analysis/IntRanges.hpp"
+#include "analysis/FunctionFacts.hpp"
 #include "analysis/IRValueUtils.hpp"
 #include "analysis/smt/SmtEncoding.hpp"
 #include "analysis/smt/SmtRefinement.hpp"
@@ -947,7 +948,8 @@ namespace ctrace::stack::analysis
                 return;
             const bool allowPointerStoreScan =
                 instructionCount <= budgets.pointerStoreScanInstrThreshold;
-            auto ranges = computeIntRangesFromICmps(F);
+            const FunctionFacts facts(F);
+            auto ranges = computeIntRanges(F, facts);
             std::size_t analyzedGEPs = 0;
             struct CachedResolution
             {
