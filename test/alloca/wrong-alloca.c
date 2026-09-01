@@ -18,6 +18,8 @@ error:
     return 1;
 }
 
+// strict-expectation-details: true
+
 // at line 9, column 25
 // [ !!Warn ] dynamic stack allocation detected for variable 'buff'
 //             ↳ allocated type: i8
@@ -26,5 +28,5 @@ error:
 // at line 9, column 25
 // [ !!Warn ] user-controlled alloca size for variable 'buff'
 //             ↳ allocation performed via alloca/VLA; stack usage grows with runtime value
-//             ↳ size is unbounded at compile time
+//             ↳ inferred upper bound for size: 261120 bytes
 //             ↳ size depends on user-controlled input (function argument or non-local value)
