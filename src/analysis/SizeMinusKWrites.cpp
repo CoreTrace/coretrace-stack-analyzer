@@ -2,6 +2,7 @@
 #include "analysis/SizeMinusKWrites.hpp"
 
 #include "analysis/IntRanges.hpp"
+#include "analysis/FunctionFacts.hpp"
 #include "analysis/smt/SmtEncoding.hpp"
 #include "analysis/smt/SmtRefinement.hpp"
 
@@ -442,12 +443,11 @@ namespace ctrace::stack::analysis
             if (F.isDeclaration())
                 return;
 
-            const std::map<const llvm::Value*, IntRange> ranges = computeIntRangesFromICmps(F);
+            const FunctionFacts facts(F);
+            const std::map<const llvm::Value*, IntRange> ranges = computeIntRanges(F, facts);
 
-            AssumptionCache AC(F);
-            LazyValueInfo LVI(&AC, &DL);
-            TargetLibraryInfoImpl TLII(Triple(F.getParent()->getTargetTriple()));
-            TargetLibraryInfo TLI(TLII, &F);
+            LazyValueInfo& LVI = facts.lazyValueInfo();
+            const TargetLibraryInfo& TLI = facts.targetLibraryInfo();
 
             DenseMap<const AllocaInst*, const Argument*> argSlots;
             for (Instruction& inst : F.getEntryBlock())
