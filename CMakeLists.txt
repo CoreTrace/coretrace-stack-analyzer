@@ -79,6 +79,7 @@ set(STACK_ANALYZER_SOURCES
     src/analysis/DynamicAlloca.cpp
     src/analysis/BufferWriteModel.cpp
     src/analysis/FrontendDiagnostics.cpp
+    src/analysis/FunctionFacts.cpp
     src/analysis/FunctionFilter.cpp
     src/analysis/GlobalReadBeforeWriteAnalysis.cpp
     src/analysis/IRValueUtils.cpp
@@ -206,6 +207,7 @@ if(LLVM_LINK_LLVM_DYLIB)
     )
 else()
     llvm_map_components_to_libnames(llvm_libs
+      analysis
       core
       irreader
       support

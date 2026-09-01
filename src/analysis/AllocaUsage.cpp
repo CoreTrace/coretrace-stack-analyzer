@@ -14,6 +14,7 @@
 
 #include "analysis/IRValueUtils.hpp"
 #include "analysis/IntRanges.hpp"
+#include "analysis/FunctionFacts.hpp"
 
 namespace ctrace::stack::analysis
 {
@@ -139,7 +140,8 @@ namespace ctrace::stack::analysis
             if (F.isDeclaration())
                 return;
 
-            auto ranges = computeIntRangesFromICmps(F);
+            const FunctionFacts facts(F);
+            auto ranges = computeIntRanges(F, facts);
 
             for (BasicBlock& BB : F)
             {

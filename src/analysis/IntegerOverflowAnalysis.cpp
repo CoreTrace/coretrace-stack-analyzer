@@ -3,6 +3,7 @@
 
 #include "analysis/AnalyzerUtils.hpp"
 #include "analysis/IntRanges.hpp"
+#include "analysis/FunctionFacts.hpp"
 #include "analysis/smt/SmtEncoding.hpp"
 #include "analysis/smt/SmtRefinement.hpp"
 
@@ -816,8 +817,8 @@ namespace ctrace::stack::analysis
             if (function.isDeclaration() || !shouldAnalyze(function))
                 continue;
 
-            const std::map<const llvm::Value*, IntRange> ranges =
-                computeIntRangesFromICmps(function);
+            const FunctionFacts facts(function);
+            const std::map<const llvm::Value*, IntRange> ranges = computeIntRanges(function, facts);
 
             for (llvm::BasicBlock& block : function)
             {
