@@ -82,6 +82,7 @@ _RE_RESOURCE_MODEL = re.compile(r"//\s*resource-model\s*[:=]\s*(\S+)", re.IGNORE
 _RE_ESCAPE_MODEL = re.compile(r"//\s*escape-model\s*[:=]\s*(\S+)", re.IGNORECASE)
 _RE_BUFFER_MODEL = re.compile(r"//\s*buffer-model\s*[:=]\s*(\S+)", re.IGNORECASE)
 _RE_STRICT_DIAG = re.compile(r"//\s*strict-diagnostic-count\s*[:=]\s*(\S+)", re.IGNORECASE)
+_RE_STRICT_DETAILS = re.compile(r"//\s*strict-expectation-details\s*[:=]\s*(\S+)", re.IGNORECASE)
 
 
 # Thread-safe stdout dispatcher for parallel check execution
@@ -327,6 +328,7 @@ def extract_expectations(c_path: Path):
     escape_model = None
     buffer_model = None
     strict_diag_count = None
+    strict_details = None
     lines = c_path.read_text().splitlines()
     i = 0
     n = len(lines)
@@ -370,6 +372,13 @@ def extract_expectations(c_path: Path):
                 strict_diag_count = parsed
             i += 1
             continue
+        details_match = _RE_STRICT_DETAILS.match(stripped)
+        if details_match:
+            parsed = parse_bool_directive(details_match.group(1))
+            if parsed is not None:
+                strict_details = parsed
+            i += 1
+            continue
 
         stripped_line = stripped
         if stripped_line.startswith("// not contains:"):
@@ -409,6 +418,7 @@ def extract_expectations(c_path: Path):
         escape_model,
         buffer_model,
         strict_diag_count,
+        strict_details,
     )
 
 
@@ -2931,6 +2941,7 @@ def check_file(c_path: Path):
         escape_model,
         buffer_model,
         strict_diag_count,
+        strict_details,
     ) = extract_expectations(c_path)
     strict_enabled = (
         strict_diag_count if strict_diag_count is not None else _default_strict_diagnostic_count(c_path)
@@ -2976,7 +2987,15 @@ def check_file(c_path: Path):
                                 break
                         if matched:
                             break
-            if not matched and _expectation_matches_by_location_and_headlines(exp, output_index):
+            # The headline-only fallback ignores the "↳" detail lines entirely, so a
+            # diagnostic's details can drift without any test noticing. Fixtures that pin a
+            # computed value in a detail line opt out of it with:
+            #   // strict-expectation-details: true
+            if (
+                not matched
+                and not strict_details
+                and _expectation_matches_by_location_and_headlines(exp, output_index)
+            ):
                 matched = True
 
             if matched:
