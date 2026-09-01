@@ -3,6 +3,7 @@
 
 #include "analysis/AnalyzerUtils.hpp"
 #include "analysis/IntRanges.hpp"
+#include "analysis/FunctionFacts.hpp"
 #include "analysis/smt/SmtEncoding.hpp"
 #include "analysis/smt/SmtRefinement.hpp"
 
@@ -183,39 +184,23 @@ namespace ctrace::stack::analysis
             return uniqueStore;
         }
 
+        /// ObjectSizeOffsetVisitor also sizes heap allocations and byval arguments, but the
+        /// callers below reason about stack and static storage only, so the result is kept to
+        /// the object kinds they can attribute a name and a diagnostic to.
         static std::optional<std::uint64_t> getObjectSizeBytes(const llvm::Value* root,
-                                                               const llvm::DataLayout& dataLayout)
+                                                               const FunctionFacts& facts)
         {
-            if (!root)
+            if (!root ||
+                (!llvm::isa<llvm::AllocaInst>(root) && !llvm::isa<llvm::GlobalVariable>(root)))
+            {
                 return std::nullopt;
-
-            if (const auto* allocaInst = llvm::dyn_cast<llvm::AllocaInst>(root))
-            {
-                llvm::Type* allocatedType = allocaInst->getAllocatedType();
-                if (!allocaInst->isArrayAllocation())
-                    return dataLayout.getTypeAllocSize(allocatedType);
-
-                const auto* count = llvm::dyn_cast<llvm::ConstantInt>(allocaInst->getArraySize());
-                if (!count)
-                    return std::nullopt;
-                const std::uint64_t n = count->getZExtValue();
-                const std::uint64_t elem = dataLayout.getTypeAllocSize(allocatedType);
-                return n * elem;
             }
 
-            if (const auto* global = llvm::dyn_cast<llvm::GlobalVariable>(root))
-            {
-                llvm::Type* valueType = global->getValueType();
-                if (!valueType->isSized())
-                    return std::nullopt;
-                return dataLayout.getTypeAllocSize(valueType);
-            }
-
-            return std::nullopt;
+            return facts.objectSizeBytes(root);
         }
 
         static std::optional<ObjectInfo> resolveObjectInfo(const llvm::Value* pointer,
-                                                           const llvm::DataLayout& dataLayout)
+                                                           const FunctionFacts& facts)
         {
             if (!pointer || !pointer->getType()->isPointerTy())
                 return std::nullopt;
@@ -226,7 +211,7 @@ namespace ctrace::stack::analysis
             if (!base)
                 return std::nullopt;
 
-            const std::optional<std::uint64_t> size = getObjectSizeBytes(base, dataLayout);
+            const std::optional<std::uint64_t> size = getObjectSizeBytes(base, facts);
             if (!size || *size == 0)
                 return std::nullopt;
 
@@ -394,8 +379,8 @@ namespace ctrace::stack::analysis
             if (function.isDeclaration() || !shouldAnalyze(function))
                 continue;
 
-            const std::map<const llvm::Value*, IntRange> ranges =
-                computeIntRangesFromICmps(function);
+            const FunctionFacts facts(function);
+            const std::map<const llvm::Value*, IntRange> ranges = computeIntRanges(function, facts);
             std::unordered_map<const llvm::Value*, RecentWrite> recentWrites;
             std::unordered_map<const llvm::Value*, std::uint64_t> heapAllocBytes;
 
@@ -464,7 +449,7 @@ namespace ctrace::stack::analysis
                         {
                             if (call->arg_size() >= 3)
                             {
-                                auto obj = resolveObjectInfo(call->getArgOperand(0), dataLayout);
+                                auto obj = resolveObjectInfo(call->getArgOperand(0), facts);
                                 auto len = tryGetConstantU64(call->getArgOperand(2));
                                 if (obj && len)
                                 {
@@ -479,7 +464,7 @@ namespace ctrace::stack::analysis
                         {
                             if (call->arg_size() >= 3)
                             {
-                                auto obj = resolveObjectInfo(call->getArgOperand(0), dataLayout);
+                                auto obj = resolveObjectInfo(call->getArgOperand(0), facts);
                                 auto fill = tryGetConstantU64(call->getArgOperand(1));
                                 auto len = tryGetConstantU64(call->getArgOperand(2));
                                 if (obj && fill && len)
@@ -498,7 +483,7 @@ namespace ctrace::stack::analysis
                         {
                             if (call->arg_size() >= 3)
                             {
-                                auto obj = resolveObjectInfo(call->getArgOperand(0), dataLayout);
+                                auto obj = resolveObjectInfo(call->getArgOperand(0), facts);
                                 auto len = tryGetConstantU64(call->getArgOperand(2));
                                 if (obj && len)
                                 {
@@ -513,7 +498,7 @@ namespace ctrace::stack::analysis
                         {
                             if (call->arg_size() >= 1)
                             {
-                                auto obj = resolveObjectInfo(call->getArgOperand(0), dataLayout);
+                                auto obj = resolveObjectInfo(call->getArgOperand(0), facts);
                                 if (obj)
                                 {
                                     recentWrites[obj->root] =
@@ -527,7 +512,7 @@ namespace ctrace::stack::analysis
                         {
                             if (call->arg_size() >= 1)
                             {
-                                auto obj = resolveObjectInfo(call->getArgOperand(0), dataLayout);
+                                auto obj = resolveObjectInfo(call->getArgOperand(0), facts);
                                 if (!obj)
                                     continue;
 
