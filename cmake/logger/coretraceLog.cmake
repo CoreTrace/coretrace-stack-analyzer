@@ -13,8 +13,10 @@ endif()
 
 include(FetchContent)
 
+# Pinned to a commit SHA so source builds are reproducible and a compromised
+# upstream default branch cannot silently enter a build. Bump deliberately.
 FetchContent_Declare(coretrace_logger
   GIT_REPOSITORY https://github.com/CoreTrace/coretrace-log.git
-  GIT_TAG        main
+  GIT_TAG        624688ad5e5d00a1d04fd72909d43fe6d948575b
 )
 FetchContent_MakeAvailable(coretrace_logger)
