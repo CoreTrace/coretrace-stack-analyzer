@@ -18,15 +18,20 @@ permissions:
 jobs:
   build-linux-binaries:
     name: Build Linux binary (${{ matrix.arch }})
-    runs-on: ubuntu-24.04
+    # Each architecture builds on its own native runner. Emulating arm64 through
+    # QEMU cost 17-24 minutes against 3 minutes for native amd64; arm64 runners
+    # are free and unlimited on public repositories.
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - platform: linux/amd64
             arch: amd64
+            runner: ubuntu-24.04
           - platform: linux/arm64
             arch: arm64
+            runner: ubuntu-24.04-arm
 
     steps:
       - name: Checkout
@@ -45,9 +50,7 @@ jobs:
           fi
           echo "value=${version}" >> "${GITHUB_OUTPUT}"
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
+      # No QEMU: matrix.platform always matches the runner's own architecture.
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
