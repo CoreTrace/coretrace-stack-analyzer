@@ -38,7 +38,8 @@ FROM ubuntu:24.04 AS base
 ARG DEBIAN_FRONTEND=noninteractive
 ARG LLVM_VERSION=20
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get -o Acquire::Retries=5 update \
+    && apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
     ca-certificates \
     curl \
     gnupg \
@@ -51,14 +52,27 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     && rm -rf /var/lib/apt/lists/*
 
-# Install LLVM/Clang toolchain
-RUN curl -fsSL https://apt.llvm.org/llvm.sh -o /tmp/llvm.sh \
-    && chmod +x /tmp/llvm.sh \
-    && /tmp/llvm.sh ${LLVM_VERSION} \
-    && rm -f /tmp/llvm.sh \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends libclang-${LLVM_VERSION}-dev \
-    && rm -rf /var/lib/apt/lists/*
+# Install LLVM/Clang toolchain.
+# apt.llvm.org probes its own repository before adding it, using a curl that
+# retries twice and not at all on 4xx. A transient blip there aborts the build
+# with a misleading "distribution not supported". That curl lives inside the
+# downloaded script, so the whole invocation is retried instead.
+RUN set -eu; \
+    for attempt in 1 2 3 4 5; do \
+      if curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 \
+              https://apt.llvm.org/llvm.sh -o /tmp/llvm.sh \
+         && chmod +x /tmp/llvm.sh \
+         && /tmp/llvm.sh "${LLVM_VERSION}"; then \
+        ok=1; break; \
+      fi; \
+      echo "llvm.sh attempt ${attempt} failed, retrying in $((attempt * 15))s" >&2; \
+      sleep $((attempt * 15)); \
+    done; \
+    [ "${ok:-0}" = 1 ] || { echo "llvm.sh failed after 5 attempts" >&2; exit 1; }; \
+    rm -f /tmp/llvm.sh; \
+    apt-get -o Acquire::Retries=5 update; \
+    apt-get -o Acquire::Retries=5 install -y --no-install-recommends "libclang-${LLVM_VERSION}-dev"; \
+    rm -rf /var/lib/apt/lists/*
 
 # Make sure LLVM shared libs are found at runtime (useful for dev builds too)
 ENV LD_LIBRARY_PATH=/usr/lib/llvm-${LLVM_VERSION}/lib
@@ -99,22 +113,33 @@ FROM ubuntu:24.04 AS runtime
 ARG DEBIAN_FRONTEND=noninteractive
 ARG LLVM_VERSION=20
 
-# Install only what is needed to run (and to support the entrypoint script)
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates \
-    curl \
-    gnupg \
-    lsb-release \
-    software-properties-common \
-    python3 \
-    git \
-    && curl -fsSL https://apt.llvm.org/llvm.sh -o /tmp/llvm.sh \
-    && chmod +x /tmp/llvm.sh \
-    && /tmp/llvm.sh ${LLVM_VERSION} \
-    && rm -f /tmp/llvm.sh \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends libclang-${LLVM_VERSION}-dev \
-    && rm -rf /var/lib/apt/lists/*
+# Install only what is needed to run (and to support the entrypoint script).
+# Same apt.llvm.org retry as the base stage; see the comment there.
+RUN set -eu; \
+    apt-get -o Acquire::Retries=5 update; \
+    apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
+      ca-certificates \
+      curl \
+      gnupg \
+      lsb-release \
+      software-properties-common \
+      python3 \
+      git; \
+    for attempt in 1 2 3 4 5; do \
+      if curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 \
+              https://apt.llvm.org/llvm.sh -o /tmp/llvm.sh \
+         && chmod +x /tmp/llvm.sh \
+         && /tmp/llvm.sh "${LLVM_VERSION}"; then \
+        ok=1; break; \
+      fi; \
+      echo "llvm.sh attempt ${attempt} failed, retrying in $((attempt * 15))s" >&2; \
+      sleep $((attempt * 15)); \
+    done; \
+    [ "${ok:-0}" = 1 ] || { echo "llvm.sh failed after 5 attempts" >&2; exit 1; }; \
+    rm -f /tmp/llvm.sh; \
+    apt-get -o Acquire::Retries=5 update; \
+    apt-get -o Acquire::Retries=5 install -y --no-install-recommends "libclang-${LLVM_VERSION}-dev"; \
+    rm -rf /var/lib/apt/lists/*
 
 # Copy runtime files
 COPY --from=builder /repo/build/stack_usage_analyzer /usr/local/bin/stack_usage_analyzer
