@@ -25,6 +25,17 @@ DEFAULT_TEST_DIR = Path("test")
 DEFAULT_CACHE_DIR = Path(".cache/run_test")
 
 
+# A single analyzer invocation that outlives this budget is treated as hung.
+# Without it one stuck invocation blocks its worker thread forever, and the whole
+# suite stalls until the CI step timeout kills it with no indication of which
+# fixture was responsible.
+DEFAULT_ANALYZER_TIMEOUT = 300.0
+
+# Distinct from any exit code the analyzer itself produces, so a timeout is never
+# mistaken for an ordinary failure.
+ANALYZER_TIMEOUT_RETURNCODE = -9001
+
+
 @dataclass
 class TestRunConfig:
     analyzer: Path = DEFAULT_ANALYZER
@@ -33,6 +44,7 @@ class TestRunConfig:
     jobs: int = 1
     cache_enabled: bool = True
     extra_analyzer_args: tuple[str, ...] = ()
+    analyzer_timeout: Optional[float] = DEFAULT_ANALYZER_TIMEOUT
 
 
 RUN_CONFIG = TestRunConfig()
@@ -161,6 +173,15 @@ def parse_args():
         "--clear-cache",
         action="store_true",
         help="Delete cache directory before running tests.",
+    )
+    parser.add_argument(
+        "--analyzer-timeout",
+        type=float,
+        default=DEFAULT_ANALYZER_TIMEOUT,
+        help=(
+            "Seconds a single analyzer invocation may run before it is killed and "
+            f"reported as hung (default: {DEFAULT_ANALYZER_TIMEOUT:g}). 0 disables the timeout."
+        ),
     )
     parser.add_argument(
         "--analyzer-arg",
@@ -621,6 +642,36 @@ def _effective_analyzer_args(args):
     return base
 
 
+def _spawn_analyzer(cmd, env) -> subprocess.CompletedProcess:
+    """
+    Run the analyzer under the configured timeout.
+
+    A hung invocation is reported as a failed run naming the command, so the
+    suite fails fast on the responsible fixture instead of stalling.
+    """
+    try:
+        return subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=RUN_CONFIG.analyzer_timeout,
+        )
+    except subprocess.TimeoutExpired as expired:
+        def _decode(stream) -> str:
+            if not stream:
+                return ""
+            return stream if isinstance(stream, str) else stream.decode("utf-8", "replace")
+
+        return subprocess.CompletedProcess(
+            args=cmd,
+            returncode=ANALYZER_TIMEOUT_RETURNCODE,
+            stdout=_decode(expired.stdout),
+            stderr=_decode(expired.stderr)
+            + f"\n[run_test] analyzer timed out after {expired.timeout:g}s: {shlex.join(cmd)}\n",
+        )
+
+
 def run_analyzer(args, env_overrides: Optional[dict[str, str]] = None) -> subprocess.CompletedProcess:
     """
     Run analyzer with custom args and return the CompletedProcess.
@@ -653,7 +704,11 @@ def run_analyzer(args, env_overrides: Optional[dict[str, str]] = None) -> subpro
     env = os.environ.copy()
     if env_overrides:
         env.update(env_overrides)
-    result = subprocess.run(cmd, capture_output=True, text=True, env=env)
+    result = _spawn_analyzer(cmd, env)
+    # A timeout says nothing about what the analyzer would have produced, so it
+    # must not be memoised as if it were a result.
+    if result.returncode == ANALYZER_TIMEOUT_RETURNCODE:
+        return result
     with _CACHE_LOCK:
         _MEM_CACHE[key] = {
             "returncode": result.returncode,
@@ -673,7 +728,7 @@ def run_analyzer_uncached(args, env_overrides: Optional[dict[str, str]] = None) 
     env = os.environ.copy()
     if env_overrides:
         env.update(env_overrides)
-    return subprocess.run(cmd, capture_output=True, text=True, env=env)
+    return _spawn_analyzer(cmd, env)
 
 
 def fail_check(message: str, output: str = "") -> bool:
@@ -3116,6 +3171,7 @@ def main() -> int:
     RUN_CONFIG.jobs = max(1, cli.jobs)
     RUN_CONFIG.cache_enabled = not cli.no_cache
     RUN_CONFIG.cache_dir = Path(cli.cache_dir)
+    RUN_CONFIG.analyzer_timeout = cli.analyzer_timeout if cli.analyzer_timeout > 0 else None
     env_extra_args = shlex.split(os.environ.get("CORETRACE_RUN_TEST_EXTRA_ANALYZER_ARGS", ""))
     RUN_CONFIG.extra_analyzer_args = tuple([*cli.analyzer_arg, *env_extra_args])
 
