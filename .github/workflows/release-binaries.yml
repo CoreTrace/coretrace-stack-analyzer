@@ -54,20 +54,27 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      # Layer cache: the LLVM install depends only on LLVM_VERSION and the base
+      # image, so a warm cache skips it entirely and never contacts
+      # apt.llvm.org — which is where these builds intermittently fail.
+      # build-push-action is used rather than a raw `docker buildx build` so the
+      # Actions runtime credentials that type=gha needs are provided; a plain
+      # run: step does not have them. publish-docker.yml already uses it.
       - name: Build packaged binary with Buildx
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.release-binaries
+          target: artifacts
+          platforms: ${{ matrix.platform }}
+          build-args: VERSION=${{ steps.version.outputs.value }}
+          cache-from: type=gha,scope=release-${{ matrix.arch }}
+          cache-to: type=gha,scope=release-${{ matrix.arch }},mode=max
+          outputs: type=local,dest=dist/${{ matrix.arch }}
+
+      - name: Show build output
         shell: bash
-        run: |
-          set -euo pipefail
-          out_dir="dist/${{ matrix.arch }}"
-          mkdir -p "${out_dir}"
-          docker buildx build \
-            --platform "${{ matrix.platform }}" \
-            --file Dockerfile.release-binaries \
-            --target artifacts \
-            --build-arg VERSION="${{ steps.version.outputs.value }}" \
-            --output "type=local,dest=${out_dir}" \
-            .
-          ls -la "${out_dir}"
+        run: ls -la "dist/${{ matrix.arch }}"
 
       - name: Validate artifact files
         shell: bash
