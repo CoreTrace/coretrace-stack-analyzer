@@ -109,30 +109,56 @@ jobs:
       run: ccache -s
 
     # Tests
+    # restore/save are split, and the primary keys carry a per-run suffix, so
+    # every run writes a fresh cache. actions/cache only saves on a primary-key
+    # miss, so a stable key is written once and then never refreshed again.
     - name: Restore run_test cache
-      uses: actions/cache@v4
+      id: run-test-cache
+      uses: actions/cache/restore@v4
       with:
         path: .cache/run_test
-        key: run-test-${{ runner.os }}-${{ hashFiles('build/stack_usage_analyzer', 'test/**', 'run_test.py') }}
+        key: run-test-${{ runner.os }}-${{ hashFiles('build/stack_usage_analyzer', 'test/**', 'run_test.py') }}-${{ github.run_id }}
         restore-keys: |
+          run-test-${{ runner.os }}-${{ hashFiles('build/stack_usage_analyzer', 'test/**', 'run_test.py') }}-
           run-test-${{ runner.os }}-
 
     - name: Restore compile_ir cache
-      uses: actions/cache@v4
+      id: compile-ir-cache
+      uses: actions/cache/restore@v4
       with:
         path: .cache/compile-ir
-        key: compile-ir-${{ runner.os }}-${{ hashFiles('test/**') }}
+        key: compile-ir-${{ runner.os }}-${{ hashFiles('test/**') }}-${{ github.run_id }}
         restore-keys: |
+          compile-ir-${{ runner.os }}-${{ hashFiles('test/**') }}-
           compile-ir-${{ runner.os }}-
 
+    # A cold suite completes in well under a minute; anything approaching this
+    # budget is a hang, not slow work. --analyzer-timeout fires first and names
+    # the offending invocation, so the step below is only a backstop.
     - name: Test Stack Usage Analyzer
-      timeout-minutes: 45
+      timeout-minutes: 15
       run: |
         TEST_JOBS="$(python3 -c 'import os; print(max(1, min(8, os.cpu_count() or 1)))')"
         echo "Running run_test.py with ${TEST_JOBS} job(s)"
         EXTRA_ANALYZER_ARGS="--compile-ir-cache-dir=.cache/compile-ir"
         CORETRACE_RUN_TEST_EXTRA_ANALYZER_ARGS="${EXTRA_ANALYZER_ARGS}" \
-          python3 -u run_test.py --jobs="${TEST_JOBS}"
+          python3 -u run_test.py --jobs="${TEST_JOBS}" --analyzer-timeout=120
+
+    # Saved even when the suite fails, so a stalled run still leaves warm caches
+    # behind instead of discarding everything it compiled.
+    - name: Save run_test cache
+      if: always()
+      uses: actions/cache/save@v4
+      with:
+        path: .cache/run_test
+        key: ${{ steps.run-test-cache.outputs.cache-primary-key }}
+
+    - name: Save compile_ir cache
+      if: always()
+      uses: actions/cache/save@v4
+      with:
+        path: .cache/compile-ir
+        key: ${{ steps.compile-ir-cache.outputs.cache-primary-key }}
 
     # Self-analysis (Linux only)
 
@@ -149,6 +175,7 @@ jobs:
 
     - name: Self-analysis (analyze own source code)
       if: runner.os == 'Linux'
+      timeout-minutes: 15
       run: |
         mkdir -p artifacts
         python3 scripts/ci/run_code_analysis.py \
