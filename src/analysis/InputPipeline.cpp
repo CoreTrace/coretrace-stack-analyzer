@@ -39,6 +39,12 @@ namespace ctrace::stack::analysis
     namespace
     {
         std::mutex gCompileWorkingDirMutex;
+        // compilerlib drives an in-process clang CompilerInstance. clang/LLVM keep global
+        // mutable state (target registry, cl options, timers); two worker threads compiling
+        // at once hung intermittently on the first compile of a run. Compilation is
+        // serialised here; module analysis stays parallel, and the IR cache makes the
+        // compile step cheap on repeated runs.
+        std::mutex gCompileInvokeMutex;
 
         std::string makeAbsolutePath(const std::string& path)
         {
@@ -873,6 +879,7 @@ namespace ctrace::stack::analysis
                 if (!useWorkingDir)
                 {
                     const ScopedHotspot hotspot(config.timing, "input.compiler.invoke");
+                    std::lock_guard<std::mutex> compileLock(gCompileInvokeMutex);
                     return compilerlib::compile(compileArgs, outputMode);
                 }
 
@@ -884,6 +891,7 @@ namespace ctrace::stack::analysis
                     return std::nullopt;
                 }
                 const ScopedHotspot hotspot(config.timing, "input.compiler.invoke.cwd");
+                std::lock_guard<std::mutex> compileLock(gCompileInvokeMutex);
                 return compilerlib::compile(compileArgs, outputMode);
             };
 
