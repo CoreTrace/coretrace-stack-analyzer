@@ -1,0 +1,59 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Concurrency analysis of this project's own sources.
+#
+# This project runs work across threads -- a worker pool in AnalyzerApp.cpp,
+# mutexes in InputPipeline.cpp and HotspotProfiler.cpp -- so the analysis has
+# something real to reason about. It reports nothing today; the point is that it
+# keeps reporting nothing, and says so the day a shared access loses its lock.
+#
+# The analyzer runs from a published container image and compiles nothing here.
+# LLVM below is installed for *this* project's configure step, which links
+# against it; the analyzer carries its own clang inside the container.
+name: concurrency
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: Concurrency analysis
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install LLVM 20
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake ninja-build
+          wget -O - https://apt.llvm.org/llvm-snapshot.gpg.key | sudo apt-key add -
+          UBUNTU_CODENAME=$(lsb_release -cs)
+          sudo apt-add-repository "deb http://apt.llvm.org/${UBUNTU_CODENAME}/ llvm-toolchain-${UBUNTU_CODENAME}-20 main"
+          sudo apt-get update
+          sudo apt-get install -y llvm-20 llvm-20-dev clang-20 libclang-20-dev
+
+      # Generated here, never committed: a compilation database records absolute
+      # paths and the toolchain that produced it, so one made on a developer's
+      # machine names an SDK this runner does not have and every unit then fails
+      # to compile. Configuring is enough -- nothing needs building.
+      - name: Generate a compilation database
+        run: |
+          cmake -S . -B build -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+            -DLLVM_DIR=/usr/lib/llvm-20/lib/cmake/llvm \
+            -DClang_DIR=/usr/lib/llvm-20/lib/cmake/clang
+
+      # fail-on: error from the start rather than the usual none-then-tighten,
+      # because there is no backlog to absorb: the tree is clean today.
+      - name: Analyze
+        uses: CoreTrace/coretrace-concurrency-analyzer@v0
+        with:
+          compile-commands: build/compile_commands.json
+          fail-on: error
