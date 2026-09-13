@@ -698,6 +698,18 @@ namespace ctrace::stack::analysis
                     args.push_back("c++");
                     args.push_back("-std=gnu++20");
                 }
+                // No compile database means no include paths at all, so a project that keeps its
+                // headers in a conventional top-level include/ next to sources it reaches with a
+                // plain quoted #include fails on the first header, not on anything the analysis
+                // itself found. /workspace is this tool's fixed project root in every invocation
+                // (see coretrace_entrypoint.py); CoreTrace Desktop applies the same one-directory
+                // fallback locally, from the workspace it has open, for the same reason.
+                std::error_code ec;
+                std::filesystem::path workspaceInclude = "/workspace/include";
+                if (std::filesystem::is_directory(workspaceInclude, ec))
+                {
+                    args.push_back("-I" + workspaceInclude.string());
+                }
             }
 
             for (const auto& extraArg : config.extraCompileArgs)
