@@ -701,14 +701,21 @@ namespace ctrace::stack::analysis
                 // No compile database means no include paths at all, so a project that keeps its
                 // headers in a conventional top-level include/ next to sources it reaches with a
                 // plain quoted #include fails on the first header, not on anything the analysis
-                // itself found. /workspace is this tool's fixed project root in every invocation
-                // (see coretrace_entrypoint.py); CoreTrace Desktop applies the same one-directory
-                // fallback locally, from the workspace it has open, for the same reason.
+                // itself found. The project root is wherever this process was started from, not a
+                // fixed path: the Docker runtime image sets it via WORKDIR /workspace, and the
+                // GitHub Action's step runs from $GITHUB_WORKSPACE by default, so both already `cd`
+                // into the real root before this ever runs. CoreTrace Desktop applies the same
+                // one-directory fallback locally, from the workspace it has open, for the same
+                // reason.
                 std::error_code ec;
-                std::filesystem::path workspaceInclude = "/workspace/include";
-                if (std::filesystem::is_directory(workspaceInclude, ec))
+                std::filesystem::path projectRoot = std::filesystem::current_path(ec);
+                if (!ec)
                 {
-                    args.push_back("-I" + workspaceInclude.string());
+                    std::filesystem::path rootInclude = projectRoot / "include";
+                    if (std::filesystem::is_directory(rootInclude, ec))
+                    {
+                        args.push_back("-I" + rootInclude.string());
+                    }
                 }
             }
 
