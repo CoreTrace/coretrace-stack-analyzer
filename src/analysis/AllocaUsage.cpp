@@ -141,7 +141,7 @@ namespace ctrace::stack::analysis
                 return;
 
             const FunctionFacts facts(F);
-            auto ranges = computeIntRanges(F, facts);
+            const ProgramPointRanges pointRanges(F, facts);
 
             for (BasicBlock& BB : F)
             {
@@ -176,7 +176,7 @@ namespace ctrace::stack::analysis
                         issue.sizeIsConst = true;
                         issue.sizeBytes = C->getZExtValue() * elemSize;
                     }
-                    else if (auto upper = getAllocaUpperBoundBytes(AI, DL, ranges))
+                    else if (auto upper = getAllocaUpperBoundBytes(AI, DL, pointRanges.at(*AI)))
                     {
                         issue.hasUpperBound = true;
                         issue.upperBoundBytes = *upper;
