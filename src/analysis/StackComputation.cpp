@@ -71,6 +71,21 @@ namespace ctrace::stack::analysis
             return false;
         }
 
+        // A call site whose callee frame cannot be derived from this module:
+        // indirect call (function pointer, virtual) or direct call to a declaration.
+        // Intrinsics and inline asm are not real calls.
+        static bool isUnresolvedCall(const llvm::CallBase& CB)
+        {
+            if (CB.isInlineAsm())
+                return false;
+            const llvm::Function* callee = CB.getCalledFunction();
+            if (!callee)
+                return true;
+            if (callee->isIntrinsic())
+                return false;
+            return callee->isDeclaration();
+        }
+
         static LocalStackInfo computeLocalStackBase(llvm::Function& F, const llvm::DataLayout& DL)
         {
             LocalStackInfo info;
@@ -79,6 +94,13 @@ namespace ctrace::stack::analysis
             {
                 for (llvm::Instruction& I : BB)
                 {
+                    if (const auto* CB = llvm::dyn_cast<llvm::CallBase>(&I))
+                    {
+                        if (isUnresolvedCall(*CB))
+                            ++info.unresolvedCallCount;
+                        continue;
+                    }
+
                     auto* alloca = llvm::dyn_cast<llvm::AllocaInst>(&I);
                     if (!alloca)
                         continue;
@@ -187,6 +209,8 @@ namespace ctrace::stack::analysis
                 local.unknown = itLocal->second.unknown;
             }
             StackEstimate maxCallee = {};
+            if (itLocal != LocalStack.end() && itLocal->second.unresolvedCallCount > 0)
+                maxCallee.unknown = true;
 
             auto itCG = CG.find(F);
             if (itCG != CG.end())

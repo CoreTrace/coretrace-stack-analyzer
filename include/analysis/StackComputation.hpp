@@ -30,6 +30,9 @@ namespace ctrace::stack::analysis
     {
         StackSize bytes = 0;
         std::vector<std::pair<std::string, StackSize>> localAllocas;
+        // Calls whose callee frame cannot be computed from this module: indirect
+        // calls and calls to declarations without a definition. Intrinsics excluded.
+        std::uint64_t unresolvedCallCount = 0;
         std::uint64_t unknown : 1 = false;
         std::uint64_t hasDynamicAlloca : 1 = false;
         std::uint64_t reservedFlags : 62 = 0;
