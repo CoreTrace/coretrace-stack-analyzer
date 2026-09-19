@@ -2161,6 +2161,57 @@ def check_resource_lifetime_cross_tu() -> bool:
     return True
 
 
+def check_ownership_cross_tu() -> bool:
+    """
+    Cross-TU transformer summaries: a wrapper that always releases clears the
+    obligation in its caller; one that releases only sometimes leaves a possible
+    leak. The second run must come from the summary cache and print the same.
+    """
+    print("=== Testing resource ownership cross-TU transformers ===")
+    model = "models/resource-lifetime/generic.txt"
+    fixtures = RUN_CONFIG.test_dir / "resource-lifetime"
+    ok = True
+    with tempfile.TemporaryDirectory(prefix="ct_ownership_cross_tu_") as tmp:
+        tmpdir = Path(tmp)
+        common = [
+            f"--resource-model={model}",
+            "--warnings-only",
+            f"--compile-ir-cache-dir={tmpdir / 'compile-ir-cache'}",
+            f"--resource-summary-cache-dir={tmpdir / 'resource-cache'}",
+        ]
+        cases = [
+            ("release-always", "use_release_always", False),
+            ("release-sometimes", "use_release_sometimes", True),
+        ]
+        for name, func, expect_leak in cases:
+            args = [str(fixtures / f"cross-tu-{name}-def.c"), str(fixtures / f"cross-tu-{name}-use.c")] + common
+            outputs = []
+            for run in ("first", "cached"):
+                result = run_analyzer_uncached(args)
+                if result.returncode != 0:
+                    print(f"  ❌ {name} ({run}) failed (code {result.returncode})")
+                    print((result.stdout or "") + (result.stderr or ""))
+                    return False
+                # stdout only: stderr carries a per-process log prefix.
+                outputs.append(result.stdout or "")
+            leak_text = "potential resource leak: 'GenericHandle' acquired in handle 'h'"
+            has_leak = leak_text in outputs[0]
+            if has_leak != expect_leak:
+                print(f"  ❌ {name}: leak {'expected' if expect_leak else 'not expected'} in {func}")
+                print(outputs[0])
+                ok = False
+            elif expect_leak and "may leave the function without being released" not in outputs[0]:
+                print(f"  ❌ {name}: the leak must be reported as a possible (partial) leak")
+                print(outputs[0])
+                ok = False
+            if outputs[0] != outputs[1]:
+                print(f"  ❌ {name}: cached run differs from the first run")
+                ok = False
+    if ok:
+        print("  ✅ resource ownership cross-TU transformers OK\n")
+    return ok
+
+
 def check_uninitialized_cross_tu() -> bool:
     """
     Regression: cross-TU uninitialized summaries must propagate indirect out-param
@@ -3344,6 +3395,7 @@ def main() -> int:
         check_exclude_dir_filter,
         check_multi_tu_folder_analysis,
         check_resource_lifetime_cross_tu,
+        check_ownership_cross_tu,
         check_uninitialized_cross_tu,
         check_null_deref_nested_inter_tu,
         check_integer_overflow_advanced_inter_tu,
