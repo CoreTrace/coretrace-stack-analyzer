@@ -16,7 +16,9 @@ int calls_indirect(int (*fp)(int), int x)
 
 int caller(int (*fp)(int), int x)
 {
-    return calls_external(x) + calls_indirect(fp, x);
+    if (x > 0)
+        return calls_external(x);
+    return calls_indirect(fp, x);
 }
 
 // not contains: max stack (including callees): 16 bytes

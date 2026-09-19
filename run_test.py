@@ -3056,7 +3056,7 @@ def check_unresolved_call_max_stack() -> bool:
         if result.returncode == 0:
             print(f"  ❌ {bad} should be rejected")
             ok = False
-    result = run_analyzer(["--assume-external-frame", str(sample)])
+    result = run_analyzer([str(sample), "--assume-external-frame"])
     output = (result.stdout or "") + (result.stderr or "")
     if result.returncode == 0 or "Missing argument for --assume-external-frame" not in output:
         print("  ❌ --assume-external-frame without a value should report a missing argument")
