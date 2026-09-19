@@ -84,6 +84,7 @@ set(STACK_ANALYZER_SOURCES
     src/analysis/GlobalReadBeforeWriteAnalysis.cpp
     src/analysis/IRValueUtils.cpp
     src/analysis/IntRanges.cpp
+    src/analysis/ownership/OwnershipEngine.cpp
     src/analysis/IntegerOverflowAnalysis.cpp
     src/analysis/InputPipeline.cpp
     src/analysis/InvalidBaseReconstruction.cpp
