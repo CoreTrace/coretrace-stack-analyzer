@@ -380,6 +380,25 @@ namespace
         return r.failures == 0;
     }
 
+    bool testExitUncertainty(TestReport& r)
+    {
+        const ResourceId n0 = newInstanceOf(0);
+        // An exceptional exit taken before the call that releases the resource: whether the
+        // release happened is unknowable, so the resource is uncertain *there* only.
+        OwnershipFacts f = facts(1, {}, 1, 1);
+        Event exceptional = exit(true);
+        exceptional.args = {0};
+        f.blocks[0].events = {acquire(0, 0), exceptional, release(0), exit()};
+        const OwnershipResult res = solve(f, entryOf(f));
+        r.expect(res.exits.size() == 2 && res.exits[0].exceptional &&
+                     res.exits[0].state.uncertain[n0],
+                 "ExitUncertainty: the exceptional exit of a releasing call is uncertain");
+        r.expect(!res.exits[1].state.uncertain[n0] &&
+                     res.exits[1].state.resources[n0].isOnly(OwnState::Released),
+                 "ExitUncertainty: the normal path is unaffected");
+        return r.failures == 0;
+    }
+
     bool testSummaries(TestReport& r)
     {
         const auto owned = static_cast<std::size_t>(OwnState::Owned);
@@ -489,6 +508,7 @@ int main(int, char**)
     (void)testEngine(report);
     (void)testContracts(report);
     (void)testEdgeExits(report);
+    (void)testExitUncertainty(report);
     (void)testSummaries(report);
     if (report.failures == 0)
     {
