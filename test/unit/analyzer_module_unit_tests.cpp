@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "StackUsageAnalyzer.hpp"
+#include "app/AnalyzerApp.hpp"
+#include "cli/ArgParser.hpp"
 #include "analysis/FunctionFacts.hpp"
 #include "analysis/InputPipeline.hpp"
 #include "analysis/IntRanges.hpp"
@@ -8,6 +10,8 @@
 #include "analyzer/LocationResolver.hpp"
 #include "analyzer/ModulePreparationService.hpp"
 
+#include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <map>
 #include <functional>
@@ -24,6 +28,9 @@
 #include <llvm/IR/Module.h>
 #include <llvm/Support/SourceMgr.h>
 #include <llvm/Support/raw_ostream.h>
+
+#include <fcntl.h>
+#include <unistd.h>
 
 namespace
 {
@@ -392,6 +399,83 @@ namespace
 
         return true;
     }
+    /// Contract for library consumers (coretrace): the core returns a structured report and
+    /// never writes it to stdout; rendering is a separate, pure step.
+    bool testAnalysisReportContract(const std::filesystem::path& repoRoot, TestReport& report)
+    {
+        namespace app = ctrace::stack::app;
+        namespace cli = ctrace::stack::cli;
+        const std::filesystem::path source = repoRoot / "test/alloca/oversized-constant.c";
+
+        cli::ParsedArguments args;
+        args.inputFilenames = {source.string()};
+
+        // Capture fd 1 around the run: any byte written there is a contract violation.
+        std::fflush(stdout);
+        llvm::outs().flush();
+        char captureTemplate[] = "/tmp/ctrace-unit-stdout-XXXXXX";
+        const int captureFd = mkstemp(captureTemplate);
+        if (captureFd < 0)
+        {
+            report.expect(false, "AnalysisReport: unable to create stdout capture file");
+            return false;
+        }
+        unlink(captureTemplate);
+        const int savedStdout = dup(STDOUT_FILENO);
+        dup2(captureFd, STDOUT_FILENO);
+
+        app::ReportResult result = app::runAnalysis(std::move(args));
+
+        std::fflush(stdout);
+        llvm::outs().flush();
+        dup2(savedStdout, STDOUT_FILENO);
+        close(savedStdout);
+        const off_t bytesOnStdout = lseek(captureFd, 0, SEEK_END);
+        close(captureFd);
+
+        report.expect(result.isOk(),
+                      "AnalysisReport: runAnalysis succeeds on oversized-constant.c");
+        report.expect(bytesOnStdout == 0, "AnalysisReport: runAnalysis writes nothing to stdout");
+        if (!result.isOk())
+        {
+            std::cerr << "runAnalysis error: " << result.error << "\n";
+            return false;
+        }
+
+        const app::AnalysisReport& analysis = *result.report;
+        report.expect(analysis.contractVersion == 1, "AnalysisReport: contract version is 1");
+        report.expect(analysis.files.size() == 1, "AnalysisReport: one file report per input");
+        report.expect(analysis.inputFiles.size() == 1 &&
+                          analysis.inputFiles.front() == source.string(),
+                      "AnalysisReport: input file list is preserved");
+        report.expect(analysis.summary.error == 1 && analysis.summary.warning == 0 &&
+                          analysis.summary.info == 0,
+                      "AnalysisReport: summary counts the single large-alloca error");
+        report.expect(!analysis.files.empty() &&
+                          analysis.files.front().summary.error == analysis.summary.error,
+                      "AnalysisReport: per-file summary matches the total for a single input");
+        report.expect(analysis.merged.diagnostics.size() == 1,
+                      "AnalysisReport: merged result carries the diagnostic");
+
+        const std::string json = app::renderReport(analysis, cli::OutputFormat::Json);
+        report.expect(json == ctrace::stack::toJson(analysis.merged, source.string()),
+                      "renderReport(Json): equals toJson of the merged result");
+
+        const std::string human = app::renderReport(analysis, cli::OutputFormat::Human);
+        report.expect(human.rfind("Mode: IR\n", 0) == 0,
+                      "renderReport(Human): starts with the mode line");
+        report.expect(human.find("Function: big_alloca") != std::string::npos,
+                      "renderReport(Human): lists the analyzed function");
+        report.expect(human.find("Diagnostics summary: info=0, warning=0, error=1\n") !=
+                          std::string::npos,
+                      "renderReport(Human): contains the diagnostics summary line");
+
+        const std::string sarif = app::renderReport(analysis, cli::OutputFormat::Sarif);
+        report.expect(sarif == ctrace::stack::toSarif(analysis.merged, source.string(),
+                                                      "coretrace-stack-analyzer", "0.1.0", ""),
+                      "renderReport(Sarif): equals toSarif of the merged result");
+        return true;
+    }
 } // namespace
 
 int main(int argc, char** argv)
@@ -409,6 +493,7 @@ int main(int argc, char** argv)
     (void)testReachabilityService(repoRoot, report);
     (void)testModulePreparationService(repoRoot, report);
     (void)testIntRangeFacts(repoRoot, report);
+    (void)testAnalysisReportContract(repoRoot, report);
 
     if (report.failures == 0)
     {
