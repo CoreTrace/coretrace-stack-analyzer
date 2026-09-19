@@ -751,7 +751,20 @@ namespace ctrace::stack::analyzer
             std::string ruleId = "UninitializedLocalRead";
             std::string cwe = "CWE-457";
             double confidence = 0.90;
-            if (issue.kind == analysis::UninitializedLocalIssueKind::ReadBeforeDefiniteInit)
+            DiagnosticSeverity severity = DiagnosticSeverity::Warning;
+            if (issue.kind == analysis::UninitializedLocalIssueKind::AnalysisIncomplete)
+            {
+                // calleeName carries "<iterations>/<blocks>" for this kind.
+                severity = DiagnosticSeverity::Info;
+                confidence = -1.0;
+                cwe.clear();
+                body << "\t" << prefixForSeverity(DiagnosticSeverity::Info)
+                     << " uninitialized-read analysis did not converge in this function "
+                        "(fixpoint budget exhausted after "
+                     << issue.calleeName << " iterations/blocks)\n";
+                body << "\t\t ↳ reads reported above are valid, but others may be missed\n";
+            }
+            else if (issue.kind == analysis::UninitializedLocalIssueKind::ReadBeforeDefiniteInit)
             {
                 body << "\t[ !!Warn ] potential read of uninitialized local variable '"
                      << issue.varName << "'\n";
@@ -794,7 +807,7 @@ namespace ctrace::stack::analyzer
 
             DiagnosticBuilder builder;
             builder.function(issue.funcName)
-                .severity(DiagnosticSeverity::Warning)
+                .severity(severity)
                 .errCode(DescriptiveErrorCode::UninitializedLocalRead)
                 .message(body.str());
 

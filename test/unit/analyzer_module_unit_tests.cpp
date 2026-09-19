@@ -7,6 +7,8 @@
 #include "analysis/IntRanges.hpp"
 #include "analysis/Reachability.hpp"
 #include "analysis/StackBufferAnalysis.hpp"
+#include "analysis/UninitializedVarAnalysis.hpp"
+#include "analyzer/DiagnosticEmitter.hpp"
 #include "analyzer/LocationResolver.hpp"
 #include "analyzer/ModulePreparationService.hpp"
 
@@ -574,6 +576,106 @@ namespace
 
         return report.failures == 0;
     }
+    bool testUninitializedFixpointBudgetIsExplicit(const std::filesystem::path& repoRoot,
+                                                   TestReport& report)
+    {
+        using namespace ctrace::stack::analysis;
+
+        const ctrace::stack::AnalysisConfig config;
+        LoadedModule loaded;
+        std::string loadError;
+        const std::filesystem::path source = repoRoot / "test/unit/uninit_fixpoint_budget_input.c";
+        if (!loadModuleFromSource(source, config, loaded, loadError))
+        {
+            report.expect(false, "UninitFixpointBudget setup: failed to load module: " + loadError);
+            return false;
+        }
+        auto analyzeAll = [](const llvm::Function&) { return true; };
+
+        const auto countKind = [](const std::vector<UninitializedLocalReadIssue>& issues,
+                                  UninitializedLocalIssueKind kind, const char* func)
+        {
+            std::size_t count = 0;
+            for (const UninitializedLocalReadIssue& issue : issues)
+                if (issue.kind == kind && issue.funcName == func)
+                    ++count;
+            return count;
+        };
+
+        // Automatic budget: converges, no incompleteness reported.
+        {
+            const std::vector<UninitializedLocalReadIssue> issues =
+                analyzeUninitializedLocalReads(*loaded.module, analyzeAll, nullptr);
+            report.expect(
+                countKind(issues, UninitializedLocalIssueKind::AnalysisIncomplete,
+                          "reads_uninit") == 0 &&
+                    countKind(issues, UninitializedLocalIssueKind::AnalysisIncomplete, "fill") == 0,
+                "UninitFixpointBudget: converged analysis reports no incompleteness");
+            report.expect(countKind(issues, UninitializedLocalIssueKind::ReadBeforeDefiniteInit,
+                                    "reads_uninit") == 1,
+                          "UninitFixpointBudget: converged analysis finds the read of x");
+
+            const UninitializedSummaryIndex summaries = buildUninitializedSummaryIndex(
+                *loaded.module, analyzeAll, static_cast<const UninitializedSummaryIndex*>(nullptr));
+            const auto it = summaries.functions.find("fill");
+            const bool claimsWrite = it != summaries.functions.end() &&
+                                     !it->second.paramEffects.empty() &&
+                                     !it->second.paramEffects[0].writeRanges.empty() &&
+                                     !it->second.paramEffects[0].hasUnknownWrite;
+            report.expect(
+                claimsWrite,
+                "UninitFixpointBudget: converged summary of fill claims a definite write");
+        }
+
+        // Budget of one iteration: loops cannot converge, and it must be said.
+        {
+            const std::vector<UninitializedLocalReadIssue> issues =
+                analyzeUninitializedLocalReads(*loaded.module, analyzeAll, nullptr,
+                                               /*fixpointIterationLimit=*/1);
+            report.expect(countKind(issues, UninitializedLocalIssueKind::AnalysisIncomplete,
+                                    "reads_uninit") == 1,
+                          "UninitFixpointBudget: exhausted budget reports AnalysisIncomplete");
+            report.expect(
+                countKind(issues, UninitializedLocalIssueKind::AnalysisIncomplete, "fill") == 1,
+                "UninitFixpointBudget: every non-converged function is reported once");
+            report.expect(countKind(issues, UninitializedLocalIssueKind::ReadBeforeDefiniteInit,
+                                    "reads_uninit") == 1,
+                          "UninitFixpointBudget: issues found before exhaustion are kept");
+
+            const UninitializedSummaryIndex summaries = buildUninitializedSummaryIndex(
+                *loaded.module, analyzeAll, static_cast<const UninitializedSummaryIndex*>(nullptr),
+                /*fixpointIterationLimit=*/1);
+            const auto it = summaries.functions.find("fill");
+            const bool downgraded = it != summaries.functions.end() &&
+                                    !it->second.paramEffects.empty() &&
+                                    it->second.paramEffects[0].writeRanges.empty() &&
+                                    it->second.paramEffects[0].pointerSlotWrites.empty() &&
+                                    it->second.paramEffects[0].hasUnknownWrite;
+            report.expect(
+                downgraded,
+                "UninitFixpointBudget: non-converged summary downgrades writes to unknown");
+
+            // The emitter renders it as an Info diagnostic under the uninitialized rule,
+            // so it is visible in JSON/SARIF but hidden by --warnings-only.
+            ctrace::stack::AnalysisResult rendered;
+            ctrace::stack::analyzer::appendUninitializedLocalReadDiagnostics(rendered, issues);
+            std::size_t infoCount = 0;
+            bool infoMentionsBudget = false;
+            for (const ctrace::stack::Diagnostic& diag : rendered.diagnostics)
+            {
+                if (diag.severity != ctrace::stack::DiagnosticSeverity::Info)
+                    continue;
+                ++infoCount;
+                infoMentionsBudget = infoMentionsBudget ||
+                                     (diag.message.find("did not converge") != std::string::npos &&
+                                      diag.ruleId == "UninitializedLocalRead");
+            }
+            report.expect(infoCount == 2 && infoMentionsBudget,
+                          "UninitFixpointBudget: AnalysisIncomplete renders as an Info diagnostic");
+        }
+
+        return report.failures == 0;
+    }
 } // namespace
 
 int main(int argc, char** argv)
@@ -594,6 +696,7 @@ int main(int argc, char** argv)
     (void)testAnalysisReportContract(repoRoot, report);
     (void)testUnresolvedCallsMarkStackUnknown(repoRoot, report);
     (void)testAssumeExternalFrameReplacesUnknown(repoRoot, report);
+    (void)testUninitializedFixpointBudgetIsExplicit(repoRoot, report);
 
     if (report.failures == 0)
     {

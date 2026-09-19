@@ -1439,6 +1439,21 @@ namespace ctrace::stack::analysis
             dst.hasUnknownWrite |= src.hasUnknownWrite;
         }
 
+        // Callers must not inherit write claims from a non-converged dataflow:
+        // keep them as "maybe written", which already means "do not warn".
+        // readBeforeWriteRanges are kept: they are a sound subset.
+        static void downgradeWriteClaims(FunctionSummary& summary)
+        {
+            for (PointerParamEffectSummary& effect : summary.paramEffects)
+            {
+                if (!effect.hasAnyEffect())
+                    continue;
+                effect.writeRanges.clear();
+                effect.pointerSlotWrites.clear();
+                effect.hasUnknownWrite = true;
+            }
+        }
+
         static bool mergeFunctionSummary(FunctionSummary& dst, const FunctionSummary& src)
         {
             bool changed = false;
@@ -3260,7 +3275,7 @@ namespace ctrace::stack::analysis
                                     const FunctionSummaryMap& summaries,
                                     const ExternalSummaryMapByName* externalSummariesByName,
                                     const CanonicalCalleeNameMap* canonicalCalleeNames,
-                                    FunctionSummary* outSummary,
+                                    unsigned fixpointIterationLimit, FunctionSummary* outSummary,
                                     std::vector<UninitializedLocalReadIssue>* outIssues)
         {
             TrackedObjectContext tracked;
@@ -3328,7 +3343,9 @@ namespace ctrace::stack::analysis
             // converges in one outer iteration, but the intra-function
             // dataflow (loops, phi-nodes) still needs the full BB iteration
             // budget to stabilize.
-            const unsigned maxIterations = std::max(64u, reachableBlocks * 16u);
+            const unsigned maxIterations = fixpointIterationLimit != 0
+                                               ? fixpointIterationLimit
+                                               : std::max(64u, reachableBlocks * 16u);
 
             // When in issue-collection mode (outSummary == nullptr), we fuse
             // the issue collection into the fixpoint loop. On each iteration
@@ -3404,6 +3421,11 @@ namespace ctrace::stack::analysis
                 }
             }
 
+            // Non-entry blocks start at "everything initialized" and descend by
+            // intersection, so states left above the fixpoint over-claim
+            // initialization: reads found so far are valid, others may be missed.
+            const bool converged = !changed;
+
             if (outSummary)
             {
                 for (const llvm::BasicBlock& BB : F)
@@ -3419,7 +3441,17 @@ namespace ctrace::stack::analysis
                                             nullptr, outSummary, nullptr);
                     }
                 }
+                if (!converged)
+                    downgradeWriteClaims(*outSummary);
                 return;
+            }
+
+            if (!converged && outIssues)
+            {
+                outIssues->push_back(
+                    {F.getName().str(), "", nullptr, 0, 0,
+                     std::to_string(iteration) + "/" + std::to_string(reachableBlocks),
+                     UninitializedLocalIssueKind::AnalysisIncomplete});
             }
 
             if (!fuseIssueCollection)
@@ -3493,11 +3525,10 @@ namespace ctrace::stack::analysis
             }
         }
 
-        static FunctionSummaryMap
-        computeFunctionSummaries(llvm::Module& mod,
-                                 const std::function<bool(const llvm::Function&)>& shouldAnalyze,
-                                 const ExternalSummaryMapByName* externalSummariesByName,
-                                 const CanonicalCalleeNameMap* canonicalCalleeNames)
+        static FunctionSummaryMap computeFunctionSummaries(
+            llvm::Module& mod, const std::function<bool(const llvm::Function&)>& shouldAnalyze,
+            const ExternalSummaryMapByName* externalSummariesByName,
+            const CanonicalCalleeNameMap* canonicalCalleeNames, unsigned fixpointIterationLimit)
         {
             FunctionSummaryMap summaries;
             llvm::SmallVector<const llvm::Function*, 64> analysisFunctions;
@@ -3550,7 +3581,7 @@ namespace ctrace::stack::analysis
 
                     FunctionSummary next = makeEmptySummary(*func);
                     analyzeFunction(*func, mod.getDataLayout(), summaries, externalSummariesByName,
-                                    canonicalCalleeNames, &next, nullptr);
+                                    canonicalCalleeNames, fixpointIterationLimit, &next, nullptr);
                     FunctionSummary& cur = summaries[func];
                     if (!(cur == next))
                     {
@@ -3942,16 +3973,21 @@ namespace ctrace::stack::analysis
         return prepared;
     }
 
-    UninitializedSummaryIndex
-    buildUninitializedSummaryIndex(llvm::Module& mod,
-                                   const std::function<bool(const llvm::Function&)>& shouldAnalyze,
-                                   const UninitializedSummaryIndex* externalSummaries)
+    static UninitializedSummaryIndex
+    buildPreparedSummaryIndex(llvm::Module& mod,
+                              const PreparedUninitializedModuleContext* preparedModule,
+                              const PreparedUninitializedExternalSummaries* preparedExternal,
+                              unsigned fixpointIterationLimit);
+
+    UninitializedSummaryIndex buildUninitializedSummaryIndex(
+        llvm::Module& mod, const std::function<bool(const llvm::Function&)>& shouldAnalyze,
+        const UninitializedSummaryIndex* externalSummaries, unsigned fixpointIterationLimit)
     {
         const PreparedUninitializedModuleContext preparedModule =
             prepareUninitializedModuleContext(mod, shouldAnalyze);
         const PreparedUninitializedExternalSummaries prepared =
             prepareUninitializedExternalSummaries(externalSummaries);
-        return buildUninitializedSummaryIndex(mod, &preparedModule, &prepared);
+        return buildPreparedSummaryIndex(mod, &preparedModule, &prepared, fixpointIterationLimit);
     }
 
     UninitializedSummaryIndex
@@ -3964,10 +4000,11 @@ namespace ctrace::stack::analysis
         return buildUninitializedSummaryIndex(mod, &preparedModule, preparedExternal);
     }
 
-    UninitializedSummaryIndex
-    buildUninitializedSummaryIndex(llvm::Module& mod,
-                                   const PreparedUninitializedModuleContext* preparedModule,
-                                   const PreparedUninitializedExternalSummaries* preparedExternal)
+    static UninitializedSummaryIndex
+    buildPreparedSummaryIndex(llvm::Module& mod,
+                              const PreparedUninitializedModuleContext* preparedModule,
+                              const PreparedUninitializedExternalSummaries* preparedExternal,
+                              unsigned fixpointIterationLimit)
     {
         assert(preparedModule && preparedModule->opaque && "prepared module context is required");
         if (!preparedModule || !preparedModule->opaque)
@@ -3987,9 +4024,17 @@ namespace ctrace::stack::analysis
         {
             externalMap = &preparedExternal->opaque->summariesByName;
         }
-        FunctionSummaryMap summaries =
-            computeFunctionSummaries(mod, shouldSummarize, externalMap, canonicalCalleeNames);
+        FunctionSummaryMap summaries = computeFunctionSummaries(
+            mod, shouldSummarize, externalMap, canonicalCalleeNames, fixpointIterationLimit);
         return exportSummaryIndexForModule(mod, summaries);
+    }
+
+    UninitializedSummaryIndex
+    buildUninitializedSummaryIndex(llvm::Module& mod,
+                                   const PreparedUninitializedModuleContext* preparedModule,
+                                   const PreparedUninitializedExternalSummaries* preparedExternal)
+    {
+        return buildPreparedSummaryIndex(mod, preparedModule, preparedExternal, 0u);
     }
 
     bool mergeUninitializedSummaryIndex(UninitializedSummaryIndex& dst,
@@ -4077,10 +4122,9 @@ namespace ctrace::stack::analysis
         return result;
     }
 
-    std::vector<UninitializedLocalReadIssue>
-    analyzeUninitializedLocalReads(llvm::Module& mod,
-                                   const std::function<bool(const llvm::Function&)>& shouldAnalyze,
-                                   const UninitializedSummaryIndex* externalSummaries)
+    std::vector<UninitializedLocalReadIssue> analyzeUninitializedLocalReads(
+        llvm::Module& mod, const std::function<bool(const llvm::Function&)>& shouldAnalyze,
+        const UninitializedSummaryIndex* externalSummaries, unsigned fixpointIterationLimit)
     {
         std::vector<UninitializedLocalReadIssue> issues;
 
@@ -4093,7 +4137,7 @@ namespace ctrace::stack::analysis
         const ExternalSummaryMapByName externalMap = importExternalSummaryMap(externalSummaries);
         FunctionSummaryMap summaries = computeFunctionSummaries(
             mod, shouldSummarize, externalMap.empty() ? nullptr : &externalMap,
-            &canonicalCalleeNames);
+            &canonicalCalleeNames, fixpointIterationLimit);
 
         for (const llvm::Function& F : mod)
         {
@@ -4104,7 +4148,7 @@ namespace ctrace::stack::analysis
 
             analyzeFunction(F, mod.getDataLayout(), summaries,
                             externalMap.empty() ? nullptr : &externalMap, &canonicalCalleeNames,
-                            nullptr, &issues);
+                            fixpointIterationLimit, nullptr, &issues);
         }
 
         return issues;

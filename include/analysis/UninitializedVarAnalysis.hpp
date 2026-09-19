@@ -68,7 +68,10 @@ namespace ctrace::stack::analysis
         ReadBeforeDefiniteInit,
         ReadBeforeDefiniteInitViaCall,
         ExposedUninitializedBytesViaSink,
-        NeverInitialized
+        NeverInitialized,
+        // The dataflow hit its iteration budget before converging: the issues
+        // reported for this function are valid, but some may be missing.
+        AnalysisIncomplete
     };
 
     struct UninitializedLocalReadIssue
@@ -82,10 +85,15 @@ namespace ctrace::stack::analysis
         UninitializedLocalIssueKind kind = UninitializedLocalIssueKind::ReadBeforeDefiniteInit;
     };
 
+    // fixpointIterationLimit caps the per-function dataflow iterations; 0 picks
+    // the automatic budget. A function that does not converge within it exports
+    // no definite write claims (hasUnknownWrite) and, in issue mode, reports an
+    // AnalysisIncomplete issue.
     UninitializedSummaryIndex
     buildUninitializedSummaryIndex(llvm::Module& mod,
                                    const std::function<bool(const llvm::Function&)>& shouldAnalyze,
-                                   const UninitializedSummaryIndex* externalSummaries = nullptr);
+                                   const UninitializedSummaryIndex* externalSummaries = nullptr,
+                                   unsigned fixpointIterationLimit = 0);
 
     PreparedUninitializedExternalSummaries
     prepareUninitializedExternalSummaries(const UninitializedSummaryIndex* externalSummaries);
@@ -119,5 +127,6 @@ namespace ctrace::stack::analysis
     std::vector<UninitializedLocalReadIssue>
     analyzeUninitializedLocalReads(llvm::Module& mod,
                                    const std::function<bool(const llvm::Function&)>& shouldAnalyze,
-                                   const UninitializedSummaryIndex* externalSummaries = nullptr);
+                                   const UninitializedSummaryIndex* externalSummaries = nullptr,
+                                   unsigned fixpointIterationLimit = 0);
 } // namespace ctrace::stack::analysis
