@@ -33,8 +33,7 @@ namespace
         StateSet s = StateSet::of(OwnState::Owned);
         r.expect(s.isOnly(OwnState::Owned), "Domain: singleton isOnly");
         s |= StateSet::of(OwnState::Released);
-        r.expect(s.has(OwnState::Owned) && s.has(OwnState::Released) &&
-                     !s.isOnly(OwnState::Owned),
+        r.expect(s.has(OwnState::Owned) && s.has(OwnState::Released) && !s.isOnly(OwnState::Owned),
                  "Domain: union");
         r.expect(StateSet::none().empty(), "Domain: none is empty");
 
@@ -60,8 +59,7 @@ namespace
         Contents d;
         d.add(1);
         d.merge(c);
-        r.expect(d.resources.size() == 2 && d.resources[0] == 1 && d.resources[1] == 3 &&
-                     d.mayNull,
+        r.expect(d.resources.size() == 2 && d.resources[0] == 1 && d.resources[1] == 3 && d.mayNull,
                  "Domain: merge keeps contents sorted and unique");
         return r.failures == 0;
     }
