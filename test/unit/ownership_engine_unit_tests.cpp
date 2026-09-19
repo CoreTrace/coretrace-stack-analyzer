@@ -295,6 +295,120 @@ namespace
         }
         return r.failures == 0;
     }
+    // Summary-mode facts: parameter 0 is passed in location 0 holding resource `param`.
+    OwnershipFacts wrapperFacts(std::size_t blocks, std::vector<Edge> edges, std::size_t locations,
+                                std::uint32_t sites)
+    {
+        OwnershipFacts f = facts(blocks, std::move(edges), locations, sites);
+        f.paramLocations = {{0, 0}};
+        return f;
+    }
+    Event callEvent(CallEffect effect)
+    {
+        Event e;
+        e.kind = Event::Kind::Call;
+        e.call = std::move(effect);
+        return e;
+    }
+
+    bool testSummaries(TestReport& r)
+    {
+        const auto owned = static_cast<std::size_t>(OwnState::Owned);
+        {
+            OwnershipFacts f = wrapperFacts(1, {}, 1, 1);
+            f.blocks[0].events = {release(0), exit()};
+            const FunctionOwnershipSummary s = computeSummary(f);
+            r.expect(s.normal.present && s.normal.params.at(0)[owned].isOnly(OwnState::Released),
+                     "Summary: wrapper releasing always maps Owned to {Released}");
+            r.expect(!s.exceptional.present,
+                     "Summary: no exceptional exit, no exceptional transformer");
+        }
+        {
+            OwnershipFacts f = wrapperFacts(
+                4, {edge(0, 1, {release(0)}), edge(0, 2), edge(1, 3), edge(2, 3)}, 1, 1);
+            f.blocks[3].events = {exit()};
+            const FunctionOwnershipSummary s = computeSummary(f);
+            const StateSet img = s.normal.params.at(0)[owned];
+            r.expect(img.has(OwnState::Owned) && img.has(OwnState::Released),
+                     "Summary: wrapper releasing sometimes keeps Owned");
+        }
+        {
+            // release(h); *out = acquire(): location 1 is ArgPointee(1).
+            OwnershipFacts f = wrapperFacts(1, {}, 2, 1);
+            f.locations[1].kind = LocationKind::ArgPointee;
+            f.locations[1].argIndex = 1;
+            f.blocks[0].events = {release(0), acquire(0, 1), exit()};
+            const FunctionOwnershipSummary s = computeSummary(f);
+            r.expect(s.normal.params.at(0)[owned].isOnly(OwnState::Released) &&
+                         s.normal.outArgs.count(1) == 1 &&
+                         s.normal.outArgs.at(1) == Certainty::Guaranteed,
+                     "Summary: wrapper releasing then acquiring reports a fresh out-arg");
+        }
+        {
+            // local = acquire(); release(local): nothing remains, parameter untouched.
+            OwnershipFacts f = wrapperFacts(1, {}, 2, 1);
+            f.blocks[0].events = {acquire(0, 1), release(1), exit()};
+            const FunctionOwnershipSummary s = computeSummary(f);
+            r.expect(s.normal.params.at(0)[owned].isOnly(OwnState::Owned) &&
+                         s.normal.outArgs.empty() && s.normal.returns != Certainty::Guaranteed,
+                     "Summary: wrapper acquiring then releasing leaves no obligation");
+        }
+        {
+            // Returns a fresh resource on every normal exit: location 1 is the Return location.
+            OwnershipFacts f = wrapperFacts(1, {}, 2, 1);
+            f.locations[1].kind = LocationKind::Return;
+            f.blocks[0].events = {acquire(0, 1), ret(1), exit()};
+            const FunctionOwnershipSummary s = computeSummary(f);
+            r.expect(s.normal.returns == Certainty::Guaranteed,
+                     "Summary: returning a fresh resource on every exit is Guaranteed");
+        }
+        {
+            // Returns fresh on one path and null on the other → Conditional.
+            OwnershipFacts f = wrapperFacts(
+                4,
+                {edge(0, 1, {acquire(0, 1)}), edge(0, 2, {overwrite(1)}), edge(1, 3), edge(2, 3)},
+                2, 1);
+            f.locations[1].kind = LocationKind::Return;
+            f.blocks[3].events = {ret(1), exit()};
+            const FunctionOwnershipSummary s = computeSummary(f);
+            r.expect(s.normal.returns == Certainty::Conditional,
+                     "Summary: returning a fresh resource on some exits is Conditional");
+        }
+        {
+            // Exceptional exit before the release, normal exit after it.
+            OwnershipFacts f = wrapperFacts(1, {}, 1, 1);
+            f.blocks[0].events = {exit(true), release(0), exit()};
+            const FunctionOwnershipSummary s = computeSummary(f);
+            r.expect(s.exceptional.present &&
+                         s.exceptional.params.at(0)[owned].isOnly(OwnState::Owned) &&
+                         s.normal.params.at(0)[owned].isOnly(OwnState::Released),
+                     "Summary: exceptional and normal exits are summarised separately");
+        }
+        {
+            OwnershipFacts f = wrapperFacts(3, {edge(0, 1), edge(1, 1), edge(1, 2)}, 1, 1);
+            f.blocks[1].events = {acquire(0, 0)};
+            f.blocks[2].events = {exit()};
+            const FunctionOwnershipSummary s = computeSummary(f, /*iterationLimit=*/1);
+            r.expect(s.incomplete, "Summary: exhausted budget marks the summary incomplete");
+        }
+        {
+            ParamTransformer always = identityTransformer();
+            always[owned] = StateSet::of(OwnState::Released);
+            ParamTransformer sometimes = identityTransformer();
+            sometimes[owned] = StateSet::of(OwnState::Owned) | StateSet::of(OwnState::Released);
+            r.expect(
+                applyTransformer(sometimes, StateSet::of(OwnState::Owned)).has(OwnState::Owned),
+                "Summary: applyTransformer extends by union");
+            const ParamTransformer composed = composeTransformers(sometimes, always);
+            r.expect(composed[owned].isOnly(OwnState::Released),
+                     "Summary: composing 'sometimes' then 'always' releases");
+            ParamTransformer joined = always;
+            joinTransformer(joined, identityTransformer());
+            r.expect(joined[owned].has(OwnState::Owned) && joined[owned].has(OwnState::Released),
+                     "Summary: join of transformers is pointwise union");
+        }
+        return r.failures == 0;
+    }
 } // namespace
 
 int main(int, char**)
@@ -302,6 +416,7 @@ int main(int, char**)
     TestReport report;
     (void)testDomain(report);
     (void)testEngine(report);
+    (void)testSummaries(report);
     if (report.failures == 0)
     {
         std::cout << "All ownership engine unit tests passed.\n";
