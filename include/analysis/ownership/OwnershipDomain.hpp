@@ -84,6 +84,7 @@ namespace ctrace::stack::analysis::ownership
         std::vector<ResourceId> resources;
         bool mayNull = false;
         bool mayUnknown = false;
+        std::uint8_t reservedPadding[6] = {};
 
         [[nodiscard]] bool empty() const
         {
@@ -128,10 +129,11 @@ namespace ctrace::stack::analysis::ownership
     /// The abstract state at a program point.
     struct AbstractState
     {
-        bool reached = false; // false ⇔ ⊥
         std::vector<StateSet> resources;
         std::vector<bool> uncertain; // sticky: the resource can only be "insufficient information"
         std::vector<Contents> locations;
+        bool reached = false; // false ⇔ ⊥
+        std::uint8_t reservedPadding[7] = {};
 
         static AbstractState bottom(std::size_t resourceCount, std::size_t locationCount)
         {

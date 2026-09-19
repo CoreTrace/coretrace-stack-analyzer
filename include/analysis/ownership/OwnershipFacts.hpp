@@ -32,9 +32,10 @@ namespace ctrace::stack::analysis::ownership
 
     struct Location
     {
+        unsigned argIndex = 0; // ArgPointee
         LocationKind kind = LocationKind::Local;
-        unsigned argIndex = 0;       // ArgPointee
         bool strongUpdatable = true; // false when the slot's address is taken
+        std::uint8_t reservedPadding[2] = {};
     };
 
     /// Image of each singleton input state, indexed by OwnState; extends to sets by union.
@@ -65,10 +66,11 @@ namespace ctrace::stack::analysis::ownership
     struct CallEffect
     {
         std::vector<std::pair<LocationId, ParamTransformer>> params;
-        std::optional<LocationId> retDest;
-        Certainty retCertainty = Certainty::Unknown;
         std::vector<std::pair<LocationId, Certainty>> outArgs;
+        std::optional<LocationId> retDest;
         std::uint32_t site = 0; // acquisition site of the fresh resources
+        Certainty retCertainty = Certainty::Unknown;
+        std::uint8_t reservedPadding[3] = {};
     };
 
     struct Event
@@ -86,17 +88,18 @@ namespace ctrace::stack::analysis::ownership
             Exit           // function exit point (state is recorded, not changed)
         };
 
-        Kind kind = Kind::Exit;
+        std::vector<LocationId> args;
+        CallEffect call;
         std::uint32_t site = 0;
         LocationId dst = 0;
         LocationId src = 0;
+        std::uint32_t instructionIndex = 0;
+        Kind kind = Kind::Exit;
+        Certainty certainty = Certainty::Guaranteed;
         bool strong = true;
         bool unknownValue = false;
-        Certainty certainty = Certainty::Guaranteed;
-        std::vector<LocationId> args;
-        CallEffect call;
         bool exceptional = false;
-        std::uint32_t instructionIndex = 0;
+        std::uint8_t reservedPadding[3] = {};
     };
 
     struct Block
@@ -116,10 +119,11 @@ namespace ctrace::stack::analysis::ownership
         std::vector<Block> blocks; // block 0 is the entry
         std::vector<Edge> edges;
         std::vector<Location> locations;
-        std::uint32_t siteCount = 0;
         /// Summary mode: parameter `first` initially holds resource `second`.
         std::vector<std::pair<unsigned, ResourceId>> paramResources;
         /// Summary mode: the location parameter `first` is passed in.
         std::vector<std::pair<unsigned, LocationId>> paramLocations;
+        std::uint32_t siteCount = 0;
+        std::uint32_t reservedPadding = 0;
     };
 } // namespace ctrace::stack::analysis::ownership

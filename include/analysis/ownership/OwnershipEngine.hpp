@@ -14,18 +14,20 @@ namespace ctrace::stack::analysis::ownership
 {
     struct ExitRecord
     {
+        AbstractState state;
         std::uint32_t block = 0;
         std::uint32_t eventIndex = 0;
         bool exceptional = false;
-        AbstractState state;
+        std::uint8_t reservedPadding[7] = {};
     };
 
     struct OwnershipResult
     {
-        bool incomplete = false;        // budget exhausted: nothing below may be trusted
         std::vector<AbstractState> in;  // by block
         std::vector<AbstractState> out; // by block
         std::vector<ExitRecord> exits;  // in block/event order; empty when incomplete
+        bool incomplete = false;        // budget exhausted: nothing below may be trusted
+        std::uint8_t reservedPadding[7] = {};
     };
 
     /// Applies one event to a state. transfer(⊥) = ⊥.

@@ -253,7 +253,14 @@ namespace ctrace::stack::analysis::ownership
             {
                 const Event& e = facts.blocks[block].events[i];
                 if (e.kind == Event::Kind::Exit)
-                    result.exits.push_back({block, i, e.exceptional, state});
+                {
+                    ExitRecord record;
+                    record.state = state;
+                    record.block = block;
+                    record.eventIndex = i;
+                    record.exceptional = e.exceptional;
+                    result.exits.push_back(std::move(record));
+                }
                 applyEvent(facts, e, state);
             }
         }
