@@ -444,7 +444,7 @@ namespace ctrace::stack::analysis
                 return;
 
             const FunctionFacts facts(F);
-            const std::map<const llvm::Value*, IntRange> ranges = computeIntRanges(F, facts);
+            const ProgramPointRanges pointRanges(F, facts);
 
             LazyValueInfo& LVI = facts.lazyValueInfo();
             const TargetLibraryInfo& TLI = facts.targetLibraryInfo();
@@ -491,7 +491,7 @@ namespace ctrace::stack::analysis
                 if (!issue.sizeAboveK && sizeBase && sizeBase->getType()->isIntegerTy())
                 {
                     const std::map<const llvm::Value*, IntRange> queryRanges =
-                        buildValueQueryRanges(*sizeBase, ranges);
+                        buildValueQueryRanges(*sizeBase, pointRanges.at(*at));
                     if (!queryRanges.empty())
                     {
                         const SmtFeasibility sizeAtMostKFeasible =

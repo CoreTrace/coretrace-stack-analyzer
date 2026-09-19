@@ -818,12 +818,14 @@ namespace ctrace::stack::analysis
                 continue;
 
             const FunctionFacts facts(function);
-            const std::map<const llvm::Value*, IntRange> ranges = computeIntRanges(function, facts);
+            const ProgramPointRanges pointRanges(function, facts);
 
             for (llvm::BasicBlock& block : function)
             {
                 for (llvm::Instruction& inst : block)
                 {
+                    const std::map<const llvm::Value*, IntRange> ranges = pointRanges.at(inst);
+
                     if (const auto* binary = llvm::dyn_cast<llvm::BinaryOperator>(&inst))
                     {
                         if (binary->hasNoSignedWrap() && isSignedOverflowOp(binary->getOpcode()) &&

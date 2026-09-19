@@ -676,6 +676,141 @@ namespace
 
         return report.failures == 0;
     }
+    /// Program-point ranges: a branch constraint must hold only where its edge dominates.
+    bool testProgramPointRanges(const std::filesystem::path& repoRoot, TestReport& report)
+    {
+        using namespace ctrace::stack::analysis;
+
+        const ctrace::stack::AnalysisConfig config;
+        LoadedModule loaded;
+        std::string loadError;
+        const std::filesystem::path source = repoRoot / "test/unit/int_range_point_input.c";
+        if (!loadModuleFromSource(source, config, loaded, loadError))
+        {
+            report.expect(false, "ProgramPointRanges setup: failed to load module: " + loadError);
+            return false;
+        }
+
+        // The array accesses are the GEPs; the index key is the slot the index was loaded
+        // from (-O0 keeps `i` in an alloca and reloads it before every use).
+        struct Access
+        {
+            const llvm::Instruction* inst = nullptr;
+            const llvm::Value* key = nullptr;
+        };
+        const auto accessesOf = [&](const char* name) -> std::vector<Access>
+        {
+            std::vector<Access> out;
+            llvm::Function* fn = loaded.module->getFunction(name);
+            if (!fn)
+                return out;
+            for (llvm::BasicBlock& block : *fn)
+            {
+                for (llvm::Instruction& instruction : block)
+                {
+                    const auto* gep = llvm::dyn_cast<llvm::GetElementPtrInst>(&instruction);
+                    if (!gep || gep->getNumIndices() == 0)
+                        continue;
+                    const llvm::Value* index = gep->getOperand(gep->getNumOperands() - 1);
+                    if (const auto* cast = llvm::dyn_cast<llvm::CastInst>(index))
+                        index = cast->getOperand(0);
+                    const auto* load = llvm::dyn_cast<llvm::LoadInst>(index);
+                    if (!load)
+                        continue;
+                    out.push_back({gep, load->getPointerOperand()});
+                }
+            }
+            return out;
+        };
+
+        {
+            llvm::Function* fn = loaded.module->getFunction("early_return_guard");
+            const std::vector<Access> accesses = accessesOf("early_return_guard");
+            report.expect(fn != nullptr && accesses.size() == 1,
+                          "ProgramPointRanges: early_return_guard has one array access");
+            if (fn && accesses.size() == 1)
+            {
+                const FunctionFacts facts(*fn);
+                const ProgramPointRanges ranges(*fn, facts);
+                const std::optional<IntRange> r = ranges.at(accesses[0].key, *accesses[0].inst);
+                report.expect(r && r->hasUpper && r->upper == 199,
+                              "ProgramPointRanges: false edge of `i >= 200` gives i <= 199");
+                report.expect(!(r && r->hasLower && r->lower >= 200),
+                              "ProgramPointRanges: true edge of `i >= 200` does not leak past "
+                              "the return");
+            }
+        }
+
+        {
+            llvm::Function* fn = loaded.module->getFunction("else_branch");
+            const std::vector<Access> accesses = accessesOf("else_branch");
+            report.expect(fn != nullptr && accesses.size() == 2,
+                          "ProgramPointRanges: else_branch has two array accesses");
+            if (fn && accesses.size() == 2)
+            {
+                const FunctionFacts facts(*fn);
+                const ProgramPointRanges ranges(*fn, facts);
+                const std::optional<IntRange> thenRange =
+                    ranges.at(accesses[0].key, *accesses[0].inst);
+                const std::optional<IntRange> elseRange =
+                    ranges.at(accesses[1].key, *accesses[1].inst);
+                report.expect(thenRange && thenRange->hasUpper && thenRange->upper == 9,
+                              "ProgramPointRanges: then-block of `i <= 9` knows i <= 9");
+                report.expect(elseRange && elseRange->hasLower && elseRange->lower == 10,
+                              "ProgramPointRanges: else-block of `i <= 9` knows i >= 10");
+                report.expect(!(elseRange && elseRange->hasUpper),
+                              "ProgramPointRanges: then-constraint does not leak into the else");
+            }
+        }
+
+        {
+            llvm::Function* fn = loaded.module->getFunction("merge_after_guard");
+            const std::vector<Access> accesses = accessesOf("merge_after_guard");
+            report.expect(fn != nullptr && accesses.size() == 1,
+                          "ProgramPointRanges: merge_after_guard has one array access");
+            if (fn && accesses.size() == 1)
+            {
+                const FunctionFacts facts(*fn);
+                const ProgramPointRanges ranges(*fn, facts);
+                const std::optional<IntRange> r = ranges.at(accesses[0].key, *accesses[0].inst);
+                report.expect(!(r && (r->hasUpper || r->hasLower)),
+                              "ProgramPointRanges: a non-dominating guard bounds nothing at the "
+                              "merge");
+
+                // The whole-map view used by the SMT encoder agrees with the point query.
+                const std::map<const llvm::Value*, IntRange> snapshot =
+                    ranges.at(*accesses[0].inst);
+                report.expect(snapshot.count(accesses[0].key) == 0,
+                              "ProgramPointRanges: snapshot at the merge carries no bound for i");
+            }
+        }
+
+        {
+            llvm::Function* fn = loaded.module->getFunction("reused_loop_variable");
+            const std::vector<Access> accesses = accessesOf("reused_loop_variable");
+            // a[i] in loop 1, b[i] and a[i] in loop 2, b[3] is a constant index (no load).
+            report.expect(fn != nullptr && accesses.size() == 3,
+                          "ProgramPointRanges: reused_loop_variable has three indexed accesses");
+            if (fn && accesses.size() == 3)
+            {
+                const FunctionFacts facts(*fn);
+                const ProgramPointRanges ranges(*fn, facts);
+                const std::optional<IntRange> first = ranges.at(accesses[0].key, *accesses[0].inst);
+                const std::optional<IntRange> second =
+                    ranges.at(accesses[1].key, *accesses[1].inst);
+                report.expect(first && first->hasUpper && first->upper == 16,
+                              "ProgramPointRanges: a loop guard bounds its own body despite the "
+                              "increment");
+                report.expect(second && second->hasUpper && second->upper == 15,
+                              "ProgramPointRanges: the second loop's guard bounds its body");
+                report.expect(!(second && second->hasLower && second->lower >= 17),
+                              "ProgramPointRanges: the first loop's exit edge is killed by the "
+                              "rewrite of the slot");
+            }
+        }
+
+        return report.failures == 0;
+    }
 } // namespace
 
 int main(int argc, char** argv)
@@ -697,6 +832,7 @@ int main(int argc, char** argv)
     (void)testUnresolvedCallsMarkStackUnknown(repoRoot, report);
     (void)testAssumeExternalFrameReplacesUnknown(repoRoot, report);
     (void)testUninitializedFixpointBudgetIsExplicit(repoRoot, report);
+    (void)testProgramPointRanges(repoRoot, report);
 
     if (report.failures == 0)
     {

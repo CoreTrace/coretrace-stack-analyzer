@@ -380,7 +380,7 @@ namespace ctrace::stack::analysis
                 continue;
 
             const FunctionFacts facts(function);
-            const std::map<const llvm::Value*, IntRange> ranges = computeIntRanges(function, facts);
+            const ProgramPointRanges pointRanges(function, facts);
             std::unordered_map<const llvm::Value*, RecentWrite> recentWrites;
             std::unordered_map<const llvm::Value*, std::uint64_t> heapAllocBytes;
 
@@ -605,6 +605,7 @@ namespace ctrace::stack::analysis
                     }
                     else
                     {
+                        const std::map<const llvm::Value*, IntRange> ranges = pointRanges.at(inst);
                         const std::optional<IntRange> range = lookupRange(indexValue, ranges);
                         if (range && range->hasLower && range->lower >= 0 && range->hasUpper &&
                             static_cast<std::uint64_t>(range->upper) < capacity)
@@ -626,8 +627,8 @@ namespace ctrace::stack::analysis
                         while (const auto* cast = llvm::dyn_cast<llvm::CastInst>(queryIndex))
                             queryIndex = cast->getOperand(0);
 
-                        if (isHeapIndexViolationInfeasibleBySmt(evaluator, ranges, queryIndex,
-                                                                capacity, inst))
+                        if (isHeapIndexViolationInfeasibleBySmt(evaluator, pointRanges.at(inst),
+                                                                queryIndex, capacity, inst))
                         {
                             continue;
                         }
