@@ -910,8 +910,9 @@ namespace
                           "OwnershipCollector: early_return collected");
             report.expect(count(blocks, Kind::Acquire) == 1 && count(blocks, Kind::Release) == 1,
                           "OwnershipCollector: early_return has one acquire and one release");
-            report.expect(count(blocks, Kind::Exit) == 1 && count(blocks, Kind::Return) == 1,
-                          "OwnershipCollector: the merged ret is one exit with one return event");
+            report.expect(
+                count(blocks, Kind::Exit) == 1 && count(blocks, Kind::Return) == 0,
+                "OwnershipCollector: the merged int ret is one exit and no handle return");
             report.expect(
                 count(blocks, Kind::UnknownCall) == 0 && count(blocks, Kind::AddressEscape) == 0,
                 "OwnershipCollector: check() without pointer args is not an unknown call");
@@ -932,22 +933,20 @@ namespace
             {
                 const CollectedFunction c =
                     collectOwnershipFacts(*fn, model, noSummaries, loaded.module->getDataLayout());
-                bool sawWeakCopy = false;
-                bool sawStrongCopyIntoSameDst = false;
-                LocationId weakDst = 0;
-                for (const Block& b : c.facts.blocks)
-                    for (const Event& e : b.events)
-                        if (e.kind == Event::Kind::Copy && !e.strong)
-                        {
-                            sawWeakCopy = true;
-                            weakDst = e.dst;
-                        }
-                for (const Block& b : c.facts.blocks)
-                    for (const Event& e : b.events)
-                        if (e.kind == Event::Kind::Copy && e.strong && e.dst == weakDst)
-                            sawStrongCopyIntoSameDst = true;
-                report.expect(sawWeakCopy && sawStrongCopyIntoSameDst,
-                              "OwnershipCollector: select keeps both alternatives (weak copy)");
+                // `c ? h : 0` is a phi at -O0: one incoming edge copies h, the other
+                // writes null; both target the phi's location so the join keeps both.
+                std::optional<LocationId> copyDst;
+                std::optional<LocationId> nullDst;
+                for (const Edge& e : c.facts.edges)
+                    for (const Event& ev : e.events)
+                    {
+                        if (ev.kind == Event::Kind::Copy)
+                            copyDst = ev.dst;
+                        if (ev.kind == Event::Kind::Overwrite && !ev.unknownValue)
+                            nullDst = ev.dst;
+                    }
+                report.expect(copyDst && nullDst && *copyDst == *nullDst,
+                              "OwnershipCollector: phi keeps both alternatives on its edges");
                 report.expect(c.facts.siteCount == 1 && c.siteInstructions.size() == 1,
                               "OwnershipCollector: acquire_ret is one acquisition site");
             }

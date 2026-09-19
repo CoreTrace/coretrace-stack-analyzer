@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "analysis/ResourceLifetimeAnalysis.hpp"
 #include "analysis/ResourceModel.hpp"
+#include "ResourceLifetimeInternal.hpp"
 
 #include <array>
 #include <algorithm>
@@ -36,7 +37,7 @@
 
 namespace ctrace::stack::analysis
 {
-    namespace
+    namespace lifetime_detail
     {
         static bool isStdLibCalleeName(llvm::StringRef name)
         {
@@ -65,41 +66,6 @@ namespace ctrace::stack::analysis
             Owned,
             Released,
             Escaped
-        };
-
-        struct MethodClassInfo
-        {
-            std::string className;
-            std::string methodName;
-            std::uint64_t isCtor : 1 = false;
-            std::uint64_t isDtor : 1 = false;
-            std::uint64_t isLifecycleReleaseLike : 1 = false;
-            std::uint64_t reservedFlags : 61 = 0;
-        };
-
-        enum class StorageScope
-        {
-            Unknown,
-            Local,
-            Global,
-            Argument,
-            ThisField
-        };
-
-        struct StorageKey
-        {
-            std::string key;
-            std::string displayName;
-            std::string className;
-            const llvm::AllocaInst* localAlloca = nullptr;
-            std::uint64_t offset = 0;
-            int argumentIndex = -1;
-            StorageScope scope = StorageScope::Unknown;
-
-            bool valid() const
-            {
-                return scope != StorageScope::Unknown && !key.empty();
-            }
         };
 
         struct ParamLifetimeEffect
@@ -250,7 +216,7 @@ namespace ctrace::stack::analysis
             return p == pattern.size();
         }
 
-        static MethodClassInfo describeMethodClass(const llvm::Function& F)
+        MethodClassInfo describeMethodClass(const llvm::Function& F)
         {
             MethodClassInfo info;
             const std::string demangled = ctrace_tools::demangle(F.getName().str().c_str());
@@ -700,14 +666,14 @@ namespace ctrace::stack::analysis
             return buildStorageKeyFromCanonical(canonical, baseOffset + extraOffset, F, methodInfo);
         }
 
-        static StorageKey resolvePointerStorage(const llvm::Value* ptr, const llvm::Function& F,
-                                                const llvm::DataLayout& DL,
-                                                const MethodClassInfo& methodInfo)
+        StorageKey resolvePointerStorage(const llvm::Value* ptr, const llvm::Function& F,
+                                         const llvm::DataLayout& DL,
+                                         const MethodClassInfo& methodInfo)
         {
             return resolvePointerStorageWithExtraOffset(ptr, 0, F, DL, methodInfo);
         }
 
-        static const llvm::Function* resolveDirectCallee(const llvm::CallBase& CB);
+        const llvm::Function* resolveDirectCallee(const llvm::CallBase& CB);
 
         static void collectThisFieldOriginsFromValue(
             const llvm::Value* value, const llvm::Function& F, const llvm::DataLayout& DL,
@@ -883,9 +849,9 @@ namespace ctrace::stack::analysis
             return thisFieldCandidates.begin()->second;
         }
 
-        static StorageKey resolveHandleStorage(const llvm::Value* handleValue,
-                                               const llvm::Function& F, const llvm::DataLayout& DL,
-                                               const MethodClassInfo& methodInfo)
+        StorageKey resolveHandleStorage(const llvm::Value* handleValue, const llvm::Function& F,
+                                        const llvm::DataLayout& DL,
+                                        const MethodClassInfo& methodInfo)
         {
             if (!handleValue)
                 return {};
@@ -1017,7 +983,7 @@ namespace ctrace::stack::analysis
             return false;
         }
 
-        static const llvm::Function* resolveDirectCallee(const llvm::CallBase& CB);
+        const llvm::Function* resolveDirectCallee(const llvm::CallBase& CB);
         static const llvm::Instruction* firstInstructionAnchor(const llvm::Function& F);
 
         static bool summaryStorageScopeAllowed(const StorageKey& storage)
@@ -2065,7 +2031,7 @@ namespace ctrace::stack::analysis
             return out;
         }
 
-        static const llvm::Function* resolveDirectCallee(const llvm::CallBase& CB)
+        const llvm::Function* resolveDirectCallee(const llvm::CallBase& CB)
         {
             if (const llvm::Function* callee = CB.getCalledFunction())
                 return callee;
@@ -2131,7 +2097,9 @@ namespace ctrace::stack::analysis
             }
             return functionSummaries;
         }
-    } // namespace
+    } // namespace lifetime_detail
+
+    using namespace lifetime_detail;
 
     bool ruleMatchesFunction(const ResourceRule& rule, const llvm::Function& callee)
     {
