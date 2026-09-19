@@ -58,7 +58,13 @@ namespace ctrace::stack::analysis
         MissingDestructorRelease,
         IncompleteInterproc,
         UseAfterRelease,
-        ReleasedHandleEscapes
+        ReleasedHandleEscapes,
+        // The resource is still owned when a reference to it is dropped (overwrite,
+        // re-acquisition) and no other location keeps it reachable.
+        ReferenceLost,
+        // The ownership engine hit its budget: no MissingRelease was computed for
+        // this function.
+        AnalysisIncomplete
     };
 
     struct ResourceLifetimeIssue
@@ -68,7 +74,14 @@ namespace ctrace::stack::analysis
         std::string handleName;
         std::string className;
         const llvm::Instruction* inst = nullptr;
+        /// MissingRelease / ReferenceLost: the exit or overwrite that loses the
+        /// resource, when it has a source line of its own.
+        const llvm::Instruction* relatedInst = nullptr;
         ResourceLifetimeIssueKind kind = ResourceLifetimeIssueKind::MissingRelease;
+        /// MissingRelease / ReferenceLost: true when established on every path
+        /// (as far as the abstraction goes), false when only on some.
+        bool certain = true;
+        std::uint8_t reservedPadding[7] = {};
     };
 
     ResourceSummaryIndex buildResourceLifetimeSummaryIndex(

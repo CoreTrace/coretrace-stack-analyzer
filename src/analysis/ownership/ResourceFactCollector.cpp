@@ -7,6 +7,7 @@
 
 #include <llvm/ADT/DenseMap.h>
 #include <llvm/ADT/PostOrderIterator.h>
+#include <llvm/Analysis/ValueTracking.h>
 #include <llvm/IR/Argument.h>
 #include <llvm/IR/BasicBlock.h>
 #include <llvm/IR/CFG.h>
@@ -43,7 +44,8 @@ namespace ctrace::stack::analysis::ownership
             CollectedFunction run()
             {
                 mayUnwind_ = !F_.doesNotThrow();
-                returnLocation_ = newLocation(LocationKind::Local, ArgPath{}, true, "<return>");
+                returnLocation_ = newLocation(LocationKind::Local, ArgPath{}, true, "<return>",
+                                              /*isSlot=*/false);
                 out_.facts.locations[returnLocation_].kind = LocationKind::Return;
 
                 // Handles passed by value: the summary describes what happens to them.
@@ -64,9 +66,10 @@ namespace ctrace::stack::analysis::ownership
 
                 for (const llvm::BasicBlock* bb : out_.blockOf)
                 {
+                    const llvm::BasicBlock* deadSuccessor = infeasibleNullCheckSuccessor(*bb);
                     for (const llvm::BasicBlock* succ : llvm::successors(bb))
                     {
-                        if (!blockIds_.count(succ))
+                        if (!blockIds_.count(succ) || succ == deadSuccessor)
                             continue;
                         edgeIndex_[{bb, succ}] =
                             static_cast<std::uint32_t>(out_.facts.edges.size());
@@ -82,16 +85,104 @@ namespace ctrace::stack::analysis::ownership
                     current_ = &out_.facts.blocks[blockIds_[bb]];
                     for (const llvm::Instruction& I : *bb)
                         visit(I);
+                    splitMergedReturnBlock(*bb);
                 }
 
                 out_.facts.siteCount = static_cast<std::uint32_t>(out_.siteInstructions.size());
+                out_.facts.siteKinds = out_.siteKinds;
                 return std::move(out_);
             }
 
           private:
+            /// The successor of `bb` taken when a pointer LLVM proves non-null compares
+            /// equal to null (clang guards every `delete p` this way although `new` is
+            /// nonnull). That edge is never taken; keeping it would join a state where the
+            /// release did not happen. LLVM's own value tracking decides, nothing name-based.
+            const llvm::BasicBlock* infeasibleNullCheckSuccessor(const llvm::BasicBlock& bb)
+            {
+                const auto* br = llvm::dyn_cast<llvm::BranchInst>(bb.getTerminator());
+                if (!br || !br->isConditional())
+                    return nullptr;
+                const auto* icmp = llvm::dyn_cast<llvm::ICmpInst>(br->getCondition());
+                if (!icmp || !icmp->isEquality())
+                    return nullptr;
+                const llvm::Value* ptr = icmp->getOperand(0);
+                const llvm::Value* other = icmp->getOperand(1);
+                if (!llvm::isa<llvm::ConstantPointerNull>(other))
+                {
+                    std::swap(ptr, other);
+                    if (!llvm::isa<llvm::ConstantPointerNull>(other))
+                        return nullptr;
+                }
+                // -O0 reloads the pointer from its slot before the test.
+                const llvm::Value* origin = ptr;
+                if (const auto* load = llvm::dyn_cast<llvm::LoadInst>(ptr))
+                {
+                    if (const auto* slot = llvm::dyn_cast<llvm::AllocaInst>(
+                            load->getPointerOperand()->stripPointerCasts()))
+                    {
+                        const llvm::StoreInst* unique = nullptr;
+                        for (const llvm::User* u : slot->users())
+                        {
+                            if (const auto* st = llvm::dyn_cast<llvm::StoreInst>(u))
+                            {
+                                if (unique)
+                                    return nullptr;
+                                unique = st;
+                            }
+                        }
+                        if (unique)
+                            origin = unique->getValueOperand();
+                    }
+                }
+                if (!llvm::isKnownNonZero(origin, DL_))
+                    return nullptr;
+                // eq null → true edge dead; ne null → false edge dead.
+                return br->getSuccessor(icmp->getPredicate() == llvm::CmpInst::ICMP_EQ ? 0 : 1);
+            }
+
+            /// Several source `return`s are usually merged into one `ret` block that only
+            /// reloads a return slot. Its events are moved onto every incoming edge so each
+            /// path is judged with its own state instead of the join (spec §6: the
+            /// transfer of ownership is decided per path at the ret).
+            void splitMergedReturnBlock(const llvm::BasicBlock& bb)
+            {
+                if (!llvm::isa<llvm::ReturnInst>(bb.getTerminator()) || llvm::pred_size(&bb) < 2)
+                    return;
+                for (const llvm::Instruction& I : bb)
+                {
+                    if (llvm::isa<llvm::PHINode>(&I))
+                        return; // phi copies already live on the edges; keep it simple
+                }
+                // Only a block that does nothing but produce the return value may be split:
+                // moving unrelated work (an acquisition, a release) onto every incoming edge
+                // would duplicate it.
+                for (const Event& e : current_->events)
+                {
+                    const bool isReturnSequence =
+                        e.kind == Event::Kind::Return || e.kind == Event::Kind::Exit ||
+                        ((e.kind == Event::Kind::Copy || e.kind == Event::Kind::Overwrite) &&
+                         e.dst == returnLocation_);
+                    if (!isReturnSequence)
+                        return;
+                }
+
+                std::vector<Event> events = std::move(current_->events);
+                current_->events.clear();
+                for (const llvm::BasicBlock* pred : llvm::predecessors(&bb))
+                {
+                    const auto it = edgeIndex_.find({pred, &bb});
+                    if (it == edgeIndex_.end())
+                        continue;
+                    for (const Event& e : events)
+                        out_.facts.edges[it->second].events.push_back(e);
+                }
+            }
+
             // ---- locations -------------------------------------------------------------
 
-            LocationId newLocation(LocationKind kind, ArgPath path, bool strong, std::string name)
+            LocationId newLocation(LocationKind kind, ArgPath path, bool strong, std::string name,
+                                   bool isSlot = true)
             {
                 Location loc;
                 loc.kind = kind;
@@ -99,6 +190,7 @@ namespace ctrace::stack::analysis::ownership
                 loc.strongUpdatable = strong;
                 out_.facts.locations.push_back(loc);
                 out_.locationNames.push_back(std::move(name));
+                out_.locationIsSlot.push_back(isSlot);
                 return static_cast<LocationId>(out_.facts.locations.size() - 1);
             }
 
@@ -137,6 +229,7 @@ namespace ctrace::stack::analysis::ownership
                 const LocationId id = newLocation(LocationKind::ArgPointee, path, false,
                                                   "*(arg" + std::to_string(path.argIndex) + ")");
                 slotIds_[key] = id;
+                out_.facts.pointeeLocations.push_back({path, id});
                 return id;
             }
 
@@ -168,6 +261,10 @@ namespace ctrace::stack::analysis::ownership
             {
                 if (!storage.valid())
                     return std::nullopt;
+                // Whatever path resolved it, a local alloca (at offset 0) is one slot.
+                if (storage.scope == StorageScope::Local && storage.localAlloca &&
+                    storage.offset == 0)
+                    return localSlot(*storage.localAlloca);
 
                 if (const auto it = slotIds_.find(storage.key); it != slotIds_.end())
                     return it->second;
@@ -193,6 +290,8 @@ namespace ctrace::stack::analysis::ownership
                     storage.displayName.empty() ? storage.key : storage.displayName;
                 const LocationId id = newLocation(kind, path, strong, name);
                 slotIds_[storage.key] = id;
+                if (kind == LocationKind::ArgPointee)
+                    out_.facts.pointeeLocations.push_back({path, id});
                 return id;
             }
 
@@ -238,8 +337,8 @@ namespace ctrace::stack::analysis::ownership
                 // An SSA value is an immutable holder; escaping is a property of the slot a
                 // value is stored *into* (see slotOf), never of the value itself.
                 std::string name = v->hasName() ? v->getName().str() : std::string("<value>");
-                const LocationId id =
-                    newLocation(LocationKind::Local, ArgPath{}, true, std::move(name));
+                const LocationId id = newLocation(LocationKind::Local, ArgPath{}, true,
+                                                  std::move(name), /*isSlot=*/false);
                 valueIds_[v] = id;
                 return id;
             }
@@ -392,15 +491,29 @@ namespace ctrace::stack::analysis::ownership
                 return e;
             }
 
+            /// A store target the analysis cannot name (a heap object's field, a pointer
+            /// computed from an unknown base): whatever is stored there escapes.
+            LocationId unknownStoreTarget()
+            {
+                if (!unknownTarget_)
+                    unknownTarget_ = newLocation(LocationKind::NonLocal, ArgPath{}, false,
+                                                 "<unknown memory>", /*isSlot=*/false);
+                return *unknownTarget_;
+            }
+
             void visitStore(const llvm::StoreInst& store)
             {
                 const llvm::Value* value = store.getValueOperand();
                 if (!value->getType()->isPointerTy())
                     return;
-                const auto slot = slotOf(store.getPointerOperand());
-                if (!slot)
+                if (const auto slot = slotOf(store.getPointerOperand()))
+                {
+                    emit(assignment(store, *slot, value, /*strong=*/true));
                     return;
-                emit(assignment(store, *slot, value, /*strong=*/true));
+                }
+                if (llvm::isa<llvm::Constant>(value->stripPointerCasts()))
+                    return;
+                emit(assignment(store, unknownStoreTarget(), value, /*strong=*/false));
             }
 
             /// The successor of `call`'s block on which `condition` holds, when the return
@@ -429,17 +542,21 @@ namespace ctrace::stack::analysis::ownership
                         load->getPointerOperand()->stripPointerCasts());
                     if (!slot)
                         return false;
-                    const llvm::StoreInst* unique = nullptr;
-                    for (const llvm::User* u : slot->users())
+                    // -O0: call, store to slot, load, icmp — all in the same block. The
+                    // store that reaches the load is the closest one before it; other
+                    // stores to the same slot elsewhere do not matter.
+                    const llvm::StoreInst* reaching = nullptr;
+                    for (const llvm::Instruction& I : *load->getParent())
                     {
-                        if (const auto* s = llvm::dyn_cast<llvm::StoreInst>(u))
+                        if (&I == load)
+                            break;
+                        if (const auto* st = llvm::dyn_cast<llvm::StoreInst>(&I))
                         {
-                            if (unique)
-                                return false;
-                            unique = s;
+                            if (st->getPointerOperand()->stripPointerCasts() == slot)
+                                reaching = st;
                         }
                     }
-                    return unique && unique->getValueOperand() == &call;
+                    return reaching && reaching->getValueOperand() == &call;
                 };
 
                 const llvm::Value* lhs = icmp->getOperand(0);
@@ -551,6 +668,64 @@ namespace ctrace::stack::analysis::ownership
                 emitOnEdge(invoke.getParent(), invoke.getUnwindDest(), std::move(weak));
             }
 
+            /// Locations whose resource this call may release (model rule or summary).
+            std::vector<LocationId> releaseTargets(const llvm::CallBase& call,
+                                                   const llvm::Function* callee)
+            {
+                std::vector<LocationId> targets;
+                if (!callee)
+                    return targets;
+                for (const ResourceRule& rule : model_.rules)
+                {
+                    if (rule.action != RuleAction::ReleaseArg ||
+                        !ruleMatchesFunction(rule, *callee) || rule.argIndex >= call.arg_size())
+                        continue;
+                    targets.push_back(valueLocation(call.getArgOperand(rule.argIndex)));
+                }
+                if (const FunctionOwnershipSummary* summary = summaries_.byFunction(*callee))
+                {
+                    const auto releases = [](const ParamTransformer& t)
+                    {
+                        return t[static_cast<std::size_t>(OwnState::Owned)].has(OwnState::Released);
+                    };
+                    for (const auto& [argIndex, transformer] : summary->normal.params)
+                    {
+                        if (argIndex < call.arg_size() && releases(transformer) &&
+                            call.getArgOperand(argIndex)->getType()->isPointerTy())
+                            targets.push_back(valueLocation(call.getArgOperand(argIndex)));
+                    }
+                    for (const auto& [path, transformer] : summary->normal.pointeeParams)
+                    {
+                        if (!releases(transformer))
+                            continue;
+                        if (const auto slot = slotOfArgPath(call, path))
+                            targets.push_back(*slot);
+                    }
+                }
+                return targets;
+            }
+
+            /// When the block's branch tests the call's result, record on each successor
+            /// whether the conditional acquisition `site` happened.
+            void resolveContractOnBranch(const llvm::CallBase& call, RuleCondition condition,
+                                         std::uint32_t site)
+            {
+                const auto succ = successorWhere(call, condition);
+                if (!succ)
+                    return;
+                const auto* br =
+                    llvm::dyn_cast<llvm::BranchInst>(call.getParent()->getTerminator());
+                if (!br || !br->isConditional())
+                    return;
+                for (unsigned i = 0; i < 2; ++i)
+                {
+                    Event resolved = make(Event::Kind::ContractResolved, call);
+                    resolved.site = site;
+                    resolved.unknownValue = br->getSuccessor(i) != *succ;
+                    emitOnEdge(call.getParent(), br->getSuccessor(i), std::move(resolved));
+                }
+            }
+
             void visitCall(const llvm::CallBase& call)
             {
                 if (llvm::isa<llvm::IntrinsicInst>(&call) || call.isInlineAsm())
@@ -558,11 +733,14 @@ namespace ctrace::stack::analysis::ownership
                 const llvm::Function* callee = lifetime_detail::resolveDirectCallee(call);
 
                 // A plain call that may throw is an exceptional exit taken before any of
-                // its effects; the absence of an invoke proves nothing.
+                // its effects; the absence of an invoke proves nothing. Whether a call that
+                // *releases* a resource released it before unwinding is unknowable, so that
+                // resource is declared uncertain at this exit (and only there).
                 if (mayUnwind_ && llvm::isa<llvm::CallInst>(&call) && !call.doesNotThrow())
                 {
                     Event e = make(Event::Kind::Exit, call);
                     e.exceptional = true;
+                    e.args = releaseTargets(call, callee);
                     emit(std::move(e));
                 }
 
@@ -573,6 +751,11 @@ namespace ctrace::stack::analysis::ownership
                     {
                         if (!ruleMatchesFunction(rule, *callee))
                             continue;
+                        if (rule.action == RuleAction::NoEffect)
+                        {
+                            matched = true;
+                            continue;
+                        }
                         std::optional<Event> e = ruleEvent(rule, call);
                         if (!e)
                             continue;
@@ -581,13 +764,22 @@ namespace ctrace::stack::analysis::ownership
                         {
                             place(call, std::move(*e));
                         }
+                        else if (e->kind == Event::Kind::Acquire)
+                        {
+                            // The acquisition is visible to the stores that follow the call
+                            // in the block; the branch on the result then settles it.
+                            const std::uint32_t site = e->site;
+                            e->certainty = Certainty::Conditional;
+                            place(call, std::move(*e));
+                            resolveContractOnBranch(call, rule.condition, site);
+                        }
                         else if (const auto succ = successorWhere(call, rule.condition))
                         {
                             emitOnEdge(call.getParent(), *succ, std::move(*e));
                         }
                         else
                         {
-                            e->certainty = Certainty::Unknown;
+                            e->certainty = Certainty::Conditional;
                             place(call, std::move(*e));
                         }
                     }
@@ -621,7 +813,7 @@ namespace ctrace::stack::analysis::ownership
                     Event e = make(Event::Kind::Acquire, call);
                     e.site = newSite(call, rule.resourceKind);
                     e.dst = *slot;
-                    e.strong = out_.facts.locations[*slot].strongUpdatable;
+                    e.strong = true; // the callee writes the slot: a certain write
                     return e;
                 }
                 case RuleAction::AcquireRet:
@@ -641,6 +833,8 @@ namespace ctrace::stack::analysis::ownership
                     e.src = valueLocation(call.getArgOperand(rule.argIndex));
                     return e;
                 }
+                case RuleAction::NoEffect:
+                    return std::nullopt;
                 }
                 return std::nullopt;
             }
@@ -649,6 +843,23 @@ namespace ctrace::stack::analysis::ownership
             {
                 Event e = make(Event::Kind::Call, call);
                 const ExitTransformer& t = summary.normal;
+                if (!t.present && !summary.incomplete)
+                {
+                    // No normal exit known yet (a callee still being summarised, e.g. a
+                    // recursive one): the least fixpoint starts from "does not return", i.e.
+                    // the bottom transformer on everything passed.
+                    const ParamTransformer bottom{};
+                    for (unsigned i = 0; i < call.arg_size(); ++i)
+                    {
+                        const llvm::Value* arg = call.getArgOperand(i);
+                        if (!arg->getType()->isPointerTy())
+                            continue;
+                        e.call.params.push_back({valueLocation(arg), bottom});
+                        if (const auto slot = slotOf(arg))
+                            e.call.params.push_back({*slot, bottom});
+                    }
+                    return e;
+                }
                 for (const auto& [argIndex, transformer] : t.params)
                 {
                     if (argIndex >= call.arg_size() ||
@@ -657,23 +868,30 @@ namespace ctrace::stack::analysis::ownership
                     e.call.params.push_back(
                         {valueLocation(call.getArgOperand(argIndex)), transformer});
                 }
-                bool needsSite = false;
-                if (t.returns != Certainty::Unknown && call.getType()->isPointerTy())
+                for (const auto& [path, transformer] : t.pointeeParams)
+                {
+                    if (const auto slot = slotOfArgPath(call, path))
+                        e.call.params.push_back({*slot, transformer});
+                }
+                if (t.returns.certainty != Certainty::Unknown && call.getType()->isPointerTy())
                 {
                     e.call.retDest = valueLocation(&call);
-                    e.call.retCertainty = t.returns;
-                    needsSite = true;
+                    e.call.retCertainty = t.returns.certainty;
+                    e.call.site = newSite(call, t.returns.kind);
+                    // "Returns a fresh resource on some exits" is a contract on the result,
+                    // like a model rule's if_ret!=null: a null test at the call site settles
+                    // whether anything was acquired.
+                    if (t.returns.certainty == Certainty::Conditional)
+                        resolveContractOnBranch(call, RuleCondition::RetNeNull, e.call.site);
                 }
-                for (const auto& [path, certainty] : t.outArgs)
+                for (const auto& [path, fresh] : t.outArgs)
                 {
                     if (const auto slot = slotOfArgPath(call, path))
                     {
-                        e.call.outArgs.push_back({*slot, certainty});
-                        needsSite = true;
+                        e.call.outArgs.push_back({*slot, fresh.certainty});
+                        e.call.outArgSites.push_back(newSite(call, fresh.kind));
                     }
                 }
-                if (needsSite)
-                    e.call.site = newSite(call, "<summary>");
                 if (summary.incomplete)
                 {
                     // Nothing the callee claims can be trusted: everything passed is uncertain.
@@ -696,10 +914,13 @@ namespace ctrace::stack::analysis::ownership
                         x.call.params.push_back(
                             {valueLocation(call.getArgOperand(argIndex)), transformer});
                     }
-                    for (const auto& [path, certainty] : summary.exceptional.outArgs)
+                    for (const auto& [path, fresh] : summary.exceptional.outArgs)
                     {
                         if (const auto slot = slotOfArgPath(call, path))
-                            x.call.outArgs.push_back({*slot, certainty});
+                        {
+                            x.call.outArgs.push_back({*slot, fresh.certainty});
+                            x.call.outArgSites.push_back(newSite(call, fresh.kind));
+                        }
                     }
                     x.call.site = e.call.site;
                     exceptionalSummaryEvents_[&call] = std::move(x);
@@ -717,11 +938,33 @@ namespace ctrace::stack::analysis::ownership
                     const llvm::Value* arg = call.getArgOperand(i);
                     if (!arg->getType()->isPointerTy())
                         continue;
-                    const bool readOnlyNoCapture =
-                        call.paramHasAttr(i, llvm::Attribute::ReadOnly) &&
-                        call.paramHasAttr(i, llvm::Attribute::NoCapture);
-                    if (readOnlyNoCapture)
+                    // What LLVM knows about the callee (library declarations get their
+                    // attributes inferred in the function-attrs step). A callee that does
+                    // not free and does not retain the pointer beyond its return value
+                    // cannot release or take over what the pointer names.
+                    const bool calleeNoFree = callee && callee->doesNotFreeMemory();
+                    llvm::CaptureInfo capture = llvm::CaptureInfo::all();
+                    if (callee && i < callee->arg_size())
+                        capture = callee->getArg(i)->getAttributes().getCaptureInfo();
+                    if (call.paramHasAttr(i, llvm::Attribute::NoCapture))
+                        capture = llvm::CaptureInfo(llvm::CaptureComponents::None);
+                    const bool retainedElsewhere =
+                        !llvm::capturesNothing(capture.getOtherComponents());
+                    if (calleeNoFree && !retainedElsewhere)
+                    {
+                        // Only the return value may alias the argument (strcpy returns its
+                        // destination): a copy when the result is used, nothing otherwise.
+                        if (!llvm::capturesNothing(capture.getRetComponents()) &&
+                            !call.use_empty() && call.getType()->isPointerTy())
+                        {
+                            Event c = make(Event::Kind::Copy, call);
+                            c.dst = valueLocation(&call);
+                            c.src = valueLocation(arg);
+                            c.strong = false;
+                            emit(std::move(c));
+                        }
                         continue;
+                    }
 
                     const llvm::Value* stripped = arg->stripPointerCasts();
                     if (llvm::isa<llvm::AllocaInst>(stripped) ||
@@ -754,6 +997,7 @@ namespace ctrace::stack::analysis::ownership
             std::map<std::string, LocationId> slotIds_;
             llvm::DenseMap<const llvm::Value*, LocationId> valueIds_;
             std::map<const llvm::CallBase*, Event> exceptionalSummaryEvents_;
+            std::optional<LocationId> unknownTarget_;
             LocationId returnLocation_ = 0;
             bool mayUnwind_ = false;
             std::uint8_t reservedPadding_[3] = {};

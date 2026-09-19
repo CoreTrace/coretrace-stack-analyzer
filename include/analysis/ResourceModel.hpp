@@ -4,6 +4,8 @@
 //   acquire_out <pattern> <arg> <kind> [if_ret...]
 //   acquire_ret <pattern> <kind>       [if_ret...]
 //   release_arg <pattern> <arg> <kind> [if_ret...]
+//   noeffect    <pattern>              (the callee neither releases nor retains any
+//                                       pointer it receives; string/IO libc functions)
 //
 // The optional trailing qualifier makes the effect conditional on the call's
 // return value: if_ret==0, if_ret!=0, if_ret>=0, if_ret<0, if_ret==null,
@@ -25,7 +27,8 @@ namespace ctrace::stack::analysis
     {
         AcquireOut,
         AcquireRet,
-        ReleaseArg
+        ReleaseArg,
+        NoEffect
     };
 
     enum class RuleCondition : std::uint8_t

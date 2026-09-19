@@ -15,10 +15,13 @@ namespace ctrace::stack::analysis::ownership
     struct ExitRecord
     {
         AbstractState state;
-        std::uint32_t block = 0;
-        std::uint32_t eventIndex = 0;
+        std::uint32_t block = 0;      // the block, or the edge's source block
+        std::uint32_t eventIndex = 0; // index in the block's or the edge's events
+        std::uint32_t edge = kNoEdge; // set when the Exit event lives on an edge
         bool exceptional = false;
-        std::uint8_t reservedPadding[7] = {};
+        std::uint8_t reservedPadding[3] = {};
+
+        static constexpr std::uint32_t kNoEdge = ~0u;
     };
 
     struct OwnershipResult

@@ -1517,7 +1517,8 @@ encodeExitTransformer(const ctrace::stack::analysis::ownership::ExitTransformer&
 {
     llvm::json::Object obj;
     obj["present"] = t.present;
-    obj["returns"] = encodeCertainty(t.returns);
+    obj["returns"] = encodeCertainty(t.returns.certainty);
+    obj["returnsKind"] = t.returns.kind;
     llvm::json::Array params;
     for (const auto& [argIndex, transformer] : t.params)
     {
@@ -1530,14 +1531,29 @@ encodeExitTransformer(const ctrace::stack::analysis::ownership::ExitTransformer&
         params.push_back(std::move(p));
     }
     obj["params"] = std::move(params);
+    llvm::json::Array pointeeParams;
+    for (const auto& [path, transformer] : t.pointeeParams)
+    {
+        llvm::json::Array image;
+        for (const auto& stateSet : transformer)
+            image.push_back(static_cast<int64_t>(stateSet.bits));
+        llvm::json::Object p;
+        p["argIndex"] = static_cast<int64_t>(path.argIndex);
+        p["offset"] = static_cast<int64_t>(path.offset);
+        p["viaPointerSlot"] = path.viaPointerSlot;
+        p["image"] = std::move(image);
+        pointeeParams.push_back(std::move(p));
+    }
+    obj["pointeeParams"] = std::move(pointeeParams);
     llvm::json::Array outArgs;
-    for (const auto& [path, certainty] : t.outArgs)
+    for (const auto& [path, fresh] : t.outArgs)
     {
         llvm::json::Object o;
         o["argIndex"] = static_cast<int64_t>(path.argIndex);
         o["offset"] = static_cast<int64_t>(path.offset);
         o["viaPointerSlot"] = path.viaPointerSlot;
-        o["certainty"] = encodeCertainty(certainty);
+        o["certainty"] = encodeCertainty(fresh.certainty);
+        o["kind"] = fresh.kind;
         outArgs.push_back(std::move(o));
     }
     obj["outArgs"] = std::move(outArgs);
@@ -1565,10 +1581,12 @@ static bool decodeExitTransformer(const llvm::json::Object& obj,
     if (!present || !returns || !params || !outArgs)
         return false;
     const auto returnsCertainty = decodeCertainty(*returns);
-    if (!returnsCertainty)
+    const auto returnsKind = obj.getString("returnsKind");
+    if (!returnsCertainty || !returnsKind)
         return false;
     out.present = *present;
-    out.returns = *returnsCertainty;
+    out.returns.certainty = *returnsCertainty;
+    out.returns.kind = returnsKind->str();
     for (const auto& value : *params)
     {
         const auto* p = value.getAsObject();
@@ -1586,6 +1604,32 @@ static bool decodeExitTransformer(const llvm::json::Object& obj,
         }
         out.params[static_cast<unsigned>(*argIndex)] = transformer;
     }
+    const auto* pointeeParams = obj.getArray("pointeeParams");
+    if (!pointeeParams)
+        return false;
+    for (const auto& value : *pointeeParams)
+    {
+        const auto* p = value.getAsObject();
+        const auto argIndex = p ? p->getInteger("argIndex") : std::nullopt;
+        const auto offset = p ? p->getInteger("offset") : std::nullopt;
+        const auto via = p ? p->getBoolean("viaPointerSlot") : std::nullopt;
+        const auto* image = p ? p->getArray("image") : nullptr;
+        if (!argIndex || !offset || !via || !image || image->size() != 4)
+            return false;
+        ParamTransformer transformer{};
+        for (std::size_t i = 0; i < 4; ++i)
+        {
+            const auto bits = (*image)[i].getAsInteger();
+            if (!bits || *bits < 0 || *bits > 15)
+                return false;
+            transformer[i].bits = static_cast<std::uint8_t>(*bits);
+        }
+        ArgPath path;
+        path.argIndex = static_cast<unsigned>(*argIndex);
+        path.offset = static_cast<std::uint64_t>(*offset);
+        path.viaPointerSlot = *via;
+        out.pointeeParams[path] = transformer;
+    }
     for (const auto& value : *outArgs)
     {
         const auto* o = value.getAsObject();
@@ -1594,13 +1638,17 @@ static bool decodeExitTransformer(const llvm::json::Object& obj,
         const auto via = o ? o->getBoolean("viaPointerSlot") : std::nullopt;
         const auto certaintyText = o ? o->getString("certainty") : std::nullopt;
         const auto certainty = certaintyText ? decodeCertainty(*certaintyText) : std::nullopt;
-        if (!argIndex || !offset || !via || !certainty)
+        const auto kind = o ? o->getString("kind") : std::nullopt;
+        if (!argIndex || !offset || !via || !certainty || !kind)
             return false;
         ArgPath path;
         path.argIndex = static_cast<unsigned>(*argIndex);
         path.offset = static_cast<std::uint64_t>(*offset);
         path.viaPointerSlot = *via;
-        out.outArgs[path] = *certainty;
+        FreshResource fresh;
+        fresh.certainty = *certainty;
+        fresh.kind = kind->str();
+        out.outArgs[path] = std::move(fresh);
     }
     return true;
 }

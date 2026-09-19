@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
+#include <cstdlib>
 #include <fstream>
 #include <iostream>
 #include <limits>
@@ -1012,6 +1013,8 @@ namespace ctrace::stack::analysis
                 return ResourceSummaryAction::AcquireRet;
             case RuleAction::ReleaseArg:
                 return ResourceSummaryAction::ReleaseArg;
+            case RuleAction::NoEffect:
+                break; // never summarised as an effect
             }
             llvm::report_fatal_error("Unhandled RuleAction in toPublicSummaryAction");
         }
@@ -2226,6 +2229,16 @@ namespace ctrace::stack::analysis
                 rule.argIndex = 0;
                 rule.resourceKind = tokens[2];
             }
+            else if (tokens[0] == "noeffect")
+            {
+                if (tokens.size() != 2)
+                {
+                    error = "invalid noeffect rule at line " + std::to_string(lineNo);
+                    return false;
+                }
+                rule.action = RuleAction::NoEffect;
+                rule.functionPattern = tokens[1];
+            }
             else if (tokens[0] == "release_arg")
             {
                 if (tokens.size() != 4)
@@ -2260,7 +2273,7 @@ namespace ctrace::stack::analysis
                                       const ownership::ExitTransformer& b)
     {
         return a.present == b.present && a.returns == b.returns && a.outArgs == b.outArgs &&
-               a.params == b.params;
+               a.params == b.params && a.pointeeParams == b.pointeeParams;
     }
 
     bool ownershipSummaryEquals(const ownership::FunctionOwnershipSummary& lhs,
@@ -2523,6 +2536,214 @@ namespace ctrace::stack::analysis
         return changed;
     }
 
+    namespace
+    {
+        /// Runs the ownership engine on one function and turns its stabilised states into
+        /// MissingRelease / ReferenceLost / AnalysisIncomplete issues (spec §8).
+        void analyzeMissingReleaseWithEngine(const llvm::Function& F, const ResourceModel& model,
+                                             const ownership::SummaryLookup& summaries,
+                                             const llvm::DataLayout& DL,
+                                             std::vector<ResourceLifetimeIssue>& issues)
+        {
+            using namespace ownership;
+
+            const CollectedFunction collected = collectOwnershipFacts(F, model, summaries, DL);
+            if (collected.siteInstructions.empty())
+                return; // nothing acquired here: nothing to leak
+
+            const AbstractState entry = AbstractState::entry(2u * collected.facts.siteCount,
+                                                             collected.facts.locations.size());
+            const OwnershipResult result = solve(collected.facts, entry);
+            if (std::getenv("CTRACE_SPIKE_OWN"))
+            {
+                static const char* kNames[] = {
+                    "Acquire",       "Release",     "Copy", "Overwrite", "Return",
+                    "AddressEscape", "UnknownCall", "Call", "Exit",      "ContractResolved"};
+                std::cerr << "[own] " << F.getName().str() << "\n";
+                for (std::uint32_t b = 0; b < collected.facts.blocks.size(); ++b)
+                {
+                    replay(collected.facts, result, b,
+                           [&](std::uint32_t i, const AbstractState&, const AbstractState& after)
+                           {
+                               const Event& e = collected.facts.blocks[b].events[i];
+                               if (e.kind == Event::Kind::Call)
+                                   std::cerr
+                                       << "  [call params=" << e.call.params.size()
+                                       << " outArgs=" << e.call.outArgs.size()
+                                       << " sites=" << e.call.outArgSites.size()
+                                       << " ret=" << (e.call.retDest ? 1 : 0) << " site0="
+                                       << (e.call.outArgSites.empty() ? 99 : e.call.outArgSites[0])
+                                       << " dst0="
+                                       << (e.call.outArgs.empty() ? 99 : e.call.outArgs[0].first)
+                                       << " siteCount=" << collected.facts.siteCount << "]\n";
+                               std::cerr << "  b" << b << " " << kNames[static_cast<int>(e.kind)]
+                                         << " dst=" << e.dst << "("
+                                         << collected.locationNames[e.dst] << ") src=" << e.src
+                                         << " strong=" << e.strong
+                                         << " cert=" << static_cast<int>(e.certainty) << " ->";
+                               for (std::size_t r = 0; r < after.resources.size(); ++r)
+                                   std::cerr << " r" << r << "=" << int(after.resources[r].bits);
+                               std::cerr << "\n";
+                           });
+                }
+                for (const Edge& ed : collected.facts.edges)
+                    for (const Event& e : ed.events)
+                        std::cerr << "  edge " << ed.from << "->" << ed.to << " "
+                                  << kNames[static_cast<int>(e.kind)] << " dst=" << e.dst
+                                  << " strong=" << e.strong << "\n";
+            }
+
+            const auto issueFor = [&](ResourceId r, ResourceLifetimeIssueKind kind)
+            {
+                const std::uint32_t site = r / 2u;
+                ResourceLifetimeIssue issue;
+                issue.funcName = F.getName().str();
+                issue.resourceKind = collected.siteKinds[site];
+                issue.inst = collected.siteInstructions[site];
+                issue.kind = kind;
+                // The handle name is the first named slot the resource is stored into
+                // (an acquire_ret value is stored right after the call at -O0).
+                for (std::uint32_t block = 0;
+                     block < collected.facts.blocks.size() && issue.handleName.empty(); ++block)
+                {
+                    replay(collected.facts, result, block,
+                           [&](std::uint32_t, const AbstractState&, const AbstractState& after)
+                           {
+                               if (!issue.handleName.empty())
+                                   return;
+                               for (LocationId loc = 0; loc < after.locations.size(); ++loc)
+                               {
+                                   if (collected.locationIsSlot[loc] &&
+                                       (after.locations[loc].holds(newInstanceOf(site)) ||
+                                        after.locations[loc].holds(oldInstancesOf(site))))
+                                   {
+                                       issue.handleName = collected.locationNames[loc];
+                                       return;
+                                   }
+                               }
+                           });
+                }
+                if (issue.handleName.empty())
+                {
+                    const llvm::Instruction* acquiring = collected.siteInstructions[site];
+                    issue.handleName = acquiring && acquiring->hasName()
+                                           ? acquiring->getName().str()
+                                           : std::string("<temporary>");
+                }
+                return issue;
+            };
+
+            if (result.incomplete)
+            {
+                ResourceLifetimeIssue issue =
+                    issueFor(0, ResourceLifetimeIssueKind::AnalysisIncomplete);
+                issues.push_back(std::move(issue));
+                return;
+            }
+
+            const std::size_t resourceCount = entry.resources.size();
+            // One issue per acquisition site (spec §8): both instances of a site share it.
+            std::vector<bool> reportedSite(collected.facts.siteCount, false);
+            const auto reported = [&](ResourceId r) -> std::vector<bool>::reference
+            { return reportedSite[r / 2u]; };
+
+            // Only storage keeps a resource reachable. An SSA value is a conduit: at -O0 a
+            // release always reloads the slot, so a temporary left over from an earlier
+            // test cannot be used to release anything.
+            const auto referencedElsewhere = [&collected](const AbstractState& s, ResourceId r)
+            {
+                for (LocationId loc = 0; loc < s.locations.size(); ++loc)
+                    if (collected.locationIsSlot[loc] && s.locations[loc].holds(r))
+                        return true;
+                return false;
+            };
+
+            // Reference loss first (spec §8: priority over exit leaks), in block/event order.
+            for (std::uint32_t block = 0; block < collected.facts.blocks.size(); ++block)
+            {
+                replay(collected.facts, result, block,
+                       [&](std::uint32_t eventIndex, const AbstractState& before,
+                           const AbstractState& after)
+                       {
+                           const Event& e = collected.facts.blocks[block].events[eventIndex];
+                           if (e.kind != Event::Kind::Acquire && e.kind != Event::Kind::Copy &&
+                               e.kind != Event::Kind::Overwrite)
+                               return;
+                           for (const ResourceId r : before.locations[e.dst].resources)
+                           {
+                               // After an acquisition the previous instance is renamed to
+                               // the site's "older" resource; follow it.
+                               ResourceId now = r;
+                               if (e.kind == Event::Kind::Acquire && r == newInstanceOf(e.site))
+                                   now = oldInstancesOf(e.site);
+                               if (after.locations[e.dst].holds(now) ||
+                                   referencedElsewhere(after, now))
+                                   continue;
+                               if (!after.resources[now].has(OwnState::Owned) ||
+                                   after.uncertain[now] || reported(now))
+                                   continue;
+                               reported(now) = true;
+                               ResourceLifetimeIssue issue =
+                                   issueFor(now, ResourceLifetimeIssueKind::ReferenceLost);
+                               issue.certain = before.resources[r].isOnly(OwnState::Owned) &&
+                                               before.locations[e.dst].isExactly(r) && e.strong;
+                               issue.relatedInst = collected.eventInstructions[e.instructionIndex];
+                               issues.push_back(std::move(issue));
+                           }
+                       });
+            }
+
+            // Exit leaks: Owned on some exit is a possible leak; Owned alone on every exit
+            // (with at least one exit) is the historical "not released in this function".
+            // "Certain" ignores exits taken before the acquisition (state {NotOwned} alone,
+            // e.g. the acquiring call itself unwinding): they leak nothing.
+            std::vector<bool> ownedOnSomeExit(resourceCount, false);
+            std::vector<bool> ownedOnlyOnEveryExit(resourceCount, true);
+            std::vector<bool> uncertainOnSomeExit(resourceCount, false);
+            std::vector<const llvm::Instruction*> firstLeakingExit(resourceCount, nullptr);
+            for (const ExitRecord& exit : result.exits)
+            {
+                for (ResourceId r = 0; r < resourceCount; ++r)
+                {
+                    const StateSet st = exit.state.resources[r];
+                    uncertainOnSomeExit[r] = uncertainOnSomeExit[r] || exit.state.uncertain[r];
+                    if (st.has(OwnState::Owned))
+                    {
+                        ownedOnSomeExit[r] = true;
+                        if (!firstLeakingExit[r])
+                        {
+                            const std::vector<Event>& events =
+                                exit.edge == ExitRecord::kNoEdge
+                                    ? collected.facts.blocks[exit.block].events
+                                    : collected.facts.edges[exit.edge].events;
+                            const Event& e = events[exit.eventIndex];
+                            firstLeakingExit[r] = collected.eventInstructions[e.instructionIndex];
+                        }
+                    }
+                    // NotOwned means "no obligation ever existed on this path" (a
+                    // conditional contract that did not acquire): it never weakens the
+                    // verdict about the resource when it does exist.
+                    StateSet owning = st;
+                    owning.bits &=
+                        static_cast<std::uint8_t>(~StateSet::of(OwnState::NotOwned).bits);
+                    if (!owning.empty() && !owning.isOnly(OwnState::Owned))
+                        ownedOnlyOnEveryExit[r] = false;
+                }
+            }
+            for (ResourceId r = 0; r < resourceCount; ++r)
+            {
+                if (!ownedOnSomeExit[r] || uncertainOnSomeExit[r] || reported(r))
+                    continue;
+                reported(r) = true;
+                ResourceLifetimeIssue issue =
+                    issueFor(r, ResourceLifetimeIssueKind::MissingRelease);
+                issue.certain = ownedOnlyOnEveryExit[r];
+                issue.relatedInst = firstLeakingExit[r];
+                issues.push_back(std::move(issue));
+            }
+        }
+    } // namespace
+
     std::vector<ResourceLifetimeIssue> analyzeResourceLifetime(
         llvm::Module& mod, const std::function<bool(const llvm::Function&)>& shouldAnalyze,
         const std::string& modelPath, const ResourceSummaryIndex* externalSummaries)
@@ -2545,6 +2766,26 @@ namespace ctrace::stack::analysis
         std::unordered_map<const llvm::Function*, FunctionLifetimeSummary> functionSummaries =
             computeFunctionLifetimeSummaries(mod, model, shouldAnalyze,
                                              externalMap.empty() ? nullptr : &externalMap);
+
+        const auto ownershipSummaries =
+            computeOwnershipSummaries(mod, model, shouldAnalyze, externalSummaries);
+        std::unordered_map<std::string, const ownership::FunctionOwnershipSummary*>
+            externalOwnership;
+        if (externalSummaries)
+        {
+            for (const auto& [name, fn] : externalSummaries->functions)
+                externalOwnership.emplace(name, &fn.ownership);
+        }
+        const ownership::SummaryLookup ownershipLookup{
+            [&](const llvm::Function& callee) -> const ownership::FunctionOwnershipSummary*
+            {
+                if (const auto it = ownershipSummaries.find(&callee);
+                    it != ownershipSummaries.end())
+                    return &it->second;
+                const auto ext = externalOwnership.find(
+                    ctrace_tools::canonicalizeMangledName(callee.getName().str()));
+                return ext == externalOwnership.end() ? nullptr : ext->second;
+            }};
 
         std::unordered_map<std::string, ClassLifecycleSummary> classSummaries;
 
@@ -2903,6 +3144,8 @@ namespace ctrace::stack::analysis
 
                         switch (rule.action)
                         {
+                        case RuleAction::NoEffect:
+                            break;
                         case RuleAction::AcquireOut:
                         {
                             if (rule.argIndex >= CB->arg_size())
@@ -3061,34 +3304,9 @@ namespace ctrace::stack::analysis
                 }
             }
 
-            for (const auto& entry : localStates)
-            {
-                const LocalHandleState& state = entry.second;
-                if (state.storage.scope != StorageScope::Local)
-                    continue;
-                if (state.acquires <= 0)
-                    continue;
-                if (state.releases >= state.acquires)
-                    continue;
-                if (state.escapesViaReturn)
-                    continue;
-                if (state.storage.localAlloca &&
-                    localAddressEscapesToUnmodeledCall(
-                        F, *state.storage.localAlloca, model, functionSummaries,
-                        externalMap.empty() ? nullptr : &externalMap, DL, shouldAnalyze))
-                {
-                    continue;
-                }
-
-                ResourceLifetimeIssue issue;
-                issue.funcName = state.funcName;
-                issue.resourceKind = state.resourceKind;
-                issue.handleName = state.storage.displayName.empty() ? std::string("<unknown>")
-                                                                     : state.storage.displayName;
-                issue.inst = state.firstAcquireInst;
-                issue.kind = ResourceLifetimeIssueKind::MissingRelease;
-                issues.push_back(std::move(issue));
-            }
+            // MissingRelease comes from the ownership engine (spec §8); the counters
+            // above keep serving the other rules.
+            analyzeMissingReleaseWithEngine(F, model, ownershipLookup, DL, issues);
 
             if (methodInfo.isDtor && !methodInfo.className.empty())
             {

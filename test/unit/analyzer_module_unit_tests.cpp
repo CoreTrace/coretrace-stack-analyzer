@@ -899,7 +899,10 @@ namespace
                     blockKinds.push_back(e.kind);
             for (const Edge& e : c.facts.edges)
                 for (const Event& ev : e.events)
+                {
+                    blockKinds.push_back(ev.kind);
                     edgeKinds.push_back(ev.kind);
+                }
             return true;
         };
         const auto count = [](const std::vector<Kind>& v, Kind k)
@@ -911,9 +914,9 @@ namespace
                           "OwnershipCollector: early_return collected");
             report.expect(count(blocks, Kind::Acquire) == 1 && count(blocks, Kind::Release) == 1,
                           "OwnershipCollector: early_return has one acquire and one release");
-            report.expect(
-                count(blocks, Kind::Exit) == 1 && count(blocks, Kind::Return) == 0,
-                "OwnershipCollector: the merged int ret is one exit and no handle return");
+            report.expect(count(blocks, Kind::Exit) == 2 && count(blocks, Kind::Return) == 0,
+                          "OwnershipCollector: the merged int ret is split into one exit per "
+                          "incoming path, with no handle return");
             report.expect(
                 count(blocks, Kind::UnknownCall) == 0 && count(blocks, Kind::AddressEscape) == 0,
                 "OwnershipCollector: check() without pointer args is not an unknown call");
@@ -996,17 +999,26 @@ namespace
             }
             return std::nullopt;
         };
-        // Position of the first event of `kind` in flattened block order, or -1.
+        // Position of the first event of `kind`, blocks then edges, or -1.
         const auto firstIndex = [](const CollectedFunction& c, Kind kind, bool exceptional)
         {
             int index = 0;
-            for (const Block& b : c.facts.blocks)
-                for (const Event& e : b.events)
+            const auto scan = [&](const std::vector<Event>& events)
+            {
+                for (const Event& e : events)
                 {
                     if (e.kind == kind && (kind != Kind::Exit || e.exceptional == exceptional))
-                        return index;
+                        return true;
                     ++index;
                 }
+                return false;
+            };
+            for (const Block& b : c.facts.blocks)
+                if (scan(b.events))
+                    return index;
+            for (const Edge& e : c.facts.edges)
+                if (scan(e.events))
+                    return index;
             return -1;
         };
 
@@ -1036,16 +1048,28 @@ namespace
                           "OwnershipCollectorExceptions: invoke_with_catch collected");
             if (c)
             {
-                // The caught invoke's effects live on its edges and neither edge is an exit:
-                // the unwind edge lands in this function. (__cxa_end_catch is not nounwind,
-                // so the function as a whole still has an exceptional exit; no name-based
-                // exception is made for it.)
-                bool exitOnAnyEdge = false;
-                for (const Edge& e : c->facts.edges)
-                    for (const Event& ev : e.events)
-                        exitOnAnyEdge = exitOnAnyEdge || ev.kind == Kind::Exit;
-                report.expect(!exitOnAnyEdge && firstIndex(*c, Kind::Exit, false) >= 0,
-                              "OwnershipCollectorExceptions: a caught invoke is not an exit");
+                // The caught invoke's unwind edge lands in this function: it carries the
+                // callee's weakened effects, never an exit of this function.
+                const llvm::BasicBlock* unwindFrom = nullptr;
+                const llvm::BasicBlock* unwindTo = nullptr;
+                for (const llvm::BasicBlock* bb : c->blockOf)
+                    for (const llvm::Instruction& I : *bb)
+                        if (const auto* inv = llvm::dyn_cast<llvm::InvokeInst>(&I))
+                        {
+                            unwindFrom = inv->getParent();
+                            unwindTo = inv->getUnwindDest();
+                        }
+                bool exitOnUnwindEdge = false;
+                for (const Edge& edge : c->facts.edges)
+                {
+                    if (c->blockOf[edge.from] != unwindFrom || c->blockOf[edge.to] != unwindTo)
+                        continue;
+                    for (const Event& ev : edge.events)
+                        exitOnUnwindEdge = exitOnUnwindEdge || ev.kind == Kind::Exit;
+                }
+                report.expect(unwindFrom != nullptr && !exitOnUnwindEdge,
+                              "OwnershipCollectorExceptions: the invoke's unwind edge is not "
+                              "an exit of this function");
                 report.expect(firstIndex(*c, Kind::Release, false) >= 0,
                               "OwnershipCollectorExceptions: the release after the catch is seen");
             }
@@ -1120,9 +1144,10 @@ namespace
             const auto it = index.functions.find("create_wrapper_cross_tu");
             bool viaSlot = false;
             if (it != index.functions.end())
-                for (const auto& [path, certainty] : it->second.ownership.normal.outArgs)
+                for (const auto& [path, fresh] : it->second.ownership.normal.outArgs)
                     viaSlot = viaSlot || (path.argIndex == 0 && path.viaPointerSlot &&
-                                          certainty == Certainty::Guaranteed);
+                                          fresh.certainty == Certainty::Guaranteed &&
+                                          fresh.kind == "GenericHandle");
             report.expect(viaSlot, "OwnershipSummaryIndex: acquisition through props->out is a "
                                    "guaranteed viaPointerSlot out-arg");
         }

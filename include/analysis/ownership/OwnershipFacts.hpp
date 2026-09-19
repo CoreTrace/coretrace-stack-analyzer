@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <map>
 #include <optional>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -71,13 +72,26 @@ namespace ctrace::stack::analysis::ownership
                 StateSet::of(OwnState::Released), StateSet::of(OwnState::Escaped)};
     }
 
+    struct FreshResource
+    {
+        std::string kind; // resource kind of the model rule that created it
+        Certainty certainty = Certainty::Unknown;
+        std::uint8_t reservedPadding[7] = {};
+
+        friend bool operator==(const FreshResource& a, const FreshResource& b)
+        {
+            return a.kind == b.kind && a.certainty == b.certainty;
+        }
+    };
+
     struct ExitTransformer
     {
-        std::map<unsigned, ParamTransformer> params; // by parameter index (handles by value)
-        std::map<ArgPath, Certainty> outArgs;        // the path receives a fresh resource
-        Certainty returns = Certainty::Unknown;      // the return value is a fresh resource
+        std::map<unsigned, ParamTransformer> params;       // by parameter index (handles by value)
+        std::map<ArgPath, ParamTransformer> pointeeParams; // what happens to *(arg+offset)
+        std::map<ArgPath, FreshResource> outArgs;          // the path receives a fresh resource
+        FreshResource returns;                             // the return value is a fresh resource
         bool present = false;
-        std::uint8_t reservedPadding[6] = {};
+        std::uint8_t reservedPadding[7] = {};
     };
 
     struct FunctionOwnershipSummary
@@ -92,9 +106,10 @@ namespace ctrace::stack::analysis::ownership
     struct CallEffect
     {
         std::vector<std::pair<LocationId, ParamTransformer>> params;
-        std::vector<std::pair<LocationId, Certainty>> outArgs;
+        std::vector<std::pair<LocationId, Certainty>> outArgs; // each has its own site
+        std::vector<std::uint32_t> outArgSites;
         std::optional<LocationId> retDest;
-        std::uint32_t site = 0; // acquisition site of the fresh resources
+        std::uint32_t site = 0; // acquisition site of the returned resource
         Certainty retCertainty = Certainty::Unknown;
         std::uint8_t reservedPadding[3] = {};
     };
@@ -111,7 +126,11 @@ namespace ctrace::stack::analysis::ownership
             AddressEscape, // &dst handed to an unmodelled call
             UnknownCall,   // resources in `args` handed to an unmodelled call
             Call,          // modelled/summarised callee, see `call`
-            Exit           // function exit point (state is recorded, not changed)
+            Exit,          // function exit point (state is recorded, not changed); `args`
+                           // lists locations whose resources are uncertain *at this exit*
+            // Edge event: the conditional contract of acquisition `site` is decided here;
+            // unknownValue = true means "did not acquire" (resource NotOwned, holders null).
+            ContractResolved
         };
 
         std::vector<LocationId> args;
@@ -149,6 +168,9 @@ namespace ctrace::stack::analysis::ownership
         std::vector<std::pair<unsigned, ResourceId>> paramResources;
         /// Summary mode: the location parameter `first` is passed in.
         std::vector<std::pair<unsigned, LocationId>> paramLocations;
+        /// Summary mode: the ArgPointee locations, whose initial contents are summarised too.
+        std::vector<std::pair<ArgPath, LocationId>> pointeeLocations;
+        std::vector<std::string> siteKinds; // resource kind by site (for summaries)
         std::uint32_t siteCount = 0;
         std::uint32_t reservedPadding = 0;
     };

@@ -26,6 +26,7 @@ namespace ctrace::stack::analysis::ownership
         OwnershipFacts facts;
         std::vector<const llvm::Instruction*> eventInstructions; // by Event::instructionIndex
         std::vector<std::string> locationNames;                  // by LocationId
+        std::vector<bool> locationIsSlot;                        // by LocationId: slot vs SSA value
         std::vector<const llvm::Instruction*> siteInstructions;  // by site id
         std::vector<std::string> siteKinds;                      // resource kind by site id
         std::vector<const llvm::BasicBlock*> blockOf;            // by block id

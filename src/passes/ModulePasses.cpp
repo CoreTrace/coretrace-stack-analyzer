@@ -5,6 +5,7 @@
 #include <llvm/Analysis/TargetLibraryInfo.h>
 #include <llvm/IR/PassManager.h>
 #include <llvm/Passes/PassBuilder.h>
+#include <llvm/Transforms/Utils/BuildLibCalls.h>
 #include <llvm/Support/Error.h>
 #include <llvm/TargetParser/Triple.h>
 
@@ -53,6 +54,17 @@ namespace ctrace::stack
             return;
         }
         MPM.run(mod, MAM);
+
+        // Library declarations carry no attributes of their own; LLVM knows what strlen,
+        // memcpy, printf, ... do to their pointer arguments (readonly, nocapture). The
+        // ownership analysis relies on those attributes to keep a handle passed to such a
+        // call from becoming "unknown".
+        for (llvm::Function& F : mod)
+        {
+            if (F.isDeclaration())
+                (void)llvm::inferNonMandatoryLibFuncAttrs(
+                    F, FAM.getResult<llvm::TargetLibraryAnalysis>(F));
+        }
 
         unsigned added = 0;
         for (const llvm::Function& F : mod)

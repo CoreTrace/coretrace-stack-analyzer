@@ -6,6 +6,8 @@ extern void release_handle(handle_t handle);
 extern int check(void);
 
 // resource-model: models/resource-lifetime/generic.txt
+// Only MissingRelease is pinned here; other rules keep their (counter-based) behaviour.
+// strict-diagnostic-count: false
 void release_all_paths(int c)
 {
     handle_t h;
