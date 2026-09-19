@@ -2,6 +2,8 @@
 // Unit tests for the LLVM-free ownership engine (docs/superpowers/specs/
 // 2026-09-19-resource-ownership-engine-design.md). Facts are built by hand.
 #include "analysis/ownership/OwnershipDomain.hpp"
+#include "analysis/ownership/OwnershipEngine.hpp"
+#include "analysis/ownership/OwnershipFacts.hpp"
 
 #include <iostream>
 #include <string>
@@ -63,12 +65,243 @@ namespace
                  "Domain: merge keeps contents sorted and unique");
         return r.failures == 0;
     }
+    // ---- helpers to build synthetic facts -------------------------------------------------
+    using namespace ctrace::stack::analysis::ownership;
+
+    Event acquire(std::uint32_t site, LocationId dst, bool strong = true,
+                  Certainty c = Certainty::Guaranteed)
+    {
+        Event e;
+        e.kind = Event::Kind::Acquire;
+        e.site = site;
+        e.dst = dst;
+        e.strong = strong;
+        e.certainty = c;
+        return e;
+    }
+    Event release(LocationId src, Certainty c = Certainty::Guaranteed)
+    {
+        Event e;
+        e.kind = Event::Kind::Release;
+        e.src = src;
+        e.certainty = c;
+        return e;
+    }
+    Event copy(LocationId dst, LocationId src, bool strong = true)
+    {
+        Event e;
+        e.kind = Event::Kind::Copy;
+        e.dst = dst;
+        e.src = src;
+        e.strong = strong;
+        return e;
+    }
+    Event overwrite(LocationId dst, bool unknownValue = false, bool strong = true)
+    {
+        Event e;
+        e.kind = Event::Kind::Overwrite;
+        e.dst = dst;
+        e.unknownValue = unknownValue;
+        e.strong = strong;
+        return e;
+    }
+    Event ret(LocationId src)
+    {
+        Event e;
+        e.kind = Event::Kind::Return;
+        e.src = src;
+        return e;
+    }
+    Event exit(bool exceptional = false)
+    {
+        Event e;
+        e.kind = Event::Kind::Exit;
+        e.exceptional = exceptional;
+        return e;
+    }
+    Event addressEscape(LocationId dst)
+    {
+        Event e;
+        e.kind = Event::Kind::AddressEscape;
+        e.dst = dst;
+        return e;
+    }
+    Event callWith(LocationId loc, StateSet imageOfOwned)
+    {
+        Event e;
+        e.kind = Event::Kind::Call;
+        ParamTransformer t = identityTransformer();
+        t[static_cast<std::size_t>(OwnState::Owned)] = imageOfOwned;
+        e.call.params.push_back({loc, t});
+        return e;
+    }
+
+    OwnershipFacts facts(std::size_t blocks, std::vector<Edge> edges, std::size_t locations,
+                         std::uint32_t sites)
+    {
+        OwnershipFacts f;
+        f.blocks.resize(blocks);
+        f.edges = std::move(edges);
+        f.locations.resize(locations);
+        f.siteCount = sites;
+        return f;
+    }
+    Edge edge(std::uint32_t from, std::uint32_t to, std::vector<Event> events = {})
+    {
+        Edge e;
+        e.from = from;
+        e.to = to;
+        e.events = std::move(events);
+        return e;
+    }
+    AbstractState entryOf(const OwnershipFacts& f)
+    {
+        return AbstractState::entry(2 * f.siteCount, f.locations.size());
+    }
+
+    bool testEngine(TestReport& r)
+    {
+        const ResourceId n0 = newInstanceOf(0);
+        const ResourceId o0 = oldInstancesOf(0);
+
+        {
+            OwnershipFacts f = facts(1, {}, 1, 1);
+            f.blocks[0].events = {acquire(0, 0), exit()};
+            const OwnershipResult res = solve(f, entryOf(f));
+            r.expect(!res.incomplete && res.exits.size() == 1 &&
+                         res.exits[0].state.resources[n0].isOnly(OwnState::Owned),
+                     "Engine: acquire then exit leaves Owned");
+        }
+        {
+            OwnershipFacts f = facts(1, {}, 1, 1);
+            f.blocks[0].events = {acquire(0, 0), release(0), exit()};
+            const OwnershipResult res = solve(f, entryOf(f));
+            r.expect(res.exits.size() == 1 &&
+                         res.exits[0].state.resources[n0].isOnly(OwnState::Released),
+                     "Engine: release is strong on exact contents");
+        }
+        {
+            // 0: acquire; 0→1 releases, 0→2 does not; both → 3: exit.
+            OwnershipFacts f =
+                facts(4, {edge(0, 1, {release(0)}), edge(0, 2), edge(1, 3), edge(2, 3)}, 1, 1);
+            f.blocks[0].events = {acquire(0, 0)};
+            f.blocks[3].events = {exit()};
+            const OwnershipResult res = solve(f, entryOf(f));
+            const StateSet st = res.exits.at(0).state.resources[n0];
+            r.expect(st.has(OwnState::Owned) && st.has(OwnState::Released) &&
+                         !st.has(OwnState::NotOwned),
+                     "Engine: conditional release joins to {Owned, Released}");
+        }
+        {
+            // Block 1 has no incoming edge: its acquire must not exist.
+            OwnershipFacts f = facts(3, {edge(0, 2)}, 1, 1);
+            f.blocks[1].events = {acquire(0, 0)};
+            f.blocks[2].events = {exit()};
+            const OwnershipResult res = solve(f, entryOf(f));
+            r.expect(!res.out[1].reached &&
+                         res.exits.at(0).state.resources[n0].isOnly(OwnState::NotOwned),
+                     "Engine: unreachable block stays bottom");
+        }
+        {
+            OwnershipFacts f = facts(1, {}, 2, 1);
+            f.blocks[0].events = {acquire(0, 0), copy(1, 0), ret(1), exit()};
+            const OwnershipResult res = solve(f, entryOf(f));
+            r.expect(res.exits.at(0).state.resources[n0].isOnly(OwnState::Escaped),
+                     "Engine: return of exact contents escapes");
+        }
+        {
+            // ret slot 1 = h, then maybe overwritten with null, then returned.
+            OwnershipFacts f =
+                facts(4, {edge(0, 1, {overwrite(1)}), edge(0, 2), edge(1, 3), edge(2, 3)}, 2, 1);
+            f.blocks[0].events = {acquire(0, 0), copy(1, 0)};
+            f.blocks[3].events = {ret(1), exit()};
+            const OwnershipResult res = solve(f, entryOf(f));
+            const StateSet st = res.exits.at(0).state.resources[n0];
+            r.expect(st.has(OwnState::Owned) && st.has(OwnState::Escaped),
+                     "Engine: return of overwritten slot keeps Owned");
+        }
+        {
+            // saved = h; acquire(&h) again; release(saved); release(h).
+            OwnershipFacts f = facts(1, {}, 2, 1);
+            f.blocks[0].events = {acquire(0, 0), copy(1, 0), acquire(0, 0),
+                                  release(1),    release(0), exit()};
+            const OwnershipResult res = solve(f, entryOf(f));
+            bool sawOldInSaved = false;
+            replay(f, res, 0,
+                   [&](std::uint32_t idx, const AbstractState&, const AbstractState& after)
+                   {
+                       if (idx == 2)
+                           sawOldInSaved = after.locations[1].isExactly(o0) &&
+                                           after.resources[o0].isOnly(OwnState::Owned) &&
+                                           after.resources[n0].isOnly(OwnState::Owned);
+                   });
+            r.expect(sawOldInSaved, "Engine: alias keeps the old resource reachable");
+            r.expect(res.exits.at(0).state.resources[o0].isOnly(OwnState::Released) &&
+                         res.exits.at(0).state.resources[n0].isOnly(OwnState::Released),
+                     "Engine: both instances end released through their references");
+        }
+        {
+            // 0 → 1 (acquire) → 1 (back-edge) and → 2 (exit).
+            OwnershipFacts f = facts(3, {edge(0, 1), edge(1, 1), edge(1, 2)}, 1, 1);
+            f.blocks[1].events = {acquire(0, 0)};
+            f.blocks[2].events = {exit()};
+            const OwnershipResult res = solve(f, entryOf(f));
+            const AbstractState& s = res.exits.at(0).state;
+            r.expect(s.resources[o0].has(OwnState::Owned) &&
+                         s.resources[n0].isOnly(OwnState::Owned),
+                     "Engine: loop reacquire accumulates into old");
+        }
+        {
+            OwnershipFacts f = facts(1, {}, 1, 1);
+            f.blocks[0].events = {acquire(0, 0), addressEscape(0), exit()};
+            const OwnershipResult res = solve(f, entryOf(f));
+            r.expect(res.exits.at(0).state.uncertain[n0], "Engine: address escape marks uncertain");
+        }
+        {
+            OwnershipFacts f = facts(1, {}, 1, 1);
+            f.blocks[0].events = {acquire(0, 0), callWith(0, StateSet::of(OwnState::Released)),
+                                  exit()};
+            const OwnershipResult res = solve(f, entryOf(f));
+            r.expect(res.exits.at(0).state.resources[n0].isOnly(OwnState::Released),
+                     "Engine: call transformer release-always");
+        }
+        {
+            OwnershipFacts f = facts(1, {}, 1, 1);
+            f.blocks[0].events = {
+                acquire(0, 0),
+                callWith(0, StateSet::of(OwnState::Owned) | StateSet::of(OwnState::Released)),
+                exit()};
+            const OwnershipResult res = solve(f, entryOf(f));
+            const StateSet st = res.exits.at(0).state.resources[n0];
+            r.expect(st.has(OwnState::Owned) && st.has(OwnState::Released),
+                     "Engine: call transformer release-sometimes");
+        }
+        {
+            OwnershipFacts f = facts(1, {}, 1, 1);
+            f.blocks[0].events = {acquire(0, 0), exit(true), release(0), exit()};
+            const OwnershipResult res = solve(f, entryOf(f));
+            r.expect(res.exits.size() == 2 && res.exits[0].exceptional &&
+                         res.exits[0].state.resources[n0].isOnly(OwnState::Owned) &&
+                         !res.exits[1].exceptional &&
+                         res.exits[1].state.resources[n0].isOnly(OwnState::Released),
+                     "Engine: exceptional exit sees the state before the call effects");
+        }
+        {
+            OwnershipFacts f = facts(3, {edge(0, 1), edge(1, 1), edge(1, 2)}, 1, 1);
+            f.blocks[1].events = {acquire(0, 0)};
+            f.blocks[2].events = {exit()};
+            const OwnershipResult res = solve(f, entryOf(f), /*iterationLimit=*/1);
+            r.expect(res.incomplete && res.exits.empty(), "Engine: budget exhaustion is explicit");
+        }
+        return r.failures == 0;
+    }
 } // namespace
 
 int main(int, char**)
 {
     TestReport report;
     (void)testDomain(report);
+    (void)testEngine(report);
     if (report.failures == 0)
     {
         std::cout << "All ownership engine unit tests passed.\n";
