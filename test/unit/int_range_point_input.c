@@ -36,3 +36,20 @@ void merge_after_guard(int i, int c)
     }
     buf[i] = 3;
 }
+
+// The loop variable is reused: the exit edge of the first loop (i >= 17)
+// dominates the second loop, but `i = 1` rewrites the slot in between, so the
+// access must not see it. The second loop's own guard, on the other hand, still
+// holds in its body although `++i` also stores to the slot: every path from that
+// store back to the body re-evaluates the guard.
+void reused_loop_variable(int* out)
+{
+    int i;
+    int a[17];
+    int b[16];
+    for (i = 0; i < 17; ++i)
+        a[i] = 0;
+    for (i = 1; i < 16; ++i)
+        b[i] = a[i];
+    *out = b[3];
+}

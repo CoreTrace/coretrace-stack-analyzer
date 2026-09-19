@@ -695,7 +695,7 @@ namespace
         // from (-O0 keeps `i` in an alloca and reloads it before every use).
         struct Access
         {
-            const llvm::BasicBlock* block = nullptr;
+            const llvm::Instruction* inst = nullptr;
             const llvm::Value* key = nullptr;
         };
         const auto accessesOf = [&](const char* name) -> std::vector<Access>
@@ -717,7 +717,7 @@ namespace
                     const auto* load = llvm::dyn_cast<llvm::LoadInst>(index);
                     if (!load)
                         continue;
-                    out.push_back({&block, load->getPointerOperand()});
+                    out.push_back({gep, load->getPointerOperand()});
                 }
             }
             return out;
@@ -732,7 +732,7 @@ namespace
             {
                 const FunctionFacts facts(*fn);
                 const ProgramPointRanges ranges(*fn, facts);
-                const std::optional<IntRange> r = ranges.at(accesses[0].key, *accesses[0].block);
+                const std::optional<IntRange> r = ranges.at(accesses[0].key, *accesses[0].inst);
                 report.expect(r && r->hasUpper && r->upper == 199,
                               "ProgramPointRanges: false edge of `i >= 200` gives i <= 199");
                 report.expect(!(r && r->hasLower && r->lower >= 200),
@@ -751,9 +751,9 @@ namespace
                 const FunctionFacts facts(*fn);
                 const ProgramPointRanges ranges(*fn, facts);
                 const std::optional<IntRange> thenRange =
-                    ranges.at(accesses[0].key, *accesses[0].block);
+                    ranges.at(accesses[0].key, *accesses[0].inst);
                 const std::optional<IntRange> elseRange =
-                    ranges.at(accesses[1].key, *accesses[1].block);
+                    ranges.at(accesses[1].key, *accesses[1].inst);
                 report.expect(thenRange && thenRange->hasUpper && thenRange->upper == 9,
                               "ProgramPointRanges: then-block of `i <= 9` knows i <= 9");
                 report.expect(elseRange && elseRange->hasLower && elseRange->lower == 10,
@@ -772,16 +772,40 @@ namespace
             {
                 const FunctionFacts facts(*fn);
                 const ProgramPointRanges ranges(*fn, facts);
-                const std::optional<IntRange> r = ranges.at(accesses[0].key, *accesses[0].block);
+                const std::optional<IntRange> r = ranges.at(accesses[0].key, *accesses[0].inst);
                 report.expect(!(r && (r->hasUpper || r->hasLower)),
                               "ProgramPointRanges: a non-dominating guard bounds nothing at the "
                               "merge");
 
                 // The whole-map view used by the SMT encoder agrees with the point query.
                 const std::map<const llvm::Value*, IntRange> snapshot =
-                    ranges.at(*accesses[0].block);
+                    ranges.at(*accesses[0].inst);
                 report.expect(snapshot.count(accesses[0].key) == 0,
                               "ProgramPointRanges: snapshot at the merge carries no bound for i");
+            }
+        }
+
+        {
+            llvm::Function* fn = loaded.module->getFunction("reused_loop_variable");
+            const std::vector<Access> accesses = accessesOf("reused_loop_variable");
+            // a[i] in loop 1, b[i] and a[i] in loop 2, b[3] is a constant index (no load).
+            report.expect(fn != nullptr && accesses.size() == 3,
+                          "ProgramPointRanges: reused_loop_variable has three indexed accesses");
+            if (fn && accesses.size() == 3)
+            {
+                const FunctionFacts facts(*fn);
+                const ProgramPointRanges ranges(*fn, facts);
+                const std::optional<IntRange> first = ranges.at(accesses[0].key, *accesses[0].inst);
+                const std::optional<IntRange> second =
+                    ranges.at(accesses[1].key, *accesses[1].inst);
+                report.expect(first && first->hasUpper && first->upper == 16,
+                              "ProgramPointRanges: a loop guard bounds its own body despite the "
+                              "increment");
+                report.expect(second && second->hasUpper && second->upper == 15,
+                              "ProgramPointRanges: the second loop's guard bounds its body");
+                report.expect(!(second && second->hasLower && second->lower >= 17),
+                              "ProgramPointRanges: the first loop's exit edge is killed by the "
+                              "rewrite of the slot");
             }
         }
 
