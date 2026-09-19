@@ -2951,6 +2951,123 @@ def check_diagnostic_rule_coverage_regression() -> bool:
     return ok
 
 
+def check_unresolved_call_max_stack() -> bool:
+    """
+    A function containing an unresolved call (indirect, or to an external
+    declaration) has a max stack that is only a lower bound. It must be
+    published as unknown by default, and --assume-external-frame=<bytes> must
+    turn it back into a definite figure by charging <bytes> per such call.
+    """
+    print("=== Testing unresolved-call max stack policy ===")
+    sample = RUN_CONFIG.test_dir / "local-storage/c/unresolved-call-max-stack.c"
+    ok = True
+
+    def functions_of(args: list[str], label: str):
+        result = run_analyzer(["--format=json"] + args + [str(sample)])
+        if result.returncode != 0:
+            print(f"  ❌ {label}: analyzer failed (code {result.returncode})")
+            print((result.stdout or "") + (result.stderr or ""))
+            return None
+        try:
+            payload = json.loads(result.stdout or "")
+        except json.JSONDecodeError as exc:
+            print(f"  ❌ {label}: invalid JSON: {exc}")
+            return None
+        functions = {}
+        for file_entry in payload.get("files", [payload]):
+            for fn in file_entry.get("functions", []):
+                functions[fn.get("name")] = fn
+        return functions
+
+    def expect_unknown(fns, name: str, label: str) -> bool:
+        fn = fns.get(name)
+        if fn is None:
+            print(f"  ❌ {label}: function {name} missing from JSON")
+            return False
+        if fn.get("maxStackUnknown") is not True or fn.get("maxStack") is not None:
+            print(f"  ❌ {label}: {name} should be unknown, got {fn}")
+            return False
+        if not isinstance(fn.get("maxStackLowerBound"), int) or fn["maxStackLowerBound"] <= 0:
+            print(f"  ❌ {label}: {name} should keep a positive lower bound, got {fn}")
+            return False
+        return True
+
+    def expect_known(fns, name: str, expected: int, label: str) -> bool:
+        fn = fns.get(name)
+        if fn is None:
+            print(f"  ❌ {label}: function {name} missing from JSON")
+            return False
+        if fn.get("maxStackUnknown") is not False or fn.get("maxStack") != expected:
+            print(f"  ❌ {label}: {name} expected maxStack={expected}, got {fn}")
+            return False
+        return True
+
+    # Default: unknown with a lower bound, propagated to the caller.
+    fns = functions_of([], "default")
+    if fns is None:
+        return False
+    for name in ("calls_external", "calls_indirect", "caller"):
+        ok = expect_unknown(fns, name, "default") and ok
+    local_external = fns["calls_external"]["localStack"]
+    local_indirect = fns["calls_indirect"]["localStack"]
+    local_caller = fns["caller"]["localStack"]
+
+    # Human output must render the lower bound the same way dynamic allocas do.
+    human = run_analyzer([str(sample)])
+    human_out = (human.stdout or "") + (human.stderr or "")
+    needle = f"max stack (including callees): unknown (>= {local_external} bytes)"
+    if needle not in human_out:
+        print(f"  ❌ default: human output missing '{needle}'")
+        print(human_out)
+        ok = False
+
+    # --assume-external-frame=<bytes> charges <bytes> per unresolved call.
+    frame = 512
+    fns = functions_of([f"--assume-external-frame={frame}"], "assume=512")
+    if fns is None:
+        return False
+    ok = expect_known(fns, "calls_external", local_external + frame, "assume=512") and ok
+    ok = expect_known(fns, "calls_indirect", local_indirect + frame, "assume=512") and ok
+    deepest = max(local_external, local_indirect) + frame
+    ok = expect_known(fns, "caller", local_caller + deepest, "assume=512") and ok
+
+    # =0 restores the pre-#94 figures (unresolved calls cost nothing).
+    fns = functions_of(["--assume-external-frame=0"], "assume=0")
+    if fns is None:
+        return False
+    ok = expect_known(fns, "calls_external", local_external, "assume=0") and ok
+    ok = expect_known(fns, "caller", local_caller + max(local_external, local_indirect), "assume=0") and ok
+
+    # Config file key.
+    with tempfile.NamedTemporaryFile("w", suffix=".cfg", delete=False) as cfg:
+        cfg.write(f"assume-external-frame={frame}\n")
+        cfg_path = cfg.name
+    try:
+        fns = functions_of(["--config", cfg_path], "config-key")
+    finally:
+        os.unlink(cfg_path)
+    if fns is None:
+        return False
+    ok = expect_known(fns, "calls_external", local_external + frame, "config-key") and ok
+
+    # Invalid values are rejected.
+    for bad in ("--assume-external-frame=abc", "--assume-external-frame=-1"):
+        result = run_analyzer([bad, str(sample)])
+        if result.returncode == 0:
+            print(f"  ❌ {bad} should be rejected")
+            ok = False
+    result = run_analyzer(["--assume-external-frame", str(sample)])
+    output = (result.stdout or "") + (result.stderr or "")
+    if result.returncode == 0 or "Missing argument for --assume-external-frame" not in output:
+        print("  ❌ --assume-external-frame without a value should report a missing argument")
+        print(output)
+        ok = False
+
+    if ok:
+        print("  ✅ unresolved-call max stack policy OK\n")
+    return ok
+
+
 def check_analyzer_module_unit_tests() -> bool:
     """
     Run fine-grained C++ unit tests for analyzer modules.
@@ -3199,6 +3316,7 @@ def main() -> int:
         check_multi_file_total_summary,
         check_multi_file_failure,
         check_cli_parsing_and_filters,
+        check_unresolved_call_max_stack,
         check_compile_ir_format_switch,
         check_pipeline_subscriber_rollout_parity,
         check_pipeline_timing_traversal_instrumentation,
