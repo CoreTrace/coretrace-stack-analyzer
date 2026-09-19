@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "analysis/ResourceLifetimeAnalysis.hpp"
 #include "analysis/ResourceModel.hpp"
+#include "analysis/ownership/OwnershipEngine.hpp"
+#include "analysis/ownership/ResourceFactCollector.hpp"
 #include "ResourceLifetimeInternal.hpp"
 
 #include <array>
@@ -2254,6 +2256,83 @@ namespace ctrace::stack::analysis
         return true;
     }
 
+    static bool exitTransformerEquals(const ownership::ExitTransformer& a,
+                                      const ownership::ExitTransformer& b)
+    {
+        return a.present == b.present && a.returns == b.returns && a.outArgs == b.outArgs &&
+               a.params == b.params;
+    }
+
+    bool ownershipSummaryEquals(const ownership::FunctionOwnershipSummary& lhs,
+                                const ownership::FunctionOwnershipSummary& rhs)
+    {
+        return lhs.incomplete == rhs.incomplete && exitTransformerEquals(lhs.normal, rhs.normal) &&
+               exitTransformerEquals(lhs.exceptional, rhs.exceptional);
+    }
+
+    /// Transformer summaries of every analysed definition, iterated to a fixpoint so that
+    /// callees analysed later (or recursive ones) are seen by their callers. External
+    /// summaries (other TUs) seed the lookup and are never recomputed here.
+    static std::unordered_map<const llvm::Function*, ownership::FunctionOwnershipSummary>
+    computeOwnershipSummaries(llvm::Module& mod, const ResourceModel& model,
+                              const std::function<bool(const llvm::Function&)>& shouldAnalyze,
+                              const ResourceSummaryIndex* externalSummaries)
+    {
+        using ownership::FunctionOwnershipSummary;
+        std::unordered_map<const llvm::Function*, FunctionOwnershipSummary> summaries;
+        std::unordered_map<std::string, const FunctionOwnershipSummary*> externalByName;
+        if (externalSummaries)
+        {
+            for (const auto& [name, fn] : externalSummaries->functions)
+                externalByName.emplace(name, &fn.ownership);
+        }
+
+        std::vector<llvm::Function*> functions;
+        for (llvm::Function& F : mod)
+        {
+            if (!F.isDeclaration() && shouldAnalyze(F))
+                functions.push_back(&F);
+        }
+        // Start from "no effect" transformers so a recursive callee is optimistic first
+        // and widens monotonically.
+        for (llvm::Function* F : functions)
+            summaries[F] = FunctionOwnershipSummary{};
+
+        const ownership::SummaryLookup lookup{
+            [&](const llvm::Function& callee) -> const FunctionOwnershipSummary*
+            {
+                if (const auto it = summaries.find(&callee); it != summaries.end())
+                    return &it->second;
+                const auto ext = externalByName.find(
+                    ctrace_tools::canonicalizeMangledName(callee.getName().str()));
+                return ext == externalByName.end() ? nullptr : ext->second;
+            }};
+
+        const llvm::DataLayout& DL = mod.getDataLayout();
+        constexpr unsigned kMaxRounds = 16;
+        for (unsigned round = 0; round < kMaxRounds; ++round)
+        {
+            bool changed = false;
+            for (llvm::Function* F : functions)
+            {
+                const ownership::CollectedFunction collected =
+                    ownership::collectOwnershipFacts(*F, model, lookup, DL);
+                FunctionOwnershipSummary next = ownership::computeSummary(collected.facts);
+                if (!ownershipSummaryEquals(summaries[F], next))
+                {
+                    summaries[F] = std::move(next);
+                    changed = true;
+                }
+            }
+            if (!changed)
+                return summaries;
+        }
+        // No fixpoint within budget: nothing computed here may be trusted.
+        for (auto& [F, summary] : summaries)
+            summary.incomplete = true;
+        return summaries;
+    }
+
     ResourceSummaryIndex buildResourceLifetimeSummaryIndex(
         llvm::Module& mod, const std::function<bool(const llvm::Function&)>& shouldAnalyze,
         const std::string& modelPath, const ResourceSummaryIndex* externalSummaries)
@@ -2274,7 +2353,18 @@ namespace ctrace::stack::analysis
         const auto externalMap = importExternalSummaryMap(externalSummaries);
         const auto summaries = computeFunctionLifetimeSummaries(
             mod, model, shouldAnalyze, externalMap.empty() ? nullptr : &externalMap);
-        return exportSummaryIndexForModule(mod, shouldAnalyze, summaries);
+        index = exportSummaryIndexForModule(mod, shouldAnalyze, summaries);
+
+        const auto ownershipSummaries =
+            computeOwnershipSummaries(mod, model, shouldAnalyze, externalSummaries);
+        for (const auto& [F, summary] : ownershipSummaries)
+        {
+            if (F->hasLocalLinkage())
+                continue;
+            index.functions[ctrace_tools::canonicalizeMangledName(F->getName().str())].ownership =
+                summary;
+        }
+        return index;
     }
 
     bool mergeResourceSummaryIndex(ResourceSummaryIndex& dst, const ResourceSummaryIndex& src)
@@ -2288,6 +2378,11 @@ namespace ctrace::stack::analysis
                 dst.functions.emplace(entry.first, entry.second);
                 changed = true;
                 continue;
+            }
+            if (!ownershipSummaryEquals(it->second.ownership, entry.second.ownership))
+            {
+                it->second.ownership = entry.second.ownership;
+                changed = true;
             }
 
             std::unordered_set<std::string> existingKeys;
@@ -2398,7 +2493,7 @@ namespace ctrace::stack::analysis
 
         std::sort(leftKeys.begin(), leftKeys.end());
         std::sort(rightKeys.begin(), rightKeys.end());
-        return leftKeys == rightKeys;
+        return leftKeys == rightKeys && ownershipSummaryEquals(lhs.ownership, rhs.ownership);
     }
 
     std::unordered_set<std::string>

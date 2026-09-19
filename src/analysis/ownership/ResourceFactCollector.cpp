@@ -3,6 +3,7 @@
 
 #include "../ResourceLifetimeInternal.hpp"
 #include "analysis/AnalyzerUtils.hpp"
+#include "analysis/IRValueUtils.hpp"
 
 #include <llvm/ADT/DenseMap.h>
 #include <llvm/ADT/PostOrderIterator.h>
@@ -44,6 +45,13 @@ namespace ctrace::stack::analysis::ownership
                 mayUnwind_ = !F_.doesNotThrow();
                 returnLocation_ = newLocation(LocationKind::Local, ArgPath{}, true, "<return>");
                 out_.facts.locations[returnLocation_].kind = LocationKind::Return;
+
+                // Handles passed by value: the summary describes what happens to them.
+                for (const llvm::Argument& arg : F_.args())
+                {
+                    if (arg.getType()->isPointerTy())
+                        out_.facts.paramLocations.push_back({arg.getArgNo(), valueLocation(&arg)});
+                }
 
                 // Blocks in reverse post-order; unreachable blocks are simply absent.
                 llvm::ReversePostOrderTraversal<const llvm::Function*> rpo(&F_);
@@ -97,8 +105,39 @@ namespace ctrace::stack::analysis::ownership
             /// The location a pointer *points to* (a slot), or nullopt when unknown.
             std::optional<LocationId> slotOf(const llvm::Value* ptr)
             {
-                return slotOfStorage(
-                    lifetime_detail::resolvePointerStorage(ptr, F_, DL_, methodInfo_));
+                // A local alloca is a local slot, whatever it happens to hold: the legacy
+                // storage keys fold a parameter's shadow slot into the parameter, which
+                // would turn "h = param" into an escape of the parameter's resource.
+                if (const auto* alloca = llvm::dyn_cast<llvm::AllocaInst>(ptr->stripPointerCasts()))
+                    return localSlot(*alloca);
+
+                const StorageKey direct =
+                    lifetime_detail::resolvePointerStorage(ptr, F_, DL_, methodInfo_);
+                if (direct.valid())
+                    return slotOfStorage(direct);
+
+                // `*(load (arg + offset))`: the pointer itself lives in the caller's object
+                // (e.g. props->out). Same encoding as the legacy viaPointerSlot effects.
+                const auto* load = llvm::dyn_cast<llvm::LoadInst>(ptr->stripPointerCasts());
+                if (!load)
+                    return std::nullopt;
+                const StorageKey slotStorage = lifetime_detail::resolvePointerStorage(
+                    load->getPointerOperand(), F_, DL_, methodInfo_);
+                if (!slotStorage.valid() || slotStorage.scope != StorageScope::Argument ||
+                    slotStorage.argumentIndex < 0)
+                    return std::nullopt;
+                ArgPath path;
+                path.argIndex = static_cast<unsigned>(slotStorage.argumentIndex);
+                path.offset = slotStorage.offset;
+                path.viaPointerSlot = true;
+                const std::string key = "argpath|" + std::to_string(path.argIndex) + "|" +
+                                        std::to_string(path.offset) + "|via";
+                if (const auto it = slotIds_.find(key); it != slotIds_.end())
+                    return it->second;
+                const LocationId id = newLocation(LocationKind::ArgPointee, path, false,
+                                                  "*(arg" + std::to_string(path.argIndex) + ")");
+                slotIds_[key] = id;
+                return id;
             }
 
             std::optional<LocationId> slotOfArgPath(const llvm::CallBase& call, const ArgPath& p)
@@ -109,10 +148,27 @@ namespace ctrace::stack::analysis::ownership
                     call, p.argIndex, p.offset, p.viaPointerSlot, F_, DL_, methodInfo_));
             }
 
+            LocationId localSlot(const llvm::AllocaInst& alloca)
+            {
+                const std::string key =
+                    "alloca|" + std::to_string(reinterpret_cast<std::uintptr_t>(&alloca));
+                if (const auto it = slotIds_.find(key); it != slotIds_.end())
+                    return it->second;
+                std::string name = analysis::deriveAllocaName(&alloca);
+                if (name.empty() || name == "<unnamed>")
+                    name = "local";
+                const LocationId id =
+                    newLocation(LocationKind::Local, ArgPath{},
+                                addressOnlyReachesModelledOutParams(alloca), name);
+                slotIds_[key] = id;
+                return id;
+            }
+
             std::optional<LocationId> slotOfStorage(const StorageKey& storage)
             {
                 if (!storage.valid())
                     return std::nullopt;
+
                 if (const auto it = slotIds_.find(storage.key); it != slotIds_.end())
                     return it->second;
 
@@ -179,11 +235,11 @@ namespace ctrace::stack::analysis::ownership
                 v = v->stripPointerCasts();
                 if (const auto it = valueIds_.find(v); it != valueIds_.end())
                     return it->second;
-                LocationKind kind = LocationKind::Local;
+                // An SSA value is an immutable holder; escaping is a property of the slot a
+                // value is stored *into* (see slotOf), never of the value itself.
                 std::string name = v->hasName() ? v->getName().str() : std::string("<value>");
-                if (llvm::isa<llvm::Argument>(v) || llvm::isa<llvm::GlobalValue>(v))
-                    kind = LocationKind::NonLocal;
-                const LocationId id = newLocation(kind, ArgPath{}, true, std::move(name));
+                const LocationId id =
+                    newLocation(LocationKind::Local, ArgPath{}, true, std::move(name));
                 valueIds_[v] = id;
                 return id;
             }

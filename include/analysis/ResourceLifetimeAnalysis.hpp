@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 #pragma once
 
+#include "analysis/ownership/OwnershipFacts.hpp"
+
 #include <cstdint>
 #include <functional>
 #include <string>
@@ -37,7 +39,12 @@ namespace ctrace::stack::analysis
     struct ResourceSummaryFunction
     {
         std::vector<ResourceSummaryEffect> effects;
+        /// Transformer summary used by the MissingRelease ownership engine.
+        ownership::FunctionOwnershipSummary ownership;
     };
+
+    bool ownershipSummaryEquals(const ownership::FunctionOwnershipSummary& lhs,
+                                const ownership::FunctionOwnershipSummary& rhs);
 
     struct ResourceSummaryIndex
     {

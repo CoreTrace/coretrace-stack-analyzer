@@ -6,6 +6,7 @@
 #include "analysis/InputPipeline.hpp"
 #include "analysis/IntRanges.hpp"
 #include "analysis/Reachability.hpp"
+#include "analysis/ResourceLifetimeAnalysis.hpp"
 #include "analysis/ResourceModel.hpp"
 #include "analysis/ownership/ResourceFactCollector.hpp"
 #include "analysis/StackBufferAnalysis.hpp"
@@ -1051,6 +1052,82 @@ namespace
         }
         return report.failures == 0;
     }
+    bool testOwnershipSummaryIndex(const std::filesystem::path& repoRoot, TestReport& report)
+    {
+        using namespace ctrace::stack::analysis;
+        using namespace ctrace::stack::analysis::ownership;
+
+        const ctrace::stack::AnalysisConfig config;
+        const auto owned = static_cast<std::size_t>(OwnState::Owned);
+        const std::string model = (repoRoot / "models/resource-lifetime/generic.txt").string();
+        const auto all = [](const llvm::Function&) { return true; };
+
+        {
+            LoadedModule loaded;
+            std::string loadError;
+            const std::filesystem::path source =
+                repoRoot / "test/resource-lifetime/cross-tu-release-sometimes-def.c";
+            if (!loadModuleFromSource(source, config, loaded, loadError))
+            {
+                report.expect(false, "OwnershipSummaryIndex setup: " + loadError);
+                return false;
+            }
+            const ResourceSummaryIndex index =
+                buildResourceLifetimeSummaryIndex(*loaded.module, all, model, nullptr);
+            const auto it = index.functions.find("release_sometimes_cross_tu");
+            const bool ok = it != index.functions.end() && it->second.ownership.normal.present &&
+                            it->second.ownership.normal.params.count(0) == 1;
+            report.expect(ok, "OwnershipSummaryIndex: the exported index carries a transformer");
+            if (ok)
+            {
+                const StateSet img = it->second.ownership.normal.params.at(0)[owned];
+                report.expect(img.has(OwnState::Owned) && img.has(OwnState::Released),
+                              "OwnershipSummaryIndex: release-sometimes maps Owned to "
+                              "{Owned, Released}");
+            }
+        }
+        {
+            LoadedModule loaded;
+            std::string loadError;
+            const std::filesystem::path source =
+                repoRoot / "test/resource-lifetime/cross-tu-release-always-def.c";
+            if (!loadModuleFromSource(source, config, loaded, loadError))
+            {
+                report.expect(false, "OwnershipSummaryIndex setup: " + loadError);
+                return false;
+            }
+            const ResourceSummaryIndex index =
+                buildResourceLifetimeSummaryIndex(*loaded.module, all, model, nullptr);
+            const auto it = index.functions.find("release_always_cross_tu");
+            report.expect(
+                it != index.functions.end() && it->second.ownership.normal.params.count(0) == 1 &&
+                    it->second.ownership.normal.params.at(0)[owned].isOnly(OwnState::Released),
+                "OwnershipSummaryIndex: release-always maps Owned to {Released}");
+        }
+        {
+            // The legacy out-param wrapper (props->out) is exported as a viaPointerSlot path.
+            LoadedModule loaded;
+            std::string loadError;
+            const std::filesystem::path source =
+                repoRoot / "test/resource-lifetime/cross-tu-wrapper-def.c";
+            if (!loadModuleFromSource(source, config, loaded, loadError))
+            {
+                report.expect(false, "OwnershipSummaryIndex setup: " + loadError);
+                return false;
+            }
+            const ResourceSummaryIndex index =
+                buildResourceLifetimeSummaryIndex(*loaded.module, all, model, nullptr);
+            const auto it = index.functions.find("create_wrapper_cross_tu");
+            bool viaSlot = false;
+            if (it != index.functions.end())
+                for (const auto& [path, certainty] : it->second.ownership.normal.outArgs)
+                    viaSlot = viaSlot || (path.argIndex == 0 && path.viaPointerSlot &&
+                                          certainty == Certainty::Guaranteed);
+            report.expect(viaSlot, "OwnershipSummaryIndex: acquisition through props->out is a "
+                                   "guaranteed viaPointerSlot out-arg");
+        }
+        return report.failures == 0;
+    }
 } // namespace
 
 int main(int argc, char** argv)
@@ -1076,6 +1153,7 @@ int main(int argc, char** argv)
     (void)testResourceModelConditions(report);
     (void)testOwnershipFactCollector(repoRoot, report);
     (void)testOwnershipCollectorExceptions(repoRoot, report);
+    (void)testOwnershipSummaryIndex(repoRoot, report);
 
     if (report.failures == 0)
     {

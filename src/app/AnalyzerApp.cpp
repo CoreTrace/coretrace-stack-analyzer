@@ -1484,6 +1484,141 @@ encodeSummaryEffectKey(const ctrace::stack::analysis::ResourceSummaryEffect& eff
     return oss.str();
 }
 
+static const char* encodeCertainty(ctrace::stack::analysis::ownership::Certainty c)
+{
+    using ctrace::stack::analysis::ownership::Certainty;
+    switch (c)
+    {
+    case Certainty::Guaranteed:
+        return "guaranteed";
+    case Certainty::Conditional:
+        return "conditional";
+    case Certainty::Unknown:
+        return "unknown";
+    }
+    return "unknown";
+}
+
+static std::optional<ctrace::stack::analysis::ownership::Certainty>
+decodeCertainty(llvm::StringRef text)
+{
+    using ctrace::stack::analysis::ownership::Certainty;
+    if (text == "guaranteed")
+        return Certainty::Guaranteed;
+    if (text == "conditional")
+        return Certainty::Conditional;
+    if (text == "unknown")
+        return Certainty::Unknown;
+    return std::nullopt;
+}
+
+static llvm::json::Object
+encodeExitTransformer(const ctrace::stack::analysis::ownership::ExitTransformer& t)
+{
+    llvm::json::Object obj;
+    obj["present"] = t.present;
+    obj["returns"] = encodeCertainty(t.returns);
+    llvm::json::Array params;
+    for (const auto& [argIndex, transformer] : t.params)
+    {
+        llvm::json::Array image;
+        for (const auto& stateSet : transformer)
+            image.push_back(static_cast<int64_t>(stateSet.bits));
+        llvm::json::Object p;
+        p["argIndex"] = static_cast<int64_t>(argIndex);
+        p["image"] = std::move(image);
+        params.push_back(std::move(p));
+    }
+    obj["params"] = std::move(params);
+    llvm::json::Array outArgs;
+    for (const auto& [path, certainty] : t.outArgs)
+    {
+        llvm::json::Object o;
+        o["argIndex"] = static_cast<int64_t>(path.argIndex);
+        o["offset"] = static_cast<int64_t>(path.offset);
+        o["viaPointerSlot"] = path.viaPointerSlot;
+        o["certainty"] = encodeCertainty(certainty);
+        outArgs.push_back(std::move(o));
+    }
+    obj["outArgs"] = std::move(outArgs);
+    return obj;
+}
+
+static llvm::json::Object
+encodeOwnershipSummary(const ctrace::stack::analysis::ownership::FunctionOwnershipSummary& s)
+{
+    llvm::json::Object obj;
+    obj["incomplete"] = s.incomplete;
+    obj["normal"] = encodeExitTransformer(s.normal);
+    obj["exceptional"] = encodeExitTransformer(s.exceptional);
+    return obj;
+}
+
+static bool decodeExitTransformer(const llvm::json::Object& obj,
+                                  ctrace::stack::analysis::ownership::ExitTransformer& out)
+{
+    using namespace ctrace::stack::analysis::ownership;
+    const auto present = obj.getBoolean("present");
+    const auto returns = obj.getString("returns");
+    const auto* params = obj.getArray("params");
+    const auto* outArgs = obj.getArray("outArgs");
+    if (!present || !returns || !params || !outArgs)
+        return false;
+    const auto returnsCertainty = decodeCertainty(*returns);
+    if (!returnsCertainty)
+        return false;
+    out.present = *present;
+    out.returns = *returnsCertainty;
+    for (const auto& value : *params)
+    {
+        const auto* p = value.getAsObject();
+        const auto argIndex = p ? p->getInteger("argIndex") : std::nullopt;
+        const auto* image = p ? p->getArray("image") : nullptr;
+        if (!argIndex || !image || image->size() != 4)
+            return false;
+        ParamTransformer transformer{};
+        for (std::size_t i = 0; i < 4; ++i)
+        {
+            const auto bits = (*image)[i].getAsInteger();
+            if (!bits || *bits < 0 || *bits > 15)
+                return false;
+            transformer[i].bits = static_cast<std::uint8_t>(*bits);
+        }
+        out.params[static_cast<unsigned>(*argIndex)] = transformer;
+    }
+    for (const auto& value : *outArgs)
+    {
+        const auto* o = value.getAsObject();
+        const auto argIndex = o ? o->getInteger("argIndex") : std::nullopt;
+        const auto offset = o ? o->getInteger("offset") : std::nullopt;
+        const auto via = o ? o->getBoolean("viaPointerSlot") : std::nullopt;
+        const auto certaintyText = o ? o->getString("certainty") : std::nullopt;
+        const auto certainty = certaintyText ? decodeCertainty(*certaintyText) : std::nullopt;
+        if (!argIndex || !offset || !via || !certainty)
+            return false;
+        ArgPath path;
+        path.argIndex = static_cast<unsigned>(*argIndex);
+        path.offset = static_cast<std::uint64_t>(*offset);
+        path.viaPointerSlot = *via;
+        out.outArgs[path] = *certainty;
+    }
+    return true;
+}
+
+static bool
+decodeOwnershipSummary(const llvm::json::Object& obj,
+                       ctrace::stack::analysis::ownership::FunctionOwnershipSummary& out)
+{
+    const auto incomplete = obj.getBoolean("incomplete");
+    const auto* normal = obj.getObject("normal");
+    const auto* exceptional = obj.getObject("exceptional");
+    if (!incomplete || !normal || !exceptional)
+        return false;
+    out.incomplete = *incomplete;
+    return decodeExitTransformer(*normal, out.normal) &&
+           decodeExitTransformer(*exceptional, out.exceptional);
+}
+
 static std::string hashSummaryIndex(const ctrace::stack::analysis::ResourceSummaryIndex& index)
 {
     std::map<std::string, std::vector<std::string>> canonical;
@@ -1494,6 +1629,13 @@ static std::string hashSummaryIndex(const ctrace::stack::analysis::ResourceSumma
         for (const auto& effect : entry.second.effects)
             keys.push_back(encodeSummaryEffectKey(effect));
         std::sort(keys.begin(), keys.end());
+        // The transformer summary is part of the identity: the JSON encoding is canonical
+        // (maps are ordered).
+        std::string ownershipText;
+        llvm::raw_string_ostream os(ownershipText);
+        os << llvm::json::Value(encodeOwnershipSummary(entry.second.ownership));
+        os.flush();
+        keys.push_back("ownership:" + ownershipText);
         canonical.emplace(entry.first, std::move(keys));
     }
 
@@ -1561,11 +1703,12 @@ static bool writeSummaryCacheFile(const std::filesystem::path& cacheFile,
         llvm::json::Object fnObj;
         fnObj["name"] = ctrace_tools::canonicalizeMangledName(entry.first);
         fnObj["effects"] = std::move(effectArray);
+        fnObj["ownership"] = encodeOwnershipSummary(entry.second.ownership);
         functionArray.push_back(std::move(fnObj));
     }
 
     llvm::json::Object root;
-    root["schema"] = "resource-summary-cache-v2";
+    root["schema"] = "resource-summary-cache-v3";
     root["functions"] = std::move(functionArray);
 
     std::ofstream out(cacheFile, std::ios::out | std::ios::trunc | std::ios::binary);
@@ -1596,7 +1739,7 @@ readSummaryCacheFile(const std::filesystem::path& cacheFile)
     if (!obj)
         return std::nullopt;
     auto schema = obj->getString("schema");
-    if (!schema || *schema != "resource-summary-cache-v2")
+    if (!schema || *schema != "resource-summary-cache-v3")
         return std::nullopt;
 
     const auto* functions = obj->getArray("functions");
@@ -1641,6 +1784,9 @@ readSummaryCacheFile(const std::filesystem::path& cacheFile)
             effect.resourceKind = resourceKind->str();
             fnSummary.effects.push_back(std::move(effect));
         }
+        const auto* ownershipObj = fnObj->getObject("ownership");
+        if (!ownershipObj || !decodeOwnershipSummary(*ownershipObj, fnSummary.ownership))
+            return std::nullopt; // a file this version cannot read is a cache miss
         index.functions[ctrace_tools::canonicalizeMangledName(name->str())] = std::move(fnSummary);
     }
 
@@ -1669,7 +1815,7 @@ buildCrossTUSummaryIndex(const std::vector<LoadedInputModule>& loadedModules,
         md5Hex(modelContent.empty() ? cfg.resourceModelPath : modelContent);
     // Bump this when summary semantics evolve so on-disk cache entries from older
     // analyzer builds are not reused with incompatible interpretation.
-    constexpr llvm::StringLiteral kCacheSchema = "cross-tu-resource-summary-v2";
+    constexpr llvm::StringLiteral kCacheSchema = "cross-tu-resource-summary-v3";
     const bool allowDiskCache =
         !cfg.resourceSummaryMemoryOnly && !cfg.resourceSummaryCacheDir.empty();
     const unsigned maxJobs = resolveConfiguredJobs(cfg);
