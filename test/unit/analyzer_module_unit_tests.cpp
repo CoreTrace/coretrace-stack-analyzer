@@ -478,6 +478,51 @@ namespace
     }
 } // namespace
 
+    bool testUnresolvedCallsMarkStackUnknown(const std::filesystem::path& repoRoot,
+                                             TestReport& report)
+    {
+        const ctrace::stack::AnalysisConfig config;
+        LoadedModule loaded;
+        std::string loadError;
+        const std::filesystem::path source = repoRoot / "test/unit/unresolved_calls_input.c";
+        if (!loadModuleFromSource(source, config, loaded, loadError))
+        {
+            report.expect(false, "UnresolvedCalls setup: failed to load module: " + loadError);
+            return false;
+        }
+
+        ctrace::stack::analyzer::ModulePreparationService service;
+        ctrace::stack::analyzer::PreparedModule prepared = service.prepare(*loaded.module, config);
+
+        auto estimateOf = [&](const char* name) -> ctrace::stack::analysis::StackEstimate
+        {
+            const llvm::Function* fn = loaded.module->getFunction(name);
+            if (!fn)
+                return {};
+            auto it = prepared.recursionState.TotalStack.find(fn);
+            return it == prepared.recursionState.TotalStack.end()
+                       ? ctrace::stack::analysis::StackEstimate{}
+                       : it->second;
+        };
+
+        report.expect(estimateOf("calls_external").unknown,
+                      "UnresolvedCalls: call to external declaration marks max stack unknown");
+        report.expect(estimateOf("calls_indirect").unknown,
+                      "UnresolvedCalls: indirect call marks max stack unknown");
+        report.expect(!estimateOf("calls_defined").unknown,
+                      "UnresolvedCalls: call to defined function keeps max stack known");
+        report.expect(estimateOf("calls_defined").bytes > estimateOf("leaf").bytes,
+                      "UnresolvedCalls: defined callee frame is still accumulated");
+        report.expect(!estimateOf("calls_intrinsic_only").unknown,
+                      "UnresolvedCalls: LLVM intrinsic call does not mark max stack unknown");
+        report.expect(estimateOf("calls_caller_of_external").unknown,
+                      "UnresolvedCalls: unknown propagates to callers");
+        report.expect(estimateOf("calls_external").bytes > 0,
+                      "UnresolvedCalls: lower bound keeps the known local frame");
+
+        return report.failures == 0;
+    }
+
 int main(int argc, char** argv)
 {
     if (argc != 2)
@@ -494,6 +539,7 @@ int main(int argc, char** argv)
     (void)testModulePreparationService(repoRoot, report);
     (void)testIntRangeFacts(repoRoot, report);
     (void)testAnalysisReportContract(repoRoot, report);
+    (void)testUnresolvedCallsMarkStackUnknown(repoRoot, report);
 
     if (report.failures == 0)
     {
