@@ -962,6 +962,89 @@ namespace
         }
         return report.failures == 0;
     }
+    bool testOwnershipCollectorExceptions(const std::filesystem::path& repoRoot, TestReport& report)
+    {
+        using namespace ctrace::stack::analysis;
+        using namespace ctrace::stack::analysis::ownership;
+        using Kind = Event::Kind;
+
+        const ctrace::stack::AnalysisConfig config;
+        LoadedModule loaded;
+        std::string loadError;
+        const std::filesystem::path source = repoRoot / "test/unit/ownership_collector_input.cpp";
+        if (!loadModuleFromSource(source, config, loaded, loadError))
+        {
+            report.expect(false, "OwnershipCollectorExceptions setup: failed to load module: " +
+                                     loadError);
+            return false;
+        }
+        ResourceModel model;
+        std::string modelError;
+        (void)parseResourceModel((repoRoot / "test/unit/ownership_collector_model.txt").string(),
+                                 model, modelError);
+        const SummaryLookup noSummaries{[](const llvm::Function&) { return nullptr; }};
+
+        const auto collect = [&](const char* mangledPrefix) -> std::optional<CollectedFunction>
+        {
+            for (llvm::Function& fn : *loaded.module)
+            {
+                if (fn.isDeclaration() || !fn.getName().starts_with(mangledPrefix))
+                    continue;
+                return collectOwnershipFacts(fn, model, noSummaries,
+                                             loaded.module->getDataLayout());
+            }
+            return std::nullopt;
+        };
+        // Position of the first event of `kind` in flattened block order, or -1.
+        const auto firstIndex = [](const CollectedFunction& c, Kind kind, bool exceptional)
+        {
+            int index = 0;
+            for (const Block& b : c.facts.blocks)
+                for (const Event& e : b.events)
+                {
+                    if (e.kind == kind && (kind != Kind::Exit || e.exceptional == exceptional))
+                        return index;
+                    ++index;
+                }
+            return -1;
+        };
+
+        {
+            const auto c = collect("_Z14call_may_throwv");
+            report.expect(c.has_value(), "OwnershipCollectorExceptions: call_may_throw collected");
+            if (c)
+            {
+                const int exceptionalExit = firstIndex(*c, Kind::Exit, true);
+                const int release = firstIndex(*c, Kind::Release, false);
+                report.expect(exceptionalExit >= 0 && release >= 0 && exceptionalExit < release,
+                              "OwnershipCollectorExceptions: a may-throw call is an exceptional "
+                              "exit before the release");
+            }
+        }
+        {
+            const auto c = collect("_Z12call_nothrowv");
+            report.expect(c.has_value(), "OwnershipCollectorExceptions: call_nothrow collected");
+            if (c)
+                report.expect(firstIndex(*c, Kind::Exit, true) < 0,
+                              "OwnershipCollectorExceptions: a noexcept function has no "
+                              "exceptional exit");
+        }
+        {
+            const auto c = collect("_Z17invoke_with_catchv");
+            report.expect(c.has_value(),
+                          "OwnershipCollectorExceptions: invoke_with_catch collected");
+            if (c)
+            {
+                // The caught invoke is not an exit; the function still has its normal exit.
+                report.expect(firstIndex(*c, Kind::Exit, true) < 0 &&
+                                  firstIndex(*c, Kind::Exit, false) >= 0,
+                              "OwnershipCollectorExceptions: a caught invoke is not an exit");
+                report.expect(firstIndex(*c, Kind::Release, false) >= 0,
+                              "OwnershipCollectorExceptions: the release after the catch is seen");
+            }
+        }
+        return report.failures == 0;
+    }
 } // namespace
 
 int main(int argc, char** argv)
@@ -986,6 +1069,7 @@ int main(int argc, char** argv)
     (void)testProgramPointRanges(repoRoot, report);
     (void)testResourceModelConditions(report);
     (void)testOwnershipFactCollector(repoRoot, report);
+    (void)testOwnershipCollectorExceptions(repoRoot, report);
 
     if (report.failures == 0)
     {
