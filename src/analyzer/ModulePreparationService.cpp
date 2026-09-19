@@ -156,7 +156,7 @@ namespace ctrace::stack::analyzer
                               const LocalStackMap& localStack)
         {
             analysis::InternalAnalysisState state =
-                analysis::computeGlobalStackUsage(graph, localStack);
+                analysis::computeGlobalStackUsage(graph, localStack, ctx.config);
 
             std::vector<const llvm::Function*> nodes;
             nodes.reserve(ctx.allDefinedFunctions.size());

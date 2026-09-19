@@ -30,6 +30,9 @@ namespace ctrace::stack::analysis
     {
         StackSize bytes = 0;
         std::vector<std::pair<std::string, StackSize>> localAllocas;
+        // Calls whose callee frame cannot be computed from this module: indirect
+        // calls and calls to declarations without a definition. Intrinsics excluded.
+        std::uint64_t unresolvedCallCount = 0;
         std::uint64_t unknown : 1 = false;
         std::uint64_t hasDynamicAlloca : 1 = false;
         std::uint64_t reservedFlags : 62 = 0;
@@ -47,9 +50,13 @@ namespace ctrace::stack::analysis
     LocalStackInfo computeLocalStack(llvm::Function& F, const llvm::DataLayout& DL,
                                      AnalysisMode mode);
 
+    // Unresolved calls make the max stack unknown unless
+    // config.assumeExternalFrame is set, in which case each one is charged
+    // config.assumeExternalFrameBytes as its callee subtree.
     InternalAnalysisState
     computeGlobalStackUsage(const CallGraph& CG,
-                            const std::map<const llvm::Function*, LocalStackInfo>& LocalStack);
+                            const std::map<const llvm::Function*, LocalStackInfo>& LocalStack,
+                            const AnalysisConfig& config);
 
     std::vector<std::vector<const llvm::Function*>>
     computeRecursiveComponents(const CallGraph& CG,

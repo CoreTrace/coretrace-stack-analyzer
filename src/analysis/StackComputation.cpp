@@ -71,6 +71,21 @@ namespace ctrace::stack::analysis
             return false;
         }
 
+        // A call site whose callee frame cannot be derived from this module:
+        // indirect call (function pointer, virtual) or direct call to a declaration.
+        // Intrinsics and inline asm are not real calls.
+        static bool isUnresolvedCall(const llvm::CallBase& CB)
+        {
+            if (CB.isInlineAsm())
+                return false;
+            const llvm::Function* callee = CB.getCalledFunction();
+            if (!callee)
+                return true;
+            if (callee->isIntrinsic())
+                return false;
+            return callee->isDeclaration();
+        }
+
         static LocalStackInfo computeLocalStackBase(llvm::Function& F, const llvm::DataLayout& DL)
         {
             LocalStackInfo info;
@@ -79,6 +94,13 @@ namespace ctrace::stack::analysis
             {
                 for (llvm::Instruction& I : BB)
                 {
+                    if (const auto* CB = llvm::dyn_cast<llvm::CallBase>(&I))
+                    {
+                        if (isUnresolvedCall(*CB))
+                            ++info.unresolvedCallCount;
+                        continue;
+                    }
+
                     auto* alloca = llvm::dyn_cast<llvm::AllocaInst>(&I);
                     if (!alloca)
                         continue;
@@ -155,6 +177,7 @@ namespace ctrace::stack::analysis
         static StackEstimate
         dfsComputeStack(const llvm::Function* F, const CallGraph& CG,
                         const std::map<const llvm::Function*, LocalStackInfo>& LocalStack,
+                        const AnalysisConfig& config,
                         std::map<const llvm::Function*, VisitState>& State,
                         InternalAnalysisState& Res)
         {
@@ -187,13 +210,21 @@ namespace ctrace::stack::analysis
                 local.unknown = itLocal->second.unknown;
             }
             StackEstimate maxCallee = {};
+            if (itLocal != LocalStack.end() && itLocal->second.unresolvedCallCount > 0)
+            {
+                if (config.assumeExternalFrame)
+                    maxCallee.bytes = config.assumeExternalFrameBytes;
+                else
+                    maxCallee.unknown = true;
+            }
 
             auto itCG = CG.find(F);
             if (itCG != CG.end())
             {
                 for (const llvm::Function* Callee : itCG->second)
                 {
-                    StackEstimate calleeStack = dfsComputeStack(Callee, CG, LocalStack, State, Res);
+                    StackEstimate calleeStack =
+                        dfsComputeStack(Callee, CG, LocalStack, config, State, Res);
                     if (calleeStack.bytes > maxCallee.bytes)
                         maxCallee.bytes = calleeStack.bytes;
                     if (calleeStack.unknown)
@@ -873,7 +904,8 @@ namespace ctrace::stack::analysis
 
     InternalAnalysisState
     computeGlobalStackUsage(const CallGraph& CG,
-                            const std::map<const llvm::Function*, LocalStackInfo>& LocalStack)
+                            const std::map<const llvm::Function*, LocalStackInfo>& LocalStack,
+                            const AnalysisConfig& config)
     {
         InternalAnalysisState Res;
         std::map<const llvm::Function*, VisitState> State;
@@ -894,7 +926,7 @@ namespace ctrace::stack::analysis
             const llvm::Function* F = p.first;
             if (State[F] == NotVisited)
             {
-                dfsComputeStack(F, CG, LocalStack, State, Res);
+                dfsComputeStack(F, CG, LocalStack, config, State, Res);
             }
         }
 

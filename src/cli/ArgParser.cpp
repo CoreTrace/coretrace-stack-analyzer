@@ -46,7 +46,7 @@ namespace ctrace::stack::cli
             }
 
           private:
-            static constexpr std::array<OptionCandidate, 57> kCandidates = {
+            static constexpr std::array<OptionCandidate, 58> kCandidates = {
                 {{"-h", "-h"},
                  {"--help", "--help"},
                  {"--demangle", "--demangle"},
@@ -59,6 +59,7 @@ namespace ctrace::stack::cli
                  {"--only-dir", "--only-dir"},
                  {"--exclude-dir", "--exclude-dir"},
                  {"--stack-limit", "--stack-limit"},
+                 {"--assume-external-frame", "--assume-external-frame"},
                  {"--dump-filter", "--dump-filter"},
                  {"--dump-ir", "--dump-ir"},
                  {"-I", "-I"},
@@ -420,12 +421,14 @@ namespace ctrace::stack::cli
             return false;
         }
 
-        bool parseStackLimitValue(const std::string& input, StackSize& out, std::string& error)
+        // Parses "<number>[b|k|kb|kib|m|mb|mib|g|gb|gib]" into bytes.
+        bool parseByteSizeValue(const std::string& input, bool allowZero, StackSize& out,
+                                std::string& error)
         {
             std::string trimmed = trimCopy(input);
             if (trimmed.empty())
             {
-                error = "stack limit is empty";
+                error = "value is empty";
                 return false;
             }
 
@@ -437,7 +440,7 @@ namespace ctrace::stack::cli
             }
             if (digitCount == 0)
             {
-                error = "stack limit must start with a number";
+                error = "value must start with a number";
                 return false;
             }
 
@@ -452,9 +455,9 @@ namespace ctrace::stack::cli
                 error = "invalid numeric value";
                 return false;
             }
-            if (base == 0)
+            if (base == 0 && !allowZero)
             {
-                error = "stack limit must be greater than zero";
+                error = "value must be greater than zero";
                 return false;
             }
 
@@ -494,11 +497,27 @@ namespace ctrace::stack::cli
 
             if (base > std::numeric_limits<StackSize>::max() / multiplier)
             {
-                error = "stack limit is too large";
+                error = "value is too large";
                 return false;
             }
 
             out = static_cast<StackSize>(base) * multiplier;
+            return true;
+        }
+
+        bool parseStackLimitValue(const std::string& input, StackSize& out, std::string& error)
+        {
+            return parseByteSizeValue(input, /*allowZero=*/false, out, error);
+        }
+
+        bool applyAssumeExternalFrame(const std::string& value, AnalysisConfig& cfg,
+                                      std::string& error)
+        {
+            StackSize bytes = 0;
+            if (!parseByteSizeValue(value, /*allowZero=*/true, bytes, error))
+                return false;
+            cfg.assumeExternalFrame = 1;
+            cfg.assumeExternalFrameBytes = bytes;
             return true;
         }
 
@@ -993,6 +1012,17 @@ namespace ctrace::stack::cli
                 return true;
             }
 
+            if (key == "assume-external-frame")
+            {
+                std::string localError;
+                if (!applyAssumeExternalFrame(value, cfg, localError))
+                {
+                    error = "invalid assume-external-frame value: " + localError;
+                    return false;
+                }
+                return true;
+            }
+
             error = "unknown key '" + key + "'";
             return false;
         }
@@ -1313,6 +1343,19 @@ namespace ctrace::stack::cli
                     if (!parseStackLimitValue(value, parsedStackLimit, error))
                         return makeError("Invalid --stack-limit value: " + error);
                     cfg.stackLimit = parsedStackLimit;
+                    continue;
+                }
+            }
+            {
+                std::string value;
+                std::string error;
+                if (consumeLongOptionValue(argStr, "--assume-external-frame", i, argc, argv, value,
+                                           error))
+                {
+                    if (!error.empty())
+                        return makeError(error);
+                    if (!applyAssumeExternalFrame(value, cfg, error))
+                        return makeError("Invalid --assume-external-frame value: " + error);
                     continue;
                 }
             }

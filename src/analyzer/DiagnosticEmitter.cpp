@@ -173,8 +173,9 @@ namespace ctrace::stack::analyzer
             functionResult.isRecursive = prepared.recursionState.RecursiveFuncs.count(fn) != 0;
             functionResult.hasInfiniteSelfRecursion =
                 prepared.recursionState.InfiniteRecursionFuncs.count(fn) != 0;
-            functionResult.exceedsLimit = (!functionResult.maxStackUnknown &&
-                                           totalInfo.bytes > prepared.ctx.config.stackLimit);
+            // maxStack is a lower bound when unknown; a lower bound above the
+            // limit is still a certain overflow.
+            functionResult.exceedsLimit = totalInfo.bytes > prepared.ctx.config.stackLimit;
 
             unsigned line = 0;
             unsigned column = 0;
