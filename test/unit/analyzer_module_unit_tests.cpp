@@ -8,6 +8,7 @@
 #include "analysis/Reachability.hpp"
 #include "analysis/StackBufferAnalysis.hpp"
 #include "analysis/UninitializedVarAnalysis.hpp"
+#include "analyzer/DiagnosticEmitter.hpp"
 #include "analyzer/LocationResolver.hpp"
 #include "analyzer/ModulePreparationService.hpp"
 
@@ -653,6 +654,24 @@ namespace
             report.expect(
                 downgraded,
                 "UninitFixpointBudget: non-converged summary downgrades writes to unknown");
+
+            // The emitter renders it as an Info diagnostic under the uninitialized rule,
+            // so it is visible in JSON/SARIF but hidden by --warnings-only.
+            ctrace::stack::AnalysisResult rendered;
+            ctrace::stack::analyzer::appendUninitializedLocalReadDiagnostics(rendered, issues);
+            std::size_t infoCount = 0;
+            bool infoMentionsBudget = false;
+            for (const ctrace::stack::Diagnostic& diag : rendered.diagnostics)
+            {
+                if (diag.severity != ctrace::stack::DiagnosticSeverity::Info)
+                    continue;
+                ++infoCount;
+                infoMentionsBudget = infoMentionsBudget ||
+                                     (diag.message.find("did not converge") != std::string::npos &&
+                                      diag.ruleId == "UninitializedLocalRead");
+            }
+            report.expect(infoCount == 2 && infoMentionsBudget,
+                          "UninitFixpointBudget: AnalysisIncomplete renders as an Info diagnostic");
         }
 
         return report.failures == 0;
