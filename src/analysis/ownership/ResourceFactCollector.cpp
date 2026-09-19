@@ -273,6 +273,29 @@ namespace ctrace::stack::analysis::ownership
                     emit(make(Event::Kind::Exit, I));
                     return;
                 }
+                if (llvm::isa<llvm::ResumeInst>(&I))
+                {
+                    Event e = make(Event::Kind::Exit, I);
+                    e.exceptional = true;
+                    emit(std::move(e));
+                    return;
+                }
+                if (const auto* cleanup = llvm::dyn_cast<llvm::CleanupReturnInst>(&I);
+                    cleanup && cleanup->unwindsToCaller())
+                {
+                    Event e = make(Event::Kind::Exit, I);
+                    e.exceptional = true;
+                    emit(std::move(e));
+                    return;
+                }
+                if (const auto* catchSwitch = llvm::dyn_cast<llvm::CatchSwitchInst>(&I);
+                    catchSwitch && catchSwitch->unwindsToCaller())
+                {
+                    Event e = make(Event::Kind::Exit, I);
+                    e.exceptional = true;
+                    emit(std::move(e));
+                    return;
+                }
                 if (const auto* call = llvm::dyn_cast<llvm::CallBase>(&I))
                 {
                     visitCall(*call);
@@ -414,13 +437,67 @@ namespace ctrace::stack::analysis::ownership
                 return br->getSuccessor(*trueEdgeHolds ? 0 : 1);
             }
 
+            /// Where a call's effects go: in the block for a `call`, on the normal edge for
+            /// an `invoke` (the unwind edge gets weakened effects, see placeWeakened).
+            void place(const llvm::CallBase& call, Event e)
+            {
+                if (const auto* invoke = llvm::dyn_cast<llvm::InvokeInst>(&call))
+                {
+                    placeWeakened(*invoke, e);
+                    emitOnEdge(invoke->getParent(), invoke->getNormalDest(), std::move(e));
+                    return;
+                }
+                emit(std::move(e));
+            }
+
+            /// On the unwind edge the callee may have run partially: a release or an
+            /// out-param acquisition may have happened; a returned resource does not exist.
+            void placeWeakened(const llvm::InvokeInst& invoke, const Event& e)
+            {
+                Event weak = e;
+                switch (e.kind)
+                {
+                case Event::Kind::Release:
+                    weak.certainty = Certainty::Conditional;
+                    break;
+                case Event::Kind::Acquire:
+                    if (e.dst == valueIds_.lookup(&invoke))
+                        return; // acquire_ret: no value on the unwind edge
+                    weak.strong = false;
+                    weak.certainty = Certainty::Conditional;
+                    break;
+                case Event::Kind::Call:
+                    if (const auto it = exceptionalSummaryEvents_.find(&invoke);
+                        it != exceptionalSummaryEvents_.end())
+                    {
+                        emitOnEdge(invoke.getParent(), invoke.getUnwindDest(), it->second);
+                        return;
+                    }
+                    weak.call.retDest.reset();
+                    for (auto& [loc, certainty] : weak.call.outArgs)
+                        certainty = Certainty::Conditional;
+                    break;
+                default:
+                    break;
+                }
+                emitOnEdge(invoke.getParent(), invoke.getUnwindDest(), std::move(weak));
+            }
+
             void visitCall(const llvm::CallBase& call)
             {
                 if (llvm::isa<llvm::IntrinsicInst>(&call) || call.isInlineAsm())
                     return;
                 const llvm::Function* callee = lifetime_detail::resolveDirectCallee(call);
 
-                std::vector<Event> effects; // in-block or, for conditional rules, per edge
+                // A plain call that may throw is an exceptional exit taken before any of
+                // its effects; the absence of an invoke proves nothing.
+                if (mayUnwind_ && llvm::isa<llvm::CallInst>(&call) && !call.doesNotThrow())
+                {
+                    Event e = make(Event::Kind::Exit, call);
+                    e.exceptional = true;
+                    emit(std::move(e));
+                }
+
                 bool matched = false;
                 if (callee)
                 {
@@ -434,7 +511,7 @@ namespace ctrace::stack::analysis::ownership
                         matched = true;
                         if (rule.condition == RuleCondition::Always)
                         {
-                            emit(std::move(*e));
+                            place(call, std::move(*e));
                         }
                         else if (const auto succ = successorWhere(call, rule.condition))
                         {
@@ -443,7 +520,7 @@ namespace ctrace::stack::analysis::ownership
                         else
                         {
                             e->certainty = Certainty::Unknown;
-                            emit(std::move(*e));
+                            place(call, std::move(*e));
                         }
                     }
                 }
@@ -454,7 +531,7 @@ namespace ctrace::stack::analysis::ownership
                 {
                     if (const FunctionOwnershipSummary* summary = summaries_.byFunction(*callee))
                     {
-                        emit(summaryCall(*summary, call));
+                        place(call, summaryCall(*summary, call));
                         return;
                     }
                 }
@@ -539,6 +616,30 @@ namespace ctrace::stack::analysis::ownership
                         u.args.push_back(loc);
                     emit(std::move(u));
                 }
+                if (const auto* invoke = llvm::dyn_cast<llvm::InvokeInst>(&call);
+                    invoke && summary.exceptional.present)
+                {
+                    // The callee told us what its exceptional exits do: use that on the
+                    // unwind edge rather than the weakened normal effects.
+                    Event x = make(Event::Kind::Call, call);
+                    for (const auto& [argIndex, transformer] : summary.exceptional.params)
+                    {
+                        if (argIndex >= call.arg_size() ||
+                            !call.getArgOperand(argIndex)->getType()->isPointerTy())
+                            continue;
+                        x.call.params.push_back(
+                            {valueLocation(call.getArgOperand(argIndex)), transformer});
+                    }
+                    for (const auto& [argIndex, certainty] : summary.exceptional.outArgs)
+                    {
+                        if (argIndex >= call.arg_size())
+                            continue;
+                        if (const auto slot = slotOf(call.getArgOperand(argIndex)))
+                            x.call.outArgs.push_back({*slot, certainty});
+                    }
+                    x.call.site = e.call.site;
+                    exceptionalSummaryEvents_[&call] = std::move(x);
+                }
                 return e;
             }
 
@@ -588,6 +689,7 @@ namespace ctrace::stack::analysis::ownership
                 edgeIndex_;
             std::map<std::string, LocationId> slotIds_;
             llvm::DenseMap<const llvm::Value*, LocationId> valueIds_;
+            std::map<const llvm::CallBase*, Event> exceptionalSummaryEvents_;
             LocationId returnLocation_ = 0;
             bool mayUnwind_ = false;
             std::uint8_t reservedPadding_[3] = {};

@@ -1035,9 +1035,15 @@ namespace
                           "OwnershipCollectorExceptions: invoke_with_catch collected");
             if (c)
             {
-                // The caught invoke is not an exit; the function still has its normal exit.
-                report.expect(firstIndex(*c, Kind::Exit, true) < 0 &&
-                                  firstIndex(*c, Kind::Exit, false) >= 0,
+                // The caught invoke's effects live on its edges and neither edge is an exit:
+                // the unwind edge lands in this function. (__cxa_end_catch is not nounwind,
+                // so the function as a whole still has an exceptional exit; no name-based
+                // exception is made for it.)
+                bool exitOnAnyEdge = false;
+                for (const Edge& e : c->facts.edges)
+                    for (const Event& ev : e.events)
+                        exitOnAnyEdge = exitOnAnyEdge || ev.kind == Kind::Exit;
+                report.expect(!exitOnAnyEdge && firstIndex(*c, Kind::Exit, false) >= 0,
                               "OwnershipCollectorExceptions: a caught invoke is not an exit");
                 report.expect(firstIndex(*c, Kind::Release, false) >= 0,
                               "OwnershipCollectorExceptions: the release after the catch is seen");
