@@ -7,6 +7,7 @@
 #include "analysis/IntRanges.hpp"
 #include "analysis/Reachability.hpp"
 #include "analysis/ResourceModel.hpp"
+#include "analysis/ownership/ResourceFactCollector.hpp"
 #include "analysis/StackBufferAnalysis.hpp"
 #include "analysis/UninitializedVarAnalysis.hpp"
 #include "analyzer/DiagnosticEmitter.hpp"
@@ -858,6 +859,110 @@ namespace
                       "ResourceModel: an unknown qualifier is an error naming the line");
         return report.failures == 0;
     }
+    bool testOwnershipFactCollector(const std::filesystem::path& repoRoot, TestReport& report)
+    {
+        using namespace ctrace::stack::analysis;
+        using namespace ctrace::stack::analysis::ownership;
+        using Kind = Event::Kind;
+
+        const ctrace::stack::AnalysisConfig config;
+        LoadedModule loaded;
+        std::string loadError;
+        const std::filesystem::path source = repoRoot / "test/unit/ownership_collector_input.c";
+        if (!loadModuleFromSource(source, config, loaded, loadError))
+        {
+            report.expect(false, "OwnershipCollector setup: failed to load module: " + loadError);
+            return false;
+        }
+        ResourceModel model;
+        std::string modelError;
+        if (!parseResourceModel((repoRoot / "test/unit/ownership_collector_model.txt").string(),
+                                model, modelError))
+        {
+            report.expect(false, "OwnershipCollector setup: model: " + modelError);
+            return false;
+        }
+        const SummaryLookup noSummaries{[](const llvm::Function&) { return nullptr; }};
+
+        // Kinds of all block events in block order, then edge events, as a flat list.
+        const auto kindsOf = [&](const char* name, std::vector<Kind>& blockKinds,
+                                 std::vector<Kind>& edgeKinds) -> bool
+        {
+            llvm::Function* fn = loaded.module->getFunction(name);
+            if (!fn)
+                return false;
+            const CollectedFunction c =
+                collectOwnershipFacts(*fn, model, noSummaries, loaded.module->getDataLayout());
+            for (const Block& b : c.facts.blocks)
+                for (const Event& e : b.events)
+                    blockKinds.push_back(e.kind);
+            for (const Edge& e : c.facts.edges)
+                for (const Event& ev : e.events)
+                    edgeKinds.push_back(ev.kind);
+            return true;
+        };
+        const auto count = [](const std::vector<Kind>& v, Kind k)
+        { return std::count(v.begin(), v.end(), k); };
+
+        {
+            std::vector<Kind> blocks, edges;
+            report.expect(kindsOf("early_return", blocks, edges),
+                          "OwnershipCollector: early_return collected");
+            report.expect(count(blocks, Kind::Acquire) == 1 && count(blocks, Kind::Release) == 1,
+                          "OwnershipCollector: early_return has one acquire and one release");
+            report.expect(count(blocks, Kind::Exit) == 1 && count(blocks, Kind::Return) == 1,
+                          "OwnershipCollector: the merged ret is one exit with one return event");
+            report.expect(
+                count(blocks, Kind::UnknownCall) == 0 && count(blocks, Kind::AddressEscape) == 0,
+                "OwnershipCollector: check() without pointer args is not an unknown call");
+        }
+        {
+            std::vector<Kind> blocks, edges;
+            report.expect(kindsOf("alias_keep", blocks, edges),
+                          "OwnershipCollector: alias_keep collected");
+            report.expect(count(blocks, Kind::Acquire) == 2 && count(blocks, Kind::Release) == 2,
+                          "OwnershipCollector: alias_keep has two acquires and two releases");
+            report.expect(count(blocks, Kind::Copy) >= 1,
+                          "OwnershipCollector: saved = h is a copy between locations");
+        }
+        {
+            llvm::Function* fn = loaded.module->getFunction("select_return");
+            report.expect(fn != nullptr, "OwnershipCollector: select_return exists");
+            if (fn)
+            {
+                const CollectedFunction c =
+                    collectOwnershipFacts(*fn, model, noSummaries, loaded.module->getDataLayout());
+                bool sawWeakCopy = false;
+                bool sawStrongCopyIntoSameDst = false;
+                LocationId weakDst = 0;
+                for (const Block& b : c.facts.blocks)
+                    for (const Event& e : b.events)
+                        if (e.kind == Event::Kind::Copy && !e.strong)
+                        {
+                            sawWeakCopy = true;
+                            weakDst = e.dst;
+                        }
+                for (const Block& b : c.facts.blocks)
+                    for (const Event& e : b.events)
+                        if (e.kind == Event::Kind::Copy && e.strong && e.dst == weakDst)
+                            sawStrongCopyIntoSameDst = true;
+                report.expect(sawWeakCopy && sawStrongCopyIntoSameDst,
+                              "OwnershipCollector: select keeps both alternatives (weak copy)");
+                report.expect(c.facts.siteCount == 1 && c.siteInstructions.size() == 1,
+                              "OwnershipCollector: acquire_ret is one acquisition site");
+            }
+        }
+        {
+            std::vector<Kind> blocks, edges;
+            report.expect(kindsOf("unknown_call", blocks, edges),
+                          "OwnershipCollector: unknown_call collected");
+            report.expect(count(blocks, Kind::UnknownCall) == 1,
+                          "OwnershipCollector: passing a handle to an unmodelled callee");
+            report.expect(count(blocks, Kind::AddressEscape) == 1,
+                          "OwnershipCollector: passing &h to an unmodelled callee");
+        }
+        return report.failures == 0;
+    }
 } // namespace
 
 int main(int argc, char** argv)
@@ -881,6 +986,7 @@ int main(int argc, char** argv)
     (void)testUninitializedFixpointBudgetIsExplicit(repoRoot, report);
     (void)testProgramPointRanges(repoRoot, report);
     (void)testResourceModelConditions(report);
+    (void)testOwnershipFactCollector(repoRoot, report);
 
     if (report.failures == 0)
     {

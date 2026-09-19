@@ -1,0 +1,3 @@
+acquire_out acquire_handle 0 GenericHandle
+acquire_ret acquire_ret GenericHandle
+release_arg release_handle 0 GenericHandle
