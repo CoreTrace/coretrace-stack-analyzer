@@ -320,6 +320,34 @@ namespace
         return e;
     }
 
+    bool testEdgeExits(TestReport& r)
+    {
+        const ResourceId n0 = newInstanceOf(0);
+        // 0: acquire h; 0→1: retval = null (after a release); 0→2: retval = h;
+        // both → 3: the merged `ret retval`, whose Copy/Return/Exit are placed on the
+        // incoming edges so that each path is judged before the join.
+        OwnershipFacts f = facts(4,
+                                 {edge(0, 1), edge(0, 2), edge(1, 3, {copy(2, 1), ret(2), exit()}),
+                                  edge(2, 3, {copy(2, 1), ret(2), exit()})},
+                                 3, 1);
+        f.locations[2].kind = LocationKind::Return;
+        f.blocks[0].events = {acquire(0, 0)};
+        f.blocks[1].events = {release(0), overwrite(1)};
+        f.blocks[2].events = {copy(1, 0)};
+        const OwnershipResult res = solve(f, entryOf(f));
+        r.expect(res.exits.size() == 2, "EdgeExits: one exit per incoming edge");
+        bool sawReleased = false;
+        bool sawEscaped = false;
+        for (const ExitRecord& e : res.exits)
+        {
+            sawReleased = sawReleased || e.state.resources[n0].isOnly(OwnState::Released);
+            sawEscaped = sawEscaped || e.state.resources[n0].isOnly(OwnState::Escaped);
+        }
+        r.expect(sawReleased && sawEscaped,
+                 "EdgeExits: each path keeps its own verdict (released / escaped), no leak");
+        return r.failures == 0;
+    }
+
     bool testContracts(TestReport& r)
     {
         const ResourceId n0 = newInstanceOf(0);
@@ -382,7 +410,8 @@ namespace
             const FunctionOwnershipSummary s = computeSummary(f);
             r.expect(s.normal.params.at(0)[owned].isOnly(OwnState::Released) &&
                          s.normal.outArgs.count(ArgPath{0, 1, false}) == 1 &&
-                         s.normal.outArgs.at(ArgPath{0, 1, false}) == Certainty::Guaranteed,
+                         s.normal.outArgs.at(ArgPath{0, 1, false}).certainty ==
+                             Certainty::Guaranteed,
                      "Summary: wrapper releasing then acquiring reports a fresh out-arg");
         }
         {
@@ -391,7 +420,8 @@ namespace
             f.blocks[0].events = {acquire(0, 1), release(1), exit()};
             const FunctionOwnershipSummary s = computeSummary(f);
             r.expect(s.normal.params.at(0)[owned].isOnly(OwnState::Owned) &&
-                         s.normal.outArgs.empty() && s.normal.returns != Certainty::Guaranteed,
+                         s.normal.outArgs.empty() &&
+                         s.normal.returns.certainty != Certainty::Guaranteed,
                      "Summary: wrapper acquiring then releasing leaves no obligation");
         }
         {
@@ -400,7 +430,7 @@ namespace
             f.locations[1].kind = LocationKind::Return;
             f.blocks[0].events = {acquire(0, 1), ret(1), exit()};
             const FunctionOwnershipSummary s = computeSummary(f);
-            r.expect(s.normal.returns == Certainty::Guaranteed,
+            r.expect(s.normal.returns.certainty == Certainty::Guaranteed,
                      "Summary: returning a fresh resource on every exit is Guaranteed");
         }
         {
@@ -412,7 +442,7 @@ namespace
             f.locations[1].kind = LocationKind::Return;
             f.blocks[3].events = {ret(1), exit()};
             const FunctionOwnershipSummary s = computeSummary(f);
-            r.expect(s.normal.returns == Certainty::Conditional,
+            r.expect(s.normal.returns.certainty == Certainty::Conditional,
                      "Summary: returning a fresh resource on some exits is Conditional");
         }
         {
@@ -458,6 +488,7 @@ int main(int, char**)
     (void)testDomain(report);
     (void)testEngine(report);
     (void)testContracts(report);
+    (void)testEdgeExits(report);
     (void)testSummaries(report);
     if (report.failures == 0)
     {
