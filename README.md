@@ -487,6 +487,32 @@ ctrace::stack::AnalysisConfig cfg = parsed.parsed.config;
 This keeps one single source of truth for option semantics between CLI and
 library consumers.
 
+### Library mode: structured results instead of stdout
+
+`ctrace::stack::app::runAnalysis` runs the analyzer and returns an `AnalysisReport`
+(per-file filtered results, merged result, `{info, warning, error}` summary, contract
+version). It never writes the report to stdout; run-level status goes through the
+coretrace logger on stderr. `ctrace::stack::app::renderReport` turns that report into
+the human, JSON or SARIF text the CLI prints, so embedding tools read the same data the
+CLI shows without parsing it back.
+
+```cpp
+#include "app/AnalyzerApp.hpp"
+
+auto parsed = ctrace::stack::cli::parseArguments({"main.c", "--warnings-only"});
+auto analysis = ctrace::stack::app::runAnalysis(std::move(parsed.parsed));
+if (!analysis.isOk()) {
+    // handle analysis.error
+}
+const auto& report = *analysis.report;
+std::size_t errors = report.summary.error;
+std::string json = ctrace::stack::app::renderReport(report, ctrace::stack::cli::OutputFormat::Json);
+```
+
+`runAnalyzerApp` remains the CLI entry point (`runAnalysis` + `renderReport` on stdout +
+optional SARIF file). Its exit code is `0` whenever the analysis ran, regardless of the
+diagnostics found; severity gating belongs to `scripts/ci/run_code_analysis.py`.
+
 When `--compile-commands` is provided and no input file is passed on the CLI,
 the analyzer automatically uses `compile_commands.json` as the source of truth:
 - it analyzes supported entries (`.c`, `.cc`, `.cpp`, `.cxx`, `.ll`)

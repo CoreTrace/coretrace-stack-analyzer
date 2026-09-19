@@ -1249,155 +1249,99 @@ static AnalysisResult mergeAnalysisResults(const std::vector<AnalysisEntry>& res
     return merged;
 }
 
-static int emitJsonOutput(const std::vector<AnalysisEntry>& results, const AnalysisConfig& cfg,
-                          const std::vector<std::string>& inputFilenames,
-                          const NormalizedPathFilters& normalizedFilters)
+static AnalysisResult finalizeResult(const AnalysisResult& result, const AnalysisConfig& cfg,
+                                     const NormalizedPathFilters& normalizedFilters)
 {
     const bool applyFilter =
         cfg.onlyFiles.empty() && cfg.onlyDirs.empty() && cfg.onlyFunctions.empty();
-    if (results.size() == 1)
-    {
-        AnalysisResult filtered = applyFilter
-                                      ? filterResult(results[0].second, cfg, normalizedFilters)
-                                      : results[0].second;
-        filtered = filterWarningsOnly(filtered, cfg);
-        llvm::outs() << ctrace::stack::toJson(filtered, results[0].first);
-        return 0;
-    }
-
-    AnalysisResult merged = mergeAnalysisResults(results, cfg);
-    AnalysisResult filtered = applyFilter ? filterResult(merged, cfg, normalizedFilters) : merged;
-    filtered = filterWarningsOnly(filtered, cfg);
-    llvm::outs() << ctrace::stack::toJson(filtered, inputFilenames);
-    return 0;
+    AnalysisResult filtered = applyFilter ? filterResult(result, cfg, normalizedFilters) : result;
+    return filterWarningsOnly(filtered, cfg);
 }
 
-static int emitSarifOutput(const std::vector<AnalysisEntry>& results, const AnalysisConfig& cfg,
-                           const std::vector<std::string>& inputFilenames,
-                           const std::string& sarifBaseDir,
-                           const NormalizedPathFilters& normalizedFilters)
+static std::string renderJsonReport(const ctrace::stack::app::AnalysisReport& report)
 {
-    const bool applyFilter =
-        cfg.onlyFiles.empty() && cfg.onlyDirs.empty() && cfg.onlyFunctions.empty();
-    if (results.size() == 1)
-    {
-        AnalysisResult filtered = applyFilter
-                                      ? filterResult(results[0].second, cfg, normalizedFilters)
-                                      : results[0].second;
-        filtered = filterWarningsOnly(filtered, cfg);
-        llvm::outs() << ctrace::stack::toSarif(filtered, results[0].first,
-                                               "coretrace-stack-analyzer", "0.1.0", sarifBaseDir);
-        return 0;
-    }
-
-    AnalysisResult merged = mergeAnalysisResults(results, cfg);
-    AnalysisResult filtered = applyFilter ? filterResult(merged, cfg, normalizedFilters) : merged;
-    filtered = filterWarningsOnly(filtered, cfg);
-    llvm::outs() << ctrace::stack::toSarif(filtered, inputFilenames.front(),
-                                           "coretrace-stack-analyzer", "0.1.0", sarifBaseDir);
-    return 0;
+    if (report.files.size() == 1)
+        return ctrace::stack::toJson(report.merged, report.files.front().inputFile);
+    return ctrace::stack::toJson(report.merged, report.inputFiles);
 }
 
-static bool writeSarifToFile(const std::vector<AnalysisEntry>& results, const AnalysisConfig& cfg,
-                             const std::vector<std::string>& inputFilenames,
-                             const std::string& sarifBaseDir,
-                             const NormalizedPathFilters& normalizedFilters,
-                             const std::string& outPath)
+static std::string renderSarifReport(const ctrace::stack::app::AnalysisReport& report)
 {
-    const bool applyFilter =
-        cfg.onlyFiles.empty() && cfg.onlyDirs.empty() && cfg.onlyFunctions.empty();
-    std::string sarifContent;
-    if (results.size() == 1)
-    {
-        AnalysisResult filtered = applyFilter
-                                      ? filterResult(results[0].second, cfg, normalizedFilters)
-                                      : results[0].second;
-        filtered = filterWarningsOnly(filtered, cfg);
-        sarifContent = ctrace::stack::toSarif(filtered, results[0].first,
-                                              "coretrace-stack-analyzer", "0.1.0", sarifBaseDir);
-    }
-    else
-    {
-        AnalysisResult merged = mergeAnalysisResults(results, cfg);
-        AnalysisResult filtered =
-            applyFilter ? filterResult(merged, cfg, normalizedFilters) : merged;
-        filtered = filterWarningsOnly(filtered, cfg);
-        sarifContent = ctrace::stack::toSarif(filtered, inputFilenames.front(),
-                                              "coretrace-stack-analyzer", "0.1.0", sarifBaseDir);
-    }
+    const std::string& inputFile =
+        report.files.size() == 1 ? report.files.front().inputFile : report.inputFiles.front();
+    return ctrace::stack::toSarif(report.merged, inputFile, "coretrace-stack-analyzer", "0.1.0",
+                                  report.sarifBaseDir);
+}
 
+static bool writeTextFile(const std::string& outPath, const std::string& content)
+{
     std::ofstream ofs(outPath, std::ios::binary);
     if (!ofs)
     {
         coretrace::log(coretrace::Level::Error, "Failed to open SARIF output file: {}\n", outPath);
         return false;
     }
-    ofs << sarifContent;
+    ofs << content;
     return ofs.good();
 }
 
-static int emitHumanOutput(const std::vector<AnalysisEntry>& results, const AnalysisConfig& cfg,
-                           const NormalizedPathFilters& normalizedFilters)
+static std::string renderHumanReport(const ctrace::stack::app::AnalysisReport& report)
 {
-    const bool multiFile = results.size() > 1;
-    DiagnosticSummary totalSummary;
-    for (std::size_t r = 0; r < results.size(); ++r)
+    const AnalysisConfig& cfg = report.config;
+    const bool multiFile = report.files.size() > 1;
+    std::string text;
+    llvm::raw_string_ostream out(text);
+
+    for (std::size_t r = 0; r < report.files.size(); ++r)
     {
-        const auto& inputFilename = results[r].first;
-        AnalysisResult result =
-            (cfg.onlyFiles.empty() && cfg.onlyDirs.empty() && cfg.onlyFunctions.empty())
-                ? filterResult(results[r].second, cfg, normalizedFilters)
-                : results[r].second;
-        result = filterWarningsOnly(result, cfg);
-        if (cfg.warningsOnly)
-            result = filterFunctionsWithDiagnostics(result);
+        const ctrace::stack::app::FileReport& file = report.files[r];
+        const AnalysisResult result =
+            cfg.warningsOnly ? filterFunctionsWithDiagnostics(file.result) : file.result;
 
         if (multiFile)
         {
             if (r > 0)
-                llvm::outs() << "\n";
-            llvm::outs() << "File: " << inputFilename << "\n";
+                out << "\n";
+            out << "File: " << file.inputFile << "\n";
         }
 
-        llvm::outs() << "Mode: " << (result.config.mode == AnalysisMode::IR ? "IR" : "ABI")
-                     << "\n\n";
+        out << "Mode: " << (result.config.mode == AnalysisMode::IR ? "IR" : "ABI") << "\n\n";
 
         for (const auto& f : result.functions)
         {
             if (cfg.demangle)
             {
-                llvm::outs() << "Function: " << ctrace_tools::demangle(f.name.c_str()) << "\n";
+                out << "Function: " << ctrace_tools::demangle(f.name.c_str()) << "\n";
             }
             else
             {
-                llvm::outs() << "Function: " << f.name << " "
-                             << ((ctrace_tools::isMangled(f.name))
-                                     ? ctrace_tools::demangle(f.name.c_str())
-                                     : "")
-                             << "\n";
+                out << "Function: " << f.name << " "
+                    << ((ctrace_tools::isMangled(f.name)) ? ctrace_tools::demangle(f.name.c_str())
+                                                          : "")
+                    << "\n";
             }
             if (f.localStackUnknown)
             {
-                llvm::outs() << "\tlocal stack: unknown";
+                out << "\tlocal stack: unknown";
                 if (f.localStack > 0)
-                    llvm::outs() << " (>= " << f.localStack << " bytes)";
-                llvm::outs() << "\n";
+                    out << " (>= " << f.localStack << " bytes)";
+                out << "\n";
             }
             else
             {
-                llvm::outs() << "\tlocal stack: " << f.localStack << " bytes\n";
+                out << "\tlocal stack: " << f.localStack << " bytes\n";
             }
 
             if (f.maxStackUnknown)
             {
-                llvm::outs() << "\tmax stack (including callees): unknown";
+                out << "\tmax stack (including callees): unknown";
                 if (f.maxStack > 0)
-                    llvm::outs() << " (>= " << f.maxStack << " bytes)";
-                llvm::outs() << "\n";
+                    out << " (>= " << f.maxStack << " bytes)";
+                out << "\n";
             }
             else
             {
-                llvm::outs() << "\tmax stack (including callees): " << f.maxStack << " bytes\n";
+                out << "\tmax stack (including callees): " << f.maxStack << " bytes\n";
             }
 
             if (!result.config.quiet)
@@ -1407,27 +1351,26 @@ static int emitHumanOutput(const std::vector<AnalysisEntry>& results, const Anal
                     if (d.funcName != f.name)
                         continue;
                     if (d.line != 0)
-                        llvm::outs() << "\tat line " << d.line << ", column " << d.column << "\n";
-                    llvm::outs() << d.message << "\n";
+                        out << "\tat line " << d.line << ", column " << d.column << "\n";
+                    out << d.message << "\n";
                 }
             }
 
-            llvm::outs() << "\n";
+            out << "\n";
         }
 
-        const DiagnosticSummary summary = summarizeDiagnostics(result);
-        accumulateSummary(totalSummary, summary);
-        llvm::outs() << "Diagnostics summary: info=" << summary.info
-                     << ", warning=" << summary.warning << ", error=" << summary.error << "\n";
+        out << "Diagnostics summary: info=" << file.summary.info
+            << ", warning=" << file.summary.warning << ", error=" << file.summary.error << "\n";
     }
 
     if (multiFile)
     {
-        llvm::outs() << "\nTotal diagnostics summary: info=" << totalSummary.info
-                     << ", warning=" << totalSummary.warning << ", error=" << totalSummary.error
-                     << " (across " << results.size() << " files)\n";
+        out << "\nTotal diagnostics summary: info=" << report.summary.info
+            << ", warning=" << report.summary.warning << ", error=" << report.summary.error
+            << " (across " << report.files.size() << " files)\n";
     }
-    return 0;
+    out.flush();
+    return text;
 }
 
 static std::string md5Hex(llvm::StringRef input)
@@ -2895,41 +2838,6 @@ class DirectModuleLoadingExecutionStrategy final : public AnalysisExecutionStrat
     }
 };
 
-class OutputStrategy
-{
-  public:
-    virtual ~OutputStrategy() = default;
-    virtual int emit(const RunPlan& plan, const std::vector<AnalysisEntry>& results) const = 0;
-};
-
-class JsonOutputStrategy final : public OutputStrategy
-{
-  public:
-    int emit(const RunPlan& plan, const std::vector<AnalysisEntry>& results) const override
-    {
-        return emitJsonOutput(results, plan.cfg, plan.inputFilenames, plan.normalizedFilters);
-    }
-};
-
-class SarifOutputStrategy final : public OutputStrategy
-{
-  public:
-    int emit(const RunPlan& plan, const std::vector<AnalysisEntry>& results) const override
-    {
-        return emitSarifOutput(results, plan.cfg, plan.inputFilenames, plan.sarifBaseDir,
-                               plan.normalizedFilters);
-    }
-};
-
-class HumanOutputStrategy final : public OutputStrategy
-{
-  public:
-    int emit(const RunPlan& plan, const std::vector<AnalysisEntry>& results) const override
-    {
-        return emitHumanOutput(results, plan.cfg, plan.normalizedFilters);
-    }
-};
-
 static std::unique_ptr<AnalysisExecutionStrategy> makeExecutionStrategy(const RunPlan& plan)
 {
     if (plan.needsSharedModuleLoading)
@@ -2937,30 +2845,54 @@ static std::unique_ptr<AnalysisExecutionStrategy> makeExecutionStrategy(const Ru
     return std::make_unique<DirectModuleLoadingExecutionStrategy>();
 }
 
-static std::unique_ptr<OutputStrategy>
-makeOutputStrategy(ctrace::stack::cli::OutputFormat outputFormat)
+// Computes the final filtered results once. Every output format renders this report.
+static ctrace::stack::app::AnalysisReport buildReport(RunPlan& plan,
+                                                      std::vector<AnalysisEntry>& results)
 {
-    switch (outputFormat)
+    ctrace::stack::app::AnalysisReport report;
+    report.files.reserve(results.size());
+    for (AnalysisEntry& entry : results)
     {
-    case ctrace::stack::cli::OutputFormat::Json:
-        return std::make_unique<JsonOutputStrategy>();
-    case ctrace::stack::cli::OutputFormat::Sarif:
-        return std::make_unique<SarifOutputStrategy>();
-    case ctrace::stack::cli::OutputFormat::Human:
-        return std::make_unique<HumanOutputStrategy>();
+        ctrace::stack::app::FileReport file;
+        file.inputFile = std::move(entry.first);
+        file.result = finalizeResult(entry.second, plan.cfg, plan.normalizedFilters);
+        file.summary = summarizeDiagnostics(file.result);
+        accumulateSummary(report.summary, file.summary);
+        report.files.push_back(std::move(file));
     }
-    llvm::report_fatal_error("Unhandled output format in output strategy selection");
+
+    if (report.files.size() == 1)
+    {
+        report.merged = report.files.front().result;
+    }
+    else
+    {
+        std::vector<AnalysisEntry> rawEntries;
+        rawEntries.reserve(results.size());
+        for (std::size_t i = 0; i < results.size(); ++i)
+            rawEntries.emplace_back(report.files[i].inputFile, std::move(results[i].second));
+        report.merged = finalizeResult(mergeAnalysisResults(rawEntries, plan.cfg), plan.cfg,
+                                       plan.normalizedFilters);
+    }
+
+    report.inputFiles = std::move(plan.inputFilenames);
+    report.sarifBaseDir = std::move(plan.sarifBaseDir);
+    report.config = std::move(plan.cfg);
+    return report;
 }
 
 class AnalyzerApp
 {
   public:
-    AppResult<int> run(ctrace::stack::cli::ParsedArguments parsedArgs) const
+    AppResult<ctrace::stack::app::AnalysisReport>
+    analyze(ctrace::stack::cli::ParsedArguments parsedArgs) const
     {
+        using Result = AppResult<ctrace::stack::app::AnalysisReport>;
+
         RunPlanBuilder planBuilder(std::move(parsedArgs));
         AppResult<RunPlan> planResult = planBuilder.build();
         if (!planResult.isOk())
-            return AppResult<int>::failure(std::move(planResult.error));
+            return Result::failure(std::move(planResult.error));
 
         RunPlan plan = std::move(*planResult.value);
         printInterprocStatus(plan.cfg, plan.inputFilenames.size(),
@@ -2973,41 +2905,68 @@ class AnalyzerApp
         std::unique_ptr<AnalysisExecutionStrategy> executionStrategy = makeExecutionStrategy(plan);
         AppStatus executionStatus = executionStrategy->execute(plan, results);
         if (!executionStatus.isOk())
-            return AppResult<int>::failure(std::move(executionStatus.error));
+            return Result::failure(std::move(executionStatus.error));
 
-        std::unique_ptr<OutputStrategy> outputStrategy = makeOutputStrategy(plan.outputFormat);
-        const int exitCode = outputStrategy->emit(plan, results);
-
-        if (!plan.sarifOutPath.empty())
-        {
-            if (!writeSarifToFile(results, plan.cfg, plan.inputFilenames, plan.sarifBaseDir,
-                                  plan.normalizedFilters, plan.sarifOutPath))
-            {
-                return AppResult<int>::failure("Failed to write SARIF output to: " +
-                                               plan.sarifOutPath);
-            }
-        }
-
-        analyzer::dumpHotspotSummary(std::cerr, plan.cfg.timing);
-        return AppResult<int>::success(exitCode);
+        return Result::success(buildReport(plan, results));
     }
 };
 
 namespace ctrace::stack::app
 {
-    RunResult runAnalyzerApp(cli::ParsedArguments parsedArgs)
+    ReportResult runAnalysis(cli::ParsedArguments parsedArgs)
     {
         AnalyzerApp app = {};
-        AppResult<int> runResult = app.run(std::move(parsedArgs));
+        AppResult<AnalysisReport> analysis = app.analyze(std::move(parsedArgs));
+
+        ReportResult result;
+        if (!analysis.isOk())
+        {
+            result.error = std::move(analysis.error);
+            return result;
+        }
+        result.report = std::move(*analysis.value);
+        return result;
+    }
+
+    std::string renderReport(const AnalysisReport& report, cli::OutputFormat format)
+    {
+        switch (format)
+        {
+        case cli::OutputFormat::Json:
+            return renderJsonReport(report);
+        case cli::OutputFormat::Sarif:
+            return renderSarifReport(report);
+        case cli::OutputFormat::Human:
+            return renderHumanReport(report);
+        }
+        llvm::report_fatal_error("Unhandled output format in report rendering");
+    }
+
+    RunResult runAnalyzerApp(cli::ParsedArguments parsedArgs)
+    {
+        const cli::OutputFormat outputFormat = parsedArgs.outputFormat;
+        const std::string sarifOutPath = parsedArgs.sarifOutPath;
 
         RunResult result;
-        if (!runResult.isOk())
+        ReportResult analysis = runAnalysis(std::move(parsedArgs));
+        if (!analysis.isOk())
         {
-            result.error = std::move(runResult.error);
+            result.error = std::move(analysis.error);
             return result;
         }
 
-        result.exitCode = *runResult.value;
+        const AnalysisReport& report = *analysis.report;
+        llvm::outs() << renderReport(report, outputFormat);
+
+        if (!sarifOutPath.empty() &&
+            !writeTextFile(sarifOutPath, renderReport(report, cli::OutputFormat::Sarif)))
+        {
+            result.error = "Failed to write SARIF output to: " + sarifOutPath;
+            return result;
+        }
+
+        analyzer::dumpHotspotSummary(std::cerr, report.config.timing);
+        result.exitCode = 0;
         return result;
     }
 

@@ -97,6 +97,20 @@ Pattern:
 Why:
 - Reachability criteria can evolve independently and be regression-tested as a focused unit.
 
+### `src/app/AnalyzerApp.cpp` (public API)
+
+Role:
+- `runAnalysis(ParsedArguments) -> ReportResult`: plans inputs, executes the analysis and builds one `AnalysisReport` from the final filtered diagnostics. Performs no stdout write.
+- `renderReport(AnalysisReport, OutputFormat) -> std::string`: pure serialization to human, JSON or SARIF text.
+- `runAnalyzerApp(ParsedArguments) -> RunResult`: CLI wrapper that prints the rendered report and writes the optional SARIF file.
+
+Pattern:
+- `Facade` returning a value object; output formats are renderings of that object.
+
+Why:
+- Library consumers (coretrace) read the same structured data the CLI prints instead of capturing stdout and parsing it back.
+- Filtering (`only-*`, `--warnings-only`) and summaries are computed once, so every format reports the same counts.
+
 ## Data Flow
 
 1. Input pipeline loads/normalizes LLVM module.
