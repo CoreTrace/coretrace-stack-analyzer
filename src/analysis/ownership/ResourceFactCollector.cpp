@@ -42,7 +42,7 @@ namespace ctrace::stack::analysis::ownership
             CollectedFunction run()
             {
                 mayUnwind_ = !F_.doesNotThrow();
-                returnLocation_ = newLocation(LocationKind::Local, 0, true, "<return>");
+                returnLocation_ = newLocation(LocationKind::Local, ArgPath{}, true, "<return>");
                 out_.facts.locations[returnLocation_].kind = LocationKind::Return;
 
                 // Blocks in reverse post-order; unreachable blocks are simply absent.
@@ -83,12 +83,11 @@ namespace ctrace::stack::analysis::ownership
           private:
             // ---- locations -------------------------------------------------------------
 
-            LocationId newLocation(LocationKind kind, unsigned argIndex, bool strong,
-                                   std::string name)
+            LocationId newLocation(LocationKind kind, ArgPath path, bool strong, std::string name)
             {
                 Location loc;
                 loc.kind = kind;
-                loc.argIndex = argIndex;
+                loc.path = path;
                 loc.strongUpdatable = strong;
                 out_.facts.locations.push_back(loc);
                 out_.locationNames.push_back(std::move(name));
@@ -98,15 +97,27 @@ namespace ctrace::stack::analysis::ownership
             /// The location a pointer *points to* (a slot), or nullopt when unknown.
             std::optional<LocationId> slotOf(const llvm::Value* ptr)
             {
-                const StorageKey storage =
-                    lifetime_detail::resolvePointerStorage(ptr, F_, DL_, methodInfo_);
+                return slotOfStorage(
+                    lifetime_detail::resolvePointerStorage(ptr, F_, DL_, methodInfo_));
+            }
+
+            std::optional<LocationId> slotOfArgPath(const llvm::CallBase& call, const ArgPath& p)
+            {
+                if (p.argIndex >= call.arg_size())
+                    return std::nullopt;
+                return slotOfStorage(lifetime_detail::resolveArgPathStorage(
+                    call, p.argIndex, p.offset, p.viaPointerSlot, F_, DL_, methodInfo_));
+            }
+
+            std::optional<LocationId> slotOfStorage(const StorageKey& storage)
+            {
                 if (!storage.valid())
                     return std::nullopt;
                 if (const auto it = slotIds_.find(storage.key); it != slotIds_.end())
                     return it->second;
 
                 LocationKind kind = LocationKind::NonLocal;
-                unsigned argIndex = 0;
+                ArgPath path;
                 bool strong = false;
                 if (storage.scope == StorageScope::Local)
                 {
@@ -119,11 +130,12 @@ namespace ctrace::stack::analysis::ownership
                 else if (storage.scope == StorageScope::Argument && storage.argumentIndex >= 0)
                 {
                     kind = LocationKind::ArgPointee;
-                    argIndex = static_cast<unsigned>(storage.argumentIndex);
+                    path.argIndex = static_cast<unsigned>(storage.argumentIndex);
+                    path.offset = storage.offset;
                 }
                 const std::string name =
                     storage.displayName.empty() ? storage.key : storage.displayName;
-                const LocationId id = newLocation(kind, argIndex, strong, name);
+                const LocationId id = newLocation(kind, path, strong, name);
                 slotIds_[storage.key] = id;
                 return id;
             }
@@ -171,7 +183,7 @@ namespace ctrace::stack::analysis::ownership
                 std::string name = v->hasName() ? v->getName().str() : std::string("<value>");
                 if (llvm::isa<llvm::Argument>(v) || llvm::isa<llvm::GlobalValue>(v))
                     kind = LocationKind::NonLocal;
-                const LocationId id = newLocation(kind, 0, true, std::move(name));
+                const LocationId id = newLocation(kind, ArgPath{}, true, std::move(name));
                 valueIds_[v] = id;
                 return id;
             }
@@ -596,11 +608,9 @@ namespace ctrace::stack::analysis::ownership
                     e.call.retCertainty = t.returns;
                     needsSite = true;
                 }
-                for (const auto& [argIndex, certainty] : t.outArgs)
+                for (const auto& [path, certainty] : t.outArgs)
                 {
-                    if (argIndex >= call.arg_size())
-                        continue;
-                    if (const auto slot = slotOf(call.getArgOperand(argIndex)))
+                    if (const auto slot = slotOfArgPath(call, path))
                     {
                         e.call.outArgs.push_back({*slot, certainty});
                         needsSite = true;
@@ -630,11 +640,9 @@ namespace ctrace::stack::analysis::ownership
                         x.call.params.push_back(
                             {valueLocation(call.getArgOperand(argIndex)), transformer});
                     }
-                    for (const auto& [argIndex, certainty] : summary.exceptional.outArgs)
+                    for (const auto& [path, certainty] : summary.exceptional.outArgs)
                     {
-                        if (argIndex >= call.arg_size())
-                            continue;
-                        if (const auto slot = slotOf(call.getArgOperand(argIndex)))
+                        if (const auto slot = slotOfArgPath(call, path))
                             x.call.outArgs.push_back({*slot, certainty});
                     }
                     x.call.site = e.call.site;

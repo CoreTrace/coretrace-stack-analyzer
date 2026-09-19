@@ -2097,6 +2097,19 @@ namespace ctrace::stack::analysis
             }
             return functionSummaries;
         }
+        StorageKey resolveArgPathStorage(const llvm::CallBase& CB, unsigned argIndex,
+                                         std::uint64_t offset, bool viaPointerSlot,
+                                         const llvm::Function& caller, const llvm::DataLayout& DL,
+                                         const MethodClassInfo& callerMethodInfo)
+        {
+            ParamLifetimeEffect effect;
+            effect.action = RuleAction::AcquireOut;
+            effect.argIndex = argIndex;
+            effect.offset = offset;
+            effect.viaPointerSlot = viaPointerSlot;
+            return mapSummaryEffectToCallerStorage(effect, CB, caller, callerMethodInfo, DL,
+                                                   /*allowPointerSlotFallback=*/false, nullptr);
+        }
     } // namespace lifetime_detail
 
     using namespace lifetime_detail;

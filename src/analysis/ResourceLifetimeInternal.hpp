@@ -58,4 +58,10 @@ namespace ctrace::stack::analysis::lifetime_detail
     StorageKey resolveHandleStorage(const llvm::Value* handleValue, const llvm::Function& F,
                                     const llvm::DataLayout& DL, const MethodClassInfo& methodInfo);
     const llvm::Function* resolveDirectCallee(const llvm::CallBase& CB);
+    /// The caller-side storage an out-parameter path of `CB` designates:
+    /// `*(arg + offset)`, or `**(arg + offset)` when viaPointerSlot.
+    StorageKey resolveArgPathStorage(const llvm::CallBase& CB, unsigned argIndex,
+                                     std::uint64_t offset, bool viaPointerSlot,
+                                     const llvm::Function& caller, const llvm::DataLayout& DL,
+                                     const MethodClassInfo& callerMethodInfo);
 } // namespace ctrace::stack::analysis::lifetime_detail

@@ -30,12 +30,36 @@ namespace ctrace::stack::analysis::ownership
         NonLocal    // global, this-field, argument value: storing there escapes
     };
 
+    /// Where an out-parameter target lives relative to a pointer argument: `*(arg + offset)`,
+    /// or, via a pointer slot, `**(arg + offset)`. Same encoding as the legacy summaries.
+    struct ArgPath
+    {
+        std::uint64_t offset = 0;
+        unsigned argIndex = 0;
+        bool viaPointerSlot = false;
+        std::uint8_t reservedPadding[3] = {};
+
+        friend bool operator<(const ArgPath& a, const ArgPath& b)
+        {
+            if (a.argIndex != b.argIndex)
+                return a.argIndex < b.argIndex;
+            if (a.offset != b.offset)
+                return a.offset < b.offset;
+            return a.viaPointerSlot < b.viaPointerSlot;
+        }
+        friend bool operator==(const ArgPath& a, const ArgPath& b)
+        {
+            return a.argIndex == b.argIndex && a.offset == b.offset &&
+                   a.viaPointerSlot == b.viaPointerSlot;
+        }
+    };
+
     struct Location
     {
-        unsigned argIndex = 0; // ArgPointee
+        ArgPath path; // ArgPointee
         LocationKind kind = LocationKind::Local;
         bool strongUpdatable = true; // false when the slot's address is taken
-        std::uint8_t reservedPadding[2] = {};
+        std::uint8_t reservedPadding[6] = {};
     };
 
     /// Image of each singleton input state, indexed by OwnState; extends to sets by union.
@@ -49,8 +73,8 @@ namespace ctrace::stack::analysis::ownership
 
     struct ExitTransformer
     {
-        std::map<unsigned, ParamTransformer> params; // by parameter index
-        std::map<unsigned, Certainty> outArgs;       // *arg receives a fresh resource
+        std::map<unsigned, ParamTransformer> params; // by parameter index (handles by value)
+        std::map<ArgPath, Certainty> outArgs;        // the path receives a fresh resource
         Certainty returns = Certainty::Unknown;      // the return value is a fresh resource
         bool present = false;
         std::uint8_t reservedPadding[6] = {};

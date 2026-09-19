@@ -336,12 +336,12 @@ namespace
             // release(h); *out = acquire(): location 1 is ArgPointee(1).
             OwnershipFacts f = wrapperFacts(1, {}, 2, 1);
             f.locations[1].kind = LocationKind::ArgPointee;
-            f.locations[1].argIndex = 1;
+            f.locations[1].path.argIndex = 1;
             f.blocks[0].events = {release(0), acquire(0, 1), exit()};
             const FunctionOwnershipSummary s = computeSummary(f);
             r.expect(s.normal.params.at(0)[owned].isOnly(OwnState::Released) &&
-                         s.normal.outArgs.count(1) == 1 &&
-                         s.normal.outArgs.at(1) == Certainty::Guaranteed,
+                         s.normal.outArgs.count(ArgPath{0, 1, false}) == 1 &&
+                         s.normal.outArgs.at(ArgPath{0, 1, false}) == Certainty::Guaranteed,
                      "Summary: wrapper releasing then acquiring reports a fresh out-arg");
         }
         {

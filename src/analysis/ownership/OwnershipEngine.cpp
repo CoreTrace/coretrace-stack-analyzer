@@ -307,7 +307,7 @@ namespace ctrace::stack::analysis::ownership
         /// Whether the fresh resources of the function end up exactly/possibly in a location
         /// of the given kind on the exits of the given kind.
         Certainty freshResourceCertainty(const OwnershipFacts& facts, const OwnershipResult& res,
-                                         bool exceptional, LocationKind kind, unsigned argIndex,
+                                         bool exceptional, LocationKind kind, const ArgPath& path,
                                          ResourceId paramResourceLowerBound)
         {
             bool sawExit = false;
@@ -324,7 +324,7 @@ namespace ctrace::stack::analysis::ownership
                 {
                     const Location& location = facts.locations[loc];
                     if (location.kind != kind ||
-                        (kind == LocationKind::ArgPointee && location.argIndex != argIndex))
+                        (kind == LocationKind::ArgPointee && !(location.path == path)))
                         continue;
                     const Contents& c = exit.state.locations[loc];
                     for (const ResourceId r : c.resources)
@@ -405,8 +405,8 @@ namespace ctrace::stack::analysis::ownership
         for (const ExitRecord& exit : res.exits)
             (exit.exceptional ? anyExceptional : anyNormal) = true;
         const ResourceId paramResourceLowerBound = newInstanceOf(paramSiteBase);
-        summary.normal.returns = freshResourceCertainty(facts, res, false, LocationKind::Return, 0,
-                                                        paramResourceLowerBound);
+        summary.normal.returns = freshResourceCertainty(facts, res, false, LocationKind::Return,
+                                                        ArgPath{}, paramResourceLowerBound);
         summary.exceptional.returns = Certainty::Unknown;
         for (LocationId loc = 0; loc < facts.locations.size(); ++loc)
         {
@@ -417,10 +417,10 @@ namespace ctrace::stack::analysis::ownership
             {
                 const Certainty c =
                     freshResourceCertainty(facts, res, exceptional, LocationKind::ArgPointee,
-                                           location.argIndex, paramResourceLowerBound);
+                                           location.path, paramResourceLowerBound);
                 if (c == Certainty::Unknown)
                     continue;
-                (exceptional ? summary.exceptional : summary.normal).outArgs[location.argIndex] = c;
+                (exceptional ? summary.exceptional : summary.normal).outArgs[location.path] = c;
             }
         }
         summary.normal.present = anyNormal;
