@@ -3,6 +3,9 @@
 
 #include "analysis/FunctionFacts.hpp"
 
+#include <optional>
+#include <utility>
+
 #include <llvm/ADT/SmallVector.h>
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/Dominators.h>
@@ -14,231 +17,81 @@
 
 namespace ctrace::stack::analysis
 {
-    std::map<const llvm::Value*, IntRange> computeIntRangesFromICmps(llvm::Function& F)
+    namespace
     {
-        using namespace llvm;
-
-        std::map<const Value*, IntRange> ranges;
-
-        auto applyConstraint =
-            [&ranges](const Value* V, bool hasLB, long long newLB, bool hasUB, long long newUB)
+        /// The bound on one operand of `icmp pred V, C` when the comparison evaluates to
+        /// @p holds. NE yields nothing; its negation (EQ) yields the point range.
+        std::optional<std::pair<const llvm::Value*, IntRange>>
+        boundFromComparison(const llvm::ICmpInst& icmp, bool holds)
         {
-            auto& R = ranges[V];
-            if (hasLB)
+            using namespace llvm;
+
+            const Value* op0 = icmp.getOperand(0);
+            const Value* op1 = icmp.getOperand(1);
+            const ConstantInt* C = nullptr;
+            const Value* V = nullptr;
+            if ((C = dyn_cast<ConstantInt>(op1)) && !isa<ConstantInt>(op0))
+                V = op0;
+            else if ((C = dyn_cast<ConstantInt>(op0)) && !isa<ConstantInt>(op1))
+                V = op1;
+            else
+                return std::nullopt;
+
+            ICmpInst::Predicate pred = icmp.getPredicate();
+            if (!holds)
+                pred = ICmpInst::getInversePredicate(pred);
+            // Normalise to "V pred C".
+            if (V == op1)
+                pred = ICmpInst::getSwappedPredicate(pred);
+
+            IntRange out;
+            const auto setUB = [&out](long long ub)
             {
-                if (!R.hasLower || newLB > R.lower)
-                {
-                    R.hasLower = true;
-                    R.lower = newLB;
-                }
-            }
-            if (hasUB)
+                out.hasUpper = true;
+                out.upper = ub;
+            };
+            const auto setLB = [&out](long long lb)
             {
-                if (!R.hasUpper || newUB < R.upper)
-                {
-                    R.hasUpper = true;
-                    R.upper = newUB;
-                }
-            }
-        };
+                out.hasLower = true;
+                out.lower = lb;
+            };
 
-        for (BasicBlock& BB : F)
-        {
-            for (Instruction& I : BB)
+            switch (pred)
             {
-                auto* icmp = dyn_cast<ICmpInst>(&I);
-                if (!icmp)
-                    continue;
-
-                Value* op0 = icmp->getOperand(0);
-                Value* op1 = icmp->getOperand(1);
-
-                ConstantInt* C = nullptr;
-                Value* V = nullptr;
-
-                // On cherche un pattern "V ? C" ou "C ? V"
-                if ((C = dyn_cast<ConstantInt>(op1)) && !isa<ConstantInt>(op0))
-                {
-                    V = op0;
-                }
-                else if ((C = dyn_cast<ConstantInt>(op0)) && !isa<ConstantInt>(op1))
-                {
-                    V = op1;
-                }
-                else
-                {
-                    continue;
-                }
-
-                auto pred = icmp->getPredicate();
-
-                bool hasLB = false, hasUB = false;
-                long long lb = 0, ub = 0;
-
-                auto updateForSigned = [&](bool valueIsOp0)
-                {
-                    long long c = C->getSExtValue();
-                    if (valueIsOp0)
-                    {
-                        switch (pred)
-                        {
-                        case ICmpInst::ICMP_SLT: // V < C  => V <= C-1
-                            hasUB = true;
-                            ub = c - 1;
-                            break;
-                        case ICmpInst::ICMP_SLE: // V <= C => V <= C
-                            hasUB = true;
-                            ub = c;
-                            break;
-                        case ICmpInst::ICMP_SGT: // V > C  => V >= C+1
-                            hasLB = true;
-                            lb = c + 1;
-                            break;
-                        case ICmpInst::ICMP_SGE: // V >= C => V >= C
-                            hasLB = true;
-                            lb = c;
-                            break;
-                        case ICmpInst::ICMP_EQ: // V == C => [C, C]
-                            hasLB = true;
-                            lb = c;
-                            hasUB = true;
-                            ub = c;
-                            break;
-                        default:
-                            break;
-                        }
-                    }
-                    else
-                    {
-                        // C ? V  <=>  V ? C (reversed)
-                        switch (pred)
-                        {
-                        case ICmpInst::ICMP_SGT: // C > V  => V < C => V <= C-1
-                            hasUB = true;
-                            ub = c - 1;
-                            break;
-                        case ICmpInst::ICMP_SGE: // C >= V => V <= C
-                            hasUB = true;
-                            ub = c;
-                            break;
-                        case ICmpInst::ICMP_SLT: // C < V  => V > C => V >= C+1
-                            hasLB = true;
-                            lb = c + 1;
-                            break;
-                        case ICmpInst::ICMP_SLE: // C <= V => V >= C
-                            hasLB = true;
-                            lb = c;
-                            break;
-                        case ICmpInst::ICMP_EQ: // C == V => [C, C]
-                            hasLB = true;
-                            lb = c;
-                            hasUB = true;
-                            ub = c;
-                            break;
-                        default:
-                            break;
-                        }
-                    }
-                };
-
-                auto updateForUnsigned = [&](bool valueIsOp0)
-                {
-                    unsigned long long cu = C->getZExtValue();
-                    long long c = static_cast<long long>(cu);
-                    if (valueIsOp0)
-                    {
-                        switch (pred)
-                        {
-                        case ICmpInst::ICMP_ULT: // V < C  => V <= C-1
-                            hasUB = true;
-                            ub = c - 1;
-                            break;
-                        case ICmpInst::ICMP_ULE: // V <= C
-                            hasUB = true;
-                            ub = c;
-                            break;
-                        case ICmpInst::ICMP_UGT: // V > C  => V >= C+1
-                            hasLB = true;
-                            lb = c + 1;
-                            break;
-                        case ICmpInst::ICMP_UGE: // V >= C
-                            hasLB = true;
-                            lb = c;
-                            break;
-                        case ICmpInst::ICMP_EQ:
-                            hasLB = true;
-                            lb = c;
-                            hasUB = true;
-                            ub = c;
-                            break;
-                        default:
-                            break;
-                        }
-                    }
-                    else
-                    {
-                        switch (pred)
-                        {
-                        case ICmpInst::ICMP_UGT: // C > V => V < C
-                            hasUB = true;
-                            ub = c - 1;
-                            break;
-                        case ICmpInst::ICMP_UGE: // C >= V => V <= C
-                            hasUB = true;
-                            ub = c;
-                            break;
-                        case ICmpInst::ICMP_ULT: // C < V => V > C
-                            hasLB = true;
-                            lb = c + 1;
-                            break;
-                        case ICmpInst::ICMP_ULE: // C <= V => V >= C
-                            hasLB = true;
-                            lb = c;
-                            break;
-                        case ICmpInst::ICMP_EQ:
-                            hasLB = true;
-                            lb = c;
-                            hasUB = true;
-                            ub = c;
-                            break;
-                        default:
-                            break;
-                        }
-                    }
-                };
-
-                bool valueIsOp0 = (V == op0);
-
-                // Choose the predicate group
-                if (pred == ICmpInst::ICMP_SLT || pred == ICmpInst::ICMP_SLE ||
-                    pred == ICmpInst::ICMP_SGT || pred == ICmpInst::ICMP_SGE ||
-                    pred == ICmpInst::ICMP_EQ)
-                {
-                    updateForSigned(valueIsOp0);
-                }
-                else if (pred == ICmpInst::ICMP_ULT || pred == ICmpInst::ICMP_ULE ||
-                         pred == ICmpInst::ICMP_UGT || pred == ICmpInst::ICMP_UGE)
-                {
-                    updateForUnsigned(valueIsOp0);
-                }
-
-                if (!(hasLB || hasUB))
-                    continue;
-
-                // Apply the constraint to V itself
-                applyConstraint(V, hasLB, lb, hasUB, ub);
-
-                // And possibly to the underlying pointer if V is a load
-                if (auto* LI = dyn_cast<LoadInst>(V))
-                {
-                    const Value* ptr = LI->getPointerOperand();
-                    applyConstraint(ptr, hasLB, lb, hasUB, ub);
-                }
+            case ICmpInst::ICMP_SLT:
+                setUB(C->getSExtValue() - 1);
+                break;
+            case ICmpInst::ICMP_SLE:
+                setUB(C->getSExtValue());
+                break;
+            case ICmpInst::ICMP_SGT:
+                setLB(C->getSExtValue() + 1);
+                break;
+            case ICmpInst::ICMP_SGE:
+                setLB(C->getSExtValue());
+                break;
+            case ICmpInst::ICMP_ULT:
+                setUB(static_cast<long long>(C->getZExtValue()) - 1);
+                break;
+            case ICmpInst::ICMP_ULE:
+                setUB(static_cast<long long>(C->getZExtValue()));
+                break;
+            case ICmpInst::ICMP_UGT:
+                setLB(static_cast<long long>(C->getZExtValue()) + 1);
+                break;
+            case ICmpInst::ICMP_UGE:
+                setLB(static_cast<long long>(C->getZExtValue()));
+                break;
+            case ICmpInst::ICMP_EQ:
+                setLB(C->getSExtValue());
+                setUB(C->getSExtValue());
+                break;
+            default:
+                return std::nullopt;
             }
+            return std::make_pair(V, out);
         }
-
-        return ranges;
-    }
+    } // namespace
 
     namespace
     {
@@ -421,16 +274,10 @@ namespace ctrace::stack::analysis
     std::map<const llvm::Value*, IntRange> computeIntRanges(llvm::Function& F,
                                                             const FunctionFacts& facts)
     {
-        std::map<const llvm::Value*, IntRange> ranges = computeIntRangesFromICmps(F);
+        std::map<const llvm::Value*, IntRange> ranges;
 
-        for (auto& [value, range] : ranges)
-        {
-            if (const std::optional<IntRange> proven = publishableRange(value, facts))
-                narrowWith(range, *proven);
-        }
-
-        // Values no comparison mentions can still be bounded: masks, truncations, loop
-        // induction variables, arguments carrying !range or an llvm.assume.
+        // Masks, truncations, loop induction variables, arguments carrying !range or an
+        // llvm.assume.
         for (llvm::Argument& argument : F.args())
         {
             if (ranges.count(&argument) != 0)
@@ -453,5 +300,82 @@ namespace ctrace::stack::analysis
         publishSingleStoreSlots(F, facts, ranges);
 
         return ranges;
+    }
+
+    ProgramPointRanges::ProgramPointRanges(llvm::Function& F, const FunctionFacts& facts)
+        : proven_(computeIntRanges(F, facts)), dominators_(facts.dominatorTree())
+    {
+        for (const llvm::BasicBlock& block : F)
+        {
+            const auto* branch = llvm::dyn_cast<llvm::BranchInst>(block.getTerminator());
+            if (!branch || !branch->isConditional())
+                continue;
+            const auto* icmp = llvm::dyn_cast<llvm::ICmpInst>(branch->getCondition());
+            if (!icmp || branch->getSuccessor(0) == branch->getSuccessor(1))
+                continue;
+
+            for (unsigned edge = 0; edge < 2; ++edge)
+            {
+                const llvm::BasicBlock* successor = branch->getSuccessor(edge);
+                // With another predecessor the edge constraint does not hold block-wide.
+                if (successor->getSinglePredecessor() != &block)
+                    continue;
+                const auto bound = boundFromComparison(*icmp, /*holds=*/edge == 0);
+                if (!bound)
+                    continue;
+
+                RangeMap& constraints = edgeConstraints_[successor];
+                const auto record = [&constraints, &bound](const llvm::Value* key)
+                {
+                    const auto [it, inserted] = constraints.try_emplace(key, bound->second);
+                    if (!inserted)
+                        narrowWith(it->second, bound->second);
+                };
+                record(bound->first);
+                if (const auto* load = llvm::dyn_cast<llvm::LoadInst>(bound->first))
+                    record(load->getPointerOperand());
+            }
+        }
+    }
+
+    std::optional<IntRange> ProgramPointRanges::at(const llvm::Value* key,
+                                                   const llvm::BasicBlock& at) const
+    {
+        std::optional<IntRange> result;
+        if (const auto it = proven_.find(key); it != proven_.end())
+            result = it->second;
+
+        for (const llvm::DomTreeNode* node = dominators_.getNode(&at); node; node = node->getIDom())
+        {
+            const auto blockIt = edgeConstraints_.find(node->getBlock());
+            if (blockIt == edgeConstraints_.end())
+                continue;
+            const auto it = blockIt->second.find(key);
+            if (it == blockIt->second.end())
+                continue;
+            if (result)
+                narrowWith(*result, it->second);
+            else
+                result = it->second;
+        }
+        return result;
+    }
+
+    std::map<const llvm::Value*, IntRange> ProgramPointRanges::at(const llvm::BasicBlock& at) const
+    {
+        RangeMap result = proven_;
+        for (const llvm::DomTreeNode* node = dominators_.getNode(&at); node; node = node->getIDom())
+        {
+            const auto blockIt = edgeConstraints_.find(node->getBlock());
+            if (blockIt == edgeConstraints_.end())
+                continue;
+            for (const auto& [key, range] : blockIt->second)
+            {
+                const auto [it, inserted] = result.try_emplace(key, range);
+                if (!inserted)
+                    narrowWith(it->second, range);
+            }
+        }
+        return result;
     }
 } // namespace ctrace::stack::analysis
