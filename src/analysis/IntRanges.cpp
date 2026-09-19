@@ -8,6 +8,8 @@
 
 #include <llvm/ADT/SmallVector.h>
 #include <llvm/IR/Constants.h>
+#include <llvm/IR/IntrinsicInst.h>
+#include <llvm/IR/CFG.h>
 #include <llvm/IR/Dominators.h>
 #include <llvm/IR/DerivedTypes.h>
 #include <llvm/IR/Operator.h>
@@ -302,9 +304,48 @@ namespace ctrace::stack::analysis
         return ranges;
     }
 
+    namespace
+    {
+        /// The alloca @p key stands for when a constraint on a `load` was mirrored onto it,
+        /// or nullptr for SSA keys (immutable, never killed).
+        const llvm::AllocaInst* slotOf(const llvm::Value* key)
+        {
+            return llvm::dyn_cast<llvm::AllocaInst>(key);
+        }
+
+        /// Whether every write to @p slot is a plain store through the slot pointer.
+        /// A slot whose address is taken can be written behind the analysis' back.
+        bool onlyDirectlyStored(const llvm::AllocaInst& slot)
+        {
+            for (const llvm::User* user : slot.users())
+            {
+                if (llvm::isa<llvm::LoadInst>(user) || llvm::isa<llvm::DbgInfoIntrinsic>(user) ||
+                    llvm::isa<llvm::LifetimeIntrinsic>(user))
+                    continue;
+                const auto* store = llvm::dyn_cast<llvm::StoreInst>(user);
+                if (!store || store->getPointerOperand() != &slot)
+                    return false;
+            }
+            return true;
+        }
+    } // namespace
+
     ProgramPointRanges::ProgramPointRanges(llvm::Function& F, const FunctionFacts& facts)
         : proven_(computeIntRanges(F, facts)), dominators_(facts.dominatorTree())
     {
+        for (llvm::Instruction& instruction : F.getEntryBlock())
+        {
+            const auto* slot = llvm::dyn_cast<llvm::AllocaInst>(&instruction);
+            if (!slot || !onlyDirectlyStored(*slot))
+                continue;
+            auto& stores = slotStores_[slot];
+            for (const llvm::User* user : slot->users())
+            {
+                if (const auto* store = llvm::dyn_cast<llvm::StoreInst>(user))
+                    stores.push_back(store);
+            }
+        }
+
         for (const llvm::BasicBlock& block : F)
         {
             const auto* branch = llvm::dyn_cast<llvm::BranchInst>(block.getTerminator());
@@ -332,26 +373,116 @@ namespace ctrace::stack::analysis
                         narrowWith(it->second, bound->second);
                 };
                 record(bound->first);
-                if (const auto* load = llvm::dyn_cast<llvm::LoadInst>(bound->first))
-                    record(load->getPointerOperand());
+
+                const auto* load = llvm::dyn_cast<llvm::LoadInst>(bound->first);
+                const auto* slot =
+                    load ? llvm::dyn_cast<llvm::AllocaInst>(load->getPointerOperand()) : nullptr;
+                if (!slot || !slotStores_.count(slot))
+                    continue;
+                // The compared value was read before the branch; a store to the slot in
+                // between means the branch says nothing about what the slot holds now.
+                bool rewrittenBeforeBranch = false;
+                for (const llvm::StoreInst* store : slotStores_[slot])
+                {
+                    if (store->getParent() == &block && load->comesBefore(store))
+                        rewrittenBeforeBranch = true;
+                }
+                if (!rewrittenBeforeBranch)
+                    record(slot);
             }
         }
     }
 
+    const ProgramPointRanges::BlockSet&
+    ProgramPointRanges::blocksAfterStoresAvoiding(const llvm::BasicBlock& establishing,
+                                                  const llvm::AllocaInst& slot) const
+    {
+        const auto cacheKey = std::make_pair(&establishing, &slot);
+        if (const auto it = afterStoresCache_.find(cacheKey); it != afterStoresCache_.end())
+            return it->second;
+
+        // Blocks reachable from the constraint block without re-entering the branch block
+        // that established it: re-entering it re-evaluates the comparison.
+        const llvm::BasicBlock* guard = establishing.getSinglePredecessor();
+        BlockSet region;
+        llvm::SmallVector<const llvm::BasicBlock*, 16> worklist{&establishing};
+        while (!worklist.empty())
+        {
+            const llvm::BasicBlock* block = worklist.pop_back_val();
+            if (block == guard || !region.insert(block).second)
+                continue;
+            for (const llvm::BasicBlock* successor : llvm::successors(block))
+                worklist.push_back(successor);
+        }
+
+        // Everything reachable, within that region, from a block that stores to the slot.
+        // The storing block itself is handled per instruction by the caller.
+        BlockSet after;
+        const auto storesIt = slotStores_.find(&slot);
+        if (storesIt != slotStores_.end())
+        {
+            for (const llvm::StoreInst* store : storesIt->second)
+            {
+                if (!region.count(store->getParent()))
+                    continue;
+                for (const llvm::BasicBlock* successor : llvm::successors(store->getParent()))
+                    worklist.push_back(successor);
+            }
+        }
+        while (!worklist.empty())
+        {
+            const llvm::BasicBlock* block = worklist.pop_back_val();
+            if (block == guard || !after.insert(block).second)
+                continue;
+            for (const llvm::BasicBlock* successor : llvm::successors(block))
+                worklist.push_back(successor);
+        }
+
+        return afterStoresCache_.try_emplace(cacheKey, std::move(after)).first->second;
+    }
+
+    bool ProgramPointRanges::constraintKilledAt(const llvm::BasicBlock& establishing,
+                                                const llvm::Value* key,
+                                                const llvm::Instruction& at) const
+    {
+        const llvm::AllocaInst* slot = slotOf(key);
+        if (!slot)
+            return false;
+
+        const BlockSet& after = blocksAfterStoresAvoiding(establishing, *slot);
+        const llvm::BasicBlock* block = at.getParent();
+        if (after.count(block))
+            return true;
+
+        // A store earlier in the same block, when that block is inside the region.
+        const auto storesIt = slotStores_.find(slot);
+        if (storesIt == slotStores_.end())
+            return false;
+        for (const llvm::StoreInst* store : storesIt->second)
+        {
+            if (store->getParent() == block && store->comesBefore(&at) &&
+                (block == &establishing || after.count(block) ||
+                 dominators_.dominates(&establishing, block)))
+                return true;
+        }
+        return false;
+    }
+
     std::optional<IntRange> ProgramPointRanges::at(const llvm::Value* key,
-                                                   const llvm::BasicBlock& at) const
+                                                   const llvm::Instruction& at) const
     {
         std::optional<IntRange> result;
         if (const auto it = proven_.find(key); it != proven_.end())
             result = it->second;
 
-        for (const llvm::DomTreeNode* node = dominators_.getNode(&at); node; node = node->getIDom())
+        for (const llvm::DomTreeNode* node = dominators_.getNode(at.getParent()); node;
+             node = node->getIDom())
         {
             const auto blockIt = edgeConstraints_.find(node->getBlock());
             if (blockIt == edgeConstraints_.end())
                 continue;
             const auto it = blockIt->second.find(key);
-            if (it == blockIt->second.end())
+            if (it == blockIt->second.end() || constraintKilledAt(*node->getBlock(), key, at))
                 continue;
             if (result)
                 narrowWith(*result, it->second);
@@ -361,16 +492,19 @@ namespace ctrace::stack::analysis
         return result;
     }
 
-    std::map<const llvm::Value*, IntRange> ProgramPointRanges::at(const llvm::BasicBlock& at) const
+    std::map<const llvm::Value*, IntRange> ProgramPointRanges::at(const llvm::Instruction& at) const
     {
         RangeMap result = proven_;
-        for (const llvm::DomTreeNode* node = dominators_.getNode(&at); node; node = node->getIDom())
+        for (const llvm::DomTreeNode* node = dominators_.getNode(at.getParent()); node;
+             node = node->getIDom())
         {
             const auto blockIt = edgeConstraints_.find(node->getBlock());
             if (blockIt == edgeConstraints_.end())
                 continue;
             for (const auto& [key, range] : blockIt->second)
             {
+                if (constraintKilledAt(*node->getBlock(), key, at))
+                    continue;
                 const auto [it, inserted] = result.try_emplace(key, range);
                 if (!inserted)
                     narrowWith(it->second, range);

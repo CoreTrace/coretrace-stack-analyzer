@@ -448,27 +448,6 @@ namespace ctrace::stack::analysis
                                                          allowPointerStoreScan);
         }
 
-        static void intersectRange(IntRange& target, const IntRange& incoming)
-        {
-            if (incoming.hasLower)
-            {
-                if (!target.hasLower || incoming.lower > target.lower)
-                {
-                    target.hasLower = true;
-                    target.lower = incoming.lower;
-                }
-            }
-
-            if (incoming.hasUpper)
-            {
-                if (!target.hasUpper || incoming.upper < target.upper)
-                {
-                    target.hasUpper = true;
-                    target.upper = incoming.upper;
-                }
-            }
-        }
-
         static const llvm::StoreInst* findUniqueStoreToKeyInBlock(const llvm::BasicBlock& block,
                                                                   const llvm::Value* key)
         {
@@ -657,169 +636,10 @@ namespace ctrace::stack::analysis
             return out;
         }
 
-        static bool deriveConstraintFromPredicate(llvm::ICmpInst::Predicate pred, bool valueIsOp0,
-                                                  const llvm::ConstantInt& constant, IntRange& out)
-        {
-            using namespace llvm;
-            bool hasLB = false;
-            bool hasUB = false;
-            long long lb = 0;
-            long long ub = 0;
-
-            auto updateForSigned = [&](long long c)
-            {
-                if (valueIsOp0)
-                {
-                    switch (pred)
-                    {
-                    case ICmpInst::ICMP_SLT: // V < C  => V <= C-1
-                        hasUB = true;
-                        ub = c - 1;
-                        break;
-                    case ICmpInst::ICMP_SLE: // V <= C => V <= C
-                        hasUB = true;
-                        ub = c;
-                        break;
-                    case ICmpInst::ICMP_SGT: // V > C  => V >= C+1
-                        hasLB = true;
-                        lb = c + 1;
-                        break;
-                    case ICmpInst::ICMP_SGE: // V >= C => V >= C
-                        hasLB = true;
-                        lb = c;
-                        break;
-                    case ICmpInst::ICMP_EQ: // V == C => [C, C]
-                        hasLB = true;
-                        lb = c;
-                        hasUB = true;
-                        ub = c;
-                        break;
-                    default:
-                        break;
-                    }
-                }
-                else
-                {
-                    // C ? V  <=>  V ? C (reversed)
-                    switch (pred)
-                    {
-                    case ICmpInst::ICMP_SGT: // C > V  => V < C => V <= C-1
-                        hasUB = true;
-                        ub = c - 1;
-                        break;
-                    case ICmpInst::ICMP_SGE: // C >= V => V <= C
-                        hasUB = true;
-                        ub = c;
-                        break;
-                    case ICmpInst::ICMP_SLT: // C < V  => V > C => V >= C+1
-                        hasLB = true;
-                        lb = c + 1;
-                        break;
-                    case ICmpInst::ICMP_SLE: // C <= V => V >= C
-                        hasLB = true;
-                        lb = c;
-                        break;
-                    case ICmpInst::ICMP_EQ: // C == V => [C, C]
-                        hasLB = true;
-                        lb = c;
-                        hasUB = true;
-                        ub = c;
-                        break;
-                    default:
-                        break;
-                    }
-                }
-            };
-
-            auto updateForUnsigned = [&](unsigned long long cUnsigned)
-            {
-                long long c = static_cast<long long>(cUnsigned);
-                if (valueIsOp0)
-                {
-                    switch (pred)
-                    {
-                    case ICmpInst::ICMP_ULT: // V < C  => V <= C-1
-                        hasUB = true;
-                        ub = c - 1;
-                        break;
-                    case ICmpInst::ICMP_ULE: // V <= C
-                        hasUB = true;
-                        ub = c;
-                        break;
-                    case ICmpInst::ICMP_UGT: // V > C  => V >= C+1
-                        hasLB = true;
-                        lb = c + 1;
-                        break;
-                    case ICmpInst::ICMP_UGE: // V >= C
-                        hasLB = true;
-                        lb = c;
-                        break;
-                    case ICmpInst::ICMP_EQ:
-                        hasLB = true;
-                        lb = c;
-                        hasUB = true;
-                        ub = c;
-                        break;
-                    default:
-                        break;
-                    }
-                }
-                else
-                {
-                    switch (pred)
-                    {
-                    case ICmpInst::ICMP_UGT: // C > V => V < C
-                        hasUB = true;
-                        ub = c - 1;
-                        break;
-                    case ICmpInst::ICMP_UGE: // C >= V => V <= C
-                        hasUB = true;
-                        ub = c;
-                        break;
-                    case ICmpInst::ICMP_ULT: // C < V => V > C
-                        hasLB = true;
-                        lb = c + 1;
-                        break;
-                    case ICmpInst::ICMP_ULE: // C <= V => V >= C
-                        hasLB = true;
-                        lb = c;
-                        break;
-                    case ICmpInst::ICMP_EQ:
-                        hasLB = true;
-                        lb = c;
-                        hasUB = true;
-                        ub = c;
-                        break;
-                    default:
-                        break;
-                    }
-                }
-            };
-
-            if (pred == ICmpInst::ICMP_SLT || pred == ICmpInst::ICMP_SLE ||
-                pred == ICmpInst::ICMP_SGT || pred == ICmpInst::ICMP_SGE ||
-                pred == ICmpInst::ICMP_EQ)
-            {
-                updateForSigned(constant.getSExtValue());
-            }
-            else if (pred == ICmpInst::ICMP_ULT || pred == ICmpInst::ICMP_ULE ||
-                     pred == ICmpInst::ICMP_UGT || pred == ICmpInst::ICMP_UGE)
-            {
-                updateForUnsigned(constant.getZExtValue());
-            }
-
-            if (!(hasLB || hasUB))
-                return false;
-
-            out.hasLower = hasLB;
-            out.lower = lb;
-            out.hasUpper = hasUB;
-            out.upper = ub;
-            return true;
-        }
-
-        static std::optional<IntRange> deriveIncomingEdgeRange(const llvm::BasicBlock& target,
-                                                               const llvm::Value* key)
+        // The `i != N` loop guard is the one branch shape ProgramPointRanges cannot turn
+        // into an interval; with a constant init and step it still bounds the index.
+        static std::optional<IntRange> deriveNeLoopGuardRange(const llvm::BasicBlock& target,
+                                                              const llvm::Value* key)
         {
             using namespace llvm;
 
@@ -835,9 +655,10 @@ namespace ctrace::stack::analysis
             const auto* icmp = dyn_cast<ICmpInst>(br->getCondition());
             if (!icmp)
                 return std::nullopt;
-
-            const Value* op0 = icmp->getOperand(0);
-            const Value* op1 = icmp->getOperand(1);
+            const auto predToApply =
+                takesTrueEdge ? icmp->getPredicate() : icmp->getInversePredicate();
+            if (predToApply != ICmpInst::ICMP_NE)
+                return std::nullopt;
 
             auto matchesKey = [key](const Value* V) -> bool
             {
@@ -849,53 +670,14 @@ namespace ctrace::stack::analysis
             };
 
             const ConstantInt* C = nullptr;
-            bool valueIsOp0 = false;
-            if (matchesKey(op0) && (C = dyn_cast<ConstantInt>(op1)))
-            {
-                valueIsOp0 = true;
-            }
-            else if (matchesKey(op1) && (C = dyn_cast<ConstantInt>(op0)))
-            {
-                valueIsOp0 = false;
-            }
-            else
-            {
+            if (matchesKey(icmp->getOperand(0)))
+                C = dyn_cast<ConstantInt>(icmp->getOperand(1));
+            else if (matchesKey(icmp->getOperand(1)))
+                C = dyn_cast<ConstantInt>(icmp->getOperand(0));
+            if (!C)
                 return std::nullopt;
-            }
 
-            IntRange out;
-            const auto predToApply =
-                takesTrueEdge ? icmp->getPredicate() : icmp->getInversePredicate();
-            if (!deriveConstraintFromPredicate(predToApply, valueIsOp0, *C, out))
-            {
-                if (predToApply == ICmpInst::ICMP_NE)
-                {
-                    return deriveBoundedRangeFromNeLoopGuard(target, *pred, key, *C, takesTrueEdge);
-                }
-                return std::nullopt;
-            }
-
-            return out;
-        }
-
-        static IntRange refineRangeForAccessSite(const IntRange& coarseRange,
-                                                 const llvm::BasicBlock& accessBlock,
-                                                 const llvm::Value* key)
-        {
-            IntRange refined = coarseRange;
-            const auto incomingRange = deriveIncomingEdgeRange(accessBlock, key);
-            if (!incomingRange)
-                return refined;
-
-            intersectRange(refined, *incomingRange);
-            if (refined.hasLower && refined.hasUpper && refined.lower > refined.upper)
-            {
-                // Path-insensitive coarse bounds can conflict with edge-specific bounds.
-                // In that case prefer the edge-local constraint for this access site.
-                return *incomingRange;
-            }
-
-            return refined;
+            return deriveBoundedRangeFromNeLoopGuard(target, *pred, key, *C, takesTrueEdge);
         }
 
         static bool isUpperViolationInfeasibleBySmt(const StackBufferConstraintEvaluator& evaluator,
@@ -949,7 +731,7 @@ namespace ctrace::stack::analysis
             const bool allowPointerStoreScan =
                 instructionCount <= budgets.pointerStoreScanInstrThreshold;
             const FunctionFacts facts(F);
-            auto ranges = computeIntRanges(F, facts);
+            const ProgramPointRanges ranges(F, facts);
             std::size_t analyzedGEPs = 0;
             struct CachedResolution
             {
@@ -1175,14 +957,23 @@ namespace ctrace::stack::analysis
                     IntRange R;
                     bool hasRange = false;
 
-                    if (auto itRange = ranges.find(key); itRange != ranges.end())
+                    if (const auto pointRange = ranges.at(key, *GEP))
                     {
-                        R = refineRangeForAccessSite(itRange->second, BB, key);
+                        R = *pointRange;
                         hasRange = R.hasLower || R.hasUpper;
                     }
-                    else if (const auto localRange = deriveIncomingEdgeRange(BB, key))
+                    if (const auto loopRange = deriveNeLoopGuardRange(BB, key))
                     {
-                        R = *localRange;
+                        if (loopRange->hasLower && (!R.hasLower || loopRange->lower > R.lower))
+                        {
+                            R.hasLower = true;
+                            R.lower = loopRange->lower;
+                        }
+                        if (loopRange->hasUpper && (!R.hasUpper || loopRange->upper < R.upper))
+                        {
+                            R.hasUpper = true;
+                            R.upper = loopRange->upper;
+                        }
                         hasRange = R.hasLower || R.hasUpper;
                     }
 
