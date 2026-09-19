@@ -311,6 +311,47 @@ namespace
         return e;
     }
 
+    Event contractResolved(std::uint32_t site, bool acquired)
+    {
+        Event e;
+        e.kind = Event::Kind::ContractResolved;
+        e.site = site;
+        e.unknownValue = !acquired;
+        return e;
+    }
+
+    bool testContracts(TestReport& r)
+    {
+        const ResourceId n0 = newInstanceOf(0);
+        {
+            // p = acquire() [if_ret!=null]; if (!p) return; release(p); return.
+            OwnershipFacts f = facts(
+                3,
+                {edge(0, 1, {contractResolved(0, false)}), edge(0, 2, {contractResolved(0, true)})},
+                1, 1);
+            f.blocks[0].events = {acquire(0, 0, true, Certainty::Conditional)};
+            f.blocks[1].events = {exit()};
+            f.blocks[2].events = {release(0), exit()};
+            const OwnershipResult res = solve(f, entryOf(f));
+            r.expect(res.exits.size() == 2 &&
+                         res.exits[0].state.resources[n0].isOnly(OwnState::NotOwned) &&
+                         res.exits[0].state.locations[0].mayNull &&
+                         !res.exits[0].state.locations[0].holds(n0),
+                     "Contracts: the failure edge holds nothing and the slot is null");
+            r.expect(res.exits[1].state.resources[n0].isOnly(OwnState::Released),
+                     "Contracts: the success edge owns the resource and releases it");
+        }
+        {
+            OwnershipFacts f = facts(1, {}, 1, 1);
+            f.blocks[0].events = {acquire(0, 0, true, Certainty::Conditional), exit()};
+            const OwnershipResult res = solve(f, entryOf(f));
+            const StateSet st = res.exits.at(0).state.resources[n0];
+            r.expect(st.has(OwnState::Owned) && st.has(OwnState::NotOwned),
+                     "Contracts: an untested contract leaves both outcomes possible");
+        }
+        return r.failures == 0;
+    }
+
     bool testSummaries(TestReport& r)
     {
         const auto owned = static_cast<std::size_t>(OwnState::Owned);
@@ -416,6 +457,7 @@ int main(int, char**)
     TestReport report;
     (void)testDomain(report);
     (void)testEngine(report);
+    (void)testContracts(report);
     (void)testSummaries(report);
     if (report.failures == 0)
     {
