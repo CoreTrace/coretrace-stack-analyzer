@@ -227,6 +227,7 @@ Ready-to-adapt workflow examples:
 --quiet disables diagnostics entirely
 --warnings-only hides info-level diagnostics; in human output it also lists only functions with warnings/errors
 --stack-limit=<value> overrides stack limit (bytes, or KiB/MiB/GiB)
+--assume-external-frame=<value> charges <value> (bytes, or KiB/MiB/GiB) per unresolved call instead of reporting max stack as unknown; `0` ignores such calls
 --compile-arg=<arg> passes an extra argument to the compiler
 --compile-commands=<path> uses compile_commands.json (file or directory)
 --compdb=<path> alias for --compile-commands
@@ -311,6 +312,7 @@ Supported keys:
 - `compile-commands` (or `compdb`)
 - `analysis-profile`
 - `jobs` (`N` or `auto`)
+- `assume-external-frame`
 - `timing`
 - `warnings-only`
 - `quiet`
@@ -774,6 +776,7 @@ Actually done:
 - 3. Filters: `--only-file`, `--only-dir`, `--exclude-dir`, `--only-function/--only-func`, plus `--dump-filter`.
 - 4. Compile args passthrough: `-I`, `-D`, `--compile-arg`.
 - 5. Dynamic alloca / VLA detection, including user-controlled sizes, upper-bound inference, and recursion-aware severity (errors for infinite recursion or oversized allocations, warnings for other dynamic sizes).
+- 5b. Max stack is reported as `unknown (>= N bytes)` (JSON: `maxStack: null`, `maxStackLowerBound: N`) when a function has a dynamic alloca or an unresolved call — indirect/virtual, or to a declaration without a definition in the module. `N` is the known lower bound and still triggers the stack-limit error when it exceeds the limit; `--assume-external-frame=<bytes>` replaces the unknown by charging `<bytes>` per unresolved call.
 - 6. Deriving human-friendly names for unnamed allocas in diagnostics.
 - 7. Detection of stack buffer overflows in memory/string write APIs (built-in + model-driven).
 - 8. Warning when a function performs multiple stores into the same stack buffer.
