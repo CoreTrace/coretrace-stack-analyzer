@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "analysis/ResourceLifetimeAnalysis.hpp"
+#include "analysis/ResourceModel.hpp"
 
 #include <array>
 #include <algorithm>
@@ -58,32 +59,12 @@ namespace ctrace::stack::analysis
             return isStdLibCalleeName(callee.getName());
         }
 
-        enum class RuleAction
-        {
-            AcquireOut,
-            AcquireRet,
-            ReleaseArg
-        };
-
         enum class OwnershipState
         {
             Unknown,
             Owned,
             Released,
             Escaped
-        };
-
-        struct ResourceRule
-        {
-            std::string functionPattern;
-            std::string resourceKind;
-            unsigned argIndex = 0;
-            RuleAction action = RuleAction::AcquireOut;
-        };
-
-        struct ResourceModel
-        {
-            std::vector<ResourceRule> rules;
         };
 
         struct MethodClassInfo
@@ -267,120 +248,6 @@ namespace ctrace::stack::analysis
             while (p < pattern.size() && pattern[p] == '*')
                 ++p;
             return p == pattern.size();
-        }
-
-        static bool ruleMatchesFunction(const ResourceRule& rule, const llvm::Function& callee)
-        {
-            const std::string calleeName = callee.getName().str();
-            const std::string demangled = ctrace_tools::demangle(calleeName.c_str());
-            std::string demangledBase = demangled;
-            if (const std::size_t pos = demangledBase.find('('); pos != std::string::npos)
-                demangledBase = demangledBase.substr(0, pos);
-
-            const llvm::StringRef pattern(rule.functionPattern);
-            const bool hasGlob =
-                pattern.contains('*') || pattern.contains('?') || pattern.contains('[');
-            if (!hasGlob)
-            {
-                return rule.functionPattern == calleeName || rule.functionPattern == demangled ||
-                       rule.functionPattern == demangledBase;
-            }
-
-            return globMatches(pattern, calleeName) || globMatches(pattern, demangled) ||
-                   globMatches(pattern, demangledBase);
-        }
-
-        static bool parseResourceModel(const std::string& path, ResourceModel& out,
-                                       std::string& error)
-        {
-            std::ifstream in(path);
-            if (!in)
-            {
-                error = "cannot open model file: " + path;
-                return false;
-            }
-
-            out.rules.clear();
-            std::string line;
-            unsigned lineNo = 0;
-            while (std::getline(in, line))
-            {
-                ++lineNo;
-                const std::size_t hashPos = line.find('#');
-                if (hashPos != std::string::npos)
-                    line.erase(hashPos);
-                line = trimCopy(line);
-                if (line.empty())
-                    continue;
-
-                std::istringstream iss(line);
-                std::vector<std::string> tokens;
-                std::string tok;
-                while (iss >> tok)
-                    tokens.push_back(tok);
-                if (tokens.empty())
-                    continue;
-
-                ResourceRule rule;
-                if (tokens[0] == "acquire_out")
-                {
-                    if (tokens.size() != 4)
-                    {
-                        error = "invalid acquire_out rule at line " + std::to_string(lineNo);
-                        return false;
-                    }
-                    unsigned argIndex = 0;
-                    if (!parseUnsignedIndex(tokens[2], argIndex))
-                    {
-                        error = "invalid argument index at line " + std::to_string(lineNo);
-                        return false;
-                    }
-                    rule.action = RuleAction::AcquireOut;
-                    rule.functionPattern = tokens[1];
-                    rule.argIndex = argIndex;
-                    rule.resourceKind = tokens[3];
-                }
-                else if (tokens[0] == "acquire_ret")
-                {
-                    if (tokens.size() != 3)
-                    {
-                        error = "invalid acquire_ret rule at line " + std::to_string(lineNo);
-                        return false;
-                    }
-                    rule.action = RuleAction::AcquireRet;
-                    rule.functionPattern = tokens[1];
-                    rule.argIndex = 0;
-                    rule.resourceKind = tokens[2];
-                }
-                else if (tokens[0] == "release_arg")
-                {
-                    if (tokens.size() != 4)
-                    {
-                        error = "invalid release_arg rule at line " + std::to_string(lineNo);
-                        return false;
-                    }
-                    unsigned argIndex = 0;
-                    if (!parseUnsignedIndex(tokens[2], argIndex))
-                    {
-                        error = "invalid argument index at line " + std::to_string(lineNo);
-                        return false;
-                    }
-                    rule.action = RuleAction::ReleaseArg;
-                    rule.functionPattern = tokens[1];
-                    rule.argIndex = argIndex;
-                    rule.resourceKind = tokens[3];
-                }
-                else
-                {
-                    error =
-                        "unknown rule action '" + tokens[0] + "' at line " + std::to_string(lineNo);
-                    return false;
-                }
-
-                out.rules.push_back(std::move(rule));
-            }
-
-            return true;
         }
 
         static MethodClassInfo describeMethodClass(const llvm::Function& F)
@@ -2265,6 +2132,146 @@ namespace ctrace::stack::analysis
             return functionSummaries;
         }
     } // namespace
+
+    bool ruleMatchesFunction(const ResourceRule& rule, const llvm::Function& callee)
+    {
+        const std::string calleeName = callee.getName().str();
+        const std::string demangled = ctrace_tools::demangle(calleeName.c_str());
+        std::string demangledBase = demangled;
+        if (const std::size_t pos = demangledBase.find('('); pos != std::string::npos)
+            demangledBase = demangledBase.substr(0, pos);
+
+        const llvm::StringRef pattern(rule.functionPattern);
+        const bool hasGlob =
+            pattern.contains('*') || pattern.contains('?') || pattern.contains('[');
+        if (!hasGlob)
+        {
+            return rule.functionPattern == calleeName || rule.functionPattern == demangled ||
+                   rule.functionPattern == demangledBase;
+        }
+
+        return globMatches(pattern, calleeName) || globMatches(pattern, demangled) ||
+               globMatches(pattern, demangledBase);
+    }
+
+    bool parseResourceModel(const std::string& path, ResourceModel& out, std::string& error)
+    {
+        std::ifstream in(path);
+        if (!in)
+        {
+            error = "cannot open model file: " + path;
+            return false;
+        }
+
+        out.rules.clear();
+        std::string line;
+        unsigned lineNo = 0;
+        while (std::getline(in, line))
+        {
+            ++lineNo;
+            const std::size_t hashPos = line.find('#');
+            if (hashPos != std::string::npos)
+                line.erase(hashPos);
+            line = trimCopy(line);
+            if (line.empty())
+                continue;
+
+            std::istringstream iss(line);
+            std::vector<std::string> tokens;
+            std::string tok;
+            while (iss >> tok)
+                tokens.push_back(tok);
+            if (tokens.empty())
+                continue;
+
+            ResourceRule rule;
+            // Optional trailing qualifier on any rule.
+            if (tokens.size() >= 2 && tokens.back().rfind("if_ret", 0) == 0)
+            {
+                static const std::pair<const char*, RuleCondition> kQualifiers[] = {
+                    {"if_ret==0", RuleCondition::RetEqZero},
+                    {"if_ret!=0", RuleCondition::RetNeZero},
+                    {"if_ret>=0", RuleCondition::RetGeZero},
+                    {"if_ret<0", RuleCondition::RetLtZero},
+                    {"if_ret==null", RuleCondition::RetEqNull},
+                    {"if_ret!=null", RuleCondition::RetNeNull},
+                };
+                bool known = false;
+                for (const auto& [text, condition] : kQualifiers)
+                {
+                    if (tokens.back() == text)
+                    {
+                        rule.condition = condition;
+                        known = true;
+                    }
+                }
+                if (!known)
+                {
+                    error = "unknown qualifier '" + tokens.back() + "' at line " +
+                            std::to_string(lineNo);
+                    return false;
+                }
+                tokens.pop_back();
+            }
+            if (tokens[0] == "acquire_out")
+            {
+                if (tokens.size() != 4)
+                {
+                    error = "invalid acquire_out rule at line " + std::to_string(lineNo);
+                    return false;
+                }
+                unsigned argIndex = 0;
+                if (!parseUnsignedIndex(tokens[2], argIndex))
+                {
+                    error = "invalid argument index at line " + std::to_string(lineNo);
+                    return false;
+                }
+                rule.action = RuleAction::AcquireOut;
+                rule.functionPattern = tokens[1];
+                rule.argIndex = argIndex;
+                rule.resourceKind = tokens[3];
+            }
+            else if (tokens[0] == "acquire_ret")
+            {
+                if (tokens.size() != 3)
+                {
+                    error = "invalid acquire_ret rule at line " + std::to_string(lineNo);
+                    return false;
+                }
+                rule.action = RuleAction::AcquireRet;
+                rule.functionPattern = tokens[1];
+                rule.argIndex = 0;
+                rule.resourceKind = tokens[2];
+            }
+            else if (tokens[0] == "release_arg")
+            {
+                if (tokens.size() != 4)
+                {
+                    error = "invalid release_arg rule at line " + std::to_string(lineNo);
+                    return false;
+                }
+                unsigned argIndex = 0;
+                if (!parseUnsignedIndex(tokens[2], argIndex))
+                {
+                    error = "invalid argument index at line " + std::to_string(lineNo);
+                    return false;
+                }
+                rule.action = RuleAction::ReleaseArg;
+                rule.functionPattern = tokens[1];
+                rule.argIndex = argIndex;
+                rule.resourceKind = tokens[3];
+            }
+            else
+            {
+                error = "unknown rule action '" + tokens[0] + "' at line " + std::to_string(lineNo);
+                return false;
+            }
+
+            out.rules.push_back(std::move(rule));
+        }
+
+        return true;
+    }
 
     ResourceSummaryIndex buildResourceLifetimeSummaryIndex(
         llvm::Module& mod, const std::function<bool(const llvm::Function&)>& shouldAnalyze,
