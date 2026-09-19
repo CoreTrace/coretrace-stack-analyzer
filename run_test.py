@@ -3096,6 +3096,20 @@ def check_analyzer_module_unit_tests() -> bool:
     print("  ✅ analyzer module unit tests OK")
     if output.strip():
         print(output.rstrip())
+
+    # The LLVM-free ownership engine has its own binary (built by the same option).
+    engine_bin = RUN_CONFIG.analyzer.parent / "ownership_engine_unit_tests"
+    if engine_bin.exists():
+        engine = subprocess.run([str(engine_bin)], capture_output=True, text=True)
+        engine_output = (engine.stdout or "") + (engine.stderr or "")
+        if engine.returncode != 0:
+            print(f"  ❌ ownership engine unit tests failed (code {engine.returncode})")
+            print(engine_output)
+            print()
+            return False
+        print("  ✅ ownership engine unit tests OK")
+        if engine_output.strip():
+            print(engine_output.rstrip())
     print()
     return True
 

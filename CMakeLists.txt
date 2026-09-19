@@ -285,6 +285,20 @@ if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
       NAME analyzer_module_unit_tests
       COMMAND stack_usage_analyzer_unit_tests ${CMAKE_CURRENT_SOURCE_DIR}
     )
+
+    add_executable(ownership_engine_unit_tests
+      test/unit/ownership_engine_unit_tests.cpp
+    )
+
+    target_link_libraries(ownership_engine_unit_tests
+      PRIVATE
+        stack_usage_analyzer_lib
+    )
+
+    add_test(
+      NAME ownership_engine_unit_tests
+      COMMAND ownership_engine_unit_tests
+    )
   endif()
 endif()
 
