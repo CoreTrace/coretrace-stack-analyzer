@@ -523,6 +523,59 @@ namespace
         return report.failures == 0;
     }
 
+    bool testAssumeExternalFrameReplacesUnknown(const std::filesystem::path& repoRoot,
+                                                TestReport& report)
+    {
+        ctrace::stack::AnalysisConfig config;
+        config.assumeExternalFrameBytes = 512;
+        LoadedModule loaded;
+        std::string loadError;
+        const std::filesystem::path source = repoRoot / "test/unit/unresolved_calls_input.c";
+        if (!loadModuleFromSource(source, config, loaded, loadError))
+        {
+            report.expect(false,
+                          "AssumeExternalFrame setup: failed to load module: " + loadError);
+            return false;
+        }
+
+        ctrace::stack::analyzer::ModulePreparationService service;
+        ctrace::stack::analyzer::PreparedModule prepared = service.prepare(*loaded.module, config);
+
+        auto totalOf = [&](const char* name) -> ctrace::stack::analysis::StackEstimate
+        {
+            const llvm::Function* fn = loaded.module->getFunction(name);
+            auto it = fn ? prepared.recursionState.TotalStack.find(fn)
+                         : prepared.recursionState.TotalStack.end();
+            return it == prepared.recursionState.TotalStack.end()
+                       ? ctrace::stack::analysis::StackEstimate{}
+                       : it->second;
+        };
+        auto localOf = [&](const char* name) -> ctrace::stack::StackSize
+        {
+            const llvm::Function* fn = loaded.module->getFunction(name);
+            auto it = fn ? prepared.localStack.find(fn) : prepared.localStack.end();
+            return it == prepared.localStack.end() ? 0 : it->second.bytes;
+        };
+
+        report.expect(!totalOf("calls_external").unknown,
+                      "AssumeExternalFrame: external call no longer marks max stack unknown");
+        report.expect(totalOf("calls_external").bytes == localOf("calls_external") + 512,
+                      "AssumeExternalFrame: external call costs the assumed frame");
+        report.expect(!totalOf("calls_indirect").unknown,
+                      "AssumeExternalFrame: indirect call no longer marks max stack unknown");
+        report.expect(totalOf("calls_indirect").bytes == localOf("calls_indirect") + 512,
+                      "AssumeExternalFrame: indirect call costs the assumed frame");
+        report.expect(totalOf("calls_caller_of_external").bytes ==
+                          localOf("calls_caller_of_external") + localOf("calls_external") + 512,
+                      "AssumeExternalFrame: assumed frame propagates through callers");
+        report.expect(totalOf("calls_intrinsic_only").bytes == localOf("calls_intrinsic_only"),
+                      "AssumeExternalFrame: intrinsics are not charged");
+        report.expect(totalOf("calls_defined").bytes == localOf("calls_defined") + localOf("leaf"),
+                      "AssumeExternalFrame: defined callees keep their real frame");
+
+        return report.failures == 0;
+    }
+
 int main(int argc, char** argv)
 {
     if (argc != 2)
@@ -540,6 +593,7 @@ int main(int argc, char** argv)
     (void)testIntRangeFacts(repoRoot, report);
     (void)testAnalysisReportContract(repoRoot, report);
     (void)testUnresolvedCallsMarkStackUnknown(repoRoot, report);
+    (void)testAssumeExternalFrameReplacesUnknown(repoRoot, report);
 
     if (report.failures == 0)
     {
