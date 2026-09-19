@@ -527,6 +527,7 @@ namespace
                                                 TestReport& report)
     {
         ctrace::stack::AnalysisConfig config;
+        config.assumeExternalFrame = 1;
         config.assumeExternalFrameBytes = 512;
         LoadedModule loaded;
         std::string loadError;

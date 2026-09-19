@@ -55,6 +55,10 @@ namespace ctrace::stack
     {
         StackSize stackLimit = 8ull * 1024ull * 1024ull; // 8 MiB default
         std::uint64_t smtBudgetNodes = 10000;
+        // Stack assumed for each unresolved call (indirect, or to an external
+        // declaration) when assumeExternalFrame is set; otherwise such calls
+        // make the max stack unknown.
+        StackSize assumeExternalFrameBytes = 0;
 
         std::shared_ptr<const analysis::CompilationDatabase> compilationDatabase;
         std::shared_ptr<const analysis::ResourceSummaryIndex> resourceSummaryIndex;
@@ -103,7 +107,8 @@ namespace ctrace::stack
         std::uint32_t resourceCrossTU : 1 = 1;
         std::uint32_t resourceSummaryMemoryOnly : 1 = 0;
         std::uint32_t warningsOnly : 1 = 0;
-        std::uint32_t reservedFlags : 18 = 0;
+        std::uint32_t assumeExternalFrame : 1 = 0;
+        std::uint32_t reservedFlags : 17 = 0;
     };
 
     // Per-function result
