@@ -6,6 +6,7 @@
 #include "analysis/InputPipeline.hpp"
 #include "analysis/IntRanges.hpp"
 #include "analysis/Reachability.hpp"
+#include "analysis/ResourceModel.hpp"
 #include "analysis/StackBufferAnalysis.hpp"
 #include "analysis/UninitializedVarAnalysis.hpp"
 #include "analyzer/DiagnosticEmitter.hpp"
@@ -811,6 +812,52 @@ namespace
 
         return report.failures == 0;
     }
+    bool testResourceModelConditions(TestReport& report)
+    {
+        using namespace ctrace::stack::analysis;
+
+        const auto parseText = [](const std::string& text, ResourceModel& model, std::string& error)
+        {
+            char path[] = "/tmp/ctrace-model-XXXXXX";
+            const int fd = mkstemp(path);
+            if (fd < 0)
+                return false;
+            (void)write(fd, text.data(), text.size());
+            close(fd);
+            const bool ok = parseResourceModel(path, model, error);
+            unlink(path);
+            return ok;
+        };
+
+        ResourceModel model;
+        std::string error;
+        const bool ok = parseText("acquire_out f 0 K if_ret==0\n"
+                                  "acquire_ret g K if_ret!=null\n"
+                                  "release_arg h 0 K\n"
+                                  "release_arg i 1 K if_ret>=0\n",
+                                  model, error);
+        report.expect(ok && model.rules.size() == 4,
+                      "ResourceModel: qualified and unqualified rules parse: " + error);
+        if (ok && model.rules.size() == 4)
+        {
+            report.expect(model.rules[0].condition == RuleCondition::RetEqZero,
+                          "ResourceModel: if_ret==0");
+            report.expect(model.rules[1].condition == RuleCondition::RetNeNull,
+                          "ResourceModel: if_ret!=null");
+            report.expect(model.rules[2].condition == RuleCondition::Always,
+                          "ResourceModel: no qualifier means Always");
+            report.expect(model.rules[3].condition == RuleCondition::RetGeZero &&
+                              model.rules[3].argIndex == 1,
+                          "ResourceModel: if_ret>=0 keeps the argument index");
+        }
+
+        ResourceModel bad;
+        std::string badError;
+        const bool badOk = parseText("acquire_out f 0 K if_ret=0\n", bad, badError);
+        report.expect(!badOk && badError.find("line 1") != std::string::npos,
+                      "ResourceModel: an unknown qualifier is an error naming the line");
+        return report.failures == 0;
+    }
 } // namespace
 
 int main(int argc, char** argv)
@@ -833,6 +880,7 @@ int main(int argc, char** argv)
     (void)testAssumeExternalFrameReplacesUnknown(repoRoot, report);
     (void)testUninitializedFixpointBudgetIsExplicit(repoRoot, report);
     (void)testProgramPointRanges(repoRoot, report);
+    (void)testResourceModelConditions(report);
 
     if (report.failures == 0)
     {
