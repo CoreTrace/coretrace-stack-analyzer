@@ -476,7 +476,6 @@ namespace
                       "renderReport(Sarif): equals toSarif of the merged result");
         return true;
     }
-} // namespace
 
     bool testUnresolvedCallsMarkStackUnknown(const std::filesystem::path& repoRoot,
                                              TestReport& report)
@@ -534,8 +533,7 @@ namespace
         const std::filesystem::path source = repoRoot / "test/unit/unresolved_calls_input.c";
         if (!loadModuleFromSource(source, config, loaded, loadError))
         {
-            report.expect(false,
-                          "AssumeExternalFrame setup: failed to load module: " + loadError);
+            report.expect(false, "AssumeExternalFrame setup: failed to load module: " + loadError);
             return false;
         }
 
@@ -576,6 +574,7 @@ namespace
 
         return report.failures == 0;
     }
+} // namespace
 
 int main(int argc, char** argv)
 {
