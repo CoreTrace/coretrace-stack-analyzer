@@ -2,6 +2,7 @@
 #include "analysis/ownership/OwnershipEngine.hpp"
 
 #include <algorithm>
+#include <array>
 #include <deque>
 
 namespace ctrace::stack::analysis::ownership
@@ -55,17 +56,33 @@ namespace ctrace::stack::analysis::ownership
             c.add(rn);
         }
 
-        StateSet applyTransformer(const ParamTransformer& t, StateSet in)
-        {
-            StateSet out = StateSet::none();
-            for (std::size_t i = 0; i < t.size(); ++i)
-            {
-                if (in.bits & (1u << i))
-                    out |= t[i];
-            }
-            return out;
-        }
     } // namespace
+
+    StateSet applyTransformer(const ParamTransformer& t, StateSet in)
+    {
+        StateSet out = StateSet::none();
+        for (std::size_t i = 0; i < t.size(); ++i)
+        {
+            if (in.bits & (1u << i))
+                out |= t[i];
+        }
+        return out;
+    }
+
+    ParamTransformer composeTransformers(const ParamTransformer& first,
+                                         const ParamTransformer& then)
+    {
+        ParamTransformer out;
+        for (std::size_t i = 0; i < out.size(); ++i)
+            out[i] = applyTransformer(then, first[i]);
+        return out;
+    }
+
+    void joinTransformer(ParamTransformer& into, const ParamTransformer& other)
+    {
+        for (std::size_t i = 0; i < into.size(); ++i)
+            into[i] |= other[i];
+    }
 
     void applyEvent(const OwnershipFacts& facts, const Event& e, AbstractState& s)
     {
@@ -280,5 +297,134 @@ namespace ctrace::stack::analysis::ownership
             applyEvent(facts, facts.blocks[block].events[i], state);
             cb(i, before, state);
         }
+    }
+
+    namespace
+    {
+        constexpr std::array<OwnState, 4> kAllStates = {OwnState::NotOwned, OwnState::Owned,
+                                                        OwnState::Released, OwnState::Escaped};
+
+        /// Whether the fresh resources of the function end up exactly/possibly in a location
+        /// of the given kind on the exits of the given kind.
+        Certainty freshResourceCertainty(const OwnershipFacts& facts, const OwnershipResult& res,
+                                         bool exceptional, LocationKind kind, unsigned argIndex,
+                                         ResourceId paramResourceLowerBound)
+        {
+            bool sawExit = false;
+            bool always = true;
+            bool sometimes = false;
+            for (const ExitRecord& exit : res.exits)
+            {
+                if (exit.exceptional != exceptional)
+                    continue;
+                sawExit = true;
+                bool exact = false;
+                bool possible = false;
+                for (LocationId loc = 0; loc < facts.locations.size(); ++loc)
+                {
+                    const Location& location = facts.locations[loc];
+                    if (location.kind != kind ||
+                        (kind == LocationKind::ArgPointee && location.argIndex != argIndex))
+                        continue;
+                    const Contents& c = exit.state.locations[loc];
+                    for (const ResourceId r : c.resources)
+                    {
+                        if (r >= paramResourceLowerBound)
+                            continue; // a parameter's resource, not a fresh one
+                        possible = true;
+                        // Returned/stored through an out-arg it is Escaped; acquired straight
+                        // into the out-arg it is still Owned. Both are fresh handovers.
+                        if (c.isExactly(r))
+                            exact = true;
+                    }
+                }
+                always = always && exact;
+                sometimes = sometimes || possible;
+            }
+            if (!sawExit || !sometimes)
+                return Certainty::Unknown;
+            return always ? Certainty::Guaranteed : Certainty::Conditional;
+        }
+    } // namespace
+
+    FunctionOwnershipSummary computeSummary(const OwnershipFacts& facts, unsigned iterationLimit)
+    {
+        FunctionOwnershipSummary summary;
+
+        // Parameters get their own resources, numbered after the function's sites.
+        const std::uint32_t paramSiteBase = facts.siteCount;
+        const std::size_t resourceCount = 2u * (paramSiteBase + facts.paramLocations.size());
+
+        const auto entryWith = [&](std::size_t paramIndex, OwnState state)
+        {
+            AbstractState entry = AbstractState::entry(resourceCount, facts.locations.size());
+            for (std::size_t p = 0; p < facts.paramLocations.size(); ++p)
+            {
+                const ResourceId r = newInstanceOf(paramSiteBase + static_cast<std::uint32_t>(p));
+                entry.locations[facts.paramLocations[p].second].add(r);
+                entry.resources[r] = StateSet::of(p == paramIndex ? state : OwnState::Owned);
+            }
+            return entry;
+        };
+
+        bool anyNormal = false;
+        bool anyExceptional = false;
+        for (std::size_t p = 0; p < facts.paramLocations.size(); ++p)
+        {
+            const unsigned argIndex = facts.paramLocations[p].first;
+            const ResourceId r = newInstanceOf(paramSiteBase + static_cast<std::uint32_t>(p));
+            ParamTransformer normal{};
+            ParamTransformer exceptional{};
+            for (const OwnState state : kAllStates)
+            {
+                const OwnershipResult res = solve(facts, entryWith(p, state), iterationLimit);
+                if (res.incomplete)
+                {
+                    summary.incomplete = true;
+                    return summary;
+                }
+                for (const ExitRecord& exit : res.exits)
+                {
+                    ParamTransformer& t = exit.exceptional ? exceptional : normal;
+                    t[static_cast<std::size_t>(state)] |= exit.state.resources[r];
+                    (exit.exceptional ? anyExceptional : anyNormal) = true;
+                }
+            }
+            summary.normal.params[argIndex] = normal;
+            summary.exceptional.params[argIndex] = exceptional;
+        }
+
+        // Fresh resources: one solve with every parameter Owned (or none).
+        const OwnershipResult res =
+            solve(facts, entryWith(facts.paramLocations.size(), OwnState::Owned), iterationLimit);
+        if (res.incomplete)
+        {
+            summary.incomplete = true;
+            return summary;
+        }
+        for (const ExitRecord& exit : res.exits)
+            (exit.exceptional ? anyExceptional : anyNormal) = true;
+        const ResourceId paramResourceLowerBound = newInstanceOf(paramSiteBase);
+        summary.normal.returns = freshResourceCertainty(facts, res, false, LocationKind::Return, 0,
+                                                        paramResourceLowerBound);
+        summary.exceptional.returns = Certainty::Unknown;
+        for (LocationId loc = 0; loc < facts.locations.size(); ++loc)
+        {
+            const Location& location = facts.locations[loc];
+            if (location.kind != LocationKind::ArgPointee)
+                continue;
+            for (const bool exceptional : {false, true})
+            {
+                const Certainty c =
+                    freshResourceCertainty(facts, res, exceptional, LocationKind::ArgPointee,
+                                           location.argIndex, paramResourceLowerBound);
+                if (c == Certainty::Unknown)
+                    continue;
+                (exceptional ? summary.exceptional : summary.normal).outArgs[location.argIndex] = c;
+            }
+        }
+        summary.normal.present = anyNormal;
+        summary.exceptional.present = anyExceptional;
+        return summary;
     }
 } // namespace ctrace::stack::analysis::ownership

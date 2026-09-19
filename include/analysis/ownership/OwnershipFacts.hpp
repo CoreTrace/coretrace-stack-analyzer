@@ -50,9 +50,10 @@ namespace ctrace::stack::analysis::ownership
     struct ExitTransformer
     {
         std::map<unsigned, ParamTransformer> params; // by parameter index
-        Certainty returns = Certainty::Unknown;      // the return value is a fresh resource
         std::map<unsigned, Certainty> outArgs;       // *arg receives a fresh resource
+        Certainty returns = Certainty::Unknown;      // the return value is a fresh resource
         bool present = false;
+        std::uint8_t reservedPadding[6] = {};
     };
 
     struct FunctionOwnershipSummary
@@ -60,6 +61,7 @@ namespace ctrace::stack::analysis::ownership
         ExitTransformer normal;
         ExitTransformer exceptional;
         bool incomplete = false;
+        std::uint8_t reservedPadding[7] = {};
     };
 
     /// The effects of one modelled or summarised call on the caller's state.

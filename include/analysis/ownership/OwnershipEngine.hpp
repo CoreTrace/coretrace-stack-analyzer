@@ -42,4 +42,23 @@ namespace ctrace::stack::analysis::ownership
     void replay(
         const OwnershipFacts& facts, const OwnershipResult& result, std::uint32_t block,
         const std::function<void(std::uint32_t, const AbstractState&, const AbstractState&)>& cb);
+
+    /// Union of t[s] over the states s in `in`.
+    StateSet applyTransformer(const ParamTransformer& t, StateSet in);
+
+    /// The transformer of "first, then `then`".
+    ParamTransformer composeTransformers(const ParamTransformer& first,
+                                         const ParamTransformer& then);
+
+    /// Pointwise union.
+    void joinTransformer(ParamTransformer& into, const ParamTransformer& other);
+
+    /// Summarises a function as transformers of its parameters, per exit kind: for each
+    /// parameter location of `facts.paramLocations` and each singleton input state, one
+    /// solve with that state; the image is the join of the parameter's resource state over
+    /// the exits of each kind. Fresh resources: `returns` is Guaranteed when every normal
+    /// exit returns exactly a fresh resource, Conditional when some do, Unknown otherwise
+    /// (likewise `outArgs` for ArgPointee locations).
+    FunctionOwnershipSummary computeSummary(const OwnershipFacts& facts,
+                                            unsigned iterationLimit = 0);
 } // namespace ctrace::stack::analysis::ownership
