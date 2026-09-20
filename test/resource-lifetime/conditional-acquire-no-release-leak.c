@@ -14,7 +14,7 @@ void conditional_acquire_no_release(int c)
     if (c)
         // at line 12, column 9
         // [ !!Warn ] potential resource leak: 'GenericHandle' acquired in handle 'h' is not released in this function
-    // ↳ no matching release call was found for the tracked handle
+        // ↳ no matching release call was found for the tracked handle
         acquire_handle(&h);
     (void)h;
 }
