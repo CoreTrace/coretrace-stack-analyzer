@@ -154,17 +154,21 @@ namespace ctrace::stack::analysis::ownership
                     if (llvm::isa<llvm::PHINode>(&I))
                         return; // phi copies already live on the edges; keep it simple
                 }
-                // Only a block that does nothing but produce the return value may be split:
-                // moving unrelated work (an acquisition, a release) onto every incoming edge
-                // would duplicate it.
+                // Only a block that does nothing but move the return value into place may
+                // be split: copies are pure state moves and may be replayed on each edge,
+                // but an acquisition, a release or a call must not be duplicated.
                 for (const Event& e : current_->events)
                 {
-                    const bool isReturnSequence =
-                        e.kind == Event::Kind::Return || e.kind == Event::Kind::Exit ||
-                        ((e.kind == Event::Kind::Copy || e.kind == Event::Kind::Overwrite) &&
-                         e.dst == returnLocation_);
-                    if (!isReturnSequence)
+                    switch (e.kind)
+                    {
+                    case Event::Kind::Copy:
+                    case Event::Kind::Overwrite:
+                    case Event::Kind::Return:
+                    case Event::Kind::Exit:
+                        break;
+                    default:
                         return;
+                    }
                 }
 
                 std::vector<Event> events = std::move(current_->events);

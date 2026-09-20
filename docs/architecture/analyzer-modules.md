@@ -86,6 +86,34 @@ Pattern:
 Why:
 - Separates "what was found" from "how it is reported".
 
+### `src/analysis/ownership/` (`OwnershipDomain`, `OwnershipFacts`, `OwnershipEngine`, `ResourceFactCollector`)
+
+Role:
+- Decides `ResourceLifetime.MissingRelease` from the control flow instead of acquire/release
+  counters (the counters still serve the other resource rules).
+
+Pattern:
+- `Abstract interpretation` split in three: fact collection (LLVM), resolution (LLVM-free),
+  diagnostics.
+
+Why:
+- `OwnershipEngine` and its domain carry no LLVM dependency, so the transfer functions are
+  tested on synthetic CFGs (`test/unit/ownership_engine_unit_tests.cpp`) independently of
+  the IR recognition, and the recognition is tested on real IR
+  (`test/unit/analyzer_module_unit_tests.cpp`).
+- Resources are identified by acquisition site and kept distinct from the locations that
+  reference them, so copying a handle never loses the obligation attached to the resource.
+- Inter-procedural effects are transformers (image of each input state, per normal and
+  exceptional exit) rather than a list of effects, which is what lets "always releases",
+  "sometimes releases", "releases then acquires" and "acquires then releases" be told
+  apart, in-module and across TUs (`ResourceSummaryFunction::ownership`, cache schema v3).
+
+Design notes:
+- Full specification: `docs/superpowers/specs/2026-09-19-resource-ownership-engine-design.md`.
+- Missing information never becomes a verdict: an unresolved acquisition contract, an
+  address escaping to an unmodelled callee, or the exceptional exit of the very call that
+  would have released the resource all yield no `MissingRelease` for that resource.
+
 ### `src/analysis/Reachability.cpp`
 
 Role:

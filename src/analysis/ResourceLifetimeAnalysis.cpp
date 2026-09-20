@@ -9,7 +9,6 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
-#include <cstdlib>
 #include <fstream>
 #include <iostream>
 #include <limits>
@@ -2554,44 +2553,6 @@ namespace ctrace::stack::analysis
             const AbstractState entry = AbstractState::entry(2u * collected.facts.siteCount,
                                                              collected.facts.locations.size());
             const OwnershipResult result = solve(collected.facts, entry);
-            if (std::getenv("CTRACE_SPIKE_OWN"))
-            {
-                static const char* kNames[] = {
-                    "Acquire",       "Release",     "Copy", "Overwrite", "Return",
-                    "AddressEscape", "UnknownCall", "Call", "Exit",      "ContractResolved"};
-                std::cerr << "[own] " << F.getName().str() << "\n";
-                for (std::uint32_t b = 0; b < collected.facts.blocks.size(); ++b)
-                {
-                    replay(collected.facts, result, b,
-                           [&](std::uint32_t i, const AbstractState&, const AbstractState& after)
-                           {
-                               const Event& e = collected.facts.blocks[b].events[i];
-                               if (e.kind == Event::Kind::Call)
-                                   std::cerr
-                                       << "  [call params=" << e.call.params.size()
-                                       << " outArgs=" << e.call.outArgs.size()
-                                       << " sites=" << e.call.outArgSites.size()
-                                       << " ret=" << (e.call.retDest ? 1 : 0) << " site0="
-                                       << (e.call.outArgSites.empty() ? 99 : e.call.outArgSites[0])
-                                       << " dst0="
-                                       << (e.call.outArgs.empty() ? 99 : e.call.outArgs[0].first)
-                                       << " siteCount=" << collected.facts.siteCount << "]\n";
-                               std::cerr << "  b" << b << " " << kNames[static_cast<int>(e.kind)]
-                                         << " dst=" << e.dst << "("
-                                         << collected.locationNames[e.dst] << ") src=" << e.src
-                                         << " strong=" << e.strong
-                                         << " cert=" << static_cast<int>(e.certainty) << " ->";
-                               for (std::size_t r = 0; r < after.resources.size(); ++r)
-                                   std::cerr << " r" << r << "=" << int(after.resources[r].bits);
-                               std::cerr << "\n";
-                           });
-                }
-                for (const Edge& ed : collected.facts.edges)
-                    for (const Event& e : ed.events)
-                        std::cerr << "  edge " << ed.from << "->" << ed.to << " "
-                                  << kNames[static_cast<int>(e.kind)] << " dst=" << e.dst
-                                  << " strong=" << e.strong << "\n";
-            }
 
             const auto issueFor = [&](ResourceId r, ResourceLifetimeIssueKind kind)
             {
