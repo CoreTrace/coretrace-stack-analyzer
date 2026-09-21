@@ -1,5 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "analysis/ResourceLifetimeAnalysis.hpp"
+#include "analysis/ResourceModel.hpp"
+#include "analysis/ownership/OwnershipEngine.hpp"
+#include "analysis/ownership/ResourceFactCollector.hpp"
+#include "ResourceLifetimeInternal.hpp"
 
 #include <array>
 #include <algorithm>
@@ -35,7 +39,7 @@
 
 namespace ctrace::stack::analysis
 {
-    namespace
+    namespace lifetime_detail
     {
         static bool isStdLibCalleeName(llvm::StringRef name)
         {
@@ -58,67 +62,12 @@ namespace ctrace::stack::analysis
             return isStdLibCalleeName(callee.getName());
         }
 
-        enum class RuleAction
-        {
-            AcquireOut,
-            AcquireRet,
-            ReleaseArg
-        };
-
         enum class OwnershipState
         {
             Unknown,
             Owned,
             Released,
             Escaped
-        };
-
-        struct ResourceRule
-        {
-            std::string functionPattern;
-            std::string resourceKind;
-            unsigned argIndex = 0;
-            RuleAction action = RuleAction::AcquireOut;
-        };
-
-        struct ResourceModel
-        {
-            std::vector<ResourceRule> rules;
-        };
-
-        struct MethodClassInfo
-        {
-            std::string className;
-            std::string methodName;
-            std::uint64_t isCtor : 1 = false;
-            std::uint64_t isDtor : 1 = false;
-            std::uint64_t isLifecycleReleaseLike : 1 = false;
-            std::uint64_t reservedFlags : 61 = 0;
-        };
-
-        enum class StorageScope
-        {
-            Unknown,
-            Local,
-            Global,
-            Argument,
-            ThisField
-        };
-
-        struct StorageKey
-        {
-            std::string key;
-            std::string displayName;
-            std::string className;
-            const llvm::AllocaInst* localAlloca = nullptr;
-            std::uint64_t offset = 0;
-            int argumentIndex = -1;
-            StorageScope scope = StorageScope::Unknown;
-
-            bool valid() const
-            {
-                return scope != StorageScope::Unknown && !key.empty();
-            }
         };
 
         struct ParamLifetimeEffect
@@ -269,121 +218,7 @@ namespace ctrace::stack::analysis
             return p == pattern.size();
         }
 
-        static bool ruleMatchesFunction(const ResourceRule& rule, const llvm::Function& callee)
-        {
-            const std::string calleeName = callee.getName().str();
-            const std::string demangled = ctrace_tools::demangle(calleeName.c_str());
-            std::string demangledBase = demangled;
-            if (const std::size_t pos = demangledBase.find('('); pos != std::string::npos)
-                demangledBase = demangledBase.substr(0, pos);
-
-            const llvm::StringRef pattern(rule.functionPattern);
-            const bool hasGlob =
-                pattern.contains('*') || pattern.contains('?') || pattern.contains('[');
-            if (!hasGlob)
-            {
-                return rule.functionPattern == calleeName || rule.functionPattern == demangled ||
-                       rule.functionPattern == demangledBase;
-            }
-
-            return globMatches(pattern, calleeName) || globMatches(pattern, demangled) ||
-                   globMatches(pattern, demangledBase);
-        }
-
-        static bool parseResourceModel(const std::string& path, ResourceModel& out,
-                                       std::string& error)
-        {
-            std::ifstream in(path);
-            if (!in)
-            {
-                error = "cannot open model file: " + path;
-                return false;
-            }
-
-            out.rules.clear();
-            std::string line;
-            unsigned lineNo = 0;
-            while (std::getline(in, line))
-            {
-                ++lineNo;
-                const std::size_t hashPos = line.find('#');
-                if (hashPos != std::string::npos)
-                    line.erase(hashPos);
-                line = trimCopy(line);
-                if (line.empty())
-                    continue;
-
-                std::istringstream iss(line);
-                std::vector<std::string> tokens;
-                std::string tok;
-                while (iss >> tok)
-                    tokens.push_back(tok);
-                if (tokens.empty())
-                    continue;
-
-                ResourceRule rule;
-                if (tokens[0] == "acquire_out")
-                {
-                    if (tokens.size() != 4)
-                    {
-                        error = "invalid acquire_out rule at line " + std::to_string(lineNo);
-                        return false;
-                    }
-                    unsigned argIndex = 0;
-                    if (!parseUnsignedIndex(tokens[2], argIndex))
-                    {
-                        error = "invalid argument index at line " + std::to_string(lineNo);
-                        return false;
-                    }
-                    rule.action = RuleAction::AcquireOut;
-                    rule.functionPattern = tokens[1];
-                    rule.argIndex = argIndex;
-                    rule.resourceKind = tokens[3];
-                }
-                else if (tokens[0] == "acquire_ret")
-                {
-                    if (tokens.size() != 3)
-                    {
-                        error = "invalid acquire_ret rule at line " + std::to_string(lineNo);
-                        return false;
-                    }
-                    rule.action = RuleAction::AcquireRet;
-                    rule.functionPattern = tokens[1];
-                    rule.argIndex = 0;
-                    rule.resourceKind = tokens[2];
-                }
-                else if (tokens[0] == "release_arg")
-                {
-                    if (tokens.size() != 4)
-                    {
-                        error = "invalid release_arg rule at line " + std::to_string(lineNo);
-                        return false;
-                    }
-                    unsigned argIndex = 0;
-                    if (!parseUnsignedIndex(tokens[2], argIndex))
-                    {
-                        error = "invalid argument index at line " + std::to_string(lineNo);
-                        return false;
-                    }
-                    rule.action = RuleAction::ReleaseArg;
-                    rule.functionPattern = tokens[1];
-                    rule.argIndex = argIndex;
-                    rule.resourceKind = tokens[3];
-                }
-                else
-                {
-                    error =
-                        "unknown rule action '" + tokens[0] + "' at line " + std::to_string(lineNo);
-                    return false;
-                }
-
-                out.rules.push_back(std::move(rule));
-            }
-
-            return true;
-        }
-
-        static MethodClassInfo describeMethodClass(const llvm::Function& F)
+        MethodClassInfo describeMethodClass(const llvm::Function& F)
         {
             MethodClassInfo info;
             const std::string demangled = ctrace_tools::demangle(F.getName().str().c_str());
@@ -833,14 +668,14 @@ namespace ctrace::stack::analysis
             return buildStorageKeyFromCanonical(canonical, baseOffset + extraOffset, F, methodInfo);
         }
 
-        static StorageKey resolvePointerStorage(const llvm::Value* ptr, const llvm::Function& F,
-                                                const llvm::DataLayout& DL,
-                                                const MethodClassInfo& methodInfo)
+        StorageKey resolvePointerStorage(const llvm::Value* ptr, const llvm::Function& F,
+                                         const llvm::DataLayout& DL,
+                                         const MethodClassInfo& methodInfo)
         {
             return resolvePointerStorageWithExtraOffset(ptr, 0, F, DL, methodInfo);
         }
 
-        static const llvm::Function* resolveDirectCallee(const llvm::CallBase& CB);
+        const llvm::Function* resolveDirectCallee(const llvm::CallBase& CB);
 
         static void collectThisFieldOriginsFromValue(
             const llvm::Value* value, const llvm::Function& F, const llvm::DataLayout& DL,
@@ -1016,9 +851,9 @@ namespace ctrace::stack::analysis
             return thisFieldCandidates.begin()->second;
         }
 
-        static StorageKey resolveHandleStorage(const llvm::Value* handleValue,
-                                               const llvm::Function& F, const llvm::DataLayout& DL,
-                                               const MethodClassInfo& methodInfo)
+        StorageKey resolveHandleStorage(const llvm::Value* handleValue, const llvm::Function& F,
+                                        const llvm::DataLayout& DL,
+                                        const MethodClassInfo& methodInfo)
         {
             if (!handleValue)
                 return {};
@@ -1150,7 +985,7 @@ namespace ctrace::stack::analysis
             return false;
         }
 
-        static const llvm::Function* resolveDirectCallee(const llvm::CallBase& CB);
+        const llvm::Function* resolveDirectCallee(const llvm::CallBase& CB);
         static const llvm::Instruction* firstInstructionAnchor(const llvm::Function& F);
 
         static bool summaryStorageScopeAllowed(const StorageKey& storage)
@@ -1177,6 +1012,8 @@ namespace ctrace::stack::analysis
                 return ResourceSummaryAction::AcquireRet;
             case RuleAction::ReleaseArg:
                 return ResourceSummaryAction::ReleaseArg;
+            case RuleAction::NoEffect:
+                break; // never summarised as an effect
             }
             llvm::report_fatal_error("Unhandled RuleAction in toPublicSummaryAction");
         }
@@ -2198,7 +2035,7 @@ namespace ctrace::stack::analysis
             return out;
         }
 
-        static const llvm::Function* resolveDirectCallee(const llvm::CallBase& CB)
+        const llvm::Function* resolveDirectCallee(const llvm::CallBase& CB)
         {
             if (const llvm::Function* callee = CB.getCalledFunction())
                 return callee;
@@ -2264,7 +2101,249 @@ namespace ctrace::stack::analysis
             }
             return functionSummaries;
         }
-    } // namespace
+        StorageKey resolveArgPathStorage(const llvm::CallBase& CB, unsigned argIndex,
+                                         std::uint64_t offset, bool viaPointerSlot,
+                                         const llvm::Function& caller, const llvm::DataLayout& DL,
+                                         const MethodClassInfo& callerMethodInfo)
+        {
+            ParamLifetimeEffect effect;
+            effect.action = RuleAction::AcquireOut;
+            effect.argIndex = argIndex;
+            effect.offset = offset;
+            effect.viaPointerSlot = viaPointerSlot;
+            return mapSummaryEffectToCallerStorage(effect, CB, caller, callerMethodInfo, DL,
+                                                   /*allowPointerSlotFallback=*/false, nullptr);
+        }
+    } // namespace lifetime_detail
+
+    using namespace lifetime_detail;
+
+    bool ruleMatchesFunction(const ResourceRule& rule, const llvm::Function& callee)
+    {
+        const std::string calleeName = callee.getName().str();
+        const std::string demangled = ctrace_tools::demangle(calleeName.c_str());
+        std::string demangledBase = demangled;
+        if (const std::size_t pos = demangledBase.find('('); pos != std::string::npos)
+            demangledBase = demangledBase.substr(0, pos);
+
+        const llvm::StringRef pattern(rule.functionPattern);
+        const bool hasGlob =
+            pattern.contains('*') || pattern.contains('?') || pattern.contains('[');
+        if (!hasGlob)
+        {
+            return rule.functionPattern == calleeName || rule.functionPattern == demangled ||
+                   rule.functionPattern == demangledBase;
+        }
+
+        return globMatches(pattern, calleeName) || globMatches(pattern, demangled) ||
+               globMatches(pattern, demangledBase);
+    }
+
+    bool parseResourceModel(const std::string& path, ResourceModel& out, std::string& error)
+    {
+        std::ifstream in(path);
+        if (!in)
+        {
+            error = "cannot open model file: " + path;
+            return false;
+        }
+
+        out.rules.clear();
+        std::string line;
+        unsigned lineNo = 0;
+        while (std::getline(in, line))
+        {
+            ++lineNo;
+            const std::size_t hashPos = line.find('#');
+            if (hashPos != std::string::npos)
+                line.erase(hashPos);
+            line = trimCopy(line);
+            if (line.empty())
+                continue;
+
+            std::istringstream iss(line);
+            std::vector<std::string> tokens;
+            std::string tok;
+            while (iss >> tok)
+                tokens.push_back(tok);
+            if (tokens.empty())
+                continue;
+
+            ResourceRule rule;
+            // Optional trailing qualifier on any rule.
+            if (tokens.size() >= 2 && tokens.back().rfind("if_ret", 0) == 0)
+            {
+                static const std::pair<const char*, RuleCondition> kQualifiers[] = {
+                    {"if_ret==0", RuleCondition::RetEqZero},
+                    {"if_ret!=0", RuleCondition::RetNeZero},
+                    {"if_ret>=0", RuleCondition::RetGeZero},
+                    {"if_ret<0", RuleCondition::RetLtZero},
+                    {"if_ret==null", RuleCondition::RetEqNull},
+                    {"if_ret!=null", RuleCondition::RetNeNull},
+                };
+                bool known = false;
+                for (const auto& [text, condition] : kQualifiers)
+                {
+                    if (tokens.back() == text)
+                    {
+                        rule.condition = condition;
+                        known = true;
+                    }
+                }
+                if (!known)
+                {
+                    error = "unknown qualifier '" + tokens.back() + "' at line " +
+                            std::to_string(lineNo);
+                    return false;
+                }
+                tokens.pop_back();
+            }
+            if (tokens[0] == "acquire_out")
+            {
+                if (tokens.size() != 4)
+                {
+                    error = "invalid acquire_out rule at line " + std::to_string(lineNo);
+                    return false;
+                }
+                unsigned argIndex = 0;
+                if (!parseUnsignedIndex(tokens[2], argIndex))
+                {
+                    error = "invalid argument index at line " + std::to_string(lineNo);
+                    return false;
+                }
+                rule.action = RuleAction::AcquireOut;
+                rule.functionPattern = tokens[1];
+                rule.argIndex = argIndex;
+                rule.resourceKind = tokens[3];
+            }
+            else if (tokens[0] == "acquire_ret")
+            {
+                if (tokens.size() != 3)
+                {
+                    error = "invalid acquire_ret rule at line " + std::to_string(lineNo);
+                    return false;
+                }
+                rule.action = RuleAction::AcquireRet;
+                rule.functionPattern = tokens[1];
+                rule.argIndex = 0;
+                rule.resourceKind = tokens[2];
+            }
+            else if (tokens[0] == "noeffect")
+            {
+                if (tokens.size() != 2)
+                {
+                    error = "invalid noeffect rule at line " + std::to_string(lineNo);
+                    return false;
+                }
+                rule.action = RuleAction::NoEffect;
+                rule.functionPattern = tokens[1];
+            }
+            else if (tokens[0] == "release_arg")
+            {
+                if (tokens.size() != 4)
+                {
+                    error = "invalid release_arg rule at line " + std::to_string(lineNo);
+                    return false;
+                }
+                unsigned argIndex = 0;
+                if (!parseUnsignedIndex(tokens[2], argIndex))
+                {
+                    error = "invalid argument index at line " + std::to_string(lineNo);
+                    return false;
+                }
+                rule.action = RuleAction::ReleaseArg;
+                rule.functionPattern = tokens[1];
+                rule.argIndex = argIndex;
+                rule.resourceKind = tokens[3];
+            }
+            else
+            {
+                error = "unknown rule action '" + tokens[0] + "' at line " + std::to_string(lineNo);
+                return false;
+            }
+
+            out.rules.push_back(std::move(rule));
+        }
+
+        return true;
+    }
+
+    static bool exitTransformerEquals(const ownership::ExitTransformer& a,
+                                      const ownership::ExitTransformer& b)
+    {
+        return a.present == b.present && a.returns == b.returns && a.outArgs == b.outArgs &&
+               a.params == b.params && a.pointeeParams == b.pointeeParams;
+    }
+
+    bool ownershipSummaryEquals(const ownership::FunctionOwnershipSummary& lhs,
+                                const ownership::FunctionOwnershipSummary& rhs)
+    {
+        return lhs.incomplete == rhs.incomplete && exitTransformerEquals(lhs.normal, rhs.normal) &&
+               exitTransformerEquals(lhs.exceptional, rhs.exceptional);
+    }
+
+    /// Transformer summaries of every analysed definition, iterated to a fixpoint so that
+    /// callees analysed later (or recursive ones) are seen by their callers. External
+    /// summaries (other TUs) seed the lookup and are never recomputed here.
+    static std::unordered_map<const llvm::Function*, ownership::FunctionOwnershipSummary>
+    computeOwnershipSummaries(llvm::Module& mod, const ResourceModel& model,
+                              const std::function<bool(const llvm::Function&)>& shouldAnalyze,
+                              const ResourceSummaryIndex* externalSummaries)
+    {
+        using ownership::FunctionOwnershipSummary;
+        std::unordered_map<const llvm::Function*, FunctionOwnershipSummary> summaries;
+        std::unordered_map<std::string, const FunctionOwnershipSummary*> externalByName;
+        if (externalSummaries)
+        {
+            for (const auto& [name, fn] : externalSummaries->functions)
+                externalByName.emplace(name, &fn.ownership);
+        }
+
+        std::vector<llvm::Function*> functions;
+        for (llvm::Function& F : mod)
+        {
+            if (!F.isDeclaration() && shouldAnalyze(F))
+                functions.push_back(&F);
+        }
+        // Start from "no effect" transformers so a recursive callee is optimistic first
+        // and widens monotonically.
+        for (llvm::Function* F : functions)
+            summaries[F] = FunctionOwnershipSummary{};
+
+        const ownership::SummaryLookup lookup{
+            [&](const llvm::Function& callee) -> const FunctionOwnershipSummary*
+            {
+                if (const auto it = summaries.find(&callee); it != summaries.end())
+                    return &it->second;
+                const auto ext = externalByName.find(
+                    ctrace_tools::canonicalizeMangledName(callee.getName().str()));
+                return ext == externalByName.end() ? nullptr : ext->second;
+            }};
+
+        const llvm::DataLayout& DL = mod.getDataLayout();
+        constexpr unsigned kMaxRounds = 16;
+        for (unsigned round = 0; round < kMaxRounds; ++round)
+        {
+            bool changed = false;
+            for (llvm::Function* F : functions)
+            {
+                const ownership::CollectedFunction collected =
+                    ownership::collectOwnershipFacts(*F, model, lookup, DL);
+                FunctionOwnershipSummary next = ownership::computeSummary(collected.facts);
+                if (!ownershipSummaryEquals(summaries[F], next))
+                {
+                    summaries[F] = std::move(next);
+                    changed = true;
+                }
+            }
+            if (!changed)
+                return summaries;
+        }
+        // No fixpoint within budget: nothing computed here may be trusted.
+        for (auto& [F, summary] : summaries)
+            summary.incomplete = true;
+        return summaries;
+    }
 
     ResourceSummaryIndex buildResourceLifetimeSummaryIndex(
         llvm::Module& mod, const std::function<bool(const llvm::Function&)>& shouldAnalyze,
@@ -2286,7 +2365,18 @@ namespace ctrace::stack::analysis
         const auto externalMap = importExternalSummaryMap(externalSummaries);
         const auto summaries = computeFunctionLifetimeSummaries(
             mod, model, shouldAnalyze, externalMap.empty() ? nullptr : &externalMap);
-        return exportSummaryIndexForModule(mod, shouldAnalyze, summaries);
+        index = exportSummaryIndexForModule(mod, shouldAnalyze, summaries);
+
+        const auto ownershipSummaries =
+            computeOwnershipSummaries(mod, model, shouldAnalyze, externalSummaries);
+        for (const auto& [F, summary] : ownershipSummaries)
+        {
+            if (F->hasLocalLinkage())
+                continue;
+            index.functions[ctrace_tools::canonicalizeMangledName(F->getName().str())].ownership =
+                summary;
+        }
+        return index;
     }
 
     bool mergeResourceSummaryIndex(ResourceSummaryIndex& dst, const ResourceSummaryIndex& src)
@@ -2300,6 +2390,11 @@ namespace ctrace::stack::analysis
                 dst.functions.emplace(entry.first, entry.second);
                 changed = true;
                 continue;
+            }
+            if (!ownershipSummaryEquals(it->second.ownership, entry.second.ownership))
+            {
+                it->second.ownership = entry.second.ownership;
+                changed = true;
             }
 
             std::unordered_set<std::string> existingKeys;
@@ -2410,7 +2505,7 @@ namespace ctrace::stack::analysis
 
         std::sort(leftKeys.begin(), leftKeys.end());
         std::sort(rightKeys.begin(), rightKeys.end());
-        return leftKeys == rightKeys;
+        return leftKeys == rightKeys && ownershipSummaryEquals(lhs.ownership, rhs.ownership);
     }
 
     std::unordered_set<std::string>
@@ -2440,6 +2535,176 @@ namespace ctrace::stack::analysis
         return changed;
     }
 
+    namespace
+    {
+        /// Runs the ownership engine on one function and turns its stabilised states into
+        /// MissingRelease / ReferenceLost / AnalysisIncomplete issues (spec §8).
+        void analyzeMissingReleaseWithEngine(const llvm::Function& F, const ResourceModel& model,
+                                             const ownership::SummaryLookup& summaries,
+                                             const llvm::DataLayout& DL,
+                                             std::vector<ResourceLifetimeIssue>& issues)
+        {
+            using namespace ownership;
+
+            const CollectedFunction collected = collectOwnershipFacts(F, model, summaries, DL);
+            if (collected.siteInstructions.empty())
+                return; // nothing acquired here: nothing to leak
+
+            const AbstractState entry = AbstractState::entry(2u * collected.facts.siteCount,
+                                                             collected.facts.locations.size());
+            const OwnershipResult result = solve(collected.facts, entry);
+
+            const auto issueFor = [&](ResourceId r, ResourceLifetimeIssueKind kind)
+            {
+                const std::uint32_t site = r / 2u;
+                ResourceLifetimeIssue issue;
+                issue.funcName = F.getName().str();
+                issue.resourceKind = collected.siteKinds[site];
+                issue.inst = collected.siteInstructions[site];
+                issue.kind = kind;
+                // The handle name is the first named slot the resource is stored into
+                // (an acquire_ret value is stored right after the call at -O0).
+                for (std::uint32_t block = 0;
+                     block < collected.facts.blocks.size() && issue.handleName.empty(); ++block)
+                {
+                    replay(collected.facts, result, block,
+                           [&](std::uint32_t, const AbstractState&, const AbstractState& after)
+                           {
+                               if (!issue.handleName.empty())
+                                   return;
+                               for (LocationId loc = 0; loc < after.locations.size(); ++loc)
+                               {
+                                   if (collected.locationIsSlot[loc] &&
+                                       (after.locations[loc].holds(newInstanceOf(site)) ||
+                                        after.locations[loc].holds(oldInstancesOf(site))))
+                                   {
+                                       issue.handleName = collected.locationNames[loc];
+                                       return;
+                                   }
+                               }
+                           });
+                }
+                if (issue.handleName.empty())
+                {
+                    const llvm::Instruction* acquiring = collected.siteInstructions[site];
+                    issue.handleName = acquiring && acquiring->hasName()
+                                           ? acquiring->getName().str()
+                                           : std::string("<temporary>");
+                }
+                return issue;
+            };
+
+            if (result.incomplete)
+            {
+                ResourceLifetimeIssue issue =
+                    issueFor(0, ResourceLifetimeIssueKind::AnalysisIncomplete);
+                issues.push_back(std::move(issue));
+                return;
+            }
+
+            const std::size_t resourceCount = entry.resources.size();
+            // One issue per acquisition site (spec §8): both instances of a site share it.
+            std::vector<bool> reportedSite(collected.facts.siteCount, false);
+            const auto reported = [&](ResourceId r) -> std::vector<bool>::reference
+            { return reportedSite[r / 2u]; };
+
+            // Only storage keeps a resource reachable. An SSA value is a conduit: at -O0 a
+            // release always reloads the slot, so a temporary left over from an earlier
+            // test cannot be used to release anything.
+            const auto referencedElsewhere = [&collected](const AbstractState& s, ResourceId r)
+            {
+                for (LocationId loc = 0; loc < s.locations.size(); ++loc)
+                    if (collected.locationIsSlot[loc] && s.locations[loc].holds(r))
+                        return true;
+                return false;
+            };
+
+            // Reference loss first (spec §8: priority over exit leaks), in block/event order.
+            for (std::uint32_t block = 0; block < collected.facts.blocks.size(); ++block)
+            {
+                replay(collected.facts, result, block,
+                       [&](std::uint32_t eventIndex, const AbstractState& before,
+                           const AbstractState& after)
+                       {
+                           const Event& e = collected.facts.blocks[block].events[eventIndex];
+                           if (e.kind != Event::Kind::Acquire && e.kind != Event::Kind::Copy &&
+                               e.kind != Event::Kind::Overwrite)
+                               return;
+                           for (const ResourceId r : before.locations[e.dst].resources)
+                           {
+                               // After an acquisition the previous instance is renamed to
+                               // the site's "older" resource; follow it.
+                               ResourceId now = r;
+                               if (e.kind == Event::Kind::Acquire && r == newInstanceOf(e.site))
+                                   now = oldInstancesOf(e.site);
+                               if (after.locations[e.dst].holds(now) ||
+                                   referencedElsewhere(after, now))
+                                   continue;
+                               if (!after.resources[now].has(OwnState::Owned) ||
+                                   after.uncertain[now] || reported(now))
+                                   continue;
+                               reported(now) = true;
+                               ResourceLifetimeIssue issue =
+                                   issueFor(now, ResourceLifetimeIssueKind::ReferenceLost);
+                               issue.certain = before.resources[r].isOnly(OwnState::Owned) &&
+                                               before.locations[e.dst].isExactly(r) && e.strong;
+                               issue.relatedInst = collected.eventInstructions[e.instructionIndex];
+                               issues.push_back(std::move(issue));
+                           }
+                       });
+            }
+
+            // Exit leaks: Owned on some exit is a possible leak; Owned alone on every exit
+            // (with at least one exit) is the historical "not released in this function".
+            // "Certain" ignores exits taken before the acquisition (state {NotOwned} alone,
+            // e.g. the acquiring call itself unwinding): they leak nothing.
+            std::vector<bool> ownedOnSomeExit(resourceCount, false);
+            std::vector<bool> ownedOnlyOnEveryExit(resourceCount, true);
+            std::vector<bool> uncertainOnSomeExit(resourceCount, false);
+            std::vector<const llvm::Instruction*> firstLeakingExit(resourceCount, nullptr);
+            for (const ExitRecord& exit : result.exits)
+            {
+                for (ResourceId r = 0; r < resourceCount; ++r)
+                {
+                    const StateSet st = exit.state.resources[r];
+                    uncertainOnSomeExit[r] = uncertainOnSomeExit[r] || exit.state.uncertain[r];
+                    if (st.has(OwnState::Owned))
+                    {
+                        ownedOnSomeExit[r] = true;
+                        if (!firstLeakingExit[r])
+                        {
+                            const std::vector<Event>& events =
+                                exit.edge == ExitRecord::kNoEdge
+                                    ? collected.facts.blocks[exit.block].events
+                                    : collected.facts.edges[exit.edge].events;
+                            const Event& e = events[exit.eventIndex];
+                            firstLeakingExit[r] = collected.eventInstructions[e.instructionIndex];
+                        }
+                    }
+                    // NotOwned means "no obligation ever existed on this path" (a
+                    // conditional contract that did not acquire): it never weakens the
+                    // verdict about the resource when it does exist.
+                    StateSet owning = st;
+                    owning.bits &=
+                        static_cast<std::uint8_t>(~StateSet::of(OwnState::NotOwned).bits);
+                    if (!owning.empty() && !owning.isOnly(OwnState::Owned))
+                        ownedOnlyOnEveryExit[r] = false;
+                }
+            }
+            for (ResourceId r = 0; r < resourceCount; ++r)
+            {
+                if (!ownedOnSomeExit[r] || uncertainOnSomeExit[r] || reported(r))
+                    continue;
+                reported(r) = true;
+                ResourceLifetimeIssue issue =
+                    issueFor(r, ResourceLifetimeIssueKind::MissingRelease);
+                issue.certain = ownedOnlyOnEveryExit[r];
+                issue.relatedInst = firstLeakingExit[r];
+                issues.push_back(std::move(issue));
+            }
+        }
+    } // namespace
+
     std::vector<ResourceLifetimeIssue> analyzeResourceLifetime(
         llvm::Module& mod, const std::function<bool(const llvm::Function&)>& shouldAnalyze,
         const std::string& modelPath, const ResourceSummaryIndex* externalSummaries)
@@ -2462,6 +2727,26 @@ namespace ctrace::stack::analysis
         std::unordered_map<const llvm::Function*, FunctionLifetimeSummary> functionSummaries =
             computeFunctionLifetimeSummaries(mod, model, shouldAnalyze,
                                              externalMap.empty() ? nullptr : &externalMap);
+
+        const auto ownershipSummaries =
+            computeOwnershipSummaries(mod, model, shouldAnalyze, externalSummaries);
+        std::unordered_map<std::string, const ownership::FunctionOwnershipSummary*>
+            externalOwnership;
+        if (externalSummaries)
+        {
+            for (const auto& [name, fn] : externalSummaries->functions)
+                externalOwnership.emplace(name, &fn.ownership);
+        }
+        const ownership::SummaryLookup ownershipLookup{
+            [&](const llvm::Function& callee) -> const ownership::FunctionOwnershipSummary*
+            {
+                if (const auto it = ownershipSummaries.find(&callee);
+                    it != ownershipSummaries.end())
+                    return &it->second;
+                const auto ext = externalOwnership.find(
+                    ctrace_tools::canonicalizeMangledName(callee.getName().str()));
+                return ext == externalOwnership.end() ? nullptr : ext->second;
+            }};
 
         std::unordered_map<std::string, ClassLifecycleSummary> classSummaries;
 
@@ -2820,6 +3105,8 @@ namespace ctrace::stack::analysis
 
                         switch (rule.action)
                         {
+                        case RuleAction::NoEffect:
+                            break;
                         case RuleAction::AcquireOut:
                         {
                             if (rule.argIndex >= CB->arg_size())
@@ -2978,34 +3265,9 @@ namespace ctrace::stack::analysis
                 }
             }
 
-            for (const auto& entry : localStates)
-            {
-                const LocalHandleState& state = entry.second;
-                if (state.storage.scope != StorageScope::Local)
-                    continue;
-                if (state.acquires <= 0)
-                    continue;
-                if (state.releases >= state.acquires)
-                    continue;
-                if (state.escapesViaReturn)
-                    continue;
-                if (state.storage.localAlloca &&
-                    localAddressEscapesToUnmodeledCall(
-                        F, *state.storage.localAlloca, model, functionSummaries,
-                        externalMap.empty() ? nullptr : &externalMap, DL, shouldAnalyze))
-                {
-                    continue;
-                }
-
-                ResourceLifetimeIssue issue;
-                issue.funcName = state.funcName;
-                issue.resourceKind = state.resourceKind;
-                issue.handleName = state.storage.displayName.empty() ? std::string("<unknown>")
-                                                                     : state.storage.displayName;
-                issue.inst = state.firstAcquireInst;
-                issue.kind = ResourceLifetimeIssueKind::MissingRelease;
-                issues.push_back(std::move(issue));
-            }
+            // MissingRelease comes from the ownership engine (spec §8); the counters
+            // above keep serving the other rules.
+            analyzeMissingReleaseWithEngine(F, model, ownershipLookup, DL, issues);
 
             if (methodInfo.isDtor && !methodInfo.className.empty())
             {

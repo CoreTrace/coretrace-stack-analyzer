@@ -1225,6 +1225,25 @@ namespace ctrace::stack::analyzer
         }
     }
 
+    namespace
+    {
+        /// "↳ <label> line N" when `related` has a source line distinct from `anchor`'s.
+        /// Nothing is invented when the location is missing or is the anchor's own.
+        void appendRelatedLine(std::ostringstream& body, const llvm::Instruction* related,
+                               const llvm::Instruction* anchor, const char* label)
+        {
+            if (!related)
+                return;
+            const ResolvedLocation loc = resolveFromInstruction(related);
+            if (!loc.hasLocation)
+                return;
+            const ResolvedLocation anchorLoc = resolveFromInstruction(anchor);
+            if (anchorLoc.hasLocation && anchorLoc.line == loc.line)
+                return;
+            body << kDiagIndentArrow << label << " line " << loc.line << "\n";
+        }
+    } // namespace
+
     void
     appendResourceLifetimeDiagnostics(AnalysisResult& result,
                                       const std::vector<analysis::ResourceLifetimeIssue>& issues)
@@ -1243,15 +1262,52 @@ namespace ctrace::stack::analyzer
             switch (issue.kind)
             {
             case analysis::ResourceLifetimeIssueKind::MissingRelease:
+            {
                 builder.severity(DiagnosticSeverity::Warning)
                     .ruleId("ResourceLifetime.MissingRelease")
                     .cwe("CWE-772");
                 body << "\t" << prefixForSeverity(DiagnosticSeverity::Warning)
                      << " potential resource leak: '" << issue.resourceKind
-                     << "' acquired in handle '" << issue.handleName
-                     << "' is not released in this function\n";
+                     << "' acquired in handle '" << issue.handleName << "'";
+                if (issue.certain)
+                {
+                    body << " is not released in this function\n";
+                    body << kDiagIndentArrow
+                         << "no matching release call was found for the tracked handle\n";
+                }
+                else
+                {
+                    body << " may leave the function without being released\n";
+                    body << kDiagIndentArrow
+                         << "released on some paths only; the obligation is still open on "
+                            "at least one exit\n";
+                    appendRelatedLine(body, issue.relatedInst, issue.inst, "function exit");
+                }
+                break;
+            }
+            case analysis::ResourceLifetimeIssueKind::ReferenceLost:
+            {
+                builder.severity(DiagnosticSeverity::Warning)
+                    .ruleId("ResourceLifetime.MissingRelease")
+                    .cwe("CWE-772");
+                body << "\t" << prefixForSeverity(DiagnosticSeverity::Warning)
+                     << " potential resource leak: '" << issue.resourceKind
+                     << "' acquired in handle '" << issue.handleName << "'"
+                     << (issue.certain ? " is overwritten while still owned\n"
+                                       : " may be overwritten while still owned\n");
                 body << kDiagIndentArrow
-                     << "no matching release call was found for the tracked handle\n";
+                     << "no other reference keeps the previous resource reachable\n";
+                appendRelatedLine(body, issue.relatedInst, issue.inst, "overwritten at");
+                break;
+            }
+            case analysis::ResourceLifetimeIssueKind::AnalysisIncomplete:
+                builder.severity(DiagnosticSeverity::Info)
+                    .ruleId("ResourceLifetime.MissingRelease")
+                    .confidence(-1.0);
+                body << "\t" << prefixForSeverity(DiagnosticSeverity::Info)
+                     << " resource ownership analysis did not converge in this function "
+                        "(fixpoint budget exhausted)\n";
+                body << kDiagIndentArrow << "no resource leak was computed for this function\n";
                 break;
             case analysis::ResourceLifetimeIssueKind::DoubleRelease:
                 builder.severity(DiagnosticSeverity::Error)

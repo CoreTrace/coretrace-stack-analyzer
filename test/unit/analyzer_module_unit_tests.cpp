@@ -6,6 +6,9 @@
 #include "analysis/InputPipeline.hpp"
 #include "analysis/IntRanges.hpp"
 #include "analysis/Reachability.hpp"
+#include "analysis/ResourceLifetimeAnalysis.hpp"
+#include "analysis/ResourceModel.hpp"
+#include "analysis/ownership/ResourceFactCollector.hpp"
 #include "analysis/StackBufferAnalysis.hpp"
 #include "analysis/UninitializedVarAnalysis.hpp"
 #include "analyzer/DiagnosticEmitter.hpp"
@@ -811,6 +814,345 @@ namespace
 
         return report.failures == 0;
     }
+    bool testResourceModelConditions(TestReport& report)
+    {
+        using namespace ctrace::stack::analysis;
+
+        const auto parseText = [](const std::string& text, ResourceModel& model, std::string& error)
+        {
+            char path[] = "/tmp/ctrace-model-XXXXXX";
+            const int fd = mkstemp(path);
+            if (fd < 0)
+                return false;
+            (void)write(fd, text.data(), text.size());
+            close(fd);
+            const bool ok = parseResourceModel(path, model, error);
+            unlink(path);
+            return ok;
+        };
+
+        ResourceModel model;
+        std::string error;
+        const bool ok = parseText("acquire_out f 0 K if_ret==0\n"
+                                  "acquire_ret g K if_ret!=null\n"
+                                  "release_arg h 0 K\n"
+                                  "release_arg i 1 K if_ret>=0\n",
+                                  model, error);
+        report.expect(ok && model.rules.size() == 4,
+                      "ResourceModel: qualified and unqualified rules parse: " + error);
+        if (ok && model.rules.size() == 4)
+        {
+            report.expect(model.rules[0].condition == RuleCondition::RetEqZero,
+                          "ResourceModel: if_ret==0");
+            report.expect(model.rules[1].condition == RuleCondition::RetNeNull,
+                          "ResourceModel: if_ret!=null");
+            report.expect(model.rules[2].condition == RuleCondition::Always,
+                          "ResourceModel: no qualifier means Always");
+            report.expect(model.rules[3].condition == RuleCondition::RetGeZero &&
+                              model.rules[3].argIndex == 1,
+                          "ResourceModel: if_ret>=0 keeps the argument index");
+        }
+
+        ResourceModel bad;
+        std::string badError;
+        const bool badOk = parseText("acquire_out f 0 K if_ret=0\n", bad, badError);
+        report.expect(!badOk && badError.find("line 1") != std::string::npos,
+                      "ResourceModel: an unknown qualifier is an error naming the line");
+        return report.failures == 0;
+    }
+    bool testOwnershipFactCollector(const std::filesystem::path& repoRoot, TestReport& report)
+    {
+        using namespace ctrace::stack::analysis;
+        using namespace ctrace::stack::analysis::ownership;
+        using Kind = Event::Kind;
+
+        const ctrace::stack::AnalysisConfig config;
+        LoadedModule loaded;
+        std::string loadError;
+        const std::filesystem::path source = repoRoot / "test/unit/ownership_collector_input.c";
+        if (!loadModuleFromSource(source, config, loaded, loadError))
+        {
+            report.expect(false, "OwnershipCollector setup: failed to load module: " + loadError);
+            return false;
+        }
+        ResourceModel model;
+        std::string modelError;
+        if (!parseResourceModel((repoRoot / "test/unit/ownership_collector_model.txt").string(),
+                                model, modelError))
+        {
+            report.expect(false, "OwnershipCollector setup: model: " + modelError);
+            return false;
+        }
+        const SummaryLookup noSummaries{[](const llvm::Function&) { return nullptr; }};
+
+        // Kinds of all block events in block order, then edge events, as a flat list.
+        const auto kindsOf = [&](const char* name, std::vector<Kind>& blockKinds,
+                                 std::vector<Kind>& edgeKinds) -> bool
+        {
+            llvm::Function* fn = loaded.module->getFunction(name);
+            if (!fn)
+                return false;
+            const CollectedFunction c =
+                collectOwnershipFacts(*fn, model, noSummaries, loaded.module->getDataLayout());
+            for (const Block& b : c.facts.blocks)
+                for (const Event& e : b.events)
+                    blockKinds.push_back(e.kind);
+            for (const Edge& e : c.facts.edges)
+                for (const Event& ev : e.events)
+                {
+                    blockKinds.push_back(ev.kind);
+                    edgeKinds.push_back(ev.kind);
+                }
+            return true;
+        };
+        const auto count = [](const std::vector<Kind>& v, Kind k)
+        { return std::count(v.begin(), v.end(), k); };
+
+        {
+            std::vector<Kind> blocks, edges;
+            report.expect(kindsOf("early_return", blocks, edges),
+                          "OwnershipCollector: early_return collected");
+            report.expect(count(blocks, Kind::Acquire) == 1 && count(blocks, Kind::Release) == 1,
+                          "OwnershipCollector: early_return has one acquire and one release");
+            report.expect(count(blocks, Kind::Exit) == 2 && count(blocks, Kind::Return) == 0,
+                          "OwnershipCollector: the merged int ret is split into one exit per "
+                          "incoming path, with no handle return");
+            report.expect(
+                count(blocks, Kind::UnknownCall) == 0 && count(blocks, Kind::AddressEscape) == 0,
+                "OwnershipCollector: check() without pointer args is not an unknown call");
+        }
+        {
+            std::vector<Kind> blocks, edges;
+            report.expect(kindsOf("alias_keep", blocks, edges),
+                          "OwnershipCollector: alias_keep collected");
+            report.expect(count(blocks, Kind::Acquire) == 2 && count(blocks, Kind::Release) == 2,
+                          "OwnershipCollector: alias_keep has two acquires and two releases");
+            report.expect(count(blocks, Kind::Copy) >= 1,
+                          "OwnershipCollector: saved = h is a copy between locations");
+        }
+        {
+            llvm::Function* fn = loaded.module->getFunction("select_return");
+            report.expect(fn != nullptr, "OwnershipCollector: select_return exists");
+            if (fn)
+            {
+                const CollectedFunction c =
+                    collectOwnershipFacts(*fn, model, noSummaries, loaded.module->getDataLayout());
+                // `c ? h : 0` is a phi at -O0: one incoming edge copies h, the other
+                // writes null; both target the phi's location so the join keeps both.
+                std::optional<LocationId> copyDst;
+                std::optional<LocationId> nullDst;
+                for (const Edge& e : c.facts.edges)
+                    for (const Event& ev : e.events)
+                    {
+                        if (ev.kind == Event::Kind::Copy)
+                            copyDst = ev.dst;
+                        if (ev.kind == Event::Kind::Overwrite && !ev.unknownValue)
+                            nullDst = ev.dst;
+                    }
+                report.expect(copyDst && nullDst && *copyDst == *nullDst,
+                              "OwnershipCollector: phi keeps both alternatives on its edges");
+                report.expect(c.facts.siteCount == 1 && c.siteInstructions.size() == 1,
+                              "OwnershipCollector: acquire_ret is one acquisition site");
+            }
+        }
+        {
+            std::vector<Kind> blocks, edges;
+            report.expect(kindsOf("unknown_call", blocks, edges),
+                          "OwnershipCollector: unknown_call collected");
+            report.expect(count(blocks, Kind::UnknownCall) == 1,
+                          "OwnershipCollector: passing a handle to an unmodelled callee");
+            report.expect(count(blocks, Kind::AddressEscape) == 1,
+                          "OwnershipCollector: passing &h to an unmodelled callee");
+        }
+        return report.failures == 0;
+    }
+    bool testOwnershipCollectorExceptions(const std::filesystem::path& repoRoot, TestReport& report)
+    {
+        using namespace ctrace::stack::analysis;
+        using namespace ctrace::stack::analysis::ownership;
+        using Kind = Event::Kind;
+
+        const ctrace::stack::AnalysisConfig config;
+        LoadedModule loaded;
+        std::string loadError;
+        const std::filesystem::path source = repoRoot / "test/unit/ownership_collector_input.cpp";
+        if (!loadModuleFromSource(source, config, loaded, loadError))
+        {
+            report.expect(false, "OwnershipCollectorExceptions setup: failed to load module: " +
+                                     loadError);
+            return false;
+        }
+        ResourceModel model;
+        std::string modelError;
+        (void)parseResourceModel((repoRoot / "test/unit/ownership_collector_model.txt").string(),
+                                 model, modelError);
+        const SummaryLookup noSummaries{[](const llvm::Function&) { return nullptr; }};
+
+        const auto collect = [&](const char* mangledPrefix) -> std::optional<CollectedFunction>
+        {
+            for (llvm::Function& fn : *loaded.module)
+            {
+                if (fn.isDeclaration() || !fn.getName().starts_with(mangledPrefix))
+                    continue;
+                return collectOwnershipFacts(fn, model, noSummaries,
+                                             loaded.module->getDataLayout());
+            }
+            return std::nullopt;
+        };
+        // Position of the first event of `kind`, blocks then edges, or -1.
+        const auto firstIndex = [](const CollectedFunction& c, Kind kind, bool exceptional)
+        {
+            int index = 0;
+            const auto scan = [&](const std::vector<Event>& events)
+            {
+                for (const Event& e : events)
+                {
+                    if (e.kind == kind && (kind != Kind::Exit || e.exceptional == exceptional))
+                        return true;
+                    ++index;
+                }
+                return false;
+            };
+            for (const Block& b : c.facts.blocks)
+                if (scan(b.events))
+                    return index;
+            for (const Edge& e : c.facts.edges)
+                if (scan(e.events))
+                    return index;
+            return -1;
+        };
+
+        {
+            const auto c = collect("_Z14call_may_throwv");
+            report.expect(c.has_value(), "OwnershipCollectorExceptions: call_may_throw collected");
+            if (c)
+            {
+                const int exceptionalExit = firstIndex(*c, Kind::Exit, true);
+                const int release = firstIndex(*c, Kind::Release, false);
+                report.expect(exceptionalExit >= 0 && release >= 0 && exceptionalExit < release,
+                              "OwnershipCollectorExceptions: a may-throw call is an exceptional "
+                              "exit before the release");
+            }
+        }
+        {
+            const auto c = collect("_Z12call_nothrowv");
+            report.expect(c.has_value(), "OwnershipCollectorExceptions: call_nothrow collected");
+            if (c)
+                report.expect(firstIndex(*c, Kind::Exit, true) < 0,
+                              "OwnershipCollectorExceptions: a noexcept function has no "
+                              "exceptional exit");
+        }
+        {
+            const auto c = collect("_Z17invoke_with_catchv");
+            report.expect(c.has_value(),
+                          "OwnershipCollectorExceptions: invoke_with_catch collected");
+            if (c)
+            {
+                // The caught invoke's unwind edge lands in this function: it carries the
+                // callee's weakened effects, never an exit of this function.
+                const llvm::BasicBlock* unwindFrom = nullptr;
+                const llvm::BasicBlock* unwindTo = nullptr;
+                for (const llvm::BasicBlock* bb : c->blockOf)
+                    for (const llvm::Instruction& I : *bb)
+                        if (const auto* inv = llvm::dyn_cast<llvm::InvokeInst>(&I))
+                        {
+                            unwindFrom = inv->getParent();
+                            unwindTo = inv->getUnwindDest();
+                        }
+                bool exitOnUnwindEdge = false;
+                for (const Edge& edge : c->facts.edges)
+                {
+                    if (c->blockOf[edge.from] != unwindFrom || c->blockOf[edge.to] != unwindTo)
+                        continue;
+                    for (const Event& ev : edge.events)
+                        exitOnUnwindEdge = exitOnUnwindEdge || ev.kind == Kind::Exit;
+                }
+                report.expect(unwindFrom != nullptr && !exitOnUnwindEdge,
+                              "OwnershipCollectorExceptions: the invoke's unwind edge is not "
+                              "an exit of this function");
+                report.expect(firstIndex(*c, Kind::Release, false) >= 0,
+                              "OwnershipCollectorExceptions: the release after the catch is seen");
+            }
+        }
+        return report.failures == 0;
+    }
+    bool testOwnershipSummaryIndex(const std::filesystem::path& repoRoot, TestReport& report)
+    {
+        using namespace ctrace::stack::analysis;
+        using namespace ctrace::stack::analysis::ownership;
+
+        const ctrace::stack::AnalysisConfig config;
+        const auto owned = static_cast<std::size_t>(OwnState::Owned);
+        const std::string model = (repoRoot / "models/resource-lifetime/generic.txt").string();
+        const auto all = [](const llvm::Function&) { return true; };
+
+        {
+            LoadedModule loaded;
+            std::string loadError;
+            const std::filesystem::path source =
+                repoRoot / "test/resource-lifetime/cross-tu-release-sometimes-def.c";
+            if (!loadModuleFromSource(source, config, loaded, loadError))
+            {
+                report.expect(false, "OwnershipSummaryIndex setup: " + loadError);
+                return false;
+            }
+            const ResourceSummaryIndex index =
+                buildResourceLifetimeSummaryIndex(*loaded.module, all, model, nullptr);
+            const auto it = index.functions.find("release_sometimes_cross_tu");
+            const bool ok = it != index.functions.end() && it->second.ownership.normal.present &&
+                            it->second.ownership.normal.params.count(0) == 1;
+            report.expect(ok, "OwnershipSummaryIndex: the exported index carries a transformer");
+            if (ok)
+            {
+                const StateSet img = it->second.ownership.normal.params.at(0)[owned];
+                report.expect(img.has(OwnState::Owned) && img.has(OwnState::Released),
+                              "OwnershipSummaryIndex: release-sometimes maps Owned to "
+                              "{Owned, Released}");
+            }
+        }
+        {
+            LoadedModule loaded;
+            std::string loadError;
+            const std::filesystem::path source =
+                repoRoot / "test/resource-lifetime/cross-tu-release-always-def.c";
+            if (!loadModuleFromSource(source, config, loaded, loadError))
+            {
+                report.expect(false, "OwnershipSummaryIndex setup: " + loadError);
+                return false;
+            }
+            const ResourceSummaryIndex index =
+                buildResourceLifetimeSummaryIndex(*loaded.module, all, model, nullptr);
+            const auto it = index.functions.find("release_always_cross_tu");
+            report.expect(
+                it != index.functions.end() && it->second.ownership.normal.params.count(0) == 1 &&
+                    it->second.ownership.normal.params.at(0)[owned].isOnly(OwnState::Released),
+                "OwnershipSummaryIndex: release-always maps Owned to {Released}");
+        }
+        {
+            // The legacy out-param wrapper (props->out) is exported as a viaPointerSlot path.
+            LoadedModule loaded;
+            std::string loadError;
+            const std::filesystem::path source =
+                repoRoot / "test/resource-lifetime/cross-tu-wrapper-def.c";
+            if (!loadModuleFromSource(source, config, loaded, loadError))
+            {
+                report.expect(false, "OwnershipSummaryIndex setup: " + loadError);
+                return false;
+            }
+            const ResourceSummaryIndex index =
+                buildResourceLifetimeSummaryIndex(*loaded.module, all, model, nullptr);
+            const auto it = index.functions.find("create_wrapper_cross_tu");
+            bool viaSlot = false;
+            if (it != index.functions.end())
+                for (const auto& [path, fresh] : it->second.ownership.normal.outArgs)
+                    viaSlot = viaSlot || (path.argIndex == 0 && path.viaPointerSlot &&
+                                          fresh.certainty == Certainty::Guaranteed &&
+                                          fresh.kind == "GenericHandle");
+            report.expect(viaSlot, "OwnershipSummaryIndex: acquisition through props->out is a "
+                                   "guaranteed viaPointerSlot out-arg");
+        }
+        return report.failures == 0;
+    }
 } // namespace
 
 int main(int argc, char** argv)
@@ -833,6 +1175,10 @@ int main(int argc, char** argv)
     (void)testAssumeExternalFrameReplacesUnknown(repoRoot, report);
     (void)testUninitializedFixpointBudgetIsExplicit(repoRoot, report);
     (void)testProgramPointRanges(repoRoot, report);
+    (void)testResourceModelConditions(report);
+    (void)testOwnershipFactCollector(repoRoot, report);
+    (void)testOwnershipCollectorExceptions(repoRoot, report);
+    (void)testOwnershipSummaryIndex(repoRoot, report);
 
     if (report.failures == 0)
     {

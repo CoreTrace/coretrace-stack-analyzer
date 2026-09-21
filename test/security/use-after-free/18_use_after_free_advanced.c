@@ -111,6 +111,15 @@ int main(void)
 // escape-model: models/stack-escape/generic.txt
 // buffer-model: models/buffer-overflow/generic.txt
 
+// vuln_uaf_nested_if frees p under `if (gate1) if (gate2)` and again under
+// `if (!(gate1 && gate2))`, so every path does release it. The ownership engine
+// does not correlate predicates across separate branches (a declared limit of the
+// abstraction), so it reports the obligation as possibly open.
+// at line 22, column 22
+// [ !!Warn ] potential resource leak: 'HeapAlloc' acquired in handle 'p' may leave the function without being released
+// ↳ released on some paths only; the obligation is still open on at least one exit
+// ↳ function exit line 44
+
 // at line 30, column 24
 // [!!!Error] potential use-after-release: 'HeapAlloc' handle 'p' is used after a release in this function
 // ↳ a later dereference/call argument use may access invalid memory

@@ -87,10 +87,21 @@ int main(void)
 // escape-model: models/stack-escape/generic.txt
 // buffer-model: models/buffer-overflow/generic.txt
 
-// at line 28, column 23
-// [ !!Warn ] potential resource leak: 'HeapAlloc' acquired in handle 'p' is not released in this function
-// ↳ no matching release call was found for the tracked handle
+// The three CWE-401 sites of this file, each named by its mechanism.
 
-// at line 37, column 29
-// [ !!Warn ] potential resource leak: 'HeapAlloc' acquired in handle 'tmp' is not released in this function
-// ↳ no matching release call was found for the tracked handle
+// 9a: the early return on the length check leaves buf owned.
+// at line 16, column 24
+// [ !!Warn ] potential resource leak: 'HeapAlloc' acquired in handle 'buf' may leave the function without being released
+// ↳ released on some paths only; the obligation is still open on at least one exit
+// ↳ function exit line 28
+
+// 9b: the second malloc overwrites the slot, losing the first block.
+// at line 33, column 22
+// [ !!Warn ] potential resource leak: 'HeapAlloc' acquired in handle 'p' is overwritten while still owned
+// ↳ no other reference keeps the previous resource reachable
+// ↳ overwritten at line 36
+
+// 9c: each iteration overwrites the slot with a new block.
+// at line 46, column 28
+// [ !!Warn ] potential resource leak: 'HeapAlloc' acquired in handle 'tmp' may be overwritten while still owned
+// ↳ no other reference keeps the previous resource reachable

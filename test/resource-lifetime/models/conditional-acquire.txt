@@ -1,0 +1,3 @@
+# acquire_checked returns 0 on success and writes *out; on failure nothing is acquired.
+acquire_out acquire_checked 0 GenericHandle if_ret==0
+release_arg release_handle 0 GenericHandle

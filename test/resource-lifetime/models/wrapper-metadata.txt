@@ -1,0 +1,4 @@
+# Contracts used to check ownership metadata propagation through wrappers.
+acquire_out acquire_handle 0 GenericHandle
+acquire_ret try_acquire GenericHandle if_ret!=null
+release_arg release_handle 0 GenericHandle

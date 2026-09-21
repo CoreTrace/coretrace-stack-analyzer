@@ -554,13 +554,24 @@ Cross-TU summary behavior:
 Model format (`--resource-model=<path>`):
 
 ```text
-acquire_out <function-pattern> <out-arg-index> <resource-kind>
-acquire_ret <function-pattern> <resource-kind>
-release_arg <function-pattern> <arg-index> <resource-kind>
+acquire_out <function-pattern> <out-arg-index> <resource-kind> [<condition>]
+acquire_ret <function-pattern> <resource-kind>                 [<condition>]
+release_arg <function-pattern> <arg-index> <resource-kind>     [<condition>]
+noeffect    <function-pattern>
 ```
 
 Function pattern matching supports exact names and glob patterns (`*`, `?`, `[ ... ]`) and
 is applied to symbol names and demangled names.
+
+The optional `<condition>` makes the effect depend on the call's return value —
+`if_ret==0`, `if_ret!=0`, `if_ret>=0`, `if_ret<0`, `if_ret==null`, `if_ret!=null`. Without
+it the effect is unconditional. When the return value is tested by the caller, the branch
+that satisfies the condition owns the resource and the other one owns nothing; when it is
+not tested, both outcomes stay possible.
+
+`noeffect` states that the callee neither releases nor retains any pointer it receives, so
+passing a tracked handle to it changes nothing. The shipped model uses it for the libc
+string and I/O functions, whose variadic arguments carry no attributes LLVM could infer.
 
 Example model:
 

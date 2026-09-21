@@ -2161,6 +2161,121 @@ def check_resource_lifetime_cross_tu() -> bool:
     return True
 
 
+def check_ownership_cross_tu() -> bool:
+    """
+    Cross-TU transformer summaries: a wrapper that always releases clears the
+    obligation in its caller; one that releases only sometimes leaves a possible
+    leak. The second run must come from the summary cache and print the same.
+    """
+    print("=== Testing resource ownership cross-TU transformers ===")
+    model = "models/resource-lifetime/generic.txt"
+    fixtures = RUN_CONFIG.test_dir / "resource-lifetime"
+    ok = True
+    with tempfile.TemporaryDirectory(prefix="ct_ownership_cross_tu_") as tmp:
+        tmpdir = Path(tmp)
+        common = [
+            f"--resource-model={model}",
+            "--warnings-only",
+            f"--compile-ir-cache-dir={tmpdir / 'compile-ir-cache'}",
+            f"--resource-summary-cache-dir={tmpdir / 'resource-cache'}",
+        ]
+        cases = [
+            ("release-always", "use_release_always", False),
+            ("release-sometimes", "use_release_sometimes", True),
+        ]
+        for name, func, expect_leak in cases:
+            args = [str(fixtures / f"cross-tu-{name}-def.c"), str(fixtures / f"cross-tu-{name}-use.c")] + common
+            outputs = []
+            for run in ("first", "cached"):
+                result = run_analyzer_uncached(args)
+                if result.returncode != 0:
+                    print(f"  ❌ {name} ({run}) failed (code {result.returncode})")
+                    print((result.stdout or "") + (result.stderr or ""))
+                    return False
+                # stdout only: stderr carries a per-process log prefix.
+                outputs.append(result.stdout or "")
+            leak_text = "potential resource leak: 'GenericHandle' acquired in handle 'h'"
+            has_leak = leak_text in outputs[0]
+            if has_leak != expect_leak:
+                print(f"  ❌ {name}: leak {'expected' if expect_leak else 'not expected'} in {func}")
+                print(outputs[0])
+                ok = False
+            elif expect_leak and "may leave the function without being released" not in outputs[0]:
+                print(f"  ❌ {name}: the leak must be reported as a possible (partial) leak")
+                print(outputs[0])
+                ok = False
+            if outputs[0] != outputs[1]:
+                print(f"  ❌ {name}: cached run differs from the first run")
+                ok = False
+    if ok:
+        print("  ✅ resource ownership cross-TU transformers OK\n")
+    return ok
+
+
+def check_ownership_wrapper_metadata() -> bool:
+    """Wrappers preserve uncertainty and conditional acquisitions, including cached summaries."""
+    print("=== Testing ownership wrapper metadata ===")
+    fixtures = RUN_CONFIG.test_dir / "resource-lifetime"
+    definition = fixtures / "wrapper-metadata-def.c"
+    caller = fixtures / "wrapper-metadata-use.c"
+    model = fixtures / "models" / "wrapper-metadata.txt"
+    with tempfile.TemporaryDirectory(prefix="ct_wrapper_metadata_") as tmp:
+        tmpdir = Path(tmp)
+        local = tmpdir / "local.c"
+        local.write_text(definition.read_text() + "\n" + caller.read_text())
+        cache = tmpdir / "summaries"
+        common = [
+            f"--resource-model={model}", "--warnings-only",
+            f"--resource-summary-cache-dir={cache}",
+            f"--compile-ir-cache-dir={tmpdir / 'ir'}",
+        ]
+
+        def checked_output(inputs):
+            result = run_analyzer_uncached(inputs + common)
+            output = result.stdout or ""
+            if not expect_returncode_zero(result, output + (result.stderr or ""), "wrapper metadata run failed"):
+                return None
+            if output.count("potential resource leak:") != 1 or "Function: actual_leak " not in output:
+                fail_check("only actual_leak should report a leak; wrappers must preserve metadata", output)
+                return None
+            return output
+
+        if checked_output([str(local), "--no-resource-cross-tu"]) is None:
+            return False
+        inputs = [str(definition), str(caller)]
+        first = checked_output(inputs)
+        if first is None or checked_output(inputs) != first:
+            return fail_check("wrapper metadata differs after reading the summary cache")
+        cache_files = list(cache.glob("*.json"))
+        if not cache_files:
+            return fail_check("wrapper metadata summary cache was not populated")
+        summaries = [json.loads(path.read_text()) for path in cache_files]
+        functions = {fn["name"]: fn["ownership"] for summary in summaries for fn in summary["functions"]}
+        if not any(p["uncertainInputs"] & 2 for p in functions["unknown_wrapper"]["normal"]["params"]):
+            return fail_check("cached wrapper lost Owned-input uncertainty")
+        if not any(p["uncertainInputs"] & 2 for p in functions["unknown_slot_wrapper"]["normal"]["pointeeParams"]):
+            return fail_check("cached wrapper lost pointee uncertainty")
+        if functions["conditional_wrapper"]["normal"]["returns"] != "conditional":
+            return fail_check("cached wrapper lost its conditional acquisition")
+
+        # Old summaries have no uncertainty metadata and must be rebuilt, not reused.
+        for path, summary in zip(cache_files, summaries):
+            summary["schema"] = "resource-summary-cache-v3"
+            for fn in summary["functions"]:
+                for kind in ("normal", "exceptional"):
+                    exit_summary = fn["ownership"][kind]
+                    for param in exit_summary["params"] + exit_summary["pointeeParams"]:
+                        param.pop("uncertainInputs", None)
+            path.write_text(json.dumps(summary))
+        if checked_output(inputs) != first:
+            return fail_check("obsolete summaries changed the wrapper diagnostics")
+        # Intermediate fixpoint keys need not be reused; active keys must be rewritten.
+        if not any(json.loads(path.read_text())["schema"] == "resource-summary-cache-v4" for path in cache_files):
+            return fail_check("obsolete ownership summaries were not rebuilt")
+    print("  ✅ ownership wrapper metadata preserved locally, across TUs and in the cache\n")
+    return True
+
+
 def check_uninitialized_cross_tu() -> bool:
     """
     Regression: cross-TU uninitialized summaries must propagate indirect out-param
@@ -3096,6 +3211,20 @@ def check_analyzer_module_unit_tests() -> bool:
     print("  ✅ analyzer module unit tests OK")
     if output.strip():
         print(output.rstrip())
+
+    # The LLVM-free ownership engine has its own binary (built by the same option).
+    engine_bin = RUN_CONFIG.analyzer.parent / "ownership_engine_unit_tests"
+    if engine_bin.exists():
+        engine = subprocess.run([str(engine_bin)], capture_output=True, text=True)
+        engine_output = (engine.stdout or "") + (engine.stderr or "")
+        if engine.returncode != 0:
+            print(f"  ❌ ownership engine unit tests failed (code {engine.returncode})")
+            print(engine_output)
+            print()
+            return False
+        print("  ✅ ownership engine unit tests OK")
+        if engine_output.strip():
+            print(engine_output.rstrip())
     print()
     return True
 
@@ -3330,6 +3459,8 @@ def main() -> int:
         check_exclude_dir_filter,
         check_multi_tu_folder_analysis,
         check_resource_lifetime_cross_tu,
+        check_ownership_cross_tu,
+        check_ownership_wrapper_metadata,
         check_uninitialized_cross_tu,
         check_null_deref_nested_inter_tu,
         check_integer_overflow_advanced_inter_tu,

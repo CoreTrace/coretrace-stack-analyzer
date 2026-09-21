@@ -84,6 +84,8 @@ set(STACK_ANALYZER_SOURCES
     src/analysis/GlobalReadBeforeWriteAnalysis.cpp
     src/analysis/IRValueUtils.cpp
     src/analysis/IntRanges.cpp
+    src/analysis/ownership/OwnershipEngine.cpp
+    src/analysis/ownership/ResourceFactCollector.cpp
     src/analysis/IntegerOverflowAnalysis.cpp
     src/analysis/InputPipeline.cpp
     src/analysis/InvalidBaseReconstruction.cpp
@@ -284,6 +286,20 @@ if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
     add_test(
       NAME analyzer_module_unit_tests
       COMMAND stack_usage_analyzer_unit_tests ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+
+    add_executable(ownership_engine_unit_tests
+      test/unit/ownership_engine_unit_tests.cpp
+    )
+
+    target_link_libraries(ownership_engine_unit_tests
+      PRIVATE
+        stack_usage_analyzer_lib
+    )
+
+    add_test(
+      NAME ownership_engine_unit_tests
+      COMMAND ownership_engine_unit_tests
     )
   endif()
 endif()
