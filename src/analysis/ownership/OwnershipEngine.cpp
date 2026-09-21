@@ -17,10 +17,17 @@ namespace ctrace::stack::analysis::ownership
         {
             for (const ResourceId r : held.resources)
             {
+                // Transferring or releasing a conditional resource cannot make it exist
+                // on the paths where its acquisition failed.
+                if (s.resources[r].isOnly(OwnState::NotOwned))
+                    continue;
+                StateSet next = add;
+                if (s.resources[r].has(OwnState::NotOwned))
+                    next |= StateSet::of(OwnState::NotOwned);
                 if (held.isExactly(r) && guaranteed)
-                    s.resources[r] = add;
+                    s.resources[r] = next;
                 else
-                    s.resources[r] |= add;
+                    s.resources[r] |= next;
             }
         }
 
@@ -70,7 +77,7 @@ namespace ctrace::stack::analysis::ownership
     StateSet applyTransformer(const ParamTransformer& t, StateSet in)
     {
         StateSet out = StateSet::none();
-        for (std::size_t i = 0; i < t.size(); ++i)
+        for (std::size_t i = 0; i < t.images.size(); ++i)
         {
             if (in.bits & (1u << i))
                 out |= t[i];
@@ -82,15 +89,21 @@ namespace ctrace::stack::analysis::ownership
                                          const ParamTransformer& then)
     {
         ParamTransformer out;
-        for (std::size_t i = 0; i < out.size(); ++i)
+        out.uncertainInputs = first.uncertainInputs;
+        for (std::size_t i = 0; i < out.images.size(); ++i)
+        {
             out[i] = applyTransformer(then, first[i]);
+            if (then.isUncertain(first[i]))
+                out.uncertainInputs |= StateSet::of(static_cast<OwnState>(i));
+        }
         return out;
     }
 
     void joinTransformer(ParamTransformer& into, const ParamTransformer& other)
     {
-        for (std::size_t i = 0; i < into.size(); ++i)
+        for (std::size_t i = 0; i < into.images.size(); ++i)
             into[i] |= other[i];
+        into.uncertainInputs |= other.uncertainInputs;
     }
 
     namespace
@@ -198,6 +211,7 @@ namespace ctrace::stack::analysis::ownership
                 const Contents held = s.locations[loc];
                 for (const ResourceId r : held.resources)
                 {
+                    s.uncertain[r] = s.uncertain[r] || transformer.isUncertain(s.resources[r]);
                     const StateSet image = applyTransformer(transformer, s.resources[r]);
                     if (held.isExactly(r))
                         s.resources[r] = image;
@@ -411,10 +425,14 @@ namespace ctrace::stack::analysis::ownership
                     {
                         if (r >= paramResourceLowerBound)
                             continue; // a parameter's resource, not a fresh one
+                        if (exit.state.uncertain[r])
+                            return Certainty::Unknown;
+                        if (exit.state.resources[r].isOnly(OwnState::NotOwned))
+                            continue;
                         possible = true;
                         // Returned/stored through an out-arg it is Escaped; acquired straight
                         // into the out-arg it is still Owned. Both are fresh handovers.
-                        if (c.isExactly(r))
+                        if (c.isExactly(r) && !exit.state.resources[r].has(OwnState::NotOwned))
                             exact = true;
                     }
                 }
@@ -505,6 +523,8 @@ namespace ctrace::stack::analysis::ownership
                 {
                     ParamTransformer& t = exit.exceptional ? exceptional : normal;
                     t[static_cast<std::size_t>(state)] |= exit.state.resources[r];
+                    if (exit.state.uncertain[r])
+                        t.uncertainInputs |= StateSet::of(state);
                     (exit.exceptional ? anyExceptional : anyNormal) = true;
                 }
             }

@@ -1523,11 +1523,12 @@ encodeExitTransformer(const ctrace::stack::analysis::ownership::ExitTransformer&
     for (const auto& [argIndex, transformer] : t.params)
     {
         llvm::json::Array image;
-        for (const auto& stateSet : transformer)
+        for (const auto& stateSet : transformer.images)
             image.push_back(static_cast<int64_t>(stateSet.bits));
         llvm::json::Object p;
         p["argIndex"] = static_cast<int64_t>(argIndex);
         p["image"] = std::move(image);
+        p["uncertainInputs"] = static_cast<int64_t>(transformer.uncertainInputs.bits);
         params.push_back(std::move(p));
     }
     obj["params"] = std::move(params);
@@ -1535,13 +1536,14 @@ encodeExitTransformer(const ctrace::stack::analysis::ownership::ExitTransformer&
     for (const auto& [path, transformer] : t.pointeeParams)
     {
         llvm::json::Array image;
-        for (const auto& stateSet : transformer)
+        for (const auto& stateSet : transformer.images)
             image.push_back(static_cast<int64_t>(stateSet.bits));
         llvm::json::Object p;
         p["argIndex"] = static_cast<int64_t>(path.argIndex);
         p["offset"] = static_cast<int64_t>(path.offset);
         p["viaPointerSlot"] = path.viaPointerSlot;
         p["image"] = std::move(image);
+        p["uncertainInputs"] = static_cast<int64_t>(transformer.uncertainInputs.bits);
         pointeeParams.push_back(std::move(p));
     }
     obj["pointeeParams"] = std::move(pointeeParams);
@@ -1594,7 +1596,11 @@ static bool decodeExitTransformer(const llvm::json::Object& obj,
         const auto* image = p ? p->getArray("image") : nullptr;
         if (!argIndex || !image || image->size() != 4)
             return false;
+        const auto uncertainInputs = p->getInteger("uncertainInputs");
+        if (!uncertainInputs || *uncertainInputs < 0 || *uncertainInputs > 15)
+            return false;
         ParamTransformer transformer{};
+        transformer.uncertainInputs.bits = static_cast<std::uint8_t>(*uncertainInputs);
         for (std::size_t i = 0; i < 4; ++i)
         {
             const auto bits = (*image)[i].getAsInteger();
@@ -1616,7 +1622,11 @@ static bool decodeExitTransformer(const llvm::json::Object& obj,
         const auto* image = p ? p->getArray("image") : nullptr;
         if (!argIndex || !offset || !via || !image || image->size() != 4)
             return false;
+        const auto uncertainInputs = p->getInteger("uncertainInputs");
+        if (!uncertainInputs || *uncertainInputs < 0 || *uncertainInputs > 15)
+            return false;
         ParamTransformer transformer{};
+        transformer.uncertainInputs.bits = static_cast<std::uint8_t>(*uncertainInputs);
         for (std::size_t i = 0; i < 4; ++i)
         {
             const auto bits = (*image)[i].getAsInteger();
@@ -1756,7 +1766,7 @@ static bool writeSummaryCacheFile(const std::filesystem::path& cacheFile,
     }
 
     llvm::json::Object root;
-    root["schema"] = "resource-summary-cache-v3";
+    root["schema"] = "resource-summary-cache-v4";
     root["functions"] = std::move(functionArray);
 
     std::ofstream out(cacheFile, std::ios::out | std::ios::trunc | std::ios::binary);
@@ -1787,7 +1797,7 @@ readSummaryCacheFile(const std::filesystem::path& cacheFile)
     if (!obj)
         return std::nullopt;
     auto schema = obj->getString("schema");
-    if (!schema || *schema != "resource-summary-cache-v3")
+    if (!schema || *schema != "resource-summary-cache-v4")
         return std::nullopt;
 
     const auto* functions = obj->getArray("functions");
@@ -1863,7 +1873,7 @@ buildCrossTUSummaryIndex(const std::vector<LoadedInputModule>& loadedModules,
         md5Hex(modelContent.empty() ? cfg.resourceModelPath : modelContent);
     // Bump this when summary semantics evolve so on-disk cache entries from older
     // analyzer builds are not reused with incompatible interpretation.
-    constexpr llvm::StringLiteral kCacheSchema = "cross-tu-resource-summary-v3";
+    constexpr llvm::StringLiteral kCacheSchema = "cross-tu-resource-summary-v4";
     const bool allowDiskCache =
         !cfg.resourceSummaryMemoryOnly && !cfg.resourceSummaryCacheDir.empty();
     const unsigned maxJobs = resolveConfiguredJobs(cfg);

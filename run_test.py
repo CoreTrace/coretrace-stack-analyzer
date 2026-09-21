@@ -2212,6 +2212,70 @@ def check_ownership_cross_tu() -> bool:
     return ok
 
 
+def check_ownership_wrapper_metadata() -> bool:
+    """Wrappers preserve uncertainty and conditional acquisitions, including cached summaries."""
+    print("=== Testing ownership wrapper metadata ===")
+    fixtures = RUN_CONFIG.test_dir / "resource-lifetime"
+    definition = fixtures / "wrapper-metadata-def.c"
+    caller = fixtures / "wrapper-metadata-use.c"
+    model = fixtures / "models" / "wrapper-metadata.txt"
+    with tempfile.TemporaryDirectory(prefix="ct_wrapper_metadata_") as tmp:
+        tmpdir = Path(tmp)
+        local = tmpdir / "local.c"
+        local.write_text(definition.read_text() + "\n" + caller.read_text())
+        cache = tmpdir / "summaries"
+        common = [
+            f"--resource-model={model}", "--warnings-only",
+            f"--resource-summary-cache-dir={cache}",
+            f"--compile-ir-cache-dir={tmpdir / 'ir'}",
+        ]
+
+        def checked_output(inputs):
+            result = run_analyzer_uncached(inputs + common)
+            output = result.stdout or ""
+            if not expect_returncode_zero(result, output + (result.stderr or ""), "wrapper metadata run failed"):
+                return None
+            if output.count("potential resource leak:") != 1 or "Function: actual_leak " not in output:
+                fail_check("only actual_leak should report a leak; wrappers must preserve metadata", output)
+                return None
+            return output
+
+        if checked_output([str(local), "--no-resource-cross-tu"]) is None:
+            return False
+        inputs = [str(definition), str(caller)]
+        first = checked_output(inputs)
+        if first is None or checked_output(inputs) != first:
+            return fail_check("wrapper metadata differs after reading the summary cache")
+        cache_files = list(cache.glob("*.json"))
+        if not cache_files:
+            return fail_check("wrapper metadata summary cache was not populated")
+        summaries = [json.loads(path.read_text()) for path in cache_files]
+        functions = {fn["name"]: fn["ownership"] for summary in summaries for fn in summary["functions"]}
+        if not any(p["uncertainInputs"] & 2 for p in functions["unknown_wrapper"]["normal"]["params"]):
+            return fail_check("cached wrapper lost Owned-input uncertainty")
+        if not any(p["uncertainInputs"] & 2 for p in functions["unknown_slot_wrapper"]["normal"]["pointeeParams"]):
+            return fail_check("cached wrapper lost pointee uncertainty")
+        if functions["conditional_wrapper"]["normal"]["returns"] != "conditional":
+            return fail_check("cached wrapper lost its conditional acquisition")
+
+        # Old summaries have no uncertainty metadata and must be rebuilt, not reused.
+        for path, summary in zip(cache_files, summaries):
+            summary["schema"] = "resource-summary-cache-v3"
+            for fn in summary["functions"]:
+                for kind in ("normal", "exceptional"):
+                    exit_summary = fn["ownership"][kind]
+                    for param in exit_summary["params"] + exit_summary["pointeeParams"]:
+                        param.pop("uncertainInputs", None)
+            path.write_text(json.dumps(summary))
+        if checked_output(inputs) != first:
+            return fail_check("obsolete summaries changed the wrapper diagnostics")
+        # Intermediate fixpoint keys need not be reused; active keys must be rewritten.
+        if not any(json.loads(path.read_text())["schema"] == "resource-summary-cache-v4" for path in cache_files):
+            return fail_check("obsolete ownership summaries were not rebuilt")
+    print("  ✅ ownership wrapper metadata preserved locally, across TUs and in the cache\n")
+    return True
+
+
 def check_uninitialized_cross_tu() -> bool:
     """
     Regression: cross-TU uninitialized summaries must propagate indirect out-param
@@ -3396,6 +3460,7 @@ def main() -> int:
         check_multi_tu_folder_analysis,
         check_resource_lifetime_cross_tu,
         check_ownership_cross_tu,
+        check_ownership_wrapper_metadata,
         check_uninitialized_cross_tu,
         check_null_deref_nested_inter_tu,
         check_integer_overflow_advanced_inter_tu,

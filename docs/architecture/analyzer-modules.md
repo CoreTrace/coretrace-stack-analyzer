@@ -106,7 +106,13 @@ Why:
 - Inter-procedural effects are transformers (image of each input state, per normal and
   exceptional exit) rather than a list of effects, which is what lets "always releases",
   "sometimes releases", "releases then acquires" and "acquires then releases" be told
-  apart, in-module and across TUs (`ResourceSummaryFunction::ownership`, cache schema v3).
+  apart, in-module and across TUs (`ResourceSummaryFunction::ownership`, cache schema v4).
+- Each transformer retains uncertainty per input state, including through composition,
+  exceptional exits and the cross-TU cache. Unknown effects therefore remain unknown
+  through wrappers; older cache schemas are treated as misses.
+- Ownership transfers preserve `NotOwned` when an acquisition is conditional. A returned
+  resource is guaranteed only when it exists on every exit, so callers can still resolve
+  conditional acquisitions using their result checks.
 
 Design notes:
 - Full specification: `docs/superpowers/specs/2026-09-19-resource-ownership-engine-design.md`.

@@ -64,12 +64,34 @@ namespace ctrace::stack::analysis::ownership
     };
 
     /// Image of each singleton input state, indexed by OwnState; extends to sets by union.
-    using ParamTransformer = std::array<StateSet, 4>;
+    /// Uncertainty is sticky and must cross function boundaries with the ownership states.
+    struct ParamTransformer
+    {
+        std::array<StateSet, 4> images{};
+        StateSet uncertainInputs;
+
+        constexpr StateSet& operator[](std::size_t i)
+        {
+            return images[i];
+        }
+        constexpr const StateSet& operator[](std::size_t i) const
+        {
+            return images[i];
+        }
+
+        [[nodiscard]] constexpr bool isUncertain(StateSet input) const
+        {
+            return (uncertainInputs.bits & input.bits) != 0;
+        }
+
+        friend bool operator==(const ParamTransformer&, const ParamTransformer&) = default;
+    };
 
     constexpr ParamTransformer identityTransformer()
     {
-        return {StateSet::of(OwnState::NotOwned), StateSet::of(OwnState::Owned),
-                StateSet::of(OwnState::Released), StateSet::of(OwnState::Escaped)};
+        return {{StateSet::of(OwnState::NotOwned), StateSet::of(OwnState::Owned),
+                 StateSet::of(OwnState::Released), StateSet::of(OwnState::Escaped)},
+                {}};
     }
 
     struct FreshResource

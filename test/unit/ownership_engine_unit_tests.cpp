@@ -399,6 +399,68 @@ namespace
         return r.failures == 0;
     }
 
+    bool testSummaryMetadata(TestReport& r)
+    {
+        const StateSet owned = StateSet::of(OwnState::Owned);
+        OwnershipFacts callee = facts(1, {}, 1, 0);
+        callee.paramLocations.push_back({0, 0});
+        Event unknown;
+        unknown.kind = Event::Kind::UnknownCall;
+        unknown.args = {0};
+        callee.blocks[0].events = {unknown, exit()};
+        const FunctionOwnershipSummary summary = computeSummary(callee);
+
+        Event call;
+        call.kind = Event::Kind::Call;
+        call.call.params.push_back({0, summary.normal.params.at(0)});
+        OwnershipFacts caller = facts(1, {}, 1, 1);
+        caller.blocks[0].events = {acquire(0, 0), call, exit()};
+        const OwnershipResult result = solve(caller, entryOf(caller));
+        r.expect(result.exits.at(0).state.uncertain[newInstanceOf(0)],
+                 "Summary: opaque wrapper preserves caller uncertainty");
+        callee.blocks[0].events = {call, exit()};
+        r.expect(computeSummary(callee).normal.params.at(0).isUncertain(owned),
+                 "Summary: uncertainty survives nested wrappers");
+
+        callee.paramLocations.clear();
+        callee.locations[0].kind = LocationKind::ArgPointee;
+        callee.pointeeLocations.push_back({ArgPath{}, 0});
+        callee.blocks[0].events = {addressEscape(0), exit(true)};
+        r.expect(computeSummary(callee).exceptional.pointeeParams.at(ArgPath{}).isUncertain(owned),
+                 "Summary: exceptional pointee uncertainty survives export");
+
+        ParamTransformer first = identityTransformer();
+        first[static_cast<std::size_t>(OwnState::Owned)] = StateSet::of(OwnState::Released);
+        ParamTransformer second = identityTransformer();
+        second.uncertainInputs = StateSet::of(OwnState::Released);
+        const ParamTransformer composed = composeTransformers(first, second);
+        r.expect(composed.isUncertain(owned) &&
+                     !composed.isUncertain(StateSet::of(OwnState::NotOwned)),
+                 "Summary: composition carries uncertainty for the affected inputs only");
+        first.uncertainInputs = owned;
+        r.expect(composeTransformers(first, identityTransformer()).isUncertain(owned),
+                 "Summary: composition retains earlier uncertainty");
+        ParamTransformer joined = identityTransformer();
+        joinTransformer(joined, first);
+        r.expect(joined.isUncertain(owned), "Summary: joining retains uncertainty");
+
+        OwnershipFacts fresh = facts(1, {}, 1, 1);
+        fresh.locations[0].kind = LocationKind::Return;
+        fresh.blocks[0].events = {acquire(0, 0, true, Certainty::Conditional), ret(0), exit()};
+        r.expect(computeSummary(fresh).normal.returns.certainty == Certainty::Conditional,
+                 "Summary: returning a conditional acquisition does not guarantee a resource");
+        fresh.locations[0].kind = LocationKind::ArgPointee;
+        fresh.blocks[0].events = {acquire(0, 0, true, Certainty::Conditional), exit()};
+        r.expect(computeSummary(fresh).normal.outArgs.at(ArgPath{}).certainty ==
+                     Certainty::Conditional,
+                 "Summary: a conditional out-parameter acquisition stays conditional");
+        fresh.locations[0].kind = LocationKind::Return;
+        fresh.blocks[0].events = {acquire(0, 0), unknown, ret(0), exit()};
+        r.expect(computeSummary(fresh).normal.returns.certainty == Certainty::Unknown,
+                 "Summary: an uncertain fresh resource cannot become a guaranteed return");
+        return r.failures == 0;
+    }
+
     bool testSummaries(TestReport& r)
     {
         const auto owned = static_cast<std::size_t>(OwnState::Owned);
@@ -510,6 +572,7 @@ int main(int, char**)
     (void)testEdgeExits(report);
     (void)testExitUncertainty(report);
     (void)testSummaries(report);
+    (void)testSummaryMetadata(report);
     if (report.failures == 0)
     {
         std::cout << "All ownership engine unit tests passed.\n";

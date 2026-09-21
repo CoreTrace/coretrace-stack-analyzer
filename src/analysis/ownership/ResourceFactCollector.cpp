@@ -918,6 +918,11 @@ namespace ctrace::stack::analysis::ownership
                         x.call.params.push_back(
                             {valueLocation(call.getArgOperand(argIndex)), transformer});
                     }
+                    for (const auto& [path, transformer] : summary.exceptional.pointeeParams)
+                    {
+                        if (const auto slot = slotOfArgPath(call, path))
+                            x.call.params.push_back({*slot, transformer});
+                    }
                     for (const auto& [path, fresh] : summary.exceptional.outArgs)
                     {
                         if (const auto slot = slotOfArgPath(call, path))
@@ -970,17 +975,14 @@ namespace ctrace::stack::analysis::ownership
                         continue;
                     }
 
-                    const llvm::Value* stripped = arg->stripPointerCasts();
-                    if (llvm::isa<llvm::AllocaInst>(stripped) ||
-                        llvm::isa<llvm::GetElementPtrInst>(stripped))
+                    // The address may be forwarded through a parameter/reload, not only
+                    // spelled as an alloca or GEP at this call site. Preserve uncertainty
+                    // for both the pointee and the passed value when either is tracked.
+                    if (const auto slot = slotOf(arg))
                     {
-                        if (const auto slot = slotOf(arg))
-                        {
-                            Event a = make(Event::Kind::AddressEscape, call);
-                            a.dst = *slot;
-                            emit(std::move(a));
-                        }
-                        continue;
+                        Event a = make(Event::Kind::AddressEscape, call);
+                        a.dst = *slot;
+                        emit(std::move(a));
                     }
                     u.args.push_back(valueLocation(arg));
                 }
