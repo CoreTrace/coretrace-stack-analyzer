@@ -250,74 +250,6 @@ namespace ctrace::stack::analysis
             return "this+" + std::to_string(offset);
         }
 
-        static const llvm::Value* peelPointerFromSingleStoreSlot(const llvm::Value* inputPtr)
-        {
-            const llvm::Value* current = inputPtr;
-            for (unsigned depth = 0; depth < 4; ++depth)
-            {
-                const auto* LI = llvm::dyn_cast<llvm::LoadInst>(current->stripPointerCasts());
-                if (!LI)
-                    break;
-
-                const auto* slot =
-                    llvm::dyn_cast<llvm::AllocaInst>(LI->getPointerOperand()->stripPointerCasts());
-                if (!slot || !slot->isStaticAlloca() || !slot->getAllocatedType()->isPointerTy())
-                {
-                    break;
-                }
-
-                const llvm::StoreInst* uniqueStore = nullptr;
-                bool unsafeUse = false;
-                for (const llvm::Use& U : slot->uses())
-                {
-                    const auto* user = U.getUser();
-                    if (const auto* SI = llvm::dyn_cast<llvm::StoreInst>(user))
-                    {
-                        if (SI->getPointerOperand()->stripPointerCasts() != slot)
-                        {
-                            unsafeUse = true;
-                            break;
-                        }
-                        if (uniqueStore && uniqueStore != SI)
-                        {
-                            uniqueStore = nullptr;
-                            break;
-                        }
-                        uniqueStore = SI;
-                        continue;
-                    }
-                    if (const auto* loadUser = llvm::dyn_cast<llvm::LoadInst>(user))
-                    {
-                        if (loadUser->getPointerOperand()->stripPointerCasts() != slot)
-                        {
-                            unsafeUse = true;
-                            break;
-                        }
-                        continue;
-                    }
-                    if (const auto* II = llvm::dyn_cast<llvm::IntrinsicInst>(user))
-                    {
-                        if (llvm::isa<llvm::DbgInfoIntrinsic>(II) ||
-                            llvm::isa<llvm::LifetimeIntrinsic>(II))
-                        {
-                            continue;
-                        }
-                    }
-                    unsafeUse = true;
-                    break;
-                }
-
-                if (unsafeUse || !uniqueStore)
-                    break;
-
-                const llvm::Value* storedPtr = uniqueStore->getValueOperand()->stripPointerCasts();
-                if (!storedPtr->getType()->isPointerTy())
-                    break;
-                current = storedPtr;
-            }
-            return current;
-        }
-
         static bool resolveCanonicalPointerBaseAndOffset(const llvm::Value* ptr,
                                                          const llvm::DataLayout& DL,
                                                          const llvm::Value*& canonical,
@@ -343,62 +275,6 @@ namespace ctrace::stack::analysis
             canonical = peelPointerFromSingleStoreSlot(base)->stripPointerCasts();
             offset = static_cast<std::uint64_t>(signedOffset);
             return canonical != nullptr;
-        }
-
-        static const llvm::Value* resolveAllocaPointerShadowValue(const llvm::AllocaInst& slot,
-                                                                  bool requireSimpleUses)
-        {
-            if (!slot.isStaticAlloca() || !slot.getAllocatedType()->isPointerTy())
-                return nullptr;
-
-            const llvm::Value* uniqueStored = nullptr;
-            const llvm::StoreInst* uniqueStore = nullptr;
-            for (const llvm::Use& U : slot.uses())
-            {
-                const auto* user = U.getUser();
-                if (const auto* SI = llvm::dyn_cast<llvm::StoreInst>(user))
-                {
-                    if (SI->getPointerOperand()->stripPointerCasts() == &slot)
-                    {
-                        const llvm::Value* stored = SI->getValueOperand()->stripPointerCasts();
-                        if (!stored->getType()->isPointerTy())
-                            return nullptr;
-                        if (uniqueStore && uniqueStore != SI)
-                            return nullptr;
-                        uniqueStore = SI;
-                        if (uniqueStored && uniqueStored != stored)
-                            return nullptr;
-                        uniqueStored = stored;
-                        continue;
-                    }
-
-                    if (requireSimpleUses && SI->getValueOperand()->stripPointerCasts() != &slot)
-                    {
-                        return nullptr;
-                    }
-                    continue;
-                }
-
-                if (const auto* LI = llvm::dyn_cast<llvm::LoadInst>(user))
-                {
-                    if (LI->getPointerOperand()->stripPointerCasts() != &slot)
-                        return nullptr;
-                    continue;
-                }
-
-                if (const auto* II = llvm::dyn_cast<llvm::IntrinsicInst>(user))
-                {
-                    if (llvm::isa<llvm::DbgInfoIntrinsic>(II) ||
-                        llvm::isa<llvm::LifetimeIntrinsic>(II))
-                    {
-                        continue;
-                    }
-                }
-
-                if (requireSimpleUses)
-                    return nullptr;
-            }
-            return uniqueStored;
         }
 
         static const llvm::Argument* resolveAllocaArgumentShadow(const llvm::AllocaInst& slot,

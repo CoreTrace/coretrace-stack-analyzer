@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "analysis/TOCTOUAnalysis.hpp"
+#include "analysis/IRValueUtils.hpp"
 
 #include "analysis/AnalyzerUtils.hpp"
 
@@ -56,72 +57,6 @@ namespace ctrace::stack::analysis
             if (calleeName == "faccessat" || calleeName == "fstatat")
                 return 1u;
             return std::nullopt;
-        }
-
-        static const llvm::Value* peelPointerFromSingleStoreSlot(const llvm::Value* value)
-        {
-            const llvm::Value* current = value->stripPointerCasts();
-            for (unsigned depth = 0; depth < 4; ++depth)
-            {
-                const auto* load = llvm::dyn_cast<llvm::LoadInst>(current);
-                if (!load)
-                    break;
-
-                const auto* slot = llvm::dyn_cast<llvm::AllocaInst>(
-                    load->getPointerOperand()->stripPointerCasts());
-                if (!slot || !slot->isStaticAlloca() || !slot->getAllocatedType()->isPointerTy())
-                    break;
-
-                const llvm::StoreInst* uniqueStore = nullptr;
-                bool unsafe = false;
-                for (const llvm::Use& use : slot->uses())
-                {
-                    const auto* user = use.getUser();
-                    if (const auto* store = llvm::dyn_cast<llvm::StoreInst>(user))
-                    {
-                        if (store->getPointerOperand()->stripPointerCasts() != slot)
-                        {
-                            unsafe = true;
-                            break;
-                        }
-                        if (uniqueStore && uniqueStore != store)
-                        {
-                            unsafe = true;
-                            break;
-                        }
-                        uniqueStore = store;
-                        continue;
-                    }
-
-                    if (const auto* slotLoad = llvm::dyn_cast<llvm::LoadInst>(user))
-                    {
-                        if (slotLoad->getPointerOperand()->stripPointerCasts() != slot)
-                        {
-                            unsafe = true;
-                            break;
-                        }
-                        continue;
-                    }
-
-                    if (const auto* intrinsic = llvm::dyn_cast<llvm::IntrinsicInst>(user))
-                    {
-                        if (llvm::isa<llvm::DbgInfoIntrinsic>(intrinsic) ||
-                            llvm::isa<llvm::LifetimeIntrinsic>(intrinsic))
-                        {
-                            continue;
-                        }
-                    }
-
-                    unsafe = true;
-                    break;
-                }
-
-                if (unsafe || !uniqueStore)
-                    break;
-                current = uniqueStore->getValueOperand()->stripPointerCasts();
-            }
-
-            return current;
         }
 
         static std::optional<unsigned> usePathArgIndex(llvm::StringRef calleeName)
@@ -225,8 +160,9 @@ namespace ctrace::stack::analysis
                     if (argIndex >= call->arg_size())
                         continue;
 
-                    const llvm::Value* pathValue =
-                        peelPointerFromSingleStoreSlot(call->getArgOperand(argIndex));
+                    const llvm::Value* pathValue = peelPointerFromSingleStoreSlot(
+                        call->getArgOperand(argIndex)->stripPointerCasts(), 4,
+                        /*requirePointerValue=*/false);
                     PathEvent event;
                     event.inst = &inst;
                     event.root = llvm::getUnderlyingObject(pathValue, 32);
@@ -290,8 +226,9 @@ namespace ctrace::stack::analysis
                 if (argIndex >= call->arg_size())
                     continue;
 
-                const llvm::Value* pathValue =
-                    peelPointerFromSingleStoreSlot(call->getArgOperand(argIndex));
+                const llvm::Value* pathValue = peelPointerFromSingleStoreSlot(
+                    call->getArgOperand(argIndex)->stripPointerCasts(), 4,
+                    /*requirePointerValue=*/false);
                 PathEvent event;
                 event.inst = call;
                 event.root = llvm::getUnderlyingObject(pathValue, 32);

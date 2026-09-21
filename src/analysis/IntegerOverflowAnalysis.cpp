@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "analysis/IntegerOverflowAnalysis.hpp"
+#include "analysis/IRValueUtils.hpp"
 
 #include "analysis/AnalyzerUtils.hpp"
 #include "analysis/IntRanges.hpp"
@@ -164,44 +165,6 @@ namespace ctrace::stack::analysis
             }
 
             return std::nullopt;
-        }
-
-        static const llvm::StoreInst* findUniqueStoreToSlot(const llvm::AllocaInst& slot)
-        {
-            const llvm::StoreInst* uniqueStore = nullptr;
-            for (const llvm::Use& use : slot.uses())
-            {
-                const auto* user = use.getUser();
-                if (const auto* store = llvm::dyn_cast<llvm::StoreInst>(user))
-                {
-                    if (store->getPointerOperand()->stripPointerCasts() != &slot)
-                        return nullptr;
-                    if (uniqueStore && uniqueStore != store)
-                        return nullptr;
-                    uniqueStore = store;
-                    continue;
-                }
-
-                if (const auto* load = llvm::dyn_cast<llvm::LoadInst>(user))
-                {
-                    if (load->getPointerOperand()->stripPointerCasts() != &slot)
-                        return nullptr;
-                    continue;
-                }
-
-                if (const auto* intrinsic = llvm::dyn_cast<llvm::IntrinsicInst>(user))
-                {
-                    if (llvm::isa<llvm::DbgInfoIntrinsic>(intrinsic) ||
-                        llvm::isa<llvm::LifetimeIntrinsic>(intrinsic))
-                    {
-                        continue;
-                    }
-                }
-
-                return nullptr;
-            }
-
-            return uniqueStore;
         }
 
         static const llvm::Value* peelLoadFromSingleStoreSlot(const llvm::Value* value)

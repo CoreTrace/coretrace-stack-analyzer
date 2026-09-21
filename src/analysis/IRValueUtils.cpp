@@ -13,6 +13,123 @@
 
 namespace ctrace::stack::analysis
 {
+    const llvm::StoreInst* findUniqueStoreToSlot(const llvm::AllocaInst& slot)
+    {
+        const llvm::StoreInst* uniqueStore = nullptr;
+        for (const llvm::Use& use : slot.uses())
+        {
+            const auto* user = use.getUser();
+            if (const auto* store = llvm::dyn_cast<llvm::StoreInst>(user))
+            {
+                if (store->getPointerOperand()->stripPointerCasts() != &slot)
+                    return nullptr;
+                if (uniqueStore && uniqueStore != store)
+                    return nullptr;
+                uniqueStore = store;
+                continue;
+            }
+
+            if (const auto* load = llvm::dyn_cast<llvm::LoadInst>(user))
+            {
+                if (load->getPointerOperand()->stripPointerCasts() != &slot)
+                    return nullptr;
+                continue;
+            }
+
+            if (const auto* intrinsic = llvm::dyn_cast<llvm::IntrinsicInst>(user))
+            {
+                if (llvm::isa<llvm::DbgInfoIntrinsic>(intrinsic) ||
+                    llvm::isa<llvm::LifetimeIntrinsic>(intrinsic))
+                {
+                    continue;
+                }
+            }
+
+            return nullptr;
+        }
+
+        return uniqueStore;
+    }
+
+    const llvm::Value* resolveAllocaPointerShadowValue(const llvm::AllocaInst& slot,
+                                                       bool requireSimpleUses)
+    {
+        if (!slot.isStaticAlloca() || !slot.getAllocatedType()->isPointerTy())
+            return nullptr;
+
+        const llvm::Value* uniqueStored = nullptr;
+        const llvm::StoreInst* uniqueStore = nullptr;
+        for (const llvm::Use& U : slot.uses())
+        {
+            const auto* user = U.getUser();
+            if (const auto* SI = llvm::dyn_cast<llvm::StoreInst>(user))
+            {
+                if (SI->getPointerOperand()->stripPointerCasts() == &slot)
+                {
+                    const llvm::Value* stored = SI->getValueOperand()->stripPointerCasts();
+                    if (!stored->getType()->isPointerTy())
+                        return nullptr;
+                    if (uniqueStore && uniqueStore != SI)
+                        return nullptr;
+                    uniqueStore = SI;
+                    if (uniqueStored && uniqueStored != stored)
+                        return nullptr;
+                    uniqueStored = stored;
+                    continue;
+                }
+
+                if (requireSimpleUses && SI->getValueOperand()->stripPointerCasts() != &slot)
+                {
+                    return nullptr;
+                }
+                continue;
+            }
+
+            if (const auto* LI = llvm::dyn_cast<llvm::LoadInst>(user))
+            {
+                if (LI->getPointerOperand()->stripPointerCasts() != &slot)
+                    return nullptr;
+                continue;
+            }
+
+            if (const auto* II = llvm::dyn_cast<llvm::IntrinsicInst>(user))
+            {
+                if (llvm::isa<llvm::DbgInfoIntrinsic>(II) || llvm::isa<llvm::LifetimeIntrinsic>(II))
+                {
+                    continue;
+                }
+            }
+
+            if (requireSimpleUses)
+                return nullptr;
+        }
+        return uniqueStored;
+    }
+
+    const llvm::Value* peelPointerFromSingleStoreSlot(const llvm::Value* value, unsigned maxDepth,
+                                                      bool requirePointerValue)
+    {
+        const llvm::Value* current = value;
+        for (unsigned depth = 0; current && depth < maxDepth; ++depth)
+        {
+            const auto* load = llvm::dyn_cast<llvm::LoadInst>(current->stripPointerCasts());
+            if (!load)
+                break;
+            const auto* slot =
+                llvm::dyn_cast<llvm::AllocaInst>(load->getPointerOperand()->stripPointerCasts());
+            if (!slot || !slot->isStaticAlloca() || !slot->getAllocatedType()->isPointerTy())
+                break;
+            const llvm::StoreInst* store = findUniqueStoreToSlot(*slot);
+            if (!store)
+                break;
+            const llvm::Value* stored = store->getValueOperand()->stripPointerCasts();
+            if (requirePointerValue && !stored->getType()->isPointerTy())
+                break;
+            current = stored;
+        }
+        return current;
+    }
+
     bool isLikelyCompilerTemporaryName(llvm::StringRef name)
     {
         if (name.empty() || name == "<unnamed>")
