@@ -10,6 +10,19 @@ This document describes the module split introduced around `StackUsageAnalyzer` 
 
 ## Modules
 
+### Shared analysis infrastructure
+
+- `IRValueUtils` owns single-store slot validation, pointer peeling and pointer-shadow
+  resolution. Consumers keep their existing depth and stored-value policies; strict
+  peeling remains distinct from shadow resolution that permits address users.
+- `src/app/CrossTUSummaryDriver.hpp` owns the common Resource/Uninitialized dependency
+  plan and SCC worklist: level ordering, deterministic cyclic processing, dirty marking
+  and the iteration budget. Summary operations retain the analysis-specific preparation,
+  merge semantics and logging. Resource also retains its global passes and v4 cache;
+  Uninitialized retains its per-level/per-iteration prepared external summaries.
+- Module builds at an independent level may run in parallel. Index merges and cache
+  writes remain serial, and cyclic SCCs observe preceding SCCs in a deterministic order.
+
 ### `src/analyzer/AnalysisPipeline.cpp`
 
 Role:

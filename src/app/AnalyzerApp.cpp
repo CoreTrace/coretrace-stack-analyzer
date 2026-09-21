@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "app/AnalyzerApp.hpp"
+#include "CrossTUSummaryDriver.hpp"
 
 #include "StackUsageAnalyzer.hpp"
 #include "analyzer/HotspotProfiler.hpp"
@@ -51,6 +52,10 @@
 #include <coretrace/logger.hpp>
 
 using namespace ctrace::stack;
+using app::detail::buildSingleDefFilteredEdges;
+using app::detail::CrossTUSummaryPlan;
+using app::detail::ModuleTarjan;
+using app::detail::runCrossTUSummaryPass;
 
 static std::string normalizePath(const std::string& input)
 {
@@ -162,145 +167,6 @@ static constexpr std::size_t kDestructiveCacheLineBytes =
 #else
 static constexpr std::size_t kDestructiveCacheLineBytes = 64;
 #endif
-
-// ── Tarjan SCC algorithm on module indices ──
-// Used by both resource and uninit cross-TU loops to compute strongly
-// connected components of the inter-module call graph.
-struct ModuleTarjan
-{
-    std::vector<int> index;
-    std::vector<int> lowlink;
-    std::vector<bool> onStack;
-    std::vector<std::size_t> stack;
-    std::vector<std::vector<std::size_t>> sccs;
-    int nextIndex = 0;
-    std::byte padding1[64 - sizeof(int)]{}; // cache line isolation
-
-    void run(std::size_t N, const std::vector<std::unordered_set<std::size_t>>& edges)
-    {
-        index.assign(N, -1);
-        lowlink.assign(N, -1);
-        onStack.assign(N, false);
-        stack.reserve(N);
-        for (std::size_t v = 0; v < N; ++v)
-        {
-            if (index[v] < 0)
-                strongConnect(v, edges);
-        }
-    }
-
-    void strongConnect(std::size_t v, const std::vector<std::unordered_set<std::size_t>>& edges)
-    {
-        index[v] = lowlink[v] = nextIndex++;
-        stack.push_back(v);
-        onStack[v] = true;
-
-        for (std::size_t w : edges[v])
-        {
-            if (index[w] < 0)
-            {
-                strongConnect(w, edges);
-                lowlink[v] = std::min(lowlink[v], lowlink[w]);
-            }
-            else if (onStack[w])
-            {
-                lowlink[v] = std::min(lowlink[v], index[w]);
-            }
-        }
-
-        if (lowlink[v] == index[v])
-        {
-            std::vector<std::size_t> component;
-            std::size_t w;
-            do
-            {
-                w = stack.back();
-                stack.pop_back();
-                onStack[w] = false;
-                component.push_back(w);
-            } while (w != v);
-            // Sort for deterministic output.
-            std::sort(component.begin(), component.end());
-            sccs.push_back(std::move(component));
-        }
-    }
-};
-
-// Build the single-def filtered inter-module edge graph.
-// Only edges through functions with exactly one definition across all modules
-// are included. Multi-def functions (inline, template, weak) are excluded
-// because their summaries are identical in all TUs and don't create real
-// cross-module data dependencies.
-static std::vector<std::unordered_set<std::size_t>> buildSingleDefFilteredEdges(
-    std::size_t N, const std::vector<std::unordered_set<std::string>>& moduleCalleeNames,
-    const std::unordered_map<std::string, std::vector<std::size_t>>& definedBy)
-{
-    std::vector<std::unordered_set<std::size_t>> edges(N);
-    for (std::size_t i = 0; i < N; ++i)
-    {
-        for (const std::string& callee : moduleCalleeNames[i])
-        {
-            auto it = definedBy.find(callee);
-            if (it == definedBy.end() || it->second.size() != 1)
-                continue; // skip multi-def and unresolved
-            const std::size_t j = it->second[0];
-            if (j != i)
-                edges[i].insert(j);
-        }
-    }
-    return edges;
-}
-
-// Run Tarjan on the filtered edges and return SCCs in dependency order
-// (callees before callers).
-// With edge direction caller→callee, Tarjan's DFS reaches callees first
-// and emits their SCCs before caller SCCs.  This is already the correct
-// processing order — no reversal needed.
-static std::vector<std::vector<std::size_t>>
-computeTopologicalSCCOrder(std::size_t N,
-                           const std::vector<std::unordered_set<std::size_t>>& filteredEdges)
-{
-    ModuleTarjan tarjan;
-    tarjan.run(N, filteredEdges);
-    return std::move(tarjan.sccs);
-}
-
-// Compute topological levels for SCCs given the filtered edge graph.
-// SCCs at the same level are independent and can be processed in parallel.
-// Returns a vector of levels (one per SCC in sccOrder), plus fills
-// levelGroups: levelGroups[level] = {indices into sccOrder}.
-static std::vector<unsigned>
-computeSCCLevels(const std::vector<std::vector<std::size_t>>& sccOrder,
-                 const std::vector<std::unordered_set<std::size_t>>& filteredEdges, std::size_t N)
-{
-    // Map each module index to its SCC index in sccOrder.
-    std::vector<std::size_t> moduleToSCC(N);
-    for (std::size_t s = 0; s < sccOrder.size(); ++s)
-        for (std::size_t m : sccOrder[s])
-            moduleToSCC[m] = s;
-
-    std::vector<unsigned> level(sccOrder.size(), 0);
-    // Process in topological order: each SCC's level is 1 + max(predecessor levels).
-    for (std::size_t s = 0; s < sccOrder.size(); ++s)
-    {
-        unsigned maxPred = 0;
-        bool hasPred = false;
-        for (std::size_t m : sccOrder[s])
-        {
-            for (std::size_t dep : filteredEdges[m])
-            {
-                const std::size_t depSCC = moduleToSCC[dep];
-                if (depSCC != s)
-                {
-                    hasPred = true;
-                    maxPred = std::max(maxPred, level[depSCC]);
-                }
-            }
-        }
-        level[s] = hasPred ? maxPred + 1 : 0;
-    }
-    return level;
-}
 
 template <typename WorkFn>
 static void runParallelWork(std::size_t workItemCount, unsigned maxJobs, WorkFn&& workFn)
@@ -1851,6 +1717,223 @@ readSummaryCacheFile(const std::filesystem::path& cacheFile)
     return index;
 }
 
+static std::unordered_map<std::string, std::vector<std::size_t>>
+collectModuleDefinitions(const std::vector<LoadedInputModule>& loadedModules)
+{
+    std::unordered_map<std::string, std::vector<std::size_t>> definitions;
+    for (std::size_t i = 0; i < loadedModules.size(); ++i)
+        for (const llvm::Function& function : *loadedModules[i].module)
+            if (!function.isDeclaration() && function.hasName() && !function.getName().empty())
+                definitions[ctrace_tools::canonicalizeMangledName(function.getName().str())]
+                    .push_back(i);
+    return definitions;
+}
+
+struct ResourceSummaryOperations
+{
+    using Index = analysis::ResourceSummaryIndex;
+    const std::vector<LoadedInputModule>& modules;
+    const AnalysisConfig& cfg;
+    std::string modelHash;
+    std::string filterHash;
+    std::vector<std::string> irHashes;
+    std::vector<std::string> compileArgsHashes;
+    std::unordered_map<std::string, Index> memoryCache;
+    std::unordered_map<std::string, Index> finalCacheWrites;
+
+    ResourceSummaryOperations(const std::vector<LoadedInputModule>& modules,
+                              const AnalysisConfig& cfg)
+        : modules(modules), cfg(cfg), filterHash(computeFunctionFilterSignature(cfg))
+    {
+        const std::string modelContent = readFileAsString(cfg.resourceModelPath);
+        modelHash = md5Hex(modelContent.empty() ? cfg.resourceModelPath : modelContent);
+        for (const auto& module : modules)
+        {
+            irHashes.push_back(hashModuleIR(*module.module));
+            compileArgsHashes.push_back(computeCompileArgsSignature(cfg, module.filename));
+        }
+    }
+
+    std::string prepareLevel(const Index& global) const
+    {
+        return hashSummaryIndex(global);
+    }
+    std::string prepareCycle(const Index&) const
+    {
+        return {};
+    }
+
+    Index build(std::size_t module, const Index& global, const std::string&) const
+    {
+        const analyzer::ScopedHotspot hotspot(cfg.timing,
+                                              "app.cross_tu.resource_summary.build_module");
+        const analysis::FunctionFilter filter =
+            analysis::buildFunctionFilter(*modules[module].module, cfg);
+        return analysis::buildResourceLifetimeSummaryIndex(
+            *modules[module].module, [&](const llvm::Function& function)
+            { return filter.shouldAnalyze(function); }, cfg.resourceModelPath, &global);
+    }
+
+    std::string cacheKey(std::size_t module, const std::string& externalHash) const
+    {
+        // Keep the schema and key components identical: this refactor changes no summaries.
+        return md5Hex("cross-tu-resource-summary-v4|" + modelHash + "|" + externalHash + "|" +
+                      filterHash + "|" + compileArgsHashes[module] + "|" + irHashes[module]);
+    }
+    bool usesDiskCache() const
+    {
+        return !cfg.resourceSummaryMemoryOnly && !cfg.resourceSummaryCacheDir.empty();
+    }
+    bool tryCache(std::size_t module, const std::string& externalHash, Index& summary)
+    {
+        const std::string key = cacheKey(module, externalHash);
+        if (const auto it = memoryCache.find(key); it != memoryCache.end())
+        {
+            summary = it->second;
+            return true;
+        }
+        if (usesDiskCache())
+        {
+            auto cached = readSummaryCacheFile(std::filesystem::path(cfg.resourceSummaryCacheDir) /
+                                               (key + ".json"));
+            if (cached)
+            {
+                summary = std::move(*cached);
+                memoryCache.insert_or_assign(key, summary);
+                return true;
+            }
+        }
+        return false;
+    }
+    void cache(std::size_t module, const std::string& externalHash, const Index& summary)
+    {
+        const std::string key = cacheKey(module, externalHash);
+        memoryCache.insert_or_assign(key, summary);
+        finalCacheWrites.insert_or_assign(key, summary);
+    }
+    void flushCache() const
+    {
+        if (usesDiskCache())
+            for (const auto& [key, summary] : finalCacheWrites)
+                (void)writeSummaryCacheFile(
+                    std::filesystem::path(cfg.resourceSummaryCacheDir) / (key + ".json"), summary);
+    }
+    static void merge(Index& into, const Index& from)
+    {
+        (void)analysis::mergeResourceSummaryIndex(into, from);
+    }
+    static bool equals(const Index& a, const Index& b)
+    {
+        return analysis::resourceSummaryIndexEquals(a, b);
+    }
+    static auto changedNames(const Index& a, const Index& b)
+    {
+        return analysis::computeChangedResourceFunctionNames(a, b);
+    }
+    void reportIteration(std::size_t size, unsigned iteration, bool converged,
+                         std::size_t dirty) const
+    {
+        if (cfg.timing)
+            coretrace::log(coretrace::Level::Info,
+                           "  Resource cyclic SCC (size={}) iteration {}{} (dirty={})\n", size,
+                           iteration, converged ? " converged" : "", dirty);
+    }
+    void reportLimit(std::size_t size, unsigned limit) const
+    {
+        coretrace::log(coretrace::Level::Warn,
+                       "Resource cross-TU: cyclic SCC (size={}) reached iteration cap ({})\n", size,
+                       limit);
+    }
+    void reportLevel(std::size_t index, const CrossTUSummaryPlan::Level& level,
+                     std::int64_t ms) const
+    {
+        if (cfg.timing)
+            coretrace::log(coretrace::Level::Info,
+                           "  Resource level {}: {} trivial, {} cyclic ({} modules) in {} ms\n",
+                           index, level.trivialModules.size(), level.cyclicSCCs.size(),
+                           level.moduleCount, ms);
+    }
+};
+
+struct UninitializedSummaryOperations
+{
+    using Index = analysis::UninitializedSummaryIndex;
+    using External = analysis::PreparedUninitializedExternalSummaries;
+    const std::vector<LoadedInputModule>& modules;
+    const AnalysisConfig& cfg;
+    std::vector<analysis::PreparedUninitializedModuleContext> preparedModules;
+
+    UninitializedSummaryOperations(const std::vector<LoadedInputModule>& modules,
+                                   const AnalysisConfig& cfg)
+        : modules(modules), cfg(cfg)
+    {
+        preparedModules.reserve(modules.size());
+        for (const auto& module : modules)
+        {
+            const analysis::FunctionFilter filter =
+                analysis::buildFunctionFilter(*module.module, cfg);
+            preparedModules.push_back(analysis::prepareUninitializedModuleContext(
+                *module.module,
+                [&](const llvm::Function& function) { return filter.shouldAnalyze(function); }));
+        }
+    }
+    External prepareLevel(const Index& global) const
+    {
+        return analysis::prepareUninitializedExternalSummaries(&global);
+    }
+    External prepareCycle(const Index& global) const
+    {
+        return prepareLevel(global);
+    }
+    Index build(std::size_t module, const Index&, const External& external) const
+    {
+        const analyzer::ScopedHotspot hotspot(cfg.timing,
+                                              "app.cross_tu.uninitialized.build_module");
+        return analysis::buildUninitializedSummaryIndex(*modules[module].module,
+                                                        &preparedModules[module], &external);
+    }
+    bool tryCache(std::size_t, const External&, Index&) const
+    {
+        return false;
+    }
+    void cache(std::size_t, const External&, const Index&) const {}
+    static void merge(Index& into, const Index& from)
+    {
+        (void)analysis::mergeUninitializedSummaryIndex(into, from);
+    }
+    static bool equals(const Index& a, const Index& b)
+    {
+        return analysis::uninitializedSummaryIndexEquals(a, b);
+    }
+    static auto changedNames(const Index& a, const Index& b)
+    {
+        return analysis::computeChangedUninitializedFunctionNames(a, b);
+    }
+    void reportIteration(std::size_t size, unsigned iteration, bool converged,
+                         std::size_t dirty) const
+    {
+        if (cfg.timing)
+            coretrace::log(coretrace::Level::Info,
+                           "  Cyclic SCC (size={}) iteration {}{} (dirty={})\n", size, iteration,
+                           converged ? " converged" : "", dirty);
+    }
+    void reportLimit(std::size_t size, unsigned limit) const
+    {
+        coretrace::log(coretrace::Level::Warn,
+                       "Uninitialized cross-TU: cyclic SCC (size={}) reached iteration cap ({})\n",
+                       size, limit);
+    }
+    void reportLevel(std::size_t index, const CrossTUSummaryPlan::Level& level,
+                     std::int64_t ms) const
+    {
+        if (cfg.timing)
+            coretrace::log(coretrace::Level::Info,
+                           "  Level {}: {} trivial SCCs, {} cyclic SCCs ({} modules) in {} ms\n",
+                           index, level.trivialModules.size(), level.cyclicSCCs.size(),
+                           level.moduleCount, ms);
+    }
+};
+
 static std::shared_ptr<ctrace::stack::analysis::ResourceSummaryIndex>
 buildCrossTUSummaryIndex(const std::vector<LoadedInputModule>& loadedModules,
                          const AnalysisConfig& cfg)
@@ -1868,73 +1951,12 @@ buildCrossTUSummaryIndex(const std::vector<LoadedInputModule>& loadedModules,
                        loadedModules.size());
     }
 
-    const std::string modelContent = readFileAsString(cfg.resourceModelPath);
-    const std::string modelHash =
-        md5Hex(modelContent.empty() ? cfg.resourceModelPath : modelContent);
-    // Bump this when summary semantics evolve so on-disk cache entries from older
-    // analyzer builds are not reused with incompatible interpretation.
-    constexpr llvm::StringLiteral kCacheSchema = "cross-tu-resource-summary-v4";
-    const bool allowDiskCache =
-        !cfg.resourceSummaryMemoryOnly && !cfg.resourceSummaryCacheDir.empty();
+    ResourceSummaryOperations operations(loadedModules, cfg);
     const unsigned maxJobs = resolveConfiguredJobs(cfg);
-    std::unordered_map<std::string, ctrace::stack::analysis::ResourceSummaryIndex> memoryCache;
-    std::unordered_map<std::string, ctrace::stack::analysis::ResourceSummaryIndex> finalCacheWrites;
-    std::vector<std::string> moduleIRHashes;
-    std::vector<std::string> moduleCompileArgsHashes;
-    const std::string filterHash = computeFunctionFilterSignature(cfg);
-    moduleIRHashes.reserve(loadedModules.size());
-    moduleCompileArgsHashes.reserve(loadedModules.size());
-    for (const LoadedInputModule& loaded : loadedModules)
-    {
-        moduleIRHashes.push_back(hashModuleIR(*loaded.module));
-        moduleCompileArgsHashes.push_back(computeCompileArgsSignature(cfg, loaded.filename));
-    }
-
-    // Build inter-module dependency metadata for filtered dirty-marking.
-    //
-    // The naive dirty-check marks a module as dirty if *any* callee's summary
-    // changed. This is too sensitive because inline/template/weak functions
-    // (linkonce_odr, weak_odr, available_externally, internal) are emitted in
-    // every TU that uses them, creating O(N²) artificial cross-module edges.
-    // Their summaries converge identically in all TUs after the first iteration,
-    // so re-analyzing modules because of them is wasted work.
-    //
-    // Generic criterion: a callee represents a *real* inter-module dependency
-    // only if it has ExternalLinkage in its definition. This is a property of
-    // LLVM IR semantics, not specific to any project:
-    // - ExternalLinkage: unique strong definition, real cross-TU dependency.
-    // - LinkOnceODRLinkage: inline/template (C++), identical in all TUs.
-    // - WeakODRLinkage: weak symbols, COMDAT — same as ODR for our purposes.
-    // - AvailableExternallyLinkage: inlined copies kept for optimization.
-    // - InternalLinkage / PrivateLinkage: static functions, TU-local.
-    std::unordered_map<std::string, std::vector<std::size_t>> definedBy;
-    for (std::size_t i = 0; i < loadedModules.size(); ++i)
-    {
-        for (const llvm::Function& F : *loadedModules[i].module)
-        {
-            if (F.isDeclaration() || !F.hasName() || F.getName().empty())
-                continue;
-            const std::string canon = ctrace_tools::canonicalizeMangledName(F.getName().str());
-            definedBy[canon].push_back(i);
-        }
-    }
-
-    // Build single-def name set: functions defined in exactly one module.
-    // This is the same criterion used by buildSingleDefFilteredEdges for
-    // SCC edge construction.  Using it for dirty-marking ensures consistency:
-    // an SCC edge exists iff the corresponding callee can trigger dirty-marking.
-    std::unordered_set<std::string> singleDefNames;
-    for (const auto& [name, modules] : definedBy)
-    {
-        if (modules.size() == 1)
-            singleDefNames.insert(name);
-    }
+    const auto definedBy = collectModuleDefinitions(loadedModules);
 
     // Pre-compute per-module callee name sets for delta-based convergence.
     std::vector<std::unordered_set<std::string>> resourceModuleCalleeNames(loadedModules.size());
-    // Filtered version: only callees with single-def definitions.
-    // Consistent with SCC edge criterion (buildSingleDefFilteredEdges).
-    std::vector<std::unordered_set<std::string>> filteredResourceCalleeNames(loadedModules.size());
     for (std::size_t i = 0; i < loadedModules.size(); ++i)
     {
         const LoadedInputModule& loaded = loadedModules[i];
@@ -1956,322 +1978,49 @@ buildCrossTUSummaryIndex(const std::vector<LoadedInputModule>& loadedModules,
                     const std::string canon =
                         ctrace_tools::canonicalizeMangledName(callee->getName().str());
                     resourceModuleCalleeNames[i].insert(canon);
-                    if (singleDefNames.count(canon))
-                        filteredResourceCalleeNames[i].insert(canon);
                 }
             }
         }
     }
 
-    // ── SCC worklist for resource cross-TU convergence ──
-    constexpr unsigned kCrossTUMaxIterations = 12;
-    const std::size_t N = loadedModules.size();
-
-    const auto filteredEdges = buildSingleDefFilteredEdges(N, resourceModuleCalleeNames, definedBy);
-    const auto sccOrder = computeTopologicalSCCOrder(N, filteredEdges);
-    const auto sccLevels = computeSCCLevels(sccOrder, filteredEdges, N);
-
-    unsigned maxLevel = 0;
-    for (unsigned lvl : sccLevels)
-        maxLevel = std::max(maxLevel, lvl);
-
-    std::vector<std::vector<std::size_t>> levelGroups(maxLevel + 1);
-    for (std::size_t s = 0; s < sccOrder.size(); ++s)
-        levelGroups[sccLevels[s]].push_back(s);
-
-    // Classify SCCs for logging.
-    std::size_t trivialSCCCount = 0, cyclicSCCCount = 0;
-    for (std::size_t s = 0; s < sccOrder.size(); ++s)
-    {
-        const auto& scc = sccOrder[s];
-        if (scc.size() == 1 && !filteredEdges[scc[0]].count(scc[0]))
-            ++trivialSCCCount;
-        else
-            ++cyclicSCCCount;
-    }
-
+    const CrossTUSummaryPlan plan(resourceModuleCalleeNames, definedBy);
     if (cfg.timing)
-    {
-        coretrace::log(coretrace::Level::Info,
-                       "Cross-TU resource SCC worklist: {} SCCs ({} trivial, {} cyclic) "
-                       "in {} levels\n",
-                       sccOrder.size(), trivialSCCCount, cyclicSCCCount, maxLevel + 1);
-    }
-
-    ctrace::stack::analysis::ResourceSummaryIndex globalIndex;
-    std::vector<ctrace::stack::analysis::ResourceSummaryIndex> moduleSummaries(N);
+        coretrace::log(
+            coretrace::Level::Info,
+            "Cross-TU resource SCC worklist: {} SCCs ({} trivial, {} cyclic) in {} levels\n",
+            plan.sccs.size(), plan.trivialCount, plan.cyclicCount, plan.levels.size());
+    analysis::ResourceSummaryIndex globalIndex;
+    std::vector<analysis::ResourceSummaryIndex> moduleSummaries(loadedModules.size());
     std::size_t totalModuleAnalyses = 0;
-
     constexpr unsigned kCrossTUGlobalMaxIterations = 12;
     bool globalConverged = false;
     for (unsigned globalIter = 0; globalIter < kCrossTUGlobalMaxIterations; ++globalIter)
     {
         const std::string beforePassHash = hashSummaryIndex(globalIndex);
-        for (unsigned level = 0; level <= maxLevel; ++level)
-        {
-            const auto& group = levelGroups[level];
-            if (group.empty())
-                continue;
-
-            const auto levelStart = Clock::now();
-            const std::string externalHash = hashSummaryIndex(globalIndex);
-
-            auto buildModuleSummary =
-                [&](std::size_t moduleIndex) -> ctrace::stack::analysis::ResourceSummaryIndex
-            {
-                const analyzer::ScopedHotspot hotspot(cfg.timing,
-                                                      "app.cross_tu.resource_summary.build_module");
-                const LoadedInputModule& loaded = loadedModules[moduleIndex];
-                analysis::FunctionFilter filter =
-                    analysis::buildFunctionFilter(*loaded.module, cfg);
-                auto shouldAnalyze = [&](const llvm::Function& F) -> bool
-                { return filter.shouldAnalyze(F); };
-                return analysis::buildResourceLifetimeSummaryIndex(
-                    *loaded.module, shouldAnalyze, cfg.resourceModelPath, &globalIndex);
-            };
-
-            // Try cache for each module at this level, collect modules that need building.
-            auto tryCacheForModule = [&](std::size_t moduleIndex) -> bool
-            {
-                const std::string cacheKeyPayload = std::string(kCacheSchema) + "|" + modelHash +
-                                                    "|" + externalHash + "|" + filterHash + "|" +
-                                                    moduleCompileArgsHashes[moduleIndex] + "|" +
-                                                    moduleIRHashes[moduleIndex];
-                const std::string cacheKey = md5Hex(cacheKeyPayload);
-
-                if (const auto memIt = memoryCache.find(cacheKey); memIt != memoryCache.end())
-                {
-                    moduleSummaries[moduleIndex] = memIt->second;
-                    return true;
-                }
-                if (allowDiskCache)
-                {
-                    const std::filesystem::path cacheFile =
-                        std::filesystem::path(cfg.resourceSummaryCacheDir) / (cacheKey + ".json");
-                    auto cached = readSummaryCacheFile(cacheFile);
-                    if (cached)
-                    {
-                        moduleSummaries[moduleIndex] = std::move(*cached);
-                        memoryCache.insert_or_assign(cacheKey, moduleSummaries[moduleIndex]);
-                        return true;
-                    }
-                }
-                return false;
-            };
-
-            auto cacheAndStoreModule = [&](std::size_t moduleIndex)
-            {
-                const std::string cacheKeyPayload = std::string(kCacheSchema) + "|" + modelHash +
-                                                    "|" + externalHash + "|" + filterHash + "|" +
-                                                    moduleCompileArgsHashes[moduleIndex] + "|" +
-                                                    moduleIRHashes[moduleIndex];
-                const std::string cacheKey = md5Hex(cacheKeyPayload);
-                memoryCache.insert_or_assign(cacheKey, moduleSummaries[moduleIndex]);
-                finalCacheWrites.insert_or_assign(cacheKey, moduleSummaries[moduleIndex]);
-            };
-
-            // Collect trivial and cyclic SCCs.
-            std::vector<std::size_t> trivialModules;
-            std::vector<std::size_t> cyclicSCCIndices;
-
-            for (std::size_t sccIdx : group)
-            {
-                const auto& scc = sccOrder[sccIdx];
-                const bool isTrivial = scc.size() == 1 && !filteredEdges[scc[0]].count(scc[0]);
-                if (isTrivial)
-                    trivialModules.push_back(scc[0]);
-                else
-                    cyclicSCCIndices.push_back(sccIdx);
-            }
-
-            // Sort cyclic SCCs by minimum module index for deterministic processing order.
-            // Cyclic SCCs at the same level are processed sequentially, and each SCC sees
-            // the globalIndex effects of previously processed SCCs. Non-deterministic ordering
-            // (from Tarjan DFS over unordered_set) causes different summaries between runs.
-            // SCC members are already sorted, so sccOrder[sccIdx][0] is the minimum index.
-            std::sort(cyclicSCCIndices.begin(), cyclicSCCIndices.end(),
-                      [&](std::size_t a, std::size_t b)
-                      { return sccOrder[a][0] < sccOrder[b][0]; });
-
-            // Process trivial SCCs: try cache, then build missing ones in parallel.
-            std::vector<std::size_t> missingTrivial;
-            for (std::size_t moduleIndex : trivialModules)
-            {
-                if (!tryCacheForModule(moduleIndex))
-                    missingTrivial.push_back(moduleIndex);
-            }
-
-            if (!missingTrivial.empty())
-            {
-                if (maxJobs <= 1 || missingTrivial.size() <= 1)
-                {
-                    for (std::size_t moduleIndex : missingTrivial)
-                        moduleSummaries[moduleIndex] = buildModuleSummary(moduleIndex);
-                }
-                else
-                {
-                    runParallelWork(missingTrivial.size(), maxJobs,
-                                    [&](std::size_t slot)
-                                    {
-                                        const std::size_t moduleIndex = missingTrivial[slot];
-                                        moduleSummaries[moduleIndex] =
-                                            buildModuleSummary(moduleIndex);
-                                    });
-                }
-                for (std::size_t moduleIndex : missingTrivial)
-                    cacheAndStoreModule(moduleIndex);
-            }
-            totalModuleAnalyses += missingTrivial.size();
-
-            // Merge trivial SCCs into globalIndex.
-            for (std::size_t moduleIndex : trivialModules)
-            {
-                (void)analysis::mergeResourceSummaryIndex(globalIndex,
-                                                          moduleSummaries[moduleIndex]);
-            }
-
-            // Process cyclic SCCs with internal iteration.
-            for (std::size_t sccIdx : cyclicSCCIndices)
-            {
-                const auto& scc = sccOrder[sccIdx];
-                std::vector<analysis::ResourceSummaryIndex> sccPrevSummaries(N);
-                std::unordered_set<std::string> sccChangedNames;
-                bool sccConverged = false;
-
-                for (unsigned sccIter = 0; sccIter < kCrossTUMaxIterations; ++sccIter)
-                {
-                    std::vector<std::size_t> dirtyInSCC;
-                    if (sccIter == 0)
-                    {
-                        dirtyInSCC = std::vector<std::size_t>(scc.begin(), scc.end());
-                    }
-                    else
-                    {
-                        for (std::size_t m : scc)
-                        {
-                            bool isDirty = false;
-                            for (const std::string& callee : filteredResourceCalleeNames[m])
-                            {
-                                if (sccChangedNames.count(callee))
-                                {
-                                    isDirty = true;
-                                    break;
-                                }
-                            }
-                            if (isDirty)
-                                dirtyInSCC.push_back(m);
-                            else
-                                moduleSummaries[m] = sccPrevSummaries[m];
-                        }
-                    }
-
-                    for (std::size_t m : dirtyInSCC)
-                        moduleSummaries[m] = buildModuleSummary(m);
-                    totalModuleAnalyses += dirtyInSCC.size();
-
-                    analysis::ResourceSummaryIndex sccMerged;
-                    for (std::size_t m : scc)
-                        (void)analysis::mergeResourceSummaryIndex(sccMerged, moduleSummaries[m]);
-
-                    analysis::ResourceSummaryIndex prevSccMerged;
-                    for (std::size_t m : scc)
-                    {
-                        (void)analysis::mergeResourceSummaryIndex(prevSccMerged,
-                                                                  sccPrevSummaries[m]);
-                    }
-                    const bool iterConverged =
-                        analysis::resourceSummaryIndexEquals(sccMerged, prevSccMerged);
-
-                    sccChangedNames =
-                        analysis::computeChangedResourceFunctionNames(prevSccMerged, sccMerged);
-
-                    for (std::size_t m : scc)
-                        sccPrevSummaries[m] = moduleSummaries[m];
-
-                    if (cfg.timing)
-                    {
-                        coretrace::log(
-                            coretrace::Level::Info,
-                            "  Resource cyclic SCC (size={}) iteration {}{} (dirty={})\n",
-                            scc.size(), sccIter + 1, iterConverged ? " converged" : "",
-                            dirtyInSCC.size());
-                    }
-
-                    if (iterConverged)
-                    {
-                        sccConverged = true;
-                        break;
-                    }
-
-                    for (std::size_t m : scc)
-                        (void)analysis::mergeResourceSummaryIndex(globalIndex, moduleSummaries[m]);
-                }
-
-                if (!sccConverged)
-                {
-                    coretrace::log(coretrace::Level::Warn,
-                                   "Resource cross-TU: cyclic SCC (size={}) reached "
-                                   "iteration cap ({})\n",
-                                   scc.size(), kCrossTUMaxIterations);
-                }
-
-                for (std::size_t m : scc)
-                    (void)analysis::mergeResourceSummaryIndex(globalIndex, moduleSummaries[m]);
-            }
-
-            if (cfg.timing)
-            {
-                const auto levelEnd = Clock::now();
-                const auto ms =
-                    std::chrono::duration_cast<std::chrono::milliseconds>(levelEnd - levelStart)
-                        .count();
-                coretrace::log(
-                    coretrace::Level::Info,
-                    "  Resource level {}: {} trivial, {} cyclic ({} modules) in {} ms\n", level,
-                    trivialModules.size(), cyclicSCCIndices.size(),
-                    trivialModules.size() +
-                        [&]()
-                        {
-                            std::size_t n = 0;
-                            for (std::size_t s : cyclicSCCIndices)
-                                n += sccOrder[s].size();
-                            return n;
-                        }(),
-                    ms);
-            }
-        }
-
+        totalModuleAnalyses +=
+            runCrossTUSummaryPass(plan, globalIndex, moduleSummaries, operations,
+                                  [&](const auto& modules, auto&& build)
+                                  {
+                                      runParallelWork(modules.size(), maxJobs, [&](std::size_t slot)
+                                                      { build(modules[slot]); });
+                                  });
         const std::string afterPassHash = hashSummaryIndex(globalIndex);
         if (cfg.timing)
-        {
             coretrace::log(coretrace::Level::Info,
                            "Resource global convergence pass {}{} (summary size: {})\n",
                            globalIter + 1, (afterPassHash == beforePassHash) ? " converged" : "",
                            globalIndex.functions.size());
-        }
         if (afterPassHash == beforePassHash)
         {
             globalConverged = true;
             break;
         }
     }
-
     if (!globalConverged && cfg.timing)
-    {
         coretrace::log(coretrace::Level::Warn,
                        "Resource cross-TU: global convergence reached iteration cap ({})\n",
                        kCrossTUGlobalMaxIterations);
-    }
-
-    if (allowDiskCache)
-    {
-        for (const auto& entry : finalCacheWrites)
-        {
-            const std::filesystem::path cacheFile =
-                std::filesystem::path(cfg.resourceSummaryCacheDir) / (entry.first + ".json");
-            (void)writeSummaryCacheFile(cacheFile, entry.second);
-        }
-    }
+    operations.flushCache();
 
     if (cfg.timing)
     {
@@ -2281,7 +2030,7 @@ buildCrossTUSummaryIndex(const std::vector<LoadedInputModule>& loadedModules,
         coretrace::log(coretrace::Level::Info,
                        "Cross-TU resource summary build done in {} ms "
                        "({} SCCs, {} module analyses)\n",
-                       ms, sccOrder.size(), totalModuleAnalyses);
+                       ms, plan.sccs.size(), totalModuleAnalyses);
     }
 
     return std::make_shared<analysis::ResourceSummaryIndex>(std::move(globalIndex));
@@ -2368,60 +2117,13 @@ buildCrossTUUninitializedSummaryIndex(const std::vector<LoadedInputModule>& load
                        loadedModules.size());
     }
 
-    // Same fixed-point budget policy as resource summaries.
-    constexpr unsigned kCrossTUMaxIterations = 12;
     const unsigned maxJobs = resolveConfiguredJobs(cfg);
-    std::vector<analysis::PreparedUninitializedModuleContext> preparedModules;
-    preparedModules.reserve(loadedModules.size());
-    for (const LoadedInputModule& loaded : loadedModules)
-    {
-        const analysis::FunctionFilter filter = analysis::buildFunctionFilter(*loaded.module, cfg);
-        auto shouldAnalyze = [&](const llvm::Function& F) -> bool
-        { return filter.shouldAnalyze(F); };
-        preparedModules.push_back(
-            analysis::prepareUninitializedModuleContext(*loaded.module, shouldAnalyze));
-    }
-    // Pre-compute per-module callee name sets for delta-based convergence.
-    std::vector<std::unordered_set<std::string>> moduleCalleeNames(loadedModules.size());
-    for (std::size_t i = 0; i < loadedModules.size(); ++i)
-        moduleCalleeNames[i] = analysis::getCanonicalCalleeNames(preparedModules[i]);
-
-    // Build definedBy map and single-def name set for SCC + dirty-marking.
-    // Same criterion as buildSingleDefFilteredEdges: a function is single-def
-    // if exactly one module defines it.  Multi-def functions (inline, template,
-    // weak) produce identical summaries in all TUs and don't create real
-    // cross-module data dependencies.
+    UninitializedSummaryOperations operations(loadedModules, cfg);
     const std::size_t N = loadedModules.size();
-    std::unordered_map<std::string, std::vector<std::size_t>> definedBy;
+    std::vector<std::unordered_set<std::string>> moduleCalleeNames(N);
     for (std::size_t i = 0; i < N; ++i)
-    {
-        for (const llvm::Function& F : *loadedModules[i].module)
-        {
-            if (F.isDeclaration() || !F.hasName() || F.getName().empty())
-                continue;
-            const std::string canon = ctrace_tools::canonicalizeMangledName(F.getName().str());
-            definedBy[canon].push_back(i);
-        }
-    }
-
-    std::unordered_set<std::string> singleDefNames;
-    for (const auto& [name, modules] : definedBy)
-    {
-        if (modules.size() == 1)
-            singleDefNames.insert(name);
-    }
-
-    // Per-module filtered callee sets: only callees with single-def
-    // definitions.  Consistent with SCC edge criterion.
-    std::vector<std::unordered_set<std::string>> filteredModuleCalleeNames(N);
-    for (std::size_t i = 0; i < N; ++i)
-    {
-        for (const std::string& callee : moduleCalleeNames[i])
-        {
-            if (singleDefNames.count(callee))
-                filteredModuleCalleeNames[i].insert(callee);
-        }
-    }
+        moduleCalleeNames[i] = analysis::getCanonicalCalleeNames(operations.preparedModules[i]);
+    const auto definedBy = collectModuleDefinitions(loadedModules);
 
     // ── SCC instrumentation: diagnose inter-module call graph structure ──
     if (cfg.timing)
@@ -2651,259 +2353,21 @@ buildCrossTUUninitializedSummaryIndex(const std::vector<LoadedInputModule>& load
     }
     // ── End SCC instrumentation ──
 
-    // ── SCC worklist: topological processing of inter-module dependencies ──
-    // Build single-def filtered edge graph and compute topological SCC order.
-    // This replaces the global fixed-point loop with ordered SCC processing:
-    // - Trivial SCCs (no cycles): processed once, no iteration needed
-    // - Cyclic SCCs: iterate internally until convergence
-    const auto filteredEdges = buildSingleDefFilteredEdges(N, moduleCalleeNames, definedBy);
-    const auto sccOrder = computeTopologicalSCCOrder(N, filteredEdges);
-    const auto sccLevels = computeSCCLevels(sccOrder, filteredEdges, N);
-
-    // Note on indirect calls (function pointers):
-    // Virtually all C++ modules contain indirect calls (virtual dispatch,
-    // std::function, etc.), so flagging them as "conservatively cyclic" would
-    // negate the SCC worklist benefit. The uninit/resource analysis already
-    // handles indirect calls conservatively within each module (unresolved
-    // callees are treated as unknown). The SCC graph only tracks *resolved*
-    // inter-module edges, so indirect calls don't affect the topological order.
-    // No special treatment is needed.
-
-    // Compute max level for grouping.
-    unsigned maxLevel = 0;
-    for (unsigned lvl : sccLevels)
-        maxLevel = std::max(maxLevel, lvl);
-
-    // Group SCCs by topological level for parallel processing.
-    std::vector<std::vector<std::size_t>> levelGroups(maxLevel + 1);
-    for (std::size_t s = 0; s < sccOrder.size(); ++s)
-        levelGroups[sccLevels[s]].push_back(s);
-
-    // Classify SCCs for logging.
-    std::size_t trivialSCCCount = 0;
-    std::size_t cyclicSCCCount = 0;
-    for (std::size_t s = 0; s < sccOrder.size(); ++s)
-    {
-        const auto& scc = sccOrder[s];
-        const bool isTrivial = scc.size() == 1 && !filteredEdges[scc[0]].count(scc[0]);
-        if (isTrivial)
-            ++trivialSCCCount;
-        else
-            ++cyclicSCCCount;
-    }
-
+    const CrossTUSummaryPlan plan(moduleCalleeNames, definedBy);
     if (cfg.timing)
-    {
-        coretrace::log(coretrace::Level::Info,
-                       "Cross-TU uninitialized SCC worklist: {} SCCs ({} trivial, {} cyclic) "
-                       "in {} levels\n",
-                       sccOrder.size(), trivialSCCCount, cyclicSCCCount, maxLevel + 1);
-    }
-
-    // ── Process SCCs level by level ──
+        coretrace::log(
+            coretrace::Level::Info,
+            "Cross-TU uninitialized SCC worklist: {} SCCs ({} trivial, {} cyclic) in {} levels\n",
+            plan.sccs.size(), plan.trivialCount, plan.cyclicCount, plan.levels.size());
     analysis::UninitializedSummaryIndex globalIndex;
     std::vector<analysis::UninitializedSummaryIndex> moduleSummaries(N);
-    std::size_t totalModuleAnalyses = 0;
-
-    for (unsigned level = 0; level <= maxLevel; ++level)
-    {
-        const auto& group = levelGroups[level];
-        if (group.empty())
-            continue;
-
-        const auto levelStart = Clock::now();
-
-        // Prepare external summaries once per level — all SCCs at this level
-        // see the same accumulated globalIndex (they are independent).
-        const analysis::PreparedUninitializedExternalSummaries preparedExternal =
-            analysis::prepareUninitializedExternalSummaries(&globalIndex);
-
-        auto buildModuleSummary =
-            [&](std::size_t moduleIndex) -> analysis::UninitializedSummaryIndex
-        {
-            const analyzer::ScopedHotspot hotspot(cfg.timing,
-                                                  "app.cross_tu.uninitialized.build_module");
-            const LoadedInputModule& loaded = loadedModules[moduleIndex];
-            return analysis::buildUninitializedSummaryIndex(
-                *loaded.module, &preparedModules[moduleIndex], &preparedExternal);
-        };
-
-        // Collect all trivial SCC modules at this level for parallel batch processing.
-        std::vector<std::size_t> trivialModules;
-        std::vector<std::size_t> cyclicSCCIndices;
-
-        for (std::size_t sccIdx : group)
-        {
-            const auto& scc = sccOrder[sccIdx];
-            const bool isTrivial = scc.size() == 1 && !filteredEdges[scc[0]].count(scc[0]);
-            if (isTrivial)
-                trivialModules.push_back(scc[0]);
-            else
-                cyclicSCCIndices.push_back(sccIdx);
-        }
-
-        // Sort cyclic SCCs by minimum module index for deterministic processing order.
-        std::sort(cyclicSCCIndices.begin(), cyclicSCCIndices.end(),
-                  [&](std::size_t a, std::size_t b) { return sccOrder[a][0] < sccOrder[b][0]; });
-
-        // Process trivial SCCs in parallel.
-        if (!trivialModules.empty())
-        {
-            if (maxJobs <= 1 || trivialModules.size() <= 1)
-            {
-                for (std::size_t moduleIndex : trivialModules)
-                    moduleSummaries[moduleIndex] = buildModuleSummary(moduleIndex);
-            }
-            else
-            {
-                runParallelWork(trivialModules.size(), maxJobs,
-                                [&](std::size_t slot)
-                                {
-                                    const std::size_t moduleIndex = trivialModules[slot];
-                                    moduleSummaries[moduleIndex] = buildModuleSummary(moduleIndex);
-                                });
-            }
-            totalModuleAnalyses += trivialModules.size();
-        }
-
-        // Merge trivial SCC summaries into globalIndex.
-        for (std::size_t moduleIndex : trivialModules)
-            (void)analysis::mergeUninitializedSummaryIndex(globalIndex,
-                                                           moduleSummaries[moduleIndex]);
-
-        // Process cyclic SCCs (or modules with indirect calls) with internal iteration.
-        for (std::size_t sccIdx : cyclicSCCIndices)
-        {
-            const auto& scc = sccOrder[sccIdx];
-
-            // Internal convergence loop for this SCC.
-            std::vector<analysis::UninitializedSummaryIndex> sccPrevSummaries(N);
-            std::unordered_set<std::string> sccChangedNames;
-            bool sccConverged = false;
-
-            for (unsigned sccIter = 0; sccIter < kCrossTUMaxIterations; ++sccIter)
-            {
-                // Re-prepare external summaries with current globalIndex
-                // (which includes upstream SCCs + any changes from prev SCC iterations).
-                const analysis::PreparedUninitializedExternalSummaries sccExternal =
-                    analysis::prepareUninitializedExternalSummaries(&globalIndex);
-
-                // Rebind buildModuleSummary to use sccExternal.
-                auto buildSCCModuleSummary =
-                    [&](std::size_t moduleIndex) -> analysis::UninitializedSummaryIndex
-                {
-                    const analyzer::ScopedHotspot hotspot(
-                        cfg.timing, "app.cross_tu.uninitialized.build_module");
-                    const LoadedInputModule& loaded = loadedModules[moduleIndex];
-                    return analysis::buildUninitializedSummaryIndex(
-                        *loaded.module, &preparedModules[moduleIndex], &sccExternal);
-                };
-
-                // Delta-based dirty-marking within the SCC.
-                std::vector<std::size_t> dirtyInSCC;
-                if (sccIter == 0)
-                {
-                    dirtyInSCC = std::vector<std::size_t>(scc.begin(), scc.end());
-                }
-                else
-                {
-                    for (std::size_t m : scc)
-                    {
-                        bool isDirty = false;
-                        for (const std::string& callee : filteredModuleCalleeNames[m])
-                        {
-                            if (sccChangedNames.count(callee))
-                            {
-                                isDirty = true;
-                                break;
-                            }
-                        }
-                        if (isDirty)
-                            dirtyInSCC.push_back(m);
-                        else
-                            moduleSummaries[m] = sccPrevSummaries[m];
-                    }
-                }
-
-                for (std::size_t m : dirtyInSCC)
-                    moduleSummaries[m] = buildSCCModuleSummary(m);
-                totalModuleAnalyses += dirtyInSCC.size();
-
-                // Build SCC-local merged index to check convergence.
-                analysis::UninitializedSummaryIndex sccMerged;
-                for (std::size_t m : scc)
-                    (void)analysis::mergeUninitializedSummaryIndex(sccMerged, moduleSummaries[m]);
-
-                // Check if SCC summaries changed from previous iteration.
-                analysis::UninitializedSummaryIndex prevSccMerged;
-                for (std::size_t m : scc)
-                    (void)analysis::mergeUninitializedSummaryIndex(prevSccMerged,
-                                                                   sccPrevSummaries[m]);
-                const bool iterConverged =
-                    analysis::uninitializedSummaryIndexEquals(sccMerged, prevSccMerged);
-
-                sccChangedNames =
-                    analysis::computeChangedUninitializedFunctionNames(prevSccMerged, sccMerged);
-
-                for (std::size_t m : scc)
-                    sccPrevSummaries[m] = moduleSummaries[m];
-
-                if (cfg.timing)
-                {
-                    coretrace::log(coretrace::Level::Info,
-                                   "  Cyclic SCC (size={}) iteration {}{} (dirty={})\n", scc.size(),
-                                   sccIter + 1, iterConverged ? " converged" : "",
-                                   dirtyInSCC.size());
-                }
-
-                if (iterConverged)
-                {
-                    sccConverged = true;
-                    break;
-                }
-
-                // Update globalIndex with intermediate SCC state for next iteration's
-                // prepareExternalSummaries.
-                for (std::size_t m : scc)
-                    (void)analysis::mergeUninitializedSummaryIndex(globalIndex, moduleSummaries[m]);
-            }
-
-            if (!sccConverged)
-            {
-                coretrace::log(coretrace::Level::Warn,
-                               "Uninitialized cross-TU: cyclic SCC (size={}) reached "
-                               "iteration cap ({})\n",
-                               scc.size(), kCrossTUMaxIterations);
-            }
-
-            // Merge final SCC summaries into globalIndex.
-            for (std::size_t m : scc)
-                (void)analysis::mergeUninitializedSummaryIndex(globalIndex, moduleSummaries[m]);
-        }
-
-        if (cfg.timing)
-        {
-            const auto levelEnd = Clock::now();
-            const auto ms =
-                std::chrono::duration_cast<std::chrono::milliseconds>(levelEnd - levelStart)
-                    .count();
-            coretrace::log(
-                coretrace::Level::Info,
-                "  Level {}: {} trivial SCCs, {} cyclic SCCs ({} modules) in {} ms\n", level,
-                trivialModules.size(), cyclicSCCIndices.size(),
-                trivialModules.size() +
-                    [&]()
-                    {
-                        std::size_t n = 0;
-                        for (std::size_t s : cyclicSCCIndices)
-                            n += sccOrder[s].size();
-                        return n;
-                    }(),
-                ms);
-        }
-    }
-
-    // No indirect-call cleanup pass needed — see note above on indirect calls.
+    const std::size_t totalModuleAnalyses =
+        runCrossTUSummaryPass(plan, globalIndex, moduleSummaries, operations,
+                              [&](const auto& modules, auto&& build)
+                              {
+                                  runParallelWork(modules.size(), maxJobs,
+                                                  [&](std::size_t slot) { build(modules[slot]); });
+                              });
 
     if (cfg.timing)
     {
@@ -2913,7 +2377,7 @@ buildCrossTUUninitializedSummaryIndex(const std::vector<LoadedInputModule>& load
         coretrace::log(coretrace::Level::Info,
                        "Cross-TU uninitialized summary build done in {} ms "
                        "({} SCCs, {} module analyses)\n",
-                       ms, sccOrder.size(), totalModuleAnalyses);
+                       ms, plan.sccs.size(), totalModuleAnalyses);
     }
 
     return std::make_shared<analysis::UninitializedSummaryIndex>(std::move(globalIndex));
