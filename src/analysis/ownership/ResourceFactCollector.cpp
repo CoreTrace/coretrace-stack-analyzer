@@ -984,6 +984,12 @@ namespace ctrace::stack::analysis::ownership
                         a.dst = *slot;
                         emit(std::move(a));
                     }
+                    // A directly formed slot address is already represented by its
+                    // AddressEscape event; it is not an additional handle value.
+                    const llvm::Value* stripped = arg->stripPointerCasts();
+                    if (llvm::isa<llvm::AllocaInst>(stripped) ||
+                        llvm::isa<llvm::GetElementPtrInst>(stripped))
+                        continue;
                     u.args.push_back(valueLocation(arg));
                 }
                 if (!u.args.empty())
