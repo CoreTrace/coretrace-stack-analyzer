@@ -1019,23 +1019,9 @@ namespace ctrace::stack::analysis
             return isPointerSlotLocalStorage(storage);
         }
 
-        static llvm::StringRef canonicalExternalCalleeName(llvm::StringRef name)
-        {
-            if (!name.empty() && name.front() == '\1')
-                name = name.drop_front();
-            while (name.starts_with("_"))
-                name = name.drop_front();
-
-            const std::size_t dollarPos = name.find('$');
-            if (dollarPos != llvm::StringRef::npos)
-                name = name.take_front(dollarPos);
-
-            return name;
-        }
-
         static bool isLikelyPointerDereferenceCallee(llvm::StringRef name)
         {
-            name = canonicalExternalCalleeName(name);
+            name = canonicalExternalCalleeName(name, LeadingUnderscores::All);
             return name == "printf" || name == "fprintf" || name == "sprintf" ||
                    name == "snprintf" || name == "vprintf" || name == "vfprintf" ||
                    name == "puts" || name == "fputs" || name == "strlen" || name == "strcmp" ||

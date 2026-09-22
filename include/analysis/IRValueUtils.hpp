@@ -15,6 +15,19 @@ namespace llvm
 
 namespace ctrace::stack::analysis
 {
+    enum class LeadingUnderscores
+    {
+        One,
+        All
+    };
+
+    /// Normalize an external symbol for name-based models, returning a view into name.
+    /// Removes LLVM's no-mangling marker, leading underscores according to the caller's
+    /// policy, and the suffix beginning at the first '$'.
+    llvm::StringRef
+    canonicalExternalCalleeName(llvm::StringRef name,
+                                LeadingUnderscores underscores = LeadingUnderscores::One);
+
     enum class AllocaOrigin
     {
         User,

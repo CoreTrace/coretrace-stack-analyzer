@@ -1872,20 +1872,6 @@ namespace ctrace::stack::analysis
             return false;
         }
 
-        static llvm::StringRef canonicalExternalCalleeName(llvm::StringRef name)
-        {
-            if (!name.empty() && name.front() == '\1')
-                name = name.drop_front();
-            if (name.starts_with("_"))
-                name = name.drop_front();
-
-            const std::size_t dollarPos = name.find('$');
-            if (dollarPos != llvm::StringRef::npos)
-                name = name.take_front(dollarPos);
-
-            return name;
-        }
-
         struct ExternalReadSinkSignature
         {
             llvm::StringRef sinkName;

@@ -13,6 +13,17 @@
 
 namespace ctrace::stack::analysis
 {
+    llvm::StringRef canonicalExternalCalleeName(llvm::StringRef name,
+                                                LeadingUnderscores underscores)
+    {
+        name.consume_front("\1");
+        if (underscores == LeadingUnderscores::All)
+            name = name.ltrim("_");
+        else
+            name.consume_front("_");
+        return name.split('$').first;
+    }
+
     const llvm::StoreInst* findUniqueStoreToSlot(const llvm::AllocaInst& slot)
     {
         const llvm::StoreInst* uniqueStore = nullptr;
