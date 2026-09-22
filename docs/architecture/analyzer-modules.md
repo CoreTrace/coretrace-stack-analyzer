@@ -29,6 +29,8 @@ Role:
 - Entry point for module-level analysis execution.
 - Coordinates preparation, analysis passes, and diagnostic emission.
 - Declares step-level `requires/provides` artifact dependencies.
+- Registers each step with a typed `StepId` and its artifact dependencies together;
+  human-readable labels are used only when displaying diagnostics and timing data.
 - Tracks per-step traversal estimates (`module/function/instruction`) for timing mode.
 
 Pattern:
