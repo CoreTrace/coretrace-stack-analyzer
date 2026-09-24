@@ -565,6 +565,7 @@ namespace ctrace::stack::analyzer
             DiagnosticBuilder builder;
             builder.function(issue.funcName)
                 .severity(DiagnosticSeverity::Warning)
+                .errCode(DescriptiveErrorCode::MemcpyWithStackDest)
                 .location(loc)
                 .message(body.str());
             result.diagnostics.push_back(builder.build());
