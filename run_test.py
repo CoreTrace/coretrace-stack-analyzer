@@ -3126,6 +3126,79 @@ def check_diagnostic_rule_coverage_regression() -> bool:
     return ok
 
 
+def check_diagnostic_cwe_coverage() -> bool:
+    """
+    Every diagnostic names its rule, and each kind carries the CWE of the weakness it
+    detects, so code-scanning platforms can classify it.
+    """
+    print("=== Testing diagnostic CWE coverage ===")
+    ok = True
+
+    # (rule, CWE, analyzer args): one fixture per kind and per CWE the kind can carry.
+    cases = [
+        ("StackBufferOverflow", "CWE-121", ["test/bound-storage/bound-storage.c"]),
+        ("StackBufferOverflow", "CWE-787", ["test/bound-storage/global-array-overflow.c"]),
+        ("StackBufferOverflow", "CWE-125", ["test/bound-storage/read-access-out-of-bounds.c"]),
+        ("NegativeStackIndex", "CWE-124", ["test/bound-storage/ranges_test.c"]),
+        ("NegativeStackIndex", "CWE-127", ["test/bound-storage/read-access-out-of-bounds.c"]),
+        (
+            "MemcpyWithStackDest",
+            "CWE-120",
+            [
+                "test/cpy-buffer/unbounded-strcpy-model.c",
+                "--buffer-model=models/buffer-overflow/generic.txt",
+            ],
+        ),
+        ("MemcpyWithStackDest", "CWE-121", ["test/cpy-buffer/bad-usage-memcpy.c"]),
+        ("VLAUsage", "CWE-770", ["test/vla/vla-unknown-stack.c"]),
+        ("AllocaTooLarge", "CWE-770", ["test/alloca/oversized-constant.c"]),
+        ("AllocaUsageWarning", "CWE-770", ["test/vla/deguised-constant.c"]),
+        ("AllocaUserControlled", "CWE-789", ["test/alloca/user-controlled.c"]),
+        ("SizeMinusOneWrite", "CWE-191", ["test/size-arg/strncpy-size-minus-1.c"]),
+        (
+            "InvalidBaseReconstruction",
+            "CWE-823",
+            ["test/offset_of-container_of/container_of_wrong_member_offset_error.c"],
+        ),
+        ("StackPointerEscape", "CWE-562", ["test/escape-stack/return-buf.c"]),
+        ("DuplicateIfCondition", "CWE-561", ["test/diagnostics/duplicate-else-if-basic.c"]),
+    ]
+
+    for rule, cwe, args in cases:
+        label = f"{rule} {cwe}"
+        result = run_analyzer([*args, "--format=json"])
+        if result.returncode != 0:
+            print(f"  ❌ {label} run failed (code {result.returncode})")
+            print((result.stdout or "") + (result.stderr or ""))
+            ok = False
+            continue
+
+        try:
+            diagnostics = json.loads(result.stdout or "").get("diagnostics", [])
+        except json.JSONDecodeError as exc:
+            print(f"  ❌ {label} invalid JSON output: {exc}")
+            print(result.stdout or "")
+            ok = False
+            continue
+
+        unnamed = [d for d in diagnostics if d.get("ruleId") in ("", "None")]
+        if unnamed:
+            print(f"  ❌ {label} {args[0]} has {len(unnamed)} diagnostic(s) under rule None")
+            ok = False
+            continue
+
+        cwes = {d.get("cwe") for d in diagnostics if d.get("ruleId") == rule}
+        if cwes != {cwe}:
+            print(f"  ❌ {label} {args[0]}: {rule} diagnostics carry {json.dumps(sorted(cwes, key=str))}")
+            ok = False
+            continue
+
+        print(f"  ✅ {label} OK")
+
+    print()
+    return ok
+
+
 def check_unresolved_call_max_stack() -> bool:
     """
     A function containing an unresolved call (indirect, or to an external
@@ -3529,6 +3602,7 @@ def main() -> int:
         check_escape_model_rejects_unsupported_brackets,
         check_human_vs_json_parity,
         check_diagnostic_rule_coverage_regression,
+        check_diagnostic_cwe_coverage,
     ]
     # Env-mutating check — must run outside the parallel pool.
     sequential_checks = [
