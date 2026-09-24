@@ -96,7 +96,7 @@ _RE_BUFFER_MODEL = re.compile(r"//\s*buffer-model\s*[:=]\s*(\S+)", re.IGNORECASE
 _RE_STRICT_DIAG = re.compile(r"//\s*strict-diagnostic-count\s*[:=]\s*(\S+)", re.IGNORECASE)
 _RE_STRICT_DETAILS = re.compile(r"//\s*strict-expectation-details\s*[:=]\s*(\S+)", re.IGNORECASE)
 # `// [smt-z3] not contains: ...` or `// [default] at line ...`: an expectation for one pass.
-_RE_PASS_SCOPE = re.compile(r"//\s*\[([A-Za-z0-9_-]+)\]\s+(?=at line|not contains:)")
+_RE_PASS_SCOPE = re.compile(r"//\s*\[([A-Za-z0-9_-]+)\]\s*(?=at line|not contains:)")
 _EXPECTATION_PASSES = ("default", "smt-z3")
 
 
@@ -429,7 +429,12 @@ def extract_expectations(c_path: Path):
             comment_block = [stripped]
             i += 1
             # Collect all following "// ..." lines
-            while i < n and lines[i].lstrip().startswith("//"):
+            # A scoped line starts its own expectation, even without a blank line before it.
+            while (
+                i < n
+                and lines[i].lstrip().startswith("//")
+                and not _RE_PASS_SCOPE.match(lines[i].lstrip())
+            ):
                 comment_block.append(lines[i])
                 i += 1
 
@@ -3459,7 +3464,10 @@ def check_file(c_path: Path):
         escape_model=escape_model,
         buffer_model=buffer_model,
     )
-    base_ok, base_total, base_passed, base_lines = evaluate_pass("default", baseline_output)
+    # With runner-level --smt args this run is neither the default pass nor the smt-z3 one:
+    # only unscoped expectations describe it.
+    baseline_pass = "custom-smt" if _runner_has_explicit_smt_args() else "default"
+    base_ok, base_total, base_passed, base_lines = evaluate_pass(baseline_pass, baseline_output)
     report_lines.extend(base_lines)
     all_ok = all_ok and base_ok
     total += base_total
