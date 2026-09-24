@@ -60,7 +60,8 @@ namespace ctrace::stack::analysis
                                      const llvm::Instruction* contextInst) const
             {
                 return smt::SmtConstraintEvaluator::evaluateQuery(
-                    smt::encodeSignedOverflowFeasibility(ranges, binary, contextInst));
+                    [&]
+                    { return smt::encodeSignedOverflowFeasibility(ranges, binary, contextInst); });
             }
 
             SmtFeasibility
@@ -69,7 +70,10 @@ namespace ctrace::stack::analysis
                                        const llvm::Instruction* contextInst) const
             {
                 return smt::SmtConstraintEvaluator::evaluateQuery(
-                    smt::encodeUnsignedOverflowFeasibility(ranges, binary, contextInst));
+                    [&]
+                    {
+                        return smt::encodeUnsignedOverflowFeasibility(ranges, binary, contextInst);
+                    });
             }
 
             SmtFeasibility
@@ -78,8 +82,11 @@ namespace ctrace::stack::analysis
                                         const llvm::Instruction* contextInst) const
             {
                 return smt::SmtConstraintEvaluator::evaluateQuery(
-                    smt::encodeSignedComparisonFeasibility(ranges, lhs, rhsConstant, true,
-                                                           contextInst));
+                    [&]
+                    {
+                        return smt::encodeSignedComparisonFeasibility(ranges, lhs, rhsConstant,
+                                                                      true, contextInst);
+                    });
             }
 
             SmtFeasibility
@@ -88,8 +95,11 @@ namespace ctrace::stack::analysis
                                       const llvm::Instruction* contextInst) const
             {
                 return smt::SmtConstraintEvaluator::evaluateQuery(
-                    smt::encodeSignedComparisonFeasibility(ranges, lhs, rhsConstant, false,
-                                                           contextInst));
+                    [&]
+                    {
+                        return smt::encodeSignedComparisonFeasibility(ranges, lhs, rhsConstant,
+                                                                      false, contextInst);
+                    });
             }
         };
 

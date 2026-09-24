@@ -351,9 +351,12 @@ namespace ctrace::stack::analysis
                                         const llvm::BasicBlock* incomingBlock = nullptr) const
             {
                 const ConstraintSat fallbackDecision = evaluateIntervalSatisfiability(ranges);
-                const smt::SmtFeasibility feasibility =
-                    smt::SmtConstraintEvaluator::evaluateQuery(encoder_.encode(
-                        ranges, edgeCondition, takesTrueEdge, edgeBlock, incomingBlock));
+                const smt::SmtFeasibility feasibility = smt::SmtConstraintEvaluator::evaluateQuery(
+                    [&]
+                    {
+                        return encoder_.encode(ranges, edgeCondition, takesTrueEdge, edgeBlock,
+                                               incomingBlock);
+                    });
                 switch (feasibility)
                 {
                 case smt::SmtFeasibility::Feasible:

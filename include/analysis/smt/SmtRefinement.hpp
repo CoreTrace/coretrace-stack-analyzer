@@ -56,11 +56,21 @@ namespace ctrace::stack::analysis::smt
         }
 
       protected:
-        SmtFeasibility evaluateQuery(ConstraintIR ir) const
+        /// @brief Solves the query built by @p encode.
+        ///
+        /// When SMT is off for this rule, answers Inconclusive without calling @p encode: the
+        /// encoding, and for path-sensitive queries MemorySSA, is only paid for when a solver
+        /// will read it.
+        template <typename Encode> SmtFeasibility evaluateQuery(Encode&& encode) const
         {
             if (!orchestrator_)
                 return SmtFeasibility::Inconclusive;
+            return solve(std::forward<Encode>(encode)());
+        }
 
+      private:
+        SmtFeasibility solve(ConstraintIR ir) const
+        {
             SmtQuery query;
             query.ir = std::move(ir);
             query.ruleId = ruleId_;
@@ -82,7 +92,6 @@ namespace ctrace::stack::analysis::smt
             return SmtFeasibility::Inconclusive;
         }
 
-      private:
         std::string ruleId_;
         std::optional<SolverOrchestrator> orchestrator_;
         std::uint64_t budgetNodes_ = 10000;

@@ -208,8 +208,11 @@ namespace ctrace::stack::analysis
                                     const llvm::Instruction* contextInst) const
             {
                 return smt::SmtConstraintEvaluator::evaluateQuery(
-                    smt::encodeSignedComparisonFeasibility(ranges, indexExpr, -1, false,
-                                                           contextInst));
+                    [&]
+                    {
+                        return smt::encodeSignedComparisonFeasibility(ranges, indexExpr, -1, false,
+                                                                      contextInst);
+                    });
             }
 
             SmtFeasibility
@@ -226,8 +229,11 @@ namespace ctrace::stack::analysis
 
                 const std::int64_t upperInclusive = static_cast<std::int64_t>(limitExclusive - 1);
                 return smt::SmtConstraintEvaluator::evaluateQuery(
-                    smt::encodeSignedComparisonFeasibility(ranges, indexExpr, upperInclusive, true,
-                                                           contextInst));
+                    [&]
+                    {
+                        return smt::encodeSignedComparisonFeasibility(
+                            ranges, indexExpr, upperInclusive, true, contextInst);
+                    });
             }
         };
 

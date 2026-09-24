@@ -83,8 +83,11 @@ namespace ctrace::stack::analysis
                                       const llvm::Instruction* contextInst) const
             {
                 return smt::SmtConstraintEvaluator::evaluateQuery(
-                    smt::encodeSignedComparisonFeasibility(ranges, lhs, rhsConstant, false,
-                                                           contextInst));
+                    [&]
+                    {
+                        return smt::encodeSignedComparisonFeasibility(ranges, lhs, rhsConstant,
+                                                                      false, contextInst);
+                    });
             }
         };
 

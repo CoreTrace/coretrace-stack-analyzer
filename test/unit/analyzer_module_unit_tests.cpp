@@ -11,6 +11,7 @@
 #include "analysis/ownership/ResourceFactCollector.hpp"
 #include "analysis/StackBufferAnalysis.hpp"
 #include "analysis/UninitializedVarAnalysis.hpp"
+#include "analysis/smt/SmtRefinement.hpp"
 #include "analyzer/DiagnosticEmitter.hpp"
 #include "analyzer/LocationResolver.hpp"
 #include "analyzer/ModulePreparationService.hpp"
@@ -1153,6 +1154,43 @@ namespace
         }
         return report.failures == 0;
     }
+
+    /// SMT refinement: an evaluator whose rule has SMT off never builds its query.
+    bool testSmtEvaluatorEncodesLazily(TestReport& report)
+    {
+        struct ProbeEvaluator final : ctrace::stack::analysis::smt::SmtConstraintEvaluator
+        {
+            using SmtConstraintEvaluator::SmtConstraintEvaluator;
+
+            bool encodes() const
+            {
+                bool called = false;
+                (void)evaluateQuery(
+                    [&]
+                    {
+                        called = true;
+                        return ctrace::stack::analysis::smt::ConstraintIR{};
+                    });
+                return called;
+            }
+        };
+
+        const ctrace::stack::AnalysisConfig off;
+        report.expect(!ProbeEvaluator(off, "stack-buffer").encodes(),
+                      "SMT evaluator: SMT off builds no query");
+
+        ctrace::stack::AnalysisConfig otherRule;
+        otherRule.smtEnabled = 1;
+        otherRule.smtRules = {"recursion"};
+        report.expect(!ProbeEvaluator(otherRule, "stack-buffer").encodes(),
+                      "SMT evaluator: a rule outside --smt-rules builds no query");
+
+        ctrace::stack::AnalysisConfig on;
+        on.smtEnabled = 1;
+        report.expect(ProbeEvaluator(on, "stack-buffer").encodes(),
+                      "SMT evaluator: SMT on builds the query");
+        return report.failures == 0;
+    }
 } // namespace
 
 int main(int argc, char** argv)
@@ -1175,6 +1213,7 @@ int main(int argc, char** argv)
     (void)testAssumeExternalFrameReplacesUnknown(repoRoot, report);
     (void)testUninitializedFixpointBudgetIsExplicit(repoRoot, report);
     (void)testProgramPointRanges(repoRoot, report);
+    (void)testSmtEvaluatorEncodesLazily(report);
     (void)testResourceModelConditions(report);
     (void)testOwnershipFactCollector(repoRoot, report);
     (void)testOwnershipCollectorExceptions(repoRoot, report);
