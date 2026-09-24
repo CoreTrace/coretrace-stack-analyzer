@@ -1191,6 +1191,36 @@ namespace
                       "SMT evaluator: SMT on builds the query");
         return report.failures == 0;
     }
+
+#ifdef CTRACE_STACK_ENABLE_Z3_BACKEND
+    /// Z3 backend: a negative constant wider than 64 bits keeps its sign.
+    bool testZ3WideNegativeConstant(TestReport& report)
+    {
+        using namespace ctrace::stack::analysis::smt;
+        ConstraintIR ir;
+        ir.symbols.push_back(SymbolInfo{.id = 1, .debugName = "x", .sourceToken = 0});
+        const auto add = [&](ExprNode node)
+        {
+            ir.nodes.push_back(node);
+            return static_cast<ExprId>(ir.nodes.size() - 1);
+        };
+        const ExprId x = add({.kind = ExprKind::Symbol, .symbol = 1, .bitWidth = 128});
+        const ExprId minusOne = add({.kind = ExprKind::Constant, .constant = -1, .bitWidth = 128});
+        const ExprId zero = add({.kind = ExprKind::Constant, .constant = 0, .bitWidth = 128});
+        ir.assertions.push_back(
+            add({.kind = ExprKind::Eq, .bitWidth = 1, .lhs = x, .rhs = minusOne}));
+        ir.assertions.push_back(add({.kind = ExprKind::Sgt, .bitWidth = 1, .lhs = x, .rhs = zero}));
+
+        SmtQuery query;
+        query.ir = std::move(ir);
+        query.timeoutMs = 1000;
+        const SmtDecision decision =
+            SolverOrchestrator(SolverOrchestratorConfig{.primaryBackend = "z3"}).solve(query);
+        report.expect(decision.status == SmtStatus::Unsat,
+                      "Z3 backend: -1 at 128 bits is negative (x == -1 && x > 0 is unsat)");
+        return report.failures == 0;
+    }
+#endif
 } // namespace
 
 int main(int argc, char** argv)
@@ -1214,6 +1244,9 @@ int main(int argc, char** argv)
     (void)testUninitializedFixpointBudgetIsExplicit(repoRoot, report);
     (void)testProgramPointRanges(repoRoot, report);
     (void)testSmtEvaluatorEncodesLazily(report);
+#ifdef CTRACE_STACK_ENABLE_Z3_BACKEND
+    (void)testZ3WideNegativeConstant(report);
+#endif
     (void)testResourceModelConditions(report);
     (void)testOwnershipFactCollector(repoRoot, report);
     (void)testOwnershipCollectorExceptions(repoRoot, report);

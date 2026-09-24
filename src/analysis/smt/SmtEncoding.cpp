@@ -287,8 +287,14 @@ namespace ctrace::stack::analysis::smt
             std::optional<ExprId> encodeValueImpl(const llvm::Value& value)
             {
                 if (const auto* constantInt = llvm::dyn_cast<llvm::ConstantInt>(&value))
+                {
+                    // ExprNode stores a 64-bit constant: a wider value that does not fit is an
+                    // unknown, not its truncation (getSExtValue asserts, or keeps the low word).
+                    if (constantInt->getValue().getSignificantBits() > 64)
+                        return builder_.makeSymbol(&value, inferBitWidth(&value));
                     return builder_.makeConstant(constantInt->getSExtValue(),
                                                  inferBitWidth(&value));
+                }
 
                 if (llvm::isa<llvm::ConstantPointerNull>(&value))
                     return builder_.makeConstant(0, inferBitWidth(&value));
