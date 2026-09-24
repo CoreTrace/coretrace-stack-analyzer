@@ -237,18 +237,23 @@ namespace ctrace::stack::analysis
             }
         };
 
+        /// @p indexExpr is the index the access really uses, casts included: bounding the value
+        /// before a narrowing cast would prove in bounds an index that the cast makes negative.
+        /// The range, looked up for @p rangedValue (the index without its casts), constrains that
+        /// value, and the encoded casts carry it to the index.
         static bool isHeapIndexViolationInfeasibleBySmt(
             const OOBReadConstraintEvaluator& evaluator,
             const std::map<const llvm::Value*, IntRange>& baseRanges, const llvm::Value* indexExpr,
-            std::uint64_t capacity, const llvm::Instruction& accessInst)
+            const llvm::Value* rangedValue, std::uint64_t capacity,
+            const llvm::Instruction& accessInst)
         {
             if (!indexExpr || !indexExpr->getType()->isIntegerTy())
                 return false;
 
             std::map<const llvm::Value*, IntRange> queryRanges;
-            if (const auto range = lookupRange(indexExpr, baseRanges))
+            if (const auto range = lookupRange(rangedValue, baseRanges))
             {
-                queryRanges[indexExpr] = *range;
+                queryRanges[rangedValue] = *range;
             }
 
             if (evaluator.isNegativeIndexFeasible(queryRanges, *indexExpr, &accessInst) !=
@@ -536,7 +541,8 @@ namespace ctrace::stack::analysis
                             queryIndex = cast->getOperand(0);
 
                         if (isHeapIndexViolationInfeasibleBySmt(evaluator, pointRanges.at(inst),
-                                                                queryIndex, capacity, inst))
+                                                                indexValue, queryIndex, capacity,
+                                                                inst))
                         {
                             continue;
                         }
