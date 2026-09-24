@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "app/AnalyzerApp.hpp"
 #include "cli/ArgParser.hpp"
+#include "analysis/smt/SolverOrchestrator.hpp"
 
 #include <algorithm>
 #include <sstream>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include <llvm/Support/raw_ostream.h>
 
@@ -188,6 +190,33 @@ static void printEffectiveConfig(const ctrace::stack::cli::ParsedArguments& pars
     llvm::errs() << "========================================\n";
 }
 
+// A backend missing from this build answers every query Unknown, which silently turns
+// --smt=on into a no-op; say so once, before any analysis.
+static void warnAboutUnavailableSmtBackends(const AnalysisConfig& cfg)
+{
+    using ctrace::stack::analysis::smt::SolverMode;
+    if (!cfg.smtEnabled)
+        return;
+
+    std::vector<std::string> used{cfg.smtBackend};
+    if (cfg.smtMode != SolverMode::Single && !cfg.smtSecondaryBackend.empty() &&
+        cfg.smtSecondaryBackend != cfg.smtBackend)
+    {
+        used.push_back(cfg.smtSecondaryBackend);
+    }
+
+    for (const std::string& backend : used)
+    {
+        if (!ctrace::stack::analysis::smt::isSmtBackendAvailable(backend))
+        {
+            coretrace::log(coretrace::Level::Warn,
+                           "SMT backend '{}' is not available in this build; its queries are "
+                           "inconclusive\n",
+                           backend);
+        }
+    }
+}
+
 int main(int argc, char** argv)
 {
     coretrace::enable_logging();
@@ -221,6 +250,8 @@ int main(int argc, char** argv)
 
     if (parseResult.parsed.printEffectiveConfig)
         printEffectiveConfig(parseResult.parsed);
+
+    warnAboutUnavailableSmtBackends(parseResult.parsed.config);
 
     ctrace::stack::app::RunResult runResult =
         ctrace::stack::app::runAnalyzerApp(std::move(parseResult.parsed));
