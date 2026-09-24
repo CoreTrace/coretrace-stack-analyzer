@@ -113,6 +113,9 @@ set(STACK_ANALYZER_SOURCES
 
 set(CTRACE_STACK_HAVE_Z3_BACKEND OFF)
 if(ENABLE_Z3_BACKEND)
+    # pkg_check_modules caches Z3_FOUND: without this, a reconfigure where the CMake package
+    # is not searched would skip pkg-config and lose the PkgConfig::Z3 target.
+    unset(Z3_FOUND CACHE)
     find_package(Z3 QUIET CONFIG)
     if(NOT Z3_FOUND)
         # Debian and Ubuntu ship z3.pc but no Z3Config.cmake.
