@@ -626,7 +626,10 @@ namespace ctrace::stack::analysis::smt
                     return;
 
                 const ExprId result = builder.makeBinary(*opKind, *lhs, *rhs, bitWidth);
-                const std::uint32_t extWidth = bitWidth + 1;
+                // One extra bit computes a sum or a difference exactly; a product needs twice
+                // the width, or the widened product itself wraps and hides the overflow.
+                const std::uint32_t extWidth =
+                    *opKind == ExprKind::Mul ? 2 * bitWidth : bitWidth + 1;
 
                 const ExprId lhsExt = builder.makeUnary(ExprKind::SExt, *lhs, extWidth);
                 const ExprId rhsExt = builder.makeUnary(ExprKind::SExt, *rhs, extWidth);
@@ -665,7 +668,10 @@ namespace ctrace::stack::analysis::smt
                     return;
 
                 const ExprId result = builder.makeBinary(*opKind, *lhs, *rhs, bitWidth);
-                const std::uint32_t extWidth = bitWidth + 1;
+                // One extra bit computes a sum or a difference exactly; a product needs twice
+                // the width, or the widened product itself wraps and hides the overflow.
+                const std::uint32_t extWidth =
+                    *opKind == ExprKind::Mul ? 2 * bitWidth : bitWidth + 1;
 
                 const ExprId lhsExt = builder.makeUnary(ExprKind::ZExt, *lhs, extWidth);
                 const ExprId rhsExt = builder.makeUnary(ExprKind::ZExt, *rhs, extWidth);
