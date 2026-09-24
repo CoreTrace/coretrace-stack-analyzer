@@ -2,6 +2,7 @@
 #include "app/AnalyzerApp.hpp"
 #include "cli/ArgParser.hpp"
 #include "analysis/smt/SolverOrchestrator.hpp"
+#include "analysis/smt/TextUtil.hpp"
 
 #include <algorithm>
 #include <sstream>
@@ -195,12 +196,14 @@ static void printEffectiveConfig(const ctrace::stack::cli::ParsedArguments& pars
 static void warnAboutUnavailableSmtBackends(const AnalysisConfig& cfg)
 {
     using ctrace::stack::analysis::smt::SolverMode;
+    using ctrace::stack::analysis::smt::toLowerAscii;
     if (!cfg.smtEnabled)
         return;
 
+    // Backend names are case-insensitive, so "CVC5" and "cvc5" are one backend.
     std::vector<std::string> used{cfg.smtBackend};
     if (cfg.smtMode != SolverMode::Single && !cfg.smtSecondaryBackend.empty() &&
-        cfg.smtSecondaryBackend != cfg.smtBackend)
+        toLowerAscii(cfg.smtSecondaryBackend) != toLowerAscii(cfg.smtBackend))
     {
         used.push_back(cfg.smtSecondaryBackend);
     }

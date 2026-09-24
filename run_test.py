@@ -1206,7 +1206,14 @@ def check_smt_unavailable_backend_warning() -> bool:
         (["--smt=on", "--smt-backend=cvc5"], "cvc5"),
         (["--smt=on", "--smt-backend=Interval"], None),
         (["--smt=on", "--smt-mode=portfolio", "--smt-secondary-backend=cvc5"], "cvc5"),
+        (["--smt=on", "--smt-mode=cross-check", "--smt-secondary-backend=cvc5"], "cvc5"),
+        (["--smt=on", "--smt-mode=dual-consensus", "--smt-secondary-backend=cvc5"], "cvc5"),
         (["--smt=on", "--smt-mode=single", "--smt-secondary-backend=cvc5"], None),
+        # One backend named twice, in two casings, is one backend.
+        (
+            ["--smt=on", "--smt-mode=portfolio", "--smt-backend=CVC5", "--smt-secondary-backend=cvc5"],
+            "CVC5",
+        ),
         (["--smt-backend=cvc5", "--smt=off"], None),
     ]
     ok = True
@@ -1215,13 +1222,19 @@ def check_smt_unavailable_backend_warning() -> bool:
         stderr = result.stderr or ""
         warnings = stderr.count(_SMT_BACKEND_UNAVAILABLE)
         label = " ".join(args)
-        if _SMT_BACKEND_UNAVAILABLE in (result.stdout or ""):
+        if result.returncode != 0:
+            print(f"  ❌ {label}: exited {result.returncode}; the warning must not change it")
+            ok = False
+        elif _SMT_BACKEND_UNAVAILABLE in (result.stdout or ""):
             print(f"  ❌ {label}: the warning must go to stderr, not stdout")
             ok = False
         elif backend is None and warnings:
             print(f"  ❌ {label}: unexpected warning")
             if "SMT backend 'z3'" in stderr:
-                print("     this analyzer has no Z3: install it (libz3-dev or brew z3) and rebuild")
+                print(
+                    "     this analyzer has no Z3: install libz3-dev and pkg-config (Debian/Ubuntu)"
+                    " or `brew install z3`, then re-run cmake and rebuild"
+                )
             ok = False
         elif backend is not None and (warnings != 1 or f"SMT backend '{backend}'" not in stderr):
             print(f"  ❌ {label}: expected one warning for '{backend}', got {warnings}")
