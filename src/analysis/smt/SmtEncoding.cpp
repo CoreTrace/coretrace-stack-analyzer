@@ -278,36 +278,10 @@ namespace ctrace::stack::analysis::smt
                     return std::nullopt;
                 }
 
-                const std::uint32_t bitWidth = inferBitWidth(&binaryOp);
-                const ExprId result = builder_.makeBinary(opKind, *lhs, *rhs, bitWidth);
-
-                const bool isOverflowSensitive = binaryOp.getOpcode() == llvm::Instruction::Add ||
-                                                 binaryOp.getOpcode() == llvm::Instruction::Sub ||
-                                                 binaryOp.getOpcode() == llvm::Instruction::Mul;
-                if (!isOverflowSensitive || bitWidth >= std::numeric_limits<std::uint32_t>::max())
-                    return result;
-
-                const std::uint32_t extWidth = bitWidth + 1;
-                if (binaryOp.hasNoSignedWrap())
-                {
-                    const ExprId lhsExt = builder_.makeUnary(ExprKind::SExt, *lhs, extWidth);
-                    const ExprId rhsExt = builder_.makeUnary(ExprKind::SExt, *rhs, extWidth);
-                    const ExprId resultExt = builder_.makeUnary(ExprKind::SExt, result, extWidth);
-                    const ExprId extArith = builder_.makeBinary(opKind, lhsExt, rhsExt, extWidth);
-                    builder_.addAssertion(
-                        builder_.makeBinary(ExprKind::Eq, resultExt, extArith, 1));
-                }
-                if (binaryOp.hasNoUnsignedWrap())
-                {
-                    const ExprId lhsExt = builder_.makeUnary(ExprKind::ZExt, *lhs, extWidth);
-                    const ExprId rhsExt = builder_.makeUnary(ExprKind::ZExt, *rhs, extWidth);
-                    const ExprId resultExt = builder_.makeUnary(ExprKind::ZExt, result, extWidth);
-                    const ExprId extArith = builder_.makeBinary(opKind, lhsExt, rhsExt, extWidth);
-                    builder_.addAssertion(
-                        builder_.makeBinary(ExprKind::Eq, resultExt, extArith, 1));
-                }
-
-                return result;
+                // Wrapping semantics, as the -O0 code executes. nsw/nuw promise that an operand
+                // does not wrap, which is exactly what may be false where a warning is due, so
+                // they never become assertions.
+                return builder_.makeBinary(opKind, *lhs, *rhs, inferBitWidth(&binaryOp));
             }
 
             std::optional<ExprId> encodeValueImpl(const llvm::Value& value)
