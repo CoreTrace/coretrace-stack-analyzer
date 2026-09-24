@@ -360,9 +360,14 @@ Note:
 
 ### SMT solver usage (Z3-style backend)
 
-Build configuration:
+Build configuration. Z3 is detected through its CMake package, or through
+pkg-config when only `z3.pc` is installed (Debian/Ubuntu):
 
 ```zsh
+# Install Z3 first:
+#   Debian/Ubuntu: sudo apt-get install libz3-dev pkg-config
+#   macOS:         brew install z3
+
 # Auto-detect Z3 (default: ENABLE_Z3_BACKEND=ON)
 cmake -S . -B build -DFETCHCONTENT_UPDATES_DISCONNECTED=ON
 cmake --build build -j4
@@ -430,13 +435,14 @@ Currently integrated SMT rule ids:
 - `oob-read`
 
 Notes:
-- If a backend is unavailable in the current build, the analyzer keeps conservative behavior and falls back to baseline reasoning for SMT-integrated rules.
+- If a backend is unavailable in the current build, the analyzer keeps conservative behavior and falls back to baseline reasoning for SMT-integrated rules. With `--smt=on`, it says so once on stderr: `SMT backend 'z3' is not available in this build; its queries are inconclusive`.
 - `--smt-rules=recursion` is still recommended to roll out SMT gradually.
 - `type-confusion` currently uses deterministic layout refinement (no solver query).
 - `run_test.py` runs two passes per fixture by default:
   1. baseline pass (no extra SMT args),
   2. dedicated SMT+Z3 pass with `--smt=on --smt-backend=z3 --smt-mode=single` and all integrated SMT rule ids.
   The dedicated SMT pass is skipped if explicit `--smt*` args are already provided to the runner via `--analyzer-arg`.
+  Because of that pass, `run_test.py` needs an analyzer built with Z3: without it, `check_smt_unavailable_backend_warning` fails the run (install Z3 as above, then re-run cmake and rebuild).
 
 ### Analysis profiles (`fast` vs `full`)
 

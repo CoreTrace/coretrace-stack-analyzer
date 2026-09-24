@@ -110,16 +110,19 @@ configuration.
 ### 3.3 Avertissement de backend indisponible
 
 Quand `--smt=on` est actif et qu'un backend utilisé par le mode choisi n'est pas compilé,
-l'analyseur écrit une seule fois sur stderr :
+l'analyseur écrit une seule fois sur stderr, via le logger du projet (préfixe
+`==stack-analyzer== [WARN]`) :
 
 ```text
-warning: SMT backend 'z3' is not available in this build; its queries are inconclusive
+SMT backend 'z3' is not available in this build; its queries are inconclusive
 ```
 
 Le backend principal est toujours concerné. Le backend secondaire ne l'est que dans les modes
-`cross-check`, `portfolio` et `dual-consensus`, les seuls qui l'utilisent. L'avertissement est
-émis là où la configuration est validée, une fois par processus, et non dans chaque évaluateur. Le
-module SMT expose pour cela la liste des backends compilés. Le fragment
+`cross-check`, `portfolio` et `dual-consensus`, les seuls qui l'utilisent. Un même backend nommé
+deux fois, quelle que soit la casse, n'est signalé qu'une fois. L'avertissement est émis dans
+`main`, après la lecture de la configuration, une fois par processus, et non dans chaque
+évaluateur. Le module SMT expose pour cela le prédicat `isSmtBackendAvailable(name)`, insensible
+à la casse, qui décide aussi du backend construit. Le fragment
 `is not available in this build` est stable, car `run_test.py` s'en sert. Le code de retour, les
 diagnostics et les sorties JSON et SARIF sur stdout ne changent pas.
 
