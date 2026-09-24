@@ -250,8 +250,6 @@ namespace ctrace::stack::analysis
             {
                 queryRanges[indexExpr] = *range;
             }
-            if (queryRanges.empty())
-                return false;
 
             if (evaluator.isNegativeIndexFeasible(queryRanges, *indexExpr, &accessInst) !=
                 SmtFeasibility::Infeasible)

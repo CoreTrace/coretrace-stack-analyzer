@@ -694,8 +694,6 @@ namespace ctrace::stack::analysis
         {
             if (!indexExpr || !indexExpr->getType()->isIntegerTy())
                 return false;
-            if (!localRange.hasLower && !localRange.hasUpper)
-                return false;
 
             std::map<const llvm::Value*, IntRange> queryRanges;
             queryRanges[indexExpr] = localRange;
@@ -710,8 +708,6 @@ namespace ctrace::stack::analysis
                                                     const llvm::Instruction& accessInst)
         {
             if (!indexExpr || !indexExpr->getType()->isIntegerTy())
-                return false;
-            if (!localRange.hasLower && !localRange.hasUpper)
                 return false;
 
             std::map<const llvm::Value*, IntRange> queryRanges;

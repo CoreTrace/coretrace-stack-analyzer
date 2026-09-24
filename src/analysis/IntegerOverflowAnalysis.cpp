@@ -724,8 +724,6 @@ namespace ctrace::stack::analysis
                 {
                     const std::map<const llvm::Value*, IntRange> queryRanges =
                         buildArithmeticQueryRanges(*risk.arithmeticOp, ranges);
-                    if (queryRanges.empty())
-                        return false;
                     return evaluator.isUnsignedOverflowFeasible(queryRanges, *risk.arithmeticOp,
                                                                 &contextInst) ==
                            SmtFeasibility::Infeasible;
@@ -736,8 +734,6 @@ namespace ctrace::stack::analysis
                 {
                     const std::map<const llvm::Value*, IntRange> queryRanges =
                         buildValueQueryRanges(*risk.relatedValue, ranges);
-                    if (queryRanges.empty())
-                        return false;
                     return evaluator.isSignedLessEqualFeasible(queryRanges, *risk.relatedValue, -1,
                                                                &contextInst) ==
                            SmtFeasibility::Infeasible;
@@ -752,8 +748,6 @@ namespace ctrace::stack::analysis
 
                 const std::map<const llvm::Value*, IntRange> queryRanges =
                     buildValueQueryRanges(*risk.relatedValue, ranges);
-                if (queryRanges.empty())
-                    return false;
                 const std::int64_t truncMax = (std::int64_t{1} << risk.truncTargetBitWidth) - 1;
                 const SmtFeasibility negativeFeasible = evaluator.isSignedLessEqualFeasible(
                     queryRanges, *risk.relatedValue, -1, &contextInst);
@@ -807,9 +801,8 @@ namespace ctrace::stack::analysis
                         {
                             const std::map<const llvm::Value*, IntRange> queryRanges =
                                 buildArithmeticQueryRanges(*binary, ranges);
-                            if (!queryRanges.empty() &&
-                                evaluator.isSignedOverflowFeasible(queryRanges, *binary, &inst) ==
-                                    SmtFeasibility::Infeasible)
+                            if (evaluator.isSignedOverflowFeasible(queryRanges, *binary, &inst) ==
+                                SmtFeasibility::Infeasible)
                             {
                                 continue;
                             }

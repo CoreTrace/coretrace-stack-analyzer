@@ -495,13 +495,9 @@ namespace ctrace::stack::analysis
                 {
                     const std::map<const llvm::Value*, IntRange> queryRanges =
                         buildValueQueryRanges(*sizeBase, pointRanges.at(*at));
-                    if (!queryRanges.empty())
-                    {
-                        const SmtFeasibility sizeAtMostKFeasible =
-                            evaluator.isSignedLessEqualFeasible(queryRanges, *sizeBase, k, at);
-                        if (sizeAtMostKFeasible == SmtFeasibility::Infeasible)
-                            issue.sizeAboveK = true;
-                    }
+                    if (evaluator.isSignedLessEqualFeasible(queryRanges, *sizeBase, k, at) ==
+                        SmtFeasibility::Infeasible)
+                        issue.sizeAboveK = true;
                 }
                 issue.k = k;
                 issue.inst = at;
