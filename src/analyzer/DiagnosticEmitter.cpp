@@ -131,6 +131,9 @@ namespace ctrace::stack::analyzer
 
             Diagnostic build()
             {
+                // Named here rather than at serialization, so library consumers read it too.
+                if (diag_.ruleId.empty())
+                    diag_.ruleId = std::string(enumToString(diag_.errCode));
                 return std::move(diag_);
             }
 
