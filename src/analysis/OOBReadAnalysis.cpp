@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "analysis/OOBReadAnalysis.hpp"
+#include "analysis/IRValueUtils.hpp"
 
 #include "analysis/AnalyzerUtils.hpp"
 #include "analysis/IntRanges.hpp"
@@ -80,110 +81,6 @@ namespace ctrace::stack::analysis
             return cst->getZExtValue();
         }
 
-        static const llvm::Value* peelPointerFromSingleStoreSlot(const llvm::Value* value)
-        {
-            const llvm::Value* current = value ? value->stripPointerCasts() : nullptr;
-            for (unsigned depth = 0; current && depth < 6; ++depth)
-            {
-                const auto* load = llvm::dyn_cast<llvm::LoadInst>(current);
-                if (!load)
-                    break;
-
-                const auto* slot = llvm::dyn_cast<llvm::AllocaInst>(
-                    load->getPointerOperand()->stripPointerCasts());
-                if (!slot || !slot->isStaticAlloca() || !slot->getAllocatedType()->isPointerTy())
-                    break;
-
-                const llvm::StoreInst* uniqueStore = nullptr;
-                bool unsafe = false;
-                for (const llvm::Use& use : slot->uses())
-                {
-                    const auto* user = use.getUser();
-                    if (const auto* store = llvm::dyn_cast<llvm::StoreInst>(user))
-                    {
-                        if (store->getPointerOperand()->stripPointerCasts() != slot)
-                        {
-                            unsafe = true;
-                            break;
-                        }
-                        if (uniqueStore && uniqueStore != store)
-                        {
-                            unsafe = true;
-                            break;
-                        }
-                        uniqueStore = store;
-                        continue;
-                    }
-
-                    if (const auto* slotLoad = llvm::dyn_cast<llvm::LoadInst>(user))
-                    {
-                        if (slotLoad->getPointerOperand()->stripPointerCasts() != slot)
-                        {
-                            unsafe = true;
-                            break;
-                        }
-                        continue;
-                    }
-
-                    if (const auto* intrinsic = llvm::dyn_cast<llvm::IntrinsicInst>(user))
-                    {
-                        if (llvm::isa<llvm::DbgInfoIntrinsic>(intrinsic) ||
-                            llvm::isa<llvm::LifetimeIntrinsic>(intrinsic))
-                        {
-                            continue;
-                        }
-                    }
-
-                    unsafe = true;
-                    break;
-                }
-
-                if (unsafe || !uniqueStore)
-                    break;
-                current = uniqueStore->getValueOperand()->stripPointerCasts();
-            }
-
-            return current;
-        }
-
-        static const llvm::StoreInst* findUniqueStoreToSlot(const llvm::AllocaInst& slot)
-        {
-            const llvm::StoreInst* uniqueStore = nullptr;
-            for (const llvm::Use& use : slot.uses())
-            {
-                const auto* user = use.getUser();
-                if (const auto* store = llvm::dyn_cast<llvm::StoreInst>(user))
-                {
-                    if (store->getPointerOperand()->stripPointerCasts() != &slot)
-                        return nullptr;
-                    if (uniqueStore && uniqueStore != store)
-                        return nullptr;
-                    uniqueStore = store;
-                    continue;
-                }
-
-                if (const auto* load = llvm::dyn_cast<llvm::LoadInst>(user))
-                {
-                    if (load->getPointerOperand()->stripPointerCasts() != &slot)
-                        return nullptr;
-                    continue;
-                }
-
-                if (const auto* intrinsic = llvm::dyn_cast<llvm::IntrinsicInst>(user))
-                {
-                    if (llvm::isa<llvm::DbgInfoIntrinsic>(intrinsic) ||
-                        llvm::isa<llvm::LifetimeIntrinsic>(intrinsic))
-                    {
-                        continue;
-                    }
-                }
-
-                return nullptr;
-            }
-
-            return uniqueStore;
-        }
-
         /// ObjectSizeOffsetVisitor also sizes heap allocations and byval arguments, but the
         /// callers below reason about stack and static storage only, so the result is kept to
         /// the object kinds they can attribute a name and a diagnostic to.
@@ -205,9 +102,11 @@ namespace ctrace::stack::analysis
             if (!pointer || !pointer->getType()->isPointerTy())
                 return std::nullopt;
 
-            const llvm::Value* base = peelPointerFromSingleStoreSlot(pointer);
+            const llvm::Value* base = peelPointerFromSingleStoreSlot(
+                pointer ? pointer->stripPointerCasts() : nullptr, 6, /*requirePointerValue=*/false);
             base = llvm::getUnderlyingObject(base, 32);
-            base = peelPointerFromSingleStoreSlot(base);
+            base = peelPointerFromSingleStoreSlot(base ? base->stripPointerCasts() : nullptr, 6,
+                                                  /*requirePointerValue=*/false);
             if (!base)
                 return std::nullopt;
 
@@ -237,7 +136,8 @@ namespace ctrace::stack::analysis
             if (llvm::isa<llvm::Constant>(value))
                 return false;
 
-            if (const llvm::Value* peeled = peelPointerFromSingleStoreSlot(value))
+            if (const llvm::Value* peeled = peelPointerFromSingleStoreSlot(
+                    value ? value->stripPointerCasts() : nullptr, 6, /*requirePointerValue=*/false))
             {
                 if (dependsOnFunctionArgumentRecursive(peeled, visited, depth + 1))
                     return true;
@@ -569,9 +469,13 @@ namespace ctrace::stack::analysis
                         continue;
 
                     const llvm::Value* basePtr = gep->getPointerOperand();
-                    const llvm::Value* peeledBase = peelPointerFromSingleStoreSlot(basePtr);
+                    const llvm::Value* peeledBase = peelPointerFromSingleStoreSlot(
+                        basePtr ? basePtr->stripPointerCasts() : nullptr, 6,
+                        /*requirePointerValue=*/false);
                     const llvm::Value* baseRoot = llvm::getUnderlyingObject(peeledBase, 32);
-                    baseRoot = peelPointerFromSingleStoreSlot(baseRoot);
+                    baseRoot = peelPointerFromSingleStoreSlot(
+                        baseRoot ? baseRoot->stripPointerCasts() : nullptr, 6,
+                        /*requirePointerValue=*/false);
                     if (!baseRoot)
                         continue;
 

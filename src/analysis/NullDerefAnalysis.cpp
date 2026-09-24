@@ -2,6 +2,7 @@
 #include "analysis/NullDerefAnalysis.hpp"
 
 #include "analysis/AnalyzerUtils.hpp"
+#include "analysis/IRValueUtils.hpp"
 
 #include <string>
 #include <unordered_set>
@@ -73,20 +74,6 @@ namespace ctrace::stack::analysis
             if (root && root->hasName())
                 return root->getName().str();
             return "<pointer>";
-        }
-
-        static llvm::StringRef canonicalExternalCalleeName(llvm::StringRef name)
-        {
-            if (!name.empty() && name.front() == '\1')
-                name = name.drop_front();
-            if (name.starts_with("_"))
-                name = name.drop_front();
-
-            const std::size_t dollarPos = name.find('$');
-            if (dollarPos != llvm::StringRef::npos)
-                name = name.take_front(dollarPos);
-
-            return name;
         }
 
         static bool isAllocatorLikeName(llvm::StringRef calleeName)

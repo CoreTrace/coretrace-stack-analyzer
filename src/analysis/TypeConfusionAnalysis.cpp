@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "analysis/TypeConfusionAnalysis.hpp"
+#include "analysis/IRValueUtils.hpp"
 
 #include "analysis/AnalyzerUtils.hpp"
 
@@ -84,72 +85,6 @@ namespace ctrace::stack::analysis
 
                 break;
             }
-        }
-
-        static const llvm::Value* peelPointerFromSingleStoreSlot(const llvm::Value* value)
-        {
-            const llvm::Value* current = value ? value->stripPointerCasts() : nullptr;
-            for (unsigned depth = 0; current && depth < 6; ++depth)
-            {
-                const auto* load = llvm::dyn_cast<llvm::LoadInst>(current);
-                if (!load)
-                    break;
-
-                const auto* slot = llvm::dyn_cast<llvm::AllocaInst>(
-                    load->getPointerOperand()->stripPointerCasts());
-                if (!slot || !slot->isStaticAlloca() || !slot->getAllocatedType()->isPointerTy())
-                    break;
-
-                const llvm::StoreInst* uniqueStore = nullptr;
-                bool unsafe = false;
-                for (const llvm::Use& use : slot->uses())
-                {
-                    const auto* user = use.getUser();
-                    if (const auto* store = llvm::dyn_cast<llvm::StoreInst>(user))
-                    {
-                        if (store->getPointerOperand()->stripPointerCasts() != slot)
-                        {
-                            unsafe = true;
-                            break;
-                        }
-                        if (uniqueStore && uniqueStore != store)
-                        {
-                            unsafe = true;
-                            break;
-                        }
-                        uniqueStore = store;
-                        continue;
-                    }
-
-                    if (const auto* slotLoad = llvm::dyn_cast<llvm::LoadInst>(user))
-                    {
-                        if (slotLoad->getPointerOperand()->stripPointerCasts() != slot)
-                        {
-                            unsafe = true;
-                            break;
-                        }
-                        continue;
-                    }
-
-                    if (const auto* intrinsic = llvm::dyn_cast<llvm::IntrinsicInst>(user))
-                    {
-                        if (llvm::isa<llvm::DbgInfoIntrinsic>(intrinsic) ||
-                            llvm::isa<llvm::LifetimeIntrinsic>(intrinsic))
-                        {
-                            continue;
-                        }
-                    }
-
-                    unsafe = true;
-                    break;
-                }
-
-                if (unsafe || !uniqueStore)
-                    break;
-                current = uniqueStore->getValueOperand()->stripPointerCasts();
-            }
-
-            return current;
         }
 
         static bool containsStructTypeRecursive(const llvm::Type* haystack,
@@ -370,7 +305,8 @@ namespace ctrace::stack::analysis
 
             llvm::SmallVector<const llvm::StructType*, 6> structChain;
             collectStructTypeChain(pointer, structChain);
-            const llvm::Value* peeledPointer = peelPointerFromSingleStoreSlot(pointer);
+            const llvm::Value* peeledPointer = peelPointerFromSingleStoreSlot(
+                pointer ? pointer->stripPointerCasts() : nullptr, 6, /*requirePointerValue=*/false);
             if (peeledPointer && peeledPointer != pointer)
                 collectStructTypeChain(peeledPointer, structChain);
             if (structChain.empty())
@@ -383,9 +319,11 @@ namespace ctrace::stack::analysis
             if (!base || offset < 0)
                 return;
 
-            const llvm::Value* root = peelPointerFromSingleStoreSlot(base);
+            const llvm::Value* root = peelPointerFromSingleStoreSlot(
+                base ? base->stripPointerCasts() : nullptr, 6, /*requirePointerValue=*/false);
             root = llvm::getUnderlyingObject(root, 32);
-            root = peelPointerFromSingleStoreSlot(root);
+            root = peelPointerFromSingleStoreSlot(root ? root->stripPointerCasts() : nullptr, 6,
+                                                  /*requirePointerValue=*/false);
             if (!root)
                 return;
 

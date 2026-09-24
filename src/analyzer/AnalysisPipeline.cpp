@@ -39,16 +39,105 @@
 #include <iostream>
 #include <memory>
 #include <string>
-#include <string_view>
 #include <utility>
 #include <vector>
 
 #include <llvm/IR/Module.h>
+#include <llvm/Support/ErrorHandling.h>
 
 namespace ctrace::stack::analyzer
 {
     namespace
     {
+        // Preserve the previous label pointer's word-sized layout in step records.
+        enum class StepId : std::uintptr_t
+        {
+            FunctionAttrsPass,
+            PrepareModule,
+            CollectIRFacts,
+            BuildResults,
+            EmitSummaryDiagnostics,
+            ComputeAllocaThreshold,
+            StackBufferOverflows,
+            DynamicAllocas,
+            AllocaUsage,
+            MemIntrinsicOverflows,
+            IntegerOverflows,
+            SizeMinusKWrites,
+            MultipleStores,
+            DuplicateIfConditions,
+            UninitializedLocalReads,
+            GlobalReadsBeforeWrites,
+            InvalidBaseReconstructions,
+            StackPointerEscapes,
+            ConstParams,
+            NullPointerDereferences,
+            OutOfBoundsReads,
+            CommandInjection,
+            TOCTOU,
+            TypeConfusion,
+            ResourceLifetime,
+        };
+
+        // Labels belong to presentation only; registration and dependencies use StepId.
+        static const char* stepLabel(StepId id)
+        {
+            switch (id)
+            {
+            case StepId::FunctionAttrsPass:
+                return "Function attrs pass";
+            case StepId::PrepareModule:
+                return "Prepare module";
+            case StepId::CollectIRFacts:
+                return "Collect IR facts";
+            case StepId::BuildResults:
+                return "Build results";
+            case StepId::EmitSummaryDiagnostics:
+                return "Emit summary diagnostics";
+            case StepId::ComputeAllocaThreshold:
+                return "Compute alloca threshold";
+            case StepId::StackBufferOverflows:
+                return "Stack buffer overflows";
+            case StepId::DynamicAllocas:
+                return "Dynamic allocas";
+            case StepId::AllocaUsage:
+                return "Alloca usage";
+            case StepId::MemIntrinsicOverflows:
+                return "Mem intrinsic overflows";
+            case StepId::IntegerOverflows:
+                return "Integer overflows";
+            case StepId::SizeMinusKWrites:
+                return "Size-minus-k writes";
+            case StepId::MultipleStores:
+                return "Multiple stores";
+            case StepId::DuplicateIfConditions:
+                return "Duplicate if conditions";
+            case StepId::UninitializedLocalReads:
+                return "Uninitialized local reads";
+            case StepId::GlobalReadsBeforeWrites:
+                return "Global reads before writes";
+            case StepId::InvalidBaseReconstructions:
+                return "Invalid base reconstructions";
+            case StepId::StackPointerEscapes:
+                return "Stack pointer escapes";
+            case StepId::ConstParams:
+                return "Const params";
+            case StepId::NullPointerDereferences:
+                return "Null pointer dereferences";
+            case StepId::OutOfBoundsReads:
+                return "Out-of-bounds reads";
+            case StepId::CommandInjection:
+                return "Command injection";
+            case StepId::TOCTOU:
+                return "TOCTOU";
+            case StepId::TypeConfusion:
+                return "Type confusion";
+            case StepId::ResourceLifetime:
+                return "Resource lifetime";
+            }
+            llvm_unreachable("unknown pipeline step");
+        }
+
         enum class ArtifactId : std::uint64_t
         {
             None = 0,
@@ -81,7 +170,7 @@ namespace ctrace::stack::analyzer
 
         struct StepTraversalStats
         {
-            const char* label = "";
+            StepId id;
             std::uint64_t moduleVisits = 0;
             std::uint64_t functionVisits = 0;
             std::uint64_t instructionVisits = 0;
@@ -200,7 +289,7 @@ namespace ctrace::stack::analyzer
 
         struct PipelineStep
         {
-            const char* label;
+            StepId id;
             std::function<void(PipelineData&)> run;
             ArtifactMask requiredArtifacts = maskOf(ArtifactId::None);
             ArtifactMask producedArtifacts = maskOf(ArtifactId::None);
@@ -209,15 +298,6 @@ namespace ctrace::stack::analyzer
             std::uint8_t reservedPadding[6] = {};
         };
 
-        static PipelineStep* findStep(std::vector<PipelineStep>& steps, std::string_view label)
-        {
-            for (PipelineStep& step : steps)
-            {
-                if (std::string_view(step.label) == label)
-                    return &step;
-            }
-            return nullptr;
-        }
     } // namespace
 
     AnalysisPipeline::AnalysisPipeline(const AnalysisConfig& config) : config_(config) {}
@@ -230,12 +310,20 @@ namespace ctrace::stack::analyzer
         const ScopedHotspot pipelineHotspot(config_.timing, "pipeline.total");
         const bool subscribersEnabled = usePipelineSubscribers();
 
+        const ArtifactMask kNone = maskOf(ArtifactId::None);
+        const ArtifactMask kPrepared = maskOf(ArtifactId::PreparedModule);
+        const ArtifactMask kIRFacts = maskOf(ArtifactId::IRFacts);
+        const ArtifactMask kAllocaThreshold = maskOf(ArtifactId::AllocaLargeThreshold);
+        const ArtifactMask kPipelineSignals = maskOf(ArtifactId::PipelineSubscriberSignals);
+        const ArtifactMask kDerivedArtifacts = maskOf(ArtifactId::DerivedModuleArtifacts);
+
         std::vector<PipelineStep> steps;
-        steps.push_back({"Function attrs pass",
+        steps.push_back({StepId::FunctionAttrsPass,
                          [](const PipelineData& state) { runFunctionAttrsPass(state.mod); }});
 
         steps.push_back(
-            {"Prepare module", [](PipelineData& state)
+            {StepId::PrepareModule,
+             [](PipelineData& state)
              {
                  ModulePreparationService preparationService;
                  state.prepared = std::make_unique<PreparedModule>(
@@ -265,10 +353,12 @@ namespace ctrace::stack::analyzer
                                << ", aggregate_params=" << derived.typeFacts.aggregateParameterCount
                                << "\n";
                  }
-             }});
+             },
+             kNone, kPrepared | kDerivedArtifacts, false, ExecutionModel::Utility});
 
         steps.push_back(
-            {"Collect IR facts", [subscribersEnabled](PipelineData& state)
+            {StepId::CollectIRFacts,
+             [subscribersEnabled](PipelineData& state)
              {
                  IRFacts facts;
                  PipelineSubscriberSignals signals;
@@ -304,23 +394,29 @@ namespace ctrace::stack::analyzer
                                << ", stores=" << facts.storeInstCount
                                << ", memintrinsics=" << facts.memIntrinsicCount << "\n";
                  }
-             }});
+             },
+             kPrepared, kIRFacts | kPipelineSignals, true, ExecutionModel::Utility});
 
-        steps.push_back({"Build results", [](PipelineData& state)
-                         { state.result = buildResults(*state.prepared, state.aux); }});
+        steps.push_back({StepId::BuildResults, [](PipelineData& state)
+                         { state.result = buildResults(*state.prepared, state.aux); }, kPrepared,
+                         kNone, false, ExecutionModel::Utility});
 
-        steps.push_back({"Emit summary diagnostics", [](PipelineData& state)
-                         { emitSummaryDiagnostics(state.result, *state.prepared, state.aux); }});
+        steps.push_back({StepId::EmitSummaryDiagnostics, [](PipelineData& state)
+                         { emitSummaryDiagnostics(state.result, *state.prepared, state.aux); },
+                         kPrepared, kNone, false, ExecutionModel::Utility});
 
-        steps.push_back({"Compute alloca threshold", [](PipelineData& state)
+        steps.push_back({StepId::ComputeAllocaThreshold,
+                         [](PipelineData& state)
                          {
                              state.allocaLargeThreshold =
                                  analysis::computeAllocaLargeThreshold(state.config);
                              state.artifacts.set<StackSize>(state.allocaLargeThreshold);
-                         }});
+                         },
+                         kNone, kAllocaThreshold, false, ExecutionModel::Utility});
 
         steps.push_back(
-            {"Stack buffer overflows", [](PipelineData& state)
+            {StepId::StackBufferOverflows,
+             [](PipelineData& state)
              {
                  if (const auto* signals = state.artifacts.get<PipelineSubscriberSignals>())
                  {
@@ -339,10 +435,12 @@ namespace ctrace::stack::analyzer
                  const std::vector<analysis::StackBufferOverflowIssue> issues =
                      analysis::analyzeStackBufferOverflows(state.mod, shouldAnalyze, state.config);
                  appendStackBufferDiagnostics(state.result, issues);
-             }});
+             },
+             kPrepared | kPipelineSignals, kNone, true, ExecutionModel::SubscriberCompatible});
 
         steps.push_back(
-            {"Dynamic allocas", [](PipelineData& state)
+            {StepId::DynamicAllocas,
+             [](PipelineData& state)
              {
                  if (const auto* cache = state.artifacts.get<PerFunctionInstructionCache>())
                  {
@@ -364,10 +462,12 @@ namespace ctrace::stack::analyzer
                  const std::vector<analysis::DynamicAllocaIssue> issues =
                      analysis::analyzeDynamicAllocas(state.mod, shouldAnalyze);
                  appendDynamicAllocaDiagnostics(state.result, issues);
-             }});
+             },
+             kPrepared, kNone, true, ExecutionModel::SubscriberCompatible});
 
         steps.push_back(
-            {"Alloca usage", [](PipelineData& state)
+            {StepId::AllocaUsage,
+             [](PipelineData& state)
              {
                  auto shouldAnalyze = [&](const llvm::Function& F) -> bool
                  { return state.prepared->ctx.shouldAnalyze(F); };
@@ -378,10 +478,12 @@ namespace ctrace::stack::analyzer
                          state.prepared->recursionState.InfiniteRecursionFuncs, shouldAnalyze);
                  appendAllocaUsageDiagnostics(state.result, state.config,
                                               state.allocaLargeThreshold, issues);
-             }});
+             },
+             kPrepared | kAllocaThreshold, kNone, true, ExecutionModel::Independent});
 
         steps.push_back(
-            {"Mem intrinsic overflows", [](PipelineData& state)
+            {StepId::MemIntrinsicOverflows,
+             [](PipelineData& state)
              {
                  if (const auto* cache = state.artifacts.get<PerFunctionInstructionCache>())
                  {
@@ -425,9 +527,11 @@ namespace ctrace::stack::analyzer
                      analysis::analyzeMemIntrinsicOverflows(state.mod, dataLayout, shouldAnalyze,
                                                             state.config.bufferModelPath);
                  appendMemIntrinsicDiagnostics(state.result, issues);
-             }});
+             },
+             kPrepared, kNone, true, ExecutionModel::SubscriberCompatible});
 
-        steps.push_back({"Integer overflows", [](PipelineData& state)
+        steps.push_back({StepId::IntegerOverflows,
+                         [](PipelineData& state)
                          {
                              auto shouldAnalyze = [&](const llvm::Function& F) -> bool
                              { return state.prepared->ctx.shouldAnalyze(F); };
@@ -435,9 +539,11 @@ namespace ctrace::stack::analyzer
                                  analysis::analyzeIntegerOverflows(state.mod, shouldAnalyze,
                                                                    state.config);
                              appendIntegerOverflowDiagnostics(state.result, issues);
-                         }});
+                         },
+                         kPrepared, kNone, true, ExecutionModel::Independent});
 
-        steps.push_back({"Size-minus-k writes", [](PipelineData& state)
+        steps.push_back({StepId::SizeMinusKWrites,
+                         [](PipelineData& state)
                          {
                              auto shouldAnalyze = [&](const llvm::Function& F) -> bool
                              { return state.prepared->ctx.shouldAnalyze(F); };
@@ -446,9 +552,11 @@ namespace ctrace::stack::analyzer
                                  analysis::analyzeSizeMinusKWrites(state.mod, dataLayout,
                                                                    shouldAnalyze, state.config);
                              appendSizeMinusKDiagnostics(state.result, issues);
-                         }});
+                         },
+                         kPrepared, kNone, true, ExecutionModel::Independent});
 
-        steps.push_back({"Multiple stores", [](PipelineData& state)
+        steps.push_back({StepId::MultipleStores,
+                         [](PipelineData& state)
                          {
                              auto shouldAnalyze = [&](const llvm::Function& F) -> bool
                              { return state.prepared->ctx.shouldAnalyze(F); };
@@ -456,18 +564,22 @@ namespace ctrace::stack::analyzer
                                  analysis::analyzeMultipleStores(state.mod, shouldAnalyze,
                                                                  state.config);
                              appendMultipleStoreDiagnostics(state.result, issues);
-                         }});
+                         },
+                         kPrepared, kNone, true, ExecutionModel::SubscriberCompatible});
 
-        steps.push_back({"Duplicate if conditions", [](PipelineData& state)
+        steps.push_back({StepId::DuplicateIfConditions,
+                         [](PipelineData& state)
                          {
                              auto shouldAnalyze = [&](const llvm::Function& F) -> bool
                              { return state.prepared->ctx.shouldAnalyze(F); };
                              const std::vector<analysis::DuplicateIfConditionIssue> issues =
                                  analysis::analyzeDuplicateIfConditions(state.mod, shouldAnalyze);
                              appendDuplicateIfConditionDiagnostics(state.result, issues);
-                         }});
+                         },
+                         kPrepared, kNone, true, ExecutionModel::SubscriberCompatible});
 
-        steps.push_back({"Uninitialized local reads", [](PipelineData& state)
+        steps.push_back({StepId::UninitializedLocalReads,
+                         [](PipelineData& state)
                          {
                              auto shouldAnalyze = [&](const llvm::Function& F) -> bool
                              { return state.prepared->ctx.shouldAnalyze(F); };
@@ -476,9 +588,11 @@ namespace ctrace::stack::analyzer
                                      state.mod, shouldAnalyze,
                                      state.config.uninitializedSummaryIndex.get());
                              appendUninitializedLocalReadDiagnostics(state.result, issues);
-                         }});
+                         },
+                         kPrepared, kNone, true, ExecutionModel::Independent});
 
-        steps.push_back({"Global reads before writes", [](PipelineData& state)
+        steps.push_back({StepId::GlobalReadsBeforeWrites,
+                         [](PipelineData& state)
                          {
                              auto shouldAnalyze = [&](const llvm::Function& F) -> bool
                              { return state.prepared->ctx.shouldAnalyze(F); };
@@ -487,9 +601,11 @@ namespace ctrace::stack::analyzer
                                      state.mod, shouldAnalyze,
                                      state.config.globalReadBeforeWriteSummaryIndex.get());
                              appendGlobalReadBeforeWriteDiagnostics(state.result, issues);
-                         }});
+                         },
+                         kPrepared, kNone, true, ExecutionModel::Independent});
 
-        steps.push_back({"Invalid base reconstructions", [](PipelineData& state)
+        steps.push_back({StepId::InvalidBaseReconstructions,
+                         [](PipelineData& state)
                          {
                              auto shouldAnalyze = [&](const llvm::Function& F) -> bool
                              { return state.prepared->ctx.shouldAnalyze(F); };
@@ -498,9 +614,11 @@ namespace ctrace::stack::analyzer
                                  analysis::analyzeInvalidBaseReconstructions(state.mod, dataLayout,
                                                                              shouldAnalyze);
                              appendInvalidBaseReconstructionDiagnostics(state.result, issues);
-                         }});
+                         },
+                         kPrepared, kNone, true, ExecutionModel::SubscriberCompatible});
 
-        steps.push_back({"Stack pointer escapes", [](PipelineData& state)
+        steps.push_back({StepId::StackPointerEscapes,
+                         [](PipelineData& state)
                          {
                              auto shouldAnalyze = [&](const llvm::Function& F) -> bool
                              { return state.prepared->ctx.shouldAnalyze(F); };
@@ -508,27 +626,33 @@ namespace ctrace::stack::analyzer
                                  analysis::analyzeStackPointerEscapes(state.mod, shouldAnalyze,
                                                                       state.config.escapeModelPath);
                              appendStackPointerEscapeDiagnostics(state.result, issues);
-                         }});
+                         },
+                         kPrepared, kNone, true, ExecutionModel::Independent});
 
-        steps.push_back({"Const params", [](PipelineData& state)
+        steps.push_back({StepId::ConstParams,
+                         [](PipelineData& state)
                          {
                              auto shouldAnalyze = [&](const llvm::Function& F) -> bool
                              { return state.prepared->ctx.shouldAnalyze(F); };
                              const std::vector<analysis::ConstParamIssue> issues =
                                  analysis::analyzeConstParams(state.mod, shouldAnalyze);
                              appendConstParamDiagnostics(state.result, issues);
-                         }});
+                         },
+                         kPrepared, kNone, true, ExecutionModel::SubscriberCompatible});
 
-        steps.push_back({"Null pointer dereferences", [](PipelineData& state)
+        steps.push_back({StepId::NullPointerDereferences,
+                         [](PipelineData& state)
                          {
                              auto shouldAnalyze = [&](const llvm::Function& F) -> bool
                              { return state.prepared->ctx.shouldAnalyze(F); };
                              const std::vector<analysis::NullDerefIssue> issues =
                                  analysis::analyzeNullDereferences(state.mod, shouldAnalyze);
                              appendNullDerefDiagnostics(state.result, issues);
-                         }});
+                         },
+                         kPrepared, kNone, true, ExecutionModel::Independent});
 
-        steps.push_back({"Out-of-bounds reads", [](PipelineData& state)
+        steps.push_back({StepId::OutOfBoundsReads,
+                         [](PipelineData& state)
                          {
                              auto shouldAnalyze = [&](const llvm::Function& F) -> bool
                              { return state.prepared->ctx.shouldAnalyze(F); };
@@ -537,10 +661,12 @@ namespace ctrace::stack::analyzer
                                  analysis::analyzeOOBReads(state.mod, dataLayout, shouldAnalyze,
                                                            state.config);
                              appendOOBReadDiagnostics(state.result, issues);
-                         }});
+                         },
+                         kPrepared, kNone, true, ExecutionModel::Independent});
 
         steps.push_back(
-            {"Command injection", [](PipelineData& state)
+            {StepId::CommandInjection,
+             [](PipelineData& state)
              {
                  if (const auto* cache = state.artifacts.get<PerFunctionInstructionCache>())
                  {
@@ -562,10 +688,12 @@ namespace ctrace::stack::analyzer
                  const std::vector<analysis::CommandInjectionIssue> issues =
                      analysis::analyzeCommandInjection(state.mod, shouldAnalyze);
                  appendCommandInjectionDiagnostics(state.result, issues);
-             }});
+             },
+             kPrepared, kNone, true, ExecutionModel::SubscriberCompatible});
 
         steps.push_back(
-            {"TOCTOU", [](PipelineData& state)
+            {StepId::TOCTOU,
+             [](PipelineData& state)
              {
                  if (const auto* cache = state.artifacts.get<PerFunctionInstructionCache>())
                  {
@@ -587,9 +715,11 @@ namespace ctrace::stack::analyzer
                  const std::vector<analysis::TOCTOUIssue> issues =
                      analysis::analyzeTOCTOU(state.mod, shouldAnalyze);
                  appendTOCTOUDiagnostics(state.result, issues);
-             }});
+             },
+             kPrepared, kNone, true, ExecutionModel::SubscriberCompatible});
 
-        steps.push_back({"Type confusion", [](PipelineData& state)
+        steps.push_back({StepId::TypeConfusion,
+                         [](PipelineData& state)
                          {
                              auto shouldAnalyze = [&](const llvm::Function& F) -> bool
                              { return state.prepared->ctx.shouldAnalyze(F); };
@@ -598,10 +728,12 @@ namespace ctrace::stack::analyzer
                                  analysis::analyzeTypeConfusions(state.mod, dataLayout,
                                                                  shouldAnalyze, state.config);
                              appendTypeConfusionDiagnostics(state.result, issues);
-                         }});
+                         },
+                         kPrepared, kNone, true, ExecutionModel::SubscriberCompatible});
 
         steps.push_back(
-            {"Resource lifetime", [](PipelineData& state)
+            {StepId::ResourceLifetime,
+             [](PipelineData& state)
              {
                  if (const auto* signals = state.artifacts.get<PipelineSubscriberSignals>())
                  {
@@ -620,75 +752,15 @@ namespace ctrace::stack::analyzer
                                                        state.config.resourceModelPath,
                                                        state.config.resourceSummaryIndex.get());
                  appendResourceLifetimeDiagnostics(state.result, issues);
-             }});
-
-        const ArtifactMask kNone = maskOf(ArtifactId::None);
-        const ArtifactMask kPrepared = maskOf(ArtifactId::PreparedModule);
-        const ArtifactMask kIRFacts = maskOf(ArtifactId::IRFacts);
-        const ArtifactMask kAllocaThreshold = maskOf(ArtifactId::AllocaLargeThreshold);
-        const ArtifactMask kPipelineSignals = maskOf(ArtifactId::PipelineSubscriberSignals);
-        const ArtifactMask kDerivedArtifacts = maskOf(ArtifactId::DerivedModuleArtifacts);
-
-        auto setStepMeta = [&](std::string_view label, ArtifactMask requiredMask,
-                               ArtifactMask providedMask, bool traversalEstimate,
-                               ExecutionModel executionModel)
-        {
-            if (PipelineStep* step = findStep(steps, label))
-            {
-                step->requiredArtifacts = requiredMask;
-                step->producedArtifacts = providedMask;
-                step->contributesFullTraversalEstimate = traversalEstimate;
-                step->executionModel = executionModel;
-            }
-        };
-
-        setStepMeta("Prepare module", kNone, kPrepared | kDerivedArtifacts, false,
-                    ExecutionModel::Utility);
-        setStepMeta("Collect IR facts", kPrepared, kIRFacts | kPipelineSignals, true,
-                    ExecutionModel::Utility);
-        setStepMeta("Build results", kPrepared, kNone, false, ExecutionModel::Utility);
-        setStepMeta("Emit summary diagnostics", kPrepared, kNone, false, ExecutionModel::Utility);
-        setStepMeta("Compute alloca threshold", kNone, kAllocaThreshold, false,
-                    ExecutionModel::Utility);
-
-        setStepMeta("Stack buffer overflows", kPrepared | kPipelineSignals, kNone, true,
-                    ExecutionModel::SubscriberCompatible);
-        setStepMeta("Dynamic allocas", kPrepared, kNone, true,
-                    ExecutionModel::SubscriberCompatible);
-        setStepMeta("Alloca usage", kPrepared | kAllocaThreshold, kNone, true,
-                    ExecutionModel::Independent);
-        setStepMeta("Mem intrinsic overflows", kPrepared, kNone, true,
-                    ExecutionModel::SubscriberCompatible);
-        setStepMeta("Integer overflows", kPrepared, kNone, true, ExecutionModel::Independent);
-        setStepMeta("Size-minus-k writes", kPrepared, kNone, true, ExecutionModel::Independent);
-        setStepMeta("Multiple stores", kPrepared, kNone, true,
-                    ExecutionModel::SubscriberCompatible);
-        setStepMeta("Duplicate if conditions", kPrepared, kNone, true,
-                    ExecutionModel::SubscriberCompatible);
-        setStepMeta("Uninitialized local reads", kPrepared, kNone, true,
-                    ExecutionModel::Independent);
-        setStepMeta("Global reads before writes", kPrepared, kNone, true,
-                    ExecutionModel::Independent);
-        setStepMeta("Invalid base reconstructions", kPrepared, kNone, true,
-                    ExecutionModel::SubscriberCompatible);
-        setStepMeta("Stack pointer escapes", kPrepared, kNone, true, ExecutionModel::Independent);
-        setStepMeta("Const params", kPrepared, kNone, true, ExecutionModel::SubscriberCompatible);
-        setStepMeta("Null pointer dereferences", kPrepared, kNone, true,
-                    ExecutionModel::Independent);
-        setStepMeta("Out-of-bounds reads", kPrepared, kNone, true, ExecutionModel::Independent);
-        setStepMeta("Command injection", kPrepared, kNone, true,
-                    ExecutionModel::SubscriberCompatible);
-        setStepMeta("TOCTOU", kPrepared, kNone, true, ExecutionModel::SubscriberCompatible);
-        setStepMeta("Type confusion", kPrepared, kNone, true, ExecutionModel::SubscriberCompatible);
-        setStepMeta("Resource lifetime", kPrepared | kPipelineSignals, kNone, true,
-                    ExecutionModel::Independent);
+             },
+             kPrepared | kPipelineSignals, kNone, true, ExecutionModel::Independent});
 
         ArtifactMask availableArtifacts = kNone;
         for (const PipelineStep& step : steps)
         {
             if ((availableArtifacts & step.requiredArtifacts) != step.requiredArtifacts)
             {
-                std::cerr << "Pipeline dependency violation before step '" << step.label
+                std::cerr << "Pipeline dependency violation before step '" << stepLabel(step.id)
                           << "': required artifacts are missing\n";
                 return AnalysisResult{config_, {}, {}};
             }
@@ -701,15 +773,15 @@ namespace ctrace::stack::analyzer
                 std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
             if (config_.timing)
             {
-                const std::string hotspotName = std::string("pipeline.step.") + step.label;
+                const std::string hotspotName = std::string("pipeline.step.") + stepLabel(step.id);
                 HotspotProfiler::record(
                     hotspotName, std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed));
-                std::cerr << step.label << " done in " << durationMs << " ms\n";
+                std::cerr << stepLabel(step.id) << " done in " << durationMs << " ms\n";
             }
             availableArtifacts |= step.producedArtifacts;
 
             StepTraversalStats stats;
-            stats.label = step.label;
+            stats.id = step.id;
             stats.executionModel = static_cast<std::uint32_t>(step.executionModel);
             stats.durationMs = durationMs;
             if (step.contributesFullTraversalEstimate)
@@ -739,7 +811,8 @@ namespace ctrace::stack::analyzer
             std::uint64_t independentInstructionVisits = 0;
             for (const StepTraversalStats& stats : data.stepStats)
             {
-                std::cerr << "Traversal estimate detail: step='" << stats.label << "', model="
+                std::cerr << "Traversal estimate detail: step='" << stepLabel(stats.id)
+                          << "', model="
                           << executionModelName(static_cast<ExecutionModel>(stats.executionModel))
                           << ", modules=" << stats.moduleVisits
                           << ", functions=" << stats.functionVisits
