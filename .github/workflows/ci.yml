@@ -40,7 +40,7 @@ jobs:
       run: |
         sudo apt-get update
         sudo apt-get install -y build-essential cmake python3 \
-          ninja-build ccache lld
+          ninja-build ccache lld libz3-dev pkg-config
         # Install LLVM and Clang 20
         wget -O - https://apt.llvm.org/llvm-snapshot.gpg.key | sudo apt-key add -
         UBUNTU_CODENAME=$(lsb_release -cs)
@@ -54,7 +54,7 @@ jobs:
     - name: Install dependencies (macOS)
       if: runner.os == 'macOS'
       run: |
-        brew install cmake python llvm@20 ninja ccache
+        brew install cmake python llvm@20 ninja ccache z3
         echo "LLVM_DIR=$(brew --prefix llvm@20)/lib/cmake/llvm" >> $GITHUB_ENV
         echo "Clang_DIR=$(brew --prefix llvm@20)/lib/cmake/clang" >> $GITHUB_ENV
         echo "$(brew --prefix llvm@20)/bin" >> $GITHUB_PATH

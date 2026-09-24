@@ -1185,6 +1185,53 @@ def check_help_flags() -> bool:
     return ok
 
 
+_SMT_BACKEND_UNAVAILABLE = "is not available in this build"
+
+
+def check_smt_unavailable_backend_warning() -> bool:
+    """
+    `--smt=on` must say on stderr when a backend it uses is not compiled in. This run also
+    needs Z3: without it the dedicated smt-z3 fixture pass silently checks nothing.
+    """
+    print("=== Testing SMT backend availability ===")
+    if _runner_has_explicit_smt_args():
+        print("  [info] skipped (runner already has --smt args)")
+        print()
+        return True
+
+    fixture = str(fixture_path_with_fallback("integer-overflow/nsw-flag-must-not-discharge-itself.c"))
+    # (analyzer arguments, backend that must be reported once, or None for no warning)
+    cases = [
+        (["--smt=on", "--smt-backend=z3"], None),
+        (["--smt=on", "--smt-backend=cvc5"], "cvc5"),
+        (["--smt=on", "--smt-backend=Interval"], None),
+        (["--smt=on", "--smt-mode=portfolio", "--smt-secondary-backend=cvc5"], "cvc5"),
+        (["--smt=on", "--smt-mode=single", "--smt-secondary-backend=cvc5"], None),
+        (["--smt-backend=cvc5", "--smt=off"], None),
+    ]
+    ok = True
+    for args, backend in cases:
+        result = run_analyzer([*args, fixture])
+        stderr = result.stderr or ""
+        warnings = stderr.count(_SMT_BACKEND_UNAVAILABLE)
+        label = " ".join(args)
+        if _SMT_BACKEND_UNAVAILABLE in (result.stdout or ""):
+            print(f"  ❌ {label}: the warning must go to stderr, not stdout")
+            ok = False
+        elif backend is None and warnings:
+            print(f"  ❌ {label}: unexpected warning")
+            if "SMT backend 'z3'" in stderr:
+                print("     this analyzer has no Z3: install it (libz3-dev or brew z3) and rebuild")
+            ok = False
+        elif backend is not None and (warnings != 1 or f"SMT backend '{backend}'" not in stderr):
+            print(f"  ❌ {label}: expected one warning for '{backend}', got {warnings}")
+            ok = False
+    if ok:
+        print("  ✅ SMT backend availability OK")
+    print()
+    return ok
+
+
 def check_multi_file_json() -> bool:
     """
     Check that analysis accepts multiple files and JSON aggregates correctly.
@@ -3440,6 +3487,7 @@ def main() -> int:
     # after the pool completes.
     parallel_checks = [
         check_help_flags,
+        check_smt_unavailable_backend_warning,
         check_analyzer_module_unit_tests,
         check_multi_file_json,
         check_multi_file_total_summary,

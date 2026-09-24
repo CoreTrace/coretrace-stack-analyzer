@@ -43,12 +43,15 @@ jobs:
       # Generated here, never committed: a compilation database records absolute
       # paths and the toolchain that produced it, so one made on a developer's
       # machine names an SDK this runner does not have and every unit then fails
-      # to compile. Configuring is enough -- nothing needs building.
+      # to compile. Configuring is enough -- nothing needs building. The runner
+      # image has a z3.pc but the analyzer image has no Z3 headers, so the
+      # optional Z3 backend stays out of the database.
       - name: Generate a compilation database
         run: |
           cmake -S . -B build -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
             -DLLVM_DIR=/usr/lib/llvm-20/lib/cmake/llvm \
-            -DClang_DIR=/usr/lib/llvm-20/lib/cmake/clang
+            -DClang_DIR=/usr/lib/llvm-20/lib/cmake/clang \
+            -DENABLE_Z3_BACKEND=OFF
 
       # fail-on: error from the start rather than the usual none-then-tighten,
       # because there is no backlog to absorb: the tree is clean today.

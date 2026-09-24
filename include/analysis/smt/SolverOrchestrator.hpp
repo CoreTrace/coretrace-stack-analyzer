@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <string>
+#include <string_view>
 
 namespace ctrace::stack::analysis::smt
 {
@@ -27,4 +28,10 @@ namespace ctrace::stack::analysis::smt
       private:
         SolverOrchestratorConfig config_;
     };
+
+    /// @brief Whether @p name designates a backend compiled into this build.
+    ///
+    /// Names match case-insensitively, as `--smt-backend` accepts them; an empty name selects
+    /// the interval backend. A missing backend answers every query Unknown.
+    [[nodiscard]] bool isSmtBackendAvailable(std::string_view name);
 } // namespace ctrace::stack::analysis::smt

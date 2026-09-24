@@ -70,21 +70,13 @@ namespace ctrace::stack::analysis::smt
 
         static std::shared_ptr<ISmtBackend> createBackend(std::string_view name)
         {
-            const std::string lowered = toLowerAscii(name);
-            if (lowered.empty() || lowered == "interval")
-                return std::make_shared<IntervalBackend>();
-            if (lowered == "z3")
-            {
+            if (!isSmtBackendAvailable(name))
+                return std::make_shared<UnavailableExternalBackend>(std::string(name));
 #ifdef CTRACE_STACK_ENABLE_Z3_BACKEND
+            if (toLowerAscii(name) == "z3")
                 return std::make_shared<Z3Backend>();
-#else
-                return std::make_shared<UnavailableExternalBackend>("z3");
 #endif
-            }
-            if (lowered == "cvc5")
-                return std::make_shared<UnavailableExternalBackend>("cvc5");
-
-            return std::make_shared<UnavailableExternalBackend>(std::string(name));
+            return std::make_shared<IntervalBackend>();
         }
 
         static void appendBackendIfMissing(std::vector<std::shared_ptr<ISmtBackend>>& out,
@@ -233,6 +225,18 @@ namespace ctrace::stack::analysis::smt
             return out;
         }
     } // namespace
+
+    bool isSmtBackendAvailable(std::string_view name)
+    {
+        const std::string lowered = toLowerAscii(name);
+        if (lowered.empty() || lowered == "interval")
+            return true;
+#ifdef CTRACE_STACK_ENABLE_Z3_BACKEND
+        if (lowered == "z3")
+            return true;
+#endif
+        return false;
+    }
 
     SolverOrchestrator::SolverOrchestrator(SolverOrchestratorConfig config)
         : config_(std::move(config))
