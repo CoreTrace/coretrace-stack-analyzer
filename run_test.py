@@ -3220,6 +3220,42 @@ def check_diagnostic_cwe_coverage() -> bool:
     return ok
 
 
+def check_sarif_rule_cwe_tags() -> bool:
+    """
+    A SARIF rule lists every CWE of its diagnostics in the run, whatever the order of the
+    inputs: here StackBufferOverflow reports a write (CWE-121) and a read (CWE-125).
+    """
+    print("=== Testing SARIF rule CWE tags ===")
+    write = "char write_past_end(int i) { char buf[10] = {0}; if (i <= 10) buf[i] = 'x'; return buf[0]; }\n"
+    read = "char read_past_end(int i) { char buf[10] = {0}; if (i <= 10) return buf[i]; return 0; }\n"
+    expected = ["external/cwe/cwe-121", "external/cwe/cwe-125"]
+    ok = True
+    with tempfile.TemporaryDirectory() as tmp:
+        for label, source in (("write first", write + read), ("read first", read + write)):
+            path = Path(tmp) / f"{label.replace(' ', '-')}.c"
+            path.write_text(source)
+            result = run_analyzer([str(path), "--format=sarif"])
+            try:
+                rules = json.loads(result.stdout or "")["runs"][0]["tool"]["driver"]["rules"]
+            except (ValueError, KeyError, IndexError):
+                print(f"  ❌ {label}: no SARIF rules in the output")
+                ok = False
+                continue
+            tags = next(
+                (r.get("properties", {}).get("tags", []) for r in rules if r.get("id") == "StackBufferOverflow"),
+                None,
+            )
+            # Only the CWE tags: a rule may carry others (the security tag).
+            cwe_tags = None if tags is None else [t for t in tags if t.startswith("external/cwe/")]
+            if cwe_tags != expected:
+                print(f"  ❌ {label}: StackBufferOverflow CWE tags {cwe_tags}, expected {expected}")
+                ok = False
+    if ok:
+        print("  ✅ SARIF rule CWE tags OK")
+    print()
+    return ok
+
+
 def check_unresolved_call_max_stack() -> bool:
     """
     A function containing an unresolved call (indirect, or to an external
@@ -3640,6 +3676,7 @@ def main() -> int:
         check_human_vs_json_parity,
         check_diagnostic_rule_coverage_regression,
         check_diagnostic_cwe_coverage,
+        check_sarif_rule_cwe_tags,
     ]
     # Env-mutating check — must run outside the parallel pool.
     sequential_checks = [

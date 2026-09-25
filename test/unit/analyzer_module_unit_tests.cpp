@@ -32,6 +32,7 @@
 #include <llvm/IR/Operator.h>
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
+#include <llvm/Support/JSON.h>
 #include <llvm/Support/SourceMgr.h>
 #include <llvm/Support/raw_ostream.h>
 
@@ -1230,6 +1231,93 @@ namespace
         return report.failures == 0;
     }
 #endif
+
+    /// Tags of rule @p rule in the SARIF log @p sarif, or std::nullopt when the rule is absent.
+    std::optional<std::vector<std::string>> sarifRuleTags(const std::string& sarif,
+                                                          llvm::StringRef rule)
+    {
+        llvm::Expected<llvm::json::Value> parsed = llvm::json::parse(sarif);
+        if (!parsed)
+        {
+            llvm::consumeError(parsed.takeError());
+            return std::nullopt;
+        }
+        const llvm::json::Object* root = parsed->getAsObject();
+        const llvm::json::Array* runs = root ? root->getArray("runs") : nullptr;
+        const llvm::json::Object* run = runs && !runs->empty() ? (*runs)[0].getAsObject() : nullptr;
+        const llvm::json::Object* tool = run ? run->getObject("tool") : nullptr;
+        const llvm::json::Object* driver = tool ? tool->getObject("driver") : nullptr;
+        const llvm::json::Array* rules = driver ? driver->getArray("rules") : nullptr;
+        if (!rules)
+            return std::nullopt;
+        for (const llvm::json::Value& entry : *rules)
+        {
+            const llvm::json::Object* object = entry.getAsObject();
+            if (!object || object->getString("id") != rule)
+                continue;
+            std::vector<std::string> tags;
+            if (const llvm::json::Object* properties = object->getObject("properties"))
+            {
+                if (const llvm::json::Array* list = properties->getArray("tags"))
+                {
+                    for (const llvm::json::Value& tag : *list)
+                    {
+                        if (const std::optional<llvm::StringRef> text = tag.getAsString())
+                            tags.push_back(text->str());
+                    }
+                }
+            }
+            return tags;
+        }
+        return std::nullopt;
+    }
+
+    /// SARIF: a rule lists every CWE of its diagnostics in the run, whatever their order.
+    bool testSarifRuleCweTags(TestReport& report)
+    {
+        const auto diagnostic = [](const char* rule, const char* cwe)
+        {
+            ctrace::stack::Diagnostic d;
+            d.ruleId = rule;
+            d.cweId = cwe;
+            d.filePath = "demo.c";
+            d.line = 1;
+            d.column = 1;
+            d.message = rule;
+            return d;
+        };
+
+        ctrace::stack::AnalysisResult readFirst;
+        readFirst.diagnostics = {diagnostic("StackBufferOverflow", "CWE-125"),
+                                 diagnostic("StackBufferOverflow", "CWE-121"),
+                                 diagnostic("StackBufferOverflow", "CWE-125"),
+                                 diagnostic("CommandInjection.NonLiteralCommand", "CWE-78")};
+        ctrace::stack::AnalysisResult writeFirst;
+        writeFirst.diagnostics = {diagnostic("StackBufferOverflow", "CWE-121"),
+                                  diagnostic("StackBufferOverflow", "CWE-125"),
+                                  diagnostic("CommandInjection.NonLiteralCommand", "CWE-78")};
+
+        // Only the CWE tags: a rule may carry others (the security tag).
+        const auto cweTags = [](const ctrace::stack::AnalysisResult& result, llvm::StringRef rule)
+        {
+            std::optional<std::vector<std::string>> tags =
+                sarifRuleTags(ctrace::stack::toSarif(result, "demo.c"), rule);
+            if (tags)
+                std::erase_if(*tags, [](const std::string& tag)
+                              { return !llvm::StringRef(tag).starts_with("external/cwe/"); });
+            return tags;
+        };
+
+        const std::vector<std::string> both{"external/cwe/cwe-121", "external/cwe/cwe-125"};
+        report.expect(cweTags(readFirst, "StackBufferOverflow") == both,
+                      "SARIF: a rule lists every CWE of its diagnostics, sorted, once each");
+        report.expect(cweTags(writeFirst, "StackBufferOverflow") == both,
+                      "SARIF: the CWE tags of a rule do not depend on diagnostic order");
+        report.expect(cweTags(readFirst, "CommandInjection.NonLiteralCommand") ==
+                          std::vector<std::string>{"external/cwe/cwe-078"},
+                      "SARIF: CWE tags are zero-padded to three digits");
+        return report.failures == 0;
+    }
 } // namespace
 
 int main(int argc, char** argv)
@@ -1248,6 +1336,7 @@ int main(int argc, char** argv)
     (void)testModulePreparationService(repoRoot, report);
     (void)testIntRangeFacts(repoRoot, report);
     (void)testAnalysisReportContract(repoRoot, report);
+    (void)testSarifRuleCweTags(report);
     (void)testUnresolvedCallsMarkStackUnknown(repoRoot, report);
     (void)testAssumeExternalFrameReplacesUnknown(repoRoot, report);
     (void)testUninitializedFixpointBudgetIsExplicit(repoRoot, report);
