@@ -559,6 +559,9 @@ Cross-TU summary behavior:
   analysis is enabled or unavailable/disabled (with reason).
 - If a local release depends on an unmodeled/external callee and no summary is available, the tool
   emits `ResourceLifetime.IncompleteInterproc` as a warning to make precision limits visible.
+- When an analysis exhausts its fixpoint budget in a function, it emits an Info note under a rule
+  of its own, with no CWE: `ResourceLifetime.AnalysisIncomplete` (no leak was computed there) or
+  `UninitializedLocalRead.AnalysisIncomplete` (other uninitialized reads may be missed).
 
 Model format (`--resource-model=<path>`):
 
