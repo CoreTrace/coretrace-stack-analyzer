@@ -59,4 +59,9 @@ namespace ctrace::stack::analysis::smt
     encodeSignedComparisonFeasibility(const std::map<const llvm::Value*, IntRange>& ranges,
                                       const llvm::Value& lhs, std::int64_t rhsConstant,
                                       bool greaterThan, const QueryPoint& point = {});
+
+    /// @brief The query of @p point without any violation: the rule's ranges, the assumptions
+    /// before @p point and its reachability condition. Satisfiable when @p point can run.
+    ConstraintIR encodeReachability(const std::map<const llvm::Value*, IntRange>& ranges,
+                                    const QueryPoint& point);
 } // namespace ctrace::stack::analysis::smt

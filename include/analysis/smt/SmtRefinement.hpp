@@ -8,6 +8,7 @@
 #include "analysis/smt/TextUtil.hpp"
 
 #include <cstdint>
+#include <map>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -67,6 +68,24 @@ namespace ctrace::stack::analysis::smt
             if (!orchestrator_)
                 return SmtFeasibility::Inconclusive;
             return solve(encode());
+        }
+
+        /// @brief Solves the query built by @p encode at @p point, a point that can run.
+        ///
+        /// A query is also infeasible when the path condition of @p point is unsatisfiable,
+        /// that is when @p point never runs. A defect there stays reported, as the default pass
+        /// reports it (flagged unreachable): Infeasible holds only once the reachability of
+        /// @p point is proven, and is Inconclusive otherwise.
+        template <typename Encode>
+        SmtFeasibility evaluateQueryAt(const std::map<const llvm::Value*, IntRange>& ranges,
+                                       const QueryPoint& point, Encode encode) const
+        {
+            const SmtFeasibility result = evaluateQuery(std::move(encode));
+            if (result != SmtFeasibility::Infeasible || !point.facts)
+                return result;
+            return solve(encodeReachability(ranges, point)) == SmtFeasibility::Feasible
+                       ? result
+                       : SmtFeasibility::Inconclusive;
         }
 
         /// @brief Query point for @p inst, with this rule's node budget.

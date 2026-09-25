@@ -105,12 +105,13 @@ namespace ctrace::stack::analysis
                 const std::map<const llvm::Value*, IntRange>& ranges, const llvm::Value& indexExpr,
                 const llvm::Instruction* contextInst, const FunctionFacts* facts) const
             {
-                return smt::SmtConstraintEvaluator::evaluateQuery(
-                    [&]
-                    {
-                        return smt::encodeSignedComparisonFeasibility(
-                            ranges, indexExpr, -1, false, queryPoint(contextInst, facts));
-                    });
+                const smt::QueryPoint point = queryPoint(contextInst, facts);
+                return evaluateQueryAt(ranges, point,
+                                       [&]
+                                       {
+                                           return smt::encodeSignedComparisonFeasibility(
+                                               ranges, indexExpr, -1, false, point);
+                                       });
             }
 
             SmtFeasibility
@@ -127,13 +128,13 @@ namespace ctrace::stack::analysis
                 }
 
                 const std::int64_t upperInclusive = static_cast<std::int64_t>(limitExclusive - 1);
-                return smt::SmtConstraintEvaluator::evaluateQuery(
-                    [&]
-                    {
-                        return smt::encodeSignedComparisonFeasibility(
-                            ranges, indexExpr, upperInclusive, true,
-                            queryPoint(contextInst, facts));
-                    });
+                const smt::QueryPoint point = queryPoint(contextInst, facts);
+                return evaluateQueryAt(ranges, point,
+                                       [&]
+                                       {
+                                           return smt::encodeSignedComparisonFeasibility(
+                                               ranges, indexExpr, upperInclusive, true, point);
+                                       });
             }
         };
 

@@ -893,6 +893,14 @@ namespace ctrace::stack::analysis::smt
         return encoder.encode(ranges);
     }
 
+    ConstraintIR encodeReachability(const std::map<const llvm::Value*, IntRange>& ranges,
+                                    const QueryPoint& point)
+    {
+        return encodeQuery(ranges, point,
+                           [&](ConstraintIrBuilder& builder, LlvmExprEncoder& exprEncoder)
+                           { encodeAssumesBeforeInstruction(point.inst, builder, exprEncoder); });
+    }
+
     ConstraintIR
     encodeSignedOverflowFeasibility(const std::map<const llvm::Value*, IntRange>& ranges,
                                     const llvm::BinaryOperator& binaryOperation,

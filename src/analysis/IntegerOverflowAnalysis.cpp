@@ -60,12 +60,10 @@ namespace ctrace::stack::analysis
                                      const llvm::Instruction* contextInst,
                                      const FunctionFacts* facts) const
             {
-                return smt::SmtConstraintEvaluator::evaluateQuery(
-                    [&]
-                    {
-                        return smt::encodeSignedOverflowFeasibility(ranges, binary,
-                                                                    queryPoint(contextInst, facts));
-                    });
+                const smt::QueryPoint point = queryPoint(contextInst, facts);
+                return evaluateQueryAt(
+                    ranges, point,
+                    [&] { return smt::encodeSignedOverflowFeasibility(ranges, binary, point); });
             }
 
             SmtFeasibility
@@ -74,12 +72,10 @@ namespace ctrace::stack::analysis
                                        const llvm::Instruction* contextInst,
                                        const FunctionFacts* facts) const
             {
-                return smt::SmtConstraintEvaluator::evaluateQuery(
-                    [&]
-                    {
-                        return smt::encodeUnsignedOverflowFeasibility(
-                            ranges, binary, queryPoint(contextInst, facts));
-                    });
+                const smt::QueryPoint point = queryPoint(contextInst, facts);
+                return evaluateQueryAt(
+                    ranges, point,
+                    [&] { return smt::encodeUnsignedOverflowFeasibility(ranges, binary, point); });
             }
 
             SmtFeasibility
@@ -88,12 +84,13 @@ namespace ctrace::stack::analysis
                                         const llvm::Instruction* contextInst,
                                         const FunctionFacts* facts) const
             {
-                return smt::SmtConstraintEvaluator::evaluateQuery(
-                    [&]
-                    {
-                        return smt::encodeSignedComparisonFeasibility(
-                            ranges, lhs, rhsConstant, true, queryPoint(contextInst, facts));
-                    });
+                const smt::QueryPoint point = queryPoint(contextInst, facts);
+                return evaluateQueryAt(ranges, point,
+                                       [&]
+                                       {
+                                           return smt::encodeSignedComparisonFeasibility(
+                                               ranges, lhs, rhsConstant, true, point);
+                                       });
             }
 
             SmtFeasibility
@@ -102,12 +99,13 @@ namespace ctrace::stack::analysis
                                       const llvm::Instruction* contextInst,
                                       const FunctionFacts* facts) const
             {
-                return smt::SmtConstraintEvaluator::evaluateQuery(
-                    [&]
-                    {
-                        return smt::encodeSignedComparisonFeasibility(
-                            ranges, lhs, rhsConstant, false, queryPoint(contextInst, facts));
-                    });
+                const smt::QueryPoint point = queryPoint(contextInst, facts);
+                return evaluateQueryAt(ranges, point,
+                                       [&]
+                                       {
+                                           return smt::encodeSignedComparisonFeasibility(
+                                               ranges, lhs, rhsConstant, false, point);
+                                       });
             }
         };
 

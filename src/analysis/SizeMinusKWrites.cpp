@@ -85,12 +85,13 @@ namespace ctrace::stack::analysis
                                       const llvm::Instruction* contextInst,
                                       const FunctionFacts* facts) const
             {
-                return smt::SmtConstraintEvaluator::evaluateQuery(
-                    [&]
-                    {
-                        return smt::encodeSignedComparisonFeasibility(
-                            ranges, lhs, rhsConstant, false, queryPoint(contextInst, facts));
-                    });
+                const smt::QueryPoint point = queryPoint(contextInst, facts);
+                return evaluateQueryAt(ranges, point,
+                                       [&]
+                                       {
+                                           return smt::encodeSignedComparisonFeasibility(
+                                               ranges, lhs, rhsConstant, false, point);
+                                       });
             }
         };
 
