@@ -107,8 +107,11 @@ namespace ctrace::stack::analysis
                                     const llvm::Instruction* contextInst) const
             {
                 return smt::SmtConstraintEvaluator::evaluateQuery(
-                    smt::encodeSignedComparisonFeasibility(ranges, indexExpr, -1, false,
-                                                           contextInst));
+                    [&]
+                    {
+                        return smt::encodeSignedComparisonFeasibility(ranges, indexExpr, -1, false,
+                                                                      contextInst);
+                    });
             }
 
             SmtFeasibility
@@ -125,8 +128,11 @@ namespace ctrace::stack::analysis
 
                 const std::int64_t upperInclusive = static_cast<std::int64_t>(limitExclusive - 1);
                 return smt::SmtConstraintEvaluator::evaluateQuery(
-                    smt::encodeSignedComparisonFeasibility(ranges, indexExpr, upperInclusive, true,
-                                                           contextInst));
+                    [&]
+                    {
+                        return smt::encodeSignedComparisonFeasibility(
+                            ranges, indexExpr, upperInclusive, true, contextInst);
+                    });
             }
         };
 
@@ -688,8 +694,6 @@ namespace ctrace::stack::analysis
         {
             if (!indexExpr || !indexExpr->getType()->isIntegerTy())
                 return false;
-            if (!localRange.hasLower && !localRange.hasUpper)
-                return false;
 
             std::map<const llvm::Value*, IntRange> queryRanges;
             queryRanges[indexExpr] = localRange;
@@ -704,8 +708,6 @@ namespace ctrace::stack::analysis
                                                     const llvm::Instruction& accessInst)
         {
             if (!indexExpr || !indexExpr->getType()->isIntegerTy())
-                return false;
-            if (!localRange.hasLower && !localRange.hasUpper)
                 return false;
 
             std::map<const llvm::Value*, IntRange> queryRanges;

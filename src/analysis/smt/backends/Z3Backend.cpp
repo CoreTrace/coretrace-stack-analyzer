@@ -32,8 +32,8 @@ namespace ctrace::stack::analysis::smt
 
         static z3::expr makeBvConstant(z3::context& ctx, std::int64_t value, std::uint32_t bitWidth)
         {
-            const std::uint64_t raw = static_cast<std::uint64_t>(value);
-            return ctx.bv_val(std::to_string(raw).c_str(), normalizeBitWidth(bitWidth));
+            // The int64_t overload sign-extends to widths above 64 bits: -1 stays all ones.
+            return ctx.bv_val(value, normalizeBitWidth(bitWidth));
         }
 
         static std::unordered_map<SymbolId, std::uint32_t> collectBitWidths(const ConstraintIR& ir)

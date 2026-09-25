@@ -278,43 +278,23 @@ namespace ctrace::stack::analysis::smt
                     return std::nullopt;
                 }
 
-                const std::uint32_t bitWidth = inferBitWidth(&binaryOp);
-                const ExprId result = builder_.makeBinary(opKind, *lhs, *rhs, bitWidth);
-
-                const bool isOverflowSensitive = binaryOp.getOpcode() == llvm::Instruction::Add ||
-                                                 binaryOp.getOpcode() == llvm::Instruction::Sub ||
-                                                 binaryOp.getOpcode() == llvm::Instruction::Mul;
-                if (!isOverflowSensitive || bitWidth >= std::numeric_limits<std::uint32_t>::max())
-                    return result;
-
-                const std::uint32_t extWidth = bitWidth + 1;
-                if (binaryOp.hasNoSignedWrap())
-                {
-                    const ExprId lhsExt = builder_.makeUnary(ExprKind::SExt, *lhs, extWidth);
-                    const ExprId rhsExt = builder_.makeUnary(ExprKind::SExt, *rhs, extWidth);
-                    const ExprId resultExt = builder_.makeUnary(ExprKind::SExt, result, extWidth);
-                    const ExprId extArith = builder_.makeBinary(opKind, lhsExt, rhsExt, extWidth);
-                    builder_.addAssertion(
-                        builder_.makeBinary(ExprKind::Eq, resultExt, extArith, 1));
-                }
-                if (binaryOp.hasNoUnsignedWrap())
-                {
-                    const ExprId lhsExt = builder_.makeUnary(ExprKind::ZExt, *lhs, extWidth);
-                    const ExprId rhsExt = builder_.makeUnary(ExprKind::ZExt, *rhs, extWidth);
-                    const ExprId resultExt = builder_.makeUnary(ExprKind::ZExt, result, extWidth);
-                    const ExprId extArith = builder_.makeBinary(opKind, lhsExt, rhsExt, extWidth);
-                    builder_.addAssertion(
-                        builder_.makeBinary(ExprKind::Eq, resultExt, extArith, 1));
-                }
-
-                return result;
+                // Wrapping semantics, as the -O0 code executes. nsw/nuw promise that an operand
+                // does not wrap, which is exactly what may be false where a warning is due, so
+                // they never become assertions.
+                return builder_.makeBinary(opKind, *lhs, *rhs, inferBitWidth(&binaryOp));
             }
 
             std::optional<ExprId> encodeValueImpl(const llvm::Value& value)
             {
                 if (const auto* constantInt = llvm::dyn_cast<llvm::ConstantInt>(&value))
+                {
+                    // ExprNode stores a 64-bit constant: a wider value that does not fit is an
+                    // unknown, not its truncation (getSExtValue asserts, or keeps the low word).
+                    if (constantInt->getValue().getSignificantBits() > 64)
+                        return builder_.makeSymbol(&value, inferBitWidth(&value));
                     return builder_.makeConstant(constantInt->getSExtValue(),
                                                  inferBitWidth(&value));
+                }
 
                 if (llvm::isa<llvm::ConstantPointerNull>(&value))
                     return builder_.makeConstant(0, inferBitWidth(&value));
@@ -646,7 +626,10 @@ namespace ctrace::stack::analysis::smt
                     return;
 
                 const ExprId result = builder.makeBinary(*opKind, *lhs, *rhs, bitWidth);
-                const std::uint32_t extWidth = bitWidth + 1;
+                // One extra bit computes a sum or a difference exactly; a product needs twice
+                // the width, or the widened product itself wraps and hides the overflow.
+                const std::uint32_t extWidth =
+                    *opKind == ExprKind::Mul ? 2 * bitWidth : bitWidth + 1;
 
                 const ExprId lhsExt = builder.makeUnary(ExprKind::SExt, *lhs, extWidth);
                 const ExprId rhsExt = builder.makeUnary(ExprKind::SExt, *rhs, extWidth);
@@ -685,7 +668,10 @@ namespace ctrace::stack::analysis::smt
                     return;
 
                 const ExprId result = builder.makeBinary(*opKind, *lhs, *rhs, bitWidth);
-                const std::uint32_t extWidth = bitWidth + 1;
+                // One extra bit computes a sum or a difference exactly; a product needs twice
+                // the width, or the widened product itself wraps and hides the overflow.
+                const std::uint32_t extWidth =
+                    *opKind == ExprKind::Mul ? 2 * bitWidth : bitWidth + 1;
 
                 const ExprId lhsExt = builder.makeUnary(ExprKind::ZExt, *lhs, extWidth);
                 const ExprId rhsExt = builder.makeUnary(ExprKind::ZExt, *rhs, extWidth);

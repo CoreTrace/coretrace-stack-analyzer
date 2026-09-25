@@ -95,6 +95,9 @@ _RE_ESCAPE_MODEL = re.compile(r"//\s*escape-model\s*[:=]\s*(\S+)", re.IGNORECASE
 _RE_BUFFER_MODEL = re.compile(r"//\s*buffer-model\s*[:=]\s*(\S+)", re.IGNORECASE)
 _RE_STRICT_DIAG = re.compile(r"//\s*strict-diagnostic-count\s*[:=]\s*(\S+)", re.IGNORECASE)
 _RE_STRICT_DETAILS = re.compile(r"//\s*strict-expectation-details\s*[:=]\s*(\S+)", re.IGNORECASE)
+# `// [smt-z3] not contains: ...` or `// [default] at line ...`: an expectation for one pass.
+_RE_PASS_SCOPE = re.compile(r"//\s*\[([A-Za-z0-9_-]+)\]\s*(?=at line|not contains:)")
+_EXPECTATION_PASSES = ("default", "smt-z3")
 
 
 # Thread-safe stdout dispatcher for parallel check execution
@@ -341,9 +344,13 @@ def extract_expectations(c_path: Path):
     Extract expected comment blocks from a .c file.
 
     Look for comments that start with "// at line" and take all following comment lines.
+    Both "// at line" and "// not contains:" accept a pass prefix, "// [default] ..." or
+    "// [smt-z3] ...", restricting the expectation to that pass. Expectations are returned as
+    (scope, text) pairs, scope None meaning every pass.
     """
     expectations = []
     negative_expectations = []
+    unknown_scopes = []
     stack_limit = None
     resource_model = None
     escape_model = None
@@ -401,20 +408,33 @@ def extract_expectations(c_path: Path):
             i += 1
             continue
 
+        scope = None
+        scope_match = _RE_PASS_SCOPE.match(stripped)
+        if scope_match:
+            scope = scope_match.group(1)
+            if scope not in _EXPECTATION_PASSES:
+                unknown_scopes.append(scope)
+            stripped = "// " + stripped[scope_match.end():]
+
         stripped_line = stripped
         if stripped_line.startswith("// not contains:"):
             negative = stripped_line[len("// not contains:"):].strip()
             if negative:
-                negative_expectations.append(negative)
+                negative_expectations.append((scope, negative))
             i += 1
             continue
 
         # Start of an expectation block
         if stripped.startswith("// at line"):
-            comment_block = [raw]
+            comment_block = [stripped]
             i += 1
             # Collect all following "// ..." lines
-            while i < n and lines[i].lstrip().startswith("//"):
+            # A scoped line starts its own expectation, even without a blank line before it.
+            while (
+                i < n
+                and lines[i].lstrip().startswith("//")
+                and not _RE_PASS_SCOPE.match(lines[i].lstrip())
+            ):
                 comment_block.append(lines[i])
                 i += 1
 
@@ -427,7 +447,7 @@ def extract_expectations(c_path: Path):
                 cleaned_lines.append(s.lstrip())
 
             expectation_text = "\n".join(cleaned_lines)
-            expectations.append(expectation_text)
+            expectations.append((scope, expectation_text))
         else:
             i += 1
 
@@ -440,6 +460,7 @@ def extract_expectations(c_path: Path):
         buffer_model,
         strict_diag_count,
         strict_details,
+        unknown_scopes,
     )
 
 
@@ -3376,7 +3397,16 @@ def check_file(c_path: Path):
         buffer_model,
         strict_diag_count,
         strict_details,
+        unknown_scopes,
     ) = extract_expectations(c_path)
+    if unknown_scopes:
+        known = ", ".join(f"[{p}]" for p in _EXPECTATION_PASSES)
+        report_lines.append(
+            "  ❌ unknown expectation pass prefix: "
+            + ", ".join(f"[{s}]" for s in sorted(set(unknown_scopes)))
+            + f" (known: {known})"
+        )
+        return False, 1, 0, "\n".join(report_lines) + "\n\n"
     strict_enabled = (
         strict_diag_count if strict_diag_count is not None else _default_strict_diagnostic_count(c_path)
     )
@@ -3385,15 +3415,19 @@ def check_file(c_path: Path):
         return True, 0, 0, "\n".join(report_lines) + "\n\n"
 
     def evaluate_pass(pass_name: str, analyzer_output: str):
+        applicable = [text for scope, text in expectations if scope in (None, pass_name)]
+        applicable_negative = [
+            text for scope, text in negative_expectations if scope in (None, pass_name)
+        ]
         pass_lines = [f"  [pass: {pass_name}]"]
         norm_output = normalize(analyzer_output)
         output_index = _build_output_diagnostic_index_by_location(analyzer_output)
 
         pass_ok = True
-        pass_total = len(expectations) + len(negative_expectations)
+        pass_total = len(applicable) + len(applicable_negative)
         pass_passed = 0
 
-        for idx, exp in enumerate(expectations, start=1):
+        for idx, exp in enumerate(applicable, start=1):
             norm_exp = normalize(exp)
             matched = norm_exp in norm_output
             if not matched:
@@ -3444,7 +3478,7 @@ def check_file(c_path: Path):
                 pass_lines.append("---------------------------")
                 pass_ok = False
 
-        for idx, neg in enumerate(negative_expectations, start=1):
+        for idx, neg in enumerate(applicable_negative, start=1):
             norm_neg = normalize(neg)
             if norm_neg and norm_neg not in norm_output:
                 pass_lines.append(
@@ -3463,7 +3497,7 @@ def check_file(c_path: Path):
         if strict_enabled:
             pass_total += 1
             expected_warning_error = sum(
-                1 for exp in expectations if _expectation_is_warning_or_error(exp)
+                1 for exp in applicable if _expectation_is_warning_or_error(exp)
             )
             actual_warning_error = _parse_total_warning_error_count(analyzer_output)
             if actual_warning_error is None:
@@ -3503,7 +3537,10 @@ def check_file(c_path: Path):
         escape_model=escape_model,
         buffer_model=buffer_model,
     )
-    base_ok, base_total, base_passed, base_lines = evaluate_pass("default", baseline_output)
+    # With runner-level --smt args this run is neither the default pass nor the smt-z3 one:
+    # only unscoped expectations describe it.
+    baseline_pass = "custom-smt" if _runner_has_explicit_smt_args() else "default"
+    base_ok, base_total, base_passed, base_lines = evaluate_pass(baseline_pass, baseline_output)
     report_lines.extend(base_lines)
     all_ok = all_ok and base_ok
     total += base_total
