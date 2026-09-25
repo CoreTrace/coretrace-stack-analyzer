@@ -14,6 +14,7 @@ import os
 import shutil
 import threading
 import tempfile
+import textwrap
 import uuid
 from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor
@@ -3301,6 +3302,196 @@ def check_sarif_security_severity() -> bool:
     return ok
 
 
+CI_SCRIPT = Path(__file__).resolve().parent / "scripts" / "ci" / "run_code_analysis.py"
+
+
+def _run_ci_script(args: list[str], jobs: int) -> subprocess.CompletedProcess:
+    """Run scripts/ci/run_code_analysis.py with ANALYZER_JOBS=<jobs>."""
+    return subprocess.run(
+        [sys.executable, str(CI_SCRIPT), *args],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "ANALYZER_JOBS": str(jobs)},
+        timeout=RUN_CONFIG.analyzer_timeout,
+    )
+
+
+def check_ci_script_sarif_merge() -> bool:
+    """
+    run_code_analysis.py runs the analyzer in chunks and merges their SARIF logs. The merged
+    log must describe the same rules as one analyzer run over all the inputs: here a stack
+    write in one file, and a stack read and a read-only pointer parameter in the other.
+    """
+    print("=== Testing CI script SARIF merge ===")
+    sources = {
+        "write.c": "char write_past_end(int i) { char buf[10] = {0}; if (i <= 10) buf[i] = 'x'; return buf[0]; }\n",
+        "read.c": "char read_past_end(int i) { char buf[10] = {0}; if (i <= 10) return buf[i]; return 0; }\n"
+        "int read_only(int *p) { return *p; }\n",
+    }
+
+    def rules_of(log: dict) -> dict:
+        # Tags compared as sets: their order carries no meaning.
+        rules = log["runs"][0]["tool"]["driver"]["rules"]
+        return {
+            r["id"]: {**r, "properties": {**r.get("properties", {}), "tags": sorted(r.get("properties", {}).get("tags", []))}}
+            for r in rules
+        }
+
+    with tempfile.TemporaryDirectory() as tmp:
+        paths = []
+        for name, text in sources.items():
+            path = Path(tmp) / name
+            path.write_text(text)
+            paths.append(str(path))
+        merged_path = Path(tmp) / "merged.sarif"
+        script = _run_ci_script(
+            ["--analyzer", str(RUN_CONFIG.analyzer), "--sarif-out", str(merged_path), "--fail-on", "none", *paths],
+            jobs=2,
+        )
+        single = subprocess.run(
+            [str(RUN_CONFIG.analyzer), *paths, "--format=sarif"],
+            capture_output=True,
+            text=True,
+            timeout=RUN_CONFIG.analyzer_timeout,
+        )
+        try:
+            merged = json.loads(merged_path.read_text())
+            expected = json.loads(single.stdout or "")
+        except (OSError, ValueError) as exc:
+            print(f"  ❌ no SARIF log to compare: {exc}")
+            print((script.stdout or "") + (script.stderr or ""))
+            print()
+            return False
+
+    ok = True
+    merged_rules, expected_rules = rules_of(merged), rules_of(expected)
+    for rid in sorted(set(merged_rules) | set(expected_rules)):
+        if merged_rules.get(rid) != expected_rules.get(rid):
+            print(f"  ❌ rule {rid}: merged {merged_rules.get(rid)}, one run {expected_rules.get(rid)}")
+            ok = False
+    merged_results = merged["runs"][0].get("results", [])
+    undescribed = sorted({r.get("ruleId") for r in merged_results} - set(merged_rules))
+    if undescribed:
+        print(f"  ❌ results without a rule: {undescribed}")
+        ok = False
+    if len(merged_results) != len(expected["runs"][0].get("results", [])):
+        print(f"  ❌ {len(merged_results)} merged results, one run has {len(expected['runs'][0].get('results', []))}")
+        ok = False
+    if ok:
+        print("  ✅ CI script SARIF merge OK")
+    print()
+    return ok
+
+
+def check_ci_script_sarif_rule_join() -> bool:
+    """
+    When the chunk logs describe one rule differently, the merged rule has the tags of all of
+    them and the highest security-severity, even when the first gives it neither (its
+    diagnostics there carry no CWE).
+    """
+    print("=== Testing CI script SARIF rule join ===")
+    spec = importlib.util.spec_from_file_location("run_code_analysis", CI_SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    merge_sarif_logs = getattr(module, "merge_sarif_logs", None)
+    if merge_sarif_logs is None:
+        print(f"  ❌ {CI_SCRIPT.name} has no merge_sarif_logs")
+        print()
+        return False
+
+    def log(properties: Optional[dict]) -> dict:
+        rule = {"id": "Shared"}
+        if properties:
+            rule["properties"] = properties
+        run = {"tool": {"driver": {"name": "stand-in", "rules": [rule]}}, "results": []}
+        return {"version": "2.1.0", "runs": [run]}
+
+    # The highest score is neither the first log's nor the last's.
+    logs = [
+        log(None),
+        log({"tags": ["security", "external/cwe/cwe-457"], "security-severity": "7.8"}),
+        log({"tags": ["security", "external/cwe/cwe-200"], "security-severity": "6.5"}),
+    ]
+    with tempfile.TemporaryDirectory() as tmp:
+        paths = []
+        for i, content in enumerate(logs):
+            path = Path(tmp) / f"chunk{i}.sarif"
+            path.write_text(json.dumps(content))
+            paths.append(str(path))
+        merged = merge_sarif_logs(paths)
+
+    rules = merged["runs"][0]["tool"]["driver"]["rules"]
+    properties = rules[0].get("properties", {}) if len(rules) == 1 else {}
+    tags = set(properties.get("tags", []))
+    expected_tags = {"security", "external/cwe/cwe-457", "external/cwe/cwe-200"}
+    ok = tags == expected_tags and properties.get("security-severity") == "7.8"
+    if ok:
+        print("  ✅ CI script SARIF rule join OK")
+    else:
+        print(f"  ❌ merged rules {rules}, expected one rule with tags {sorted(expected_tags)} and 7.8")
+    print()
+    return ok
+
+
+def check_ci_script_sarif_chunks() -> bool:
+    """
+    run_code_analysis.py merges the chunk logs in input order, whatever chunk finishes first,
+    and fails when a chunk log cannot be read. A stand-in analyzer controls both: its log has
+    one rule named after its input, it sleeps first for slow.c and writes no JSON for broken.c.
+    """
+    print("=== Testing CI script SARIF chunks ===")
+    stand_in = textwrap.dedent(
+        """\
+        #!/usr/bin/env python3
+        import json, sys, time
+        from pathlib import Path
+
+        name = Path(next(a for a in sys.argv[1:] if not a.startswith("--"))).stem
+        out = next(a.split("=", 1)[1] for a in sys.argv[1:] if a.startswith("--sarif-out="))
+        if name == "slow":
+            time.sleep(1)
+        run = {"tool": {"driver": {"name": "stand-in", "rules": [{"id": name}]}},
+               "results": [{"ruleId": name, "message": {"text": name}}]}
+        log = {"version": "2.1.0", "runs": [run]}
+        Path(out).write_text("not json" if name == "broken" else json.dumps(log))
+        print(json.dumps({"diagnostics": []}))
+        """
+    )
+    ok = True
+    with tempfile.TemporaryDirectory() as tmp:
+        analyzer = Path(tmp) / "stand-in-analyzer"
+        analyzer.write_text(stand_in)
+        analyzer.chmod(0o755)
+        for name in ("slow", "fast", "broken"):
+            (Path(tmp) / f"{name}.c").write_text("int f(void) { return 0; }\n")
+        out = Path(tmp) / "merged.sarif"
+
+        def run_script(*names: str) -> subprocess.CompletedProcess:
+            inputs = [str(Path(tmp) / f"{name}.c") for name in names]
+            args = ["--analyzer", str(analyzer), "--sarif-out", str(out), "--fail-on", "none", *inputs]
+            return _run_ci_script(args, jobs=len(inputs))
+
+        # The first chunk finishes last: the merged results still follow the input order.
+        result = run_script("slow", "fast")
+        order = None
+        if result.returncode == 0 and out.exists():
+            order = [r.get("ruleId") for r in json.loads(out.read_text())["runs"][0].get("results", [])]
+        if order != ["slow", "fast"]:
+            print(f"  ❌ merged results in the order {order}, expected the input order ['slow', 'fast']")
+            print((result.stdout or "") + (result.stderr or ""))
+            ok = False
+
+        # A chunk log that cannot be read fails the run instead of losing its results.
+        result = run_script("fast", "broken")
+        if result.returncode != 2:
+            print(f"  ❌ an unreadable chunk log exits with code {result.returncode}, expected 2")
+            ok = False
+    if ok:
+        print("  ✅ CI script SARIF chunks OK")
+    print()
+    return ok
+
+
 def check_unresolved_call_max_stack() -> bool:
     """
     A function containing an unresolved call (indirect, or to an external
@@ -3723,6 +3914,9 @@ def main() -> int:
         check_diagnostic_cwe_coverage,
         check_sarif_rule_cwe_tags,
         check_sarif_security_severity,
+        check_ci_script_sarif_merge,
+        check_ci_script_sarif_rule_join,
+        check_ci_script_sarif_chunks,
     ]
     # Env-mutating check — must run outside the parallel pool.
     sequential_checks = [
