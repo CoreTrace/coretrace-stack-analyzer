@@ -84,9 +84,12 @@ namespace ctrace::stack::analysis::smt
                 return it->second.expr;
             }
 
+            // Z3 identifies a constant by its name: the id keeps two symbols that print the same
+            // apart (every memory symbol of a variable is `<name>@mem`, whatever its clobber).
             auto nameIt = names.find(id);
             std::string symbolName =
-                (nameIt != names.end()) ? nameIt->second : ("sym_" + std::to_string(id));
+                ((nameIt != names.end()) ? nameIt->second : std::string("sym")) + "!" +
+                std::to_string(id);
 
             const std::uint32_t width = normalizeBitWidth(bitWidth);
             z3::expr symbolExpr = ctx.bv_const(symbolName.c_str(), width);
