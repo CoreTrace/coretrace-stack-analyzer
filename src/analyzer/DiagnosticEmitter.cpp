@@ -131,6 +131,9 @@ namespace ctrace::stack::analyzer
 
             Diagnostic build()
             {
+                // Named here rather than at serialization, so library consumers read it too.
+                if (diag_.ruleId.empty())
+                    diag_.ruleId = std::string(enumToString(diag_.errCode));
                 return std::move(diag_);
             }
 
@@ -364,7 +367,8 @@ namespace ctrace::stack::analyzer
 
             if (issue.isLowerBoundViolation)
             {
-                builder.errCode(DescriptiveErrorCode::NegativeStackIndex);
+                builder.errCode(DescriptiveErrorCode::NegativeStackIndex)
+                    .cwe(issue.isWrite ? "CWE-124" : "CWE-127");
                 body << "  [!!] potential negative index on variable '" << issue.varName
                      << "' (size " << issue.arraySize << ")\n";
                 if (!issue.aliasPath.empty())
@@ -377,6 +381,10 @@ namespace ctrace::stack::analyzer
                 builder.errCode(DescriptiveErrorCode::StackBufferOverflow);
                 const bool isGlobalStorage =
                     issue.storageClass == analysis::BufferStorageClass::Global;
+                if (!issue.isWrite)
+                    builder.cwe("CWE-125");
+                else
+                    builder.cwe(isGlobalStorage ? "CWE-787" : "CWE-121");
                 body << "\t[ !!Warn ] potential "
                      << (isGlobalStorage ? "buffer overflow on global variable '"
                                          : "stack buffer overflow on variable '")
@@ -437,6 +445,7 @@ namespace ctrace::stack::analyzer
             builder.function(issue.funcName)
                 .severity(DiagnosticSeverity::Warning)
                 .errCode(DescriptiveErrorCode::VLAUsage)
+                .cwe("CWE-770")
                 .location(loc)
                 .message(body.str());
 
@@ -469,21 +478,24 @@ namespace ctrace::stack::analyzer
             if (isOversized)
             {
                 builder.severity(DiagnosticSeverity::Error)
-                    .errCode(DescriptiveErrorCode::AllocaTooLarge);
+                    .errCode(DescriptiveErrorCode::AllocaTooLarge)
+                    .cwe("CWE-770");
                 body << "\t" << prefixForSeverity(DiagnosticSeverity::Error)
                      << " large alloca on the stack for variable '" << issue.varName << "'\n";
             }
             else if (issue.userControlled)
             {
                 builder.severity(DiagnosticSeverity::Warning)
-                    .errCode(DescriptiveErrorCode::AllocaUserControlled);
+                    .errCode(DescriptiveErrorCode::AllocaUserControlled)
+                    .cwe("CWE-789");
                 body << "\t" << prefixForSeverity(DiagnosticSeverity::Warning)
                      << " user-controlled alloca size for variable '" << issue.varName << "'\n";
             }
             else
             {
                 builder.severity(DiagnosticSeverity::Warning)
-                    .errCode(DescriptiveErrorCode::AllocaUsageWarning);
+                    .errCode(DescriptiveErrorCode::AllocaUsageWarning)
+                    .cwe("CWE-770");
                 body << "\t" << prefixForSeverity(DiagnosticSeverity::Warning)
                      << " dynamic alloca on the stack for variable '" << issue.varName << "'\n";
             }
@@ -562,6 +574,8 @@ namespace ctrace::stack::analyzer
             DiagnosticBuilder builder;
             builder.function(issue.funcName)
                 .severity(DiagnosticSeverity::Warning)
+                .errCode(DescriptiveErrorCode::MemcpyWithStackDest)
+                .cwe(issue.hasExplicitLength ? "CWE-121" : "CWE-120")
                 .location(loc)
                 .message(body.str());
             result.diagnostics.push_back(builder.build());
@@ -598,6 +612,7 @@ namespace ctrace::stack::analyzer
             builder.function(issue.funcName)
                 .severity(DiagnosticSeverity::Warning)
                 .errCode(DescriptiveErrorCode::SizeMinusOneWrite)
+                .cwe("CWE-191")
                 .location(loc)
                 .message(body.str());
             result.diagnostics.push_back(builder.build());
@@ -724,6 +739,7 @@ namespace ctrace::stack::analyzer
                 .severity(DiagnosticSeverity::Warning)
                 .errCode(DescriptiveErrorCode::DuplicateIfCondition)
                 .ruleId("DuplicateIfCondition")
+                .cwe("CWE-561")
                 .location(loc)
                 .message(body.str());
             result.diagnostics.push_back(builder.build());
@@ -899,6 +915,7 @@ namespace ctrace::stack::analyzer
             builder.function(issue.funcName)
                 .severity(severity)
                 .errCode(DescriptiveErrorCode::InvalidBaseReconstruction)
+                .cwe("CWE-823")
                 .location(loc)
                 .message(body.str());
             result.diagnostics.push_back(builder.build());
@@ -965,6 +982,7 @@ namespace ctrace::stack::analyzer
             builder.function(issue.funcName)
                 .severity(DiagnosticSeverity::Warning)
                 .errCode(DescriptiveErrorCode::StackPointerEscape)
+                .cwe("CWE-562")
                 .location(loc)
                 .message(body.str());
             result.diagnostics.push_back(builder.build());

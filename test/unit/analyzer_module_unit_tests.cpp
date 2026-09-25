@@ -461,6 +461,15 @@ namespace
                       "AnalysisReport: per-file summary matches the total for a single input");
         report.expect(analysis.merged.diagnostics.size() == 1,
                       "AnalysisReport: merged result carries the diagnostic");
+        if (!analysis.merged.diagnostics.empty())
+        {
+            // Read on the Diagnostic itself: consumers do not go through JSON or SARIF.
+            const ctrace::stack::Diagnostic& diagnostic = analysis.merged.diagnostics.front();
+            report.expect(diagnostic.ruleId == "AllocaTooLarge",
+                          "AnalysisReport: the diagnostic names its rule");
+            report.expect(diagnostic.cweId == "CWE-770",
+                          "AnalysisReport: the diagnostic carries its CWE");
+        }
 
         const std::string json = app::renderReport(analysis, cli::OutputFormat::Json);
         report.expect(json == ctrace::stack::toJson(analysis.merged, source.string()),
