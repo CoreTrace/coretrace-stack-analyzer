@@ -3,6 +3,7 @@
 
 #include "analysis/FunctionFacts.hpp"
 
+#include <limits>
 #include <optional>
 #include <utility>
 
@@ -16,11 +17,35 @@
 #include <llvm/IR/Function.h>
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/Value.h>
+#include <llvm/Support/CheckedArithmetic.h>
 
 namespace ctrace::stack::analysis
 {
     namespace
     {
+        /// @p C plus @p delta as a range bound, or std::nullopt when that does not fit in a
+        /// long long: a constant wider than 64 bits (__int128), an unsigned one above
+        /// LLONG_MAX, or an extreme one that @p delta pushes out of range. The comparison then
+        /// gives no bound: less information, never a wrong one.
+        std::optional<long long> boundFromConstant(const llvm::ConstantInt& C, bool isUnsigned,
+                                                   long long delta)
+        {
+            std::optional<long long> value;
+            if (!isUnsigned)
+            {
+                if (const std::optional<int64_t> s = C.getValue().trySExtValue())
+                    value = *s;
+            }
+            else if (const std::optional<uint64_t> u = C.getValue().tryZExtValue();
+                     u && *u <= static_cast<uint64_t>(std::numeric_limits<long long>::max()))
+            {
+                value = static_cast<long long>(*u);
+            }
+            if (!value)
+                return std::nullopt;
+            return llvm::checkedAdd(*value, delta);
+        }
+
         /// The bound on one operand of `icmp pred V, C` when the comparison evaluates to
         /// @p holds. NE yields nothing; its negation (EQ) yields the point range.
         std::optional<std::pair<const llvm::Value*, IntRange>>
@@ -46,51 +71,48 @@ namespace ctrace::stack::analysis
             if (V == op1)
                 pred = ICmpInst::getSwappedPredicate(pred);
 
-            IntRange out;
-            const auto setUB = [&out](long long ub)
-            {
-                out.hasUpper = true;
-                out.upper = ub;
-            };
-            const auto setLB = [&out](long long lb)
-            {
-                out.hasLower = true;
-                out.lower = lb;
-            };
-
+            // Which side of V the constant bounds, and how far the bound is from the constant.
+            bool lower = false;
+            bool upper = false;
+            long long delta = 0;
             switch (pred)
             {
             case ICmpInst::ICMP_SLT:
-                setUB(C->getSExtValue() - 1);
+            case ICmpInst::ICMP_ULT:
+                upper = true;
+                delta = -1;
                 break;
             case ICmpInst::ICMP_SLE:
-                setUB(C->getSExtValue());
+            case ICmpInst::ICMP_ULE:
+                upper = true;
                 break;
             case ICmpInst::ICMP_SGT:
-                setLB(C->getSExtValue() + 1);
+            case ICmpInst::ICMP_UGT:
+                lower = true;
+                delta = 1;
                 break;
             case ICmpInst::ICMP_SGE:
-                setLB(C->getSExtValue());
-                break;
-            case ICmpInst::ICMP_ULT:
-                setUB(static_cast<long long>(C->getZExtValue()) - 1);
-                break;
-            case ICmpInst::ICMP_ULE:
-                setUB(static_cast<long long>(C->getZExtValue()));
-                break;
-            case ICmpInst::ICMP_UGT:
-                setLB(static_cast<long long>(C->getZExtValue()) + 1);
-                break;
             case ICmpInst::ICMP_UGE:
-                setLB(static_cast<long long>(C->getZExtValue()));
+                lower = true;
                 break;
             case ICmpInst::ICMP_EQ:
-                setLB(C->getSExtValue());
-                setUB(C->getSExtValue());
+                lower = upper = true;
                 break;
             default:
                 return std::nullopt;
             }
+            const std::optional<long long> bound =
+                boundFromConstant(*C, ICmpInst::isUnsigned(pred), delta);
+            if (!bound)
+                return std::nullopt;
+
+            IntRange out;
+            out.hasLower = lower;
+            out.hasUpper = upper;
+            if (lower)
+                out.lower = *bound;
+            if (upper)
+                out.upper = *bound;
             return std::make_pair(V, out);
         }
     } // namespace
