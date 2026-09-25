@@ -1318,6 +1318,93 @@ namespace
                       "SARIF: CWE tags are zero-padded to three digits");
         return report.failures == 0;
     }
+
+    /// Properties of rule @p rule in the SARIF log @p sarif (empty when it has none), or
+    /// std::nullopt when the rule is absent.
+    std::optional<llvm::json::Object> sarifRuleProperties(const std::string& sarif,
+                                                          llvm::StringRef rule)
+    {
+        llvm::Expected<llvm::json::Value> parsed = llvm::json::parse(sarif);
+        if (!parsed)
+        {
+            llvm::consumeError(parsed.takeError());
+            return std::nullopt;
+        }
+        const llvm::json::Object* root = parsed->getAsObject();
+        const llvm::json::Array* runs = root ? root->getArray("runs") : nullptr;
+        const llvm::json::Object* run = runs && !runs->empty() ? (*runs)[0].getAsObject() : nullptr;
+        const llvm::json::Object* tool = run ? run->getObject("tool") : nullptr;
+        const llvm::json::Object* driver = tool ? tool->getObject("driver") : nullptr;
+        const llvm::json::Array* rules = driver ? driver->getArray("rules") : nullptr;
+        if (!rules)
+            return std::nullopt;
+        for (const llvm::json::Value& entry : *rules)
+        {
+            const llvm::json::Object* object = entry.getAsObject();
+            if (!object || object->getString("id") != rule)
+                continue;
+            const llvm::json::Object* properties = object->getObject("properties");
+            return properties ? *properties : llvm::json::Object{};
+        }
+        return std::nullopt;
+    }
+
+    /// SARIF: GitHub code scanning ranks the alerts of a rule by its security-severity when the
+    /// rule has the security tag. A rule gets both from its scored CWEs, and a hint gets neither.
+    bool testSarifSecuritySeverity(TestReport& report)
+    {
+        const auto diagnostic = [](const char* rule, const char* cwe)
+        {
+            ctrace::stack::Diagnostic d;
+            d.ruleId = rule;
+            d.cweId = cwe;
+            d.filePath = "demo.c";
+            d.line = 1;
+            d.column = 1;
+            d.message = rule;
+            return d;
+        };
+
+        ctrace::stack::AnalysisResult result;
+        result.diagnostics = {
+            diagnostic("StackBufferOverflow", "CWE-121"),
+            diagnostic("ConstParameterNotModified.Pointer", ""),
+            // The highest score (CWE-457, 7.8) is neither the first CWE nor
+            // the last: CWE-200 scores 6.5 and CWE-685 5.0.
+            diagnostic("MixedCwes", "CWE-685"), diagnostic("MixedCwes", "CWE-457"),
+            diagnostic("MixedCwes", "CWE-200"), diagnostic("DuplicateIfCondition", "CWE-561")};
+        const std::string sarif = ctrace::stack::toSarif(result, "demo.c");
+
+        const auto hasSecurityTag = [](const llvm::json::Object& properties)
+        {
+            const llvm::json::Array* tags = properties.getArray("tags");
+            return tags &&
+                   llvm::any_of(*tags, [](const llvm::json::Value& tag)
+                                { return tag.getAsString() == llvm::StringRef("security"); });
+        };
+        const auto isSecurityRule = [&](llvm::StringRef rule, llvm::StringRef score)
+        {
+            const std::optional<llvm::json::Object> properties = sarifRuleProperties(sarif, rule);
+            return properties && hasSecurityTag(*properties) &&
+                   properties->getString("security-severity") == score;
+        };
+        const auto isPlainRule = [&](llvm::StringRef rule)
+        {
+            const std::optional<llvm::json::Object> properties = sarifRuleProperties(sarif, rule);
+            return properties && !hasSecurityTag(*properties) &&
+                   !properties->get("security-severity");
+        };
+
+        report.expect(isSecurityRule("StackBufferOverflow", "9.3"),
+                      "SARIF: a rule with a scored CWE has the security tag and its score");
+        report.expect(isPlainRule("ConstParameterNotModified.Pointer"),
+                      "SARIF: a hint rule has neither the security tag nor a score");
+        report.expect(isSecurityRule("MixedCwes", "7.8"),
+                      "SARIF: a rule takes the highest score of its CWEs");
+        report.expect(isPlainRule("DuplicateIfCondition"),
+                      "SARIF: a CWE without a score (dead code) does not make a security rule");
+        return report.failures == 0;
+    }
 } // namespace
 
 int main(int argc, char** argv)
@@ -1337,6 +1424,7 @@ int main(int argc, char** argv)
     (void)testIntRangeFacts(repoRoot, report);
     (void)testAnalysisReportContract(repoRoot, report);
     (void)testSarifRuleCweTags(report);
+    (void)testSarifSecuritySeverity(report);
     (void)testUnresolvedCallsMarkStackUnknown(repoRoot, report);
     (void)testAssumeExternalFrameReplacesUnknown(repoRoot, report);
     (void)testUninitializedFixpointBudgetIsExplicit(repoRoot, report);
