@@ -317,6 +317,47 @@ def analyzer_cmd(
     return cmd
 
 
+def join_rule_properties(rule: dict, other: dict) -> None:
+    """Give @rule the tags of @other it lacks, and the higher security-severity of the two."""
+    if not other:
+        return
+    properties = rule.setdefault("properties", {})
+    tags = properties.get("tags", [])
+    tags = tags + [tag for tag in other.get("tags", []) if tag not in tags]
+    if tags:
+        properties["tags"] = tags
+    if float(other.get("security-severity", 0)) > float(properties.get("security-severity", 0)):
+        properties["security-severity"] = other["security-severity"]
+
+
+def merge_sarif_logs(paths: list[str]) -> dict | None:
+    """
+    Merge the SARIF logs of the analyzer chunks, in the order given, into the log one run over
+    all their inputs would write: every result, and each rule once, with the tags of all its
+    logs and its highest security-severity. Raises ValueError when a log cannot be read.
+    """
+    merged: dict | None = None
+    rules: dict[str, dict] = {}
+    for path in paths:
+        try:
+            log = json.loads(Path(path).read_text(encoding="utf-8"))
+            run = log["runs"][0]
+        except (OSError, ValueError, KeyError, IndexError, TypeError) as exc:
+            raise ValueError(f"{path}: {exc}") from exc
+        if merged is None:
+            merged = log
+        else:
+            merged["runs"][0].setdefault("results", []).extend(run.get("results", []))
+        for rule in run.get("tool", {}).get("driver", {}).get("rules", []):
+            known = rules.setdefault(rule["id"], rule)
+            if known is not rule:
+                join_rule_properties(known, rule.get("properties", {}))
+    if merged is not None:
+        driver = merged["runs"][0].setdefault("tool", {}).setdefault("driver", {})
+        driver["rules"] = sorted(rules.values(), key=lambda rule: rule["id"])
+    return merged
+
+
 def main() -> int:
     args = parse_args()
 
@@ -406,15 +447,14 @@ def main() -> int:
 
     diags = []
     has_error = False
-    all_sarif_files = []
-    
+    # In chunk order, whatever chunk finishes first, so the merged log is the same every run.
+    chunk_logs: list[str | None] = [None] * len(chunks)
+
     with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as executor:
         futures = [executor.submit(run_chunk, i, c) for i, c in enumerate(chunks)]
         for fut in concurrent.futures.as_completed(futures):
             i, run, chunk_sarif = fut.result()
-            
-            if chunk_sarif and os.path.exists(chunk_sarif):
-                all_sarif_files.append(chunk_sarif)
+            chunk_logs[i] = chunk_sarif
 
             if run.returncode != 0:
                 if run.stdout:
@@ -435,20 +475,16 @@ def main() -> int:
     if has_error:
         return 2
 
-    if sarif_out_path and all_sarif_files:
-        merged = None
-        for p in all_sarif_files:
-            with open(p, 'r') as f:
-                try:
-                    data = json.load(f)
-                    if merged is None:
-                        merged = data
-                    else:
-                        if data.get("runs") and merged.get("runs"):
-                            merged["runs"][0].setdefault("results", []).extend(data["runs"][0].get("results", []))
-                except json.JSONDecodeError:
-                    pass
-            os.unlink(p)
+    if sarif_out_path:
+        paths = [path for path in chunk_logs if path]
+        try:
+            merged = merge_sarif_logs(paths)
+        except ValueError as exc:
+            print(f"Cannot merge the analyzer SARIF logs: {exc}", file=sys.stderr)
+            return 2
+        finally:
+            for path in paths:
+                Path(path).unlink(missing_ok=True)
         if merged:
             with open(sarif_out_path, 'w') as f:
                 json.dump(merged, f)
