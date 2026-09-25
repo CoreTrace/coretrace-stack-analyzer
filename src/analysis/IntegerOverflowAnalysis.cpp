@@ -871,7 +871,15 @@ namespace ctrace::stack::analysis
                         classifySizeOperand(sizeOperand, ranges);
                     if (!risk)
                         continue;
-                    if (shouldSuppressRiskWithSmt(evaluator, ranges, *risk, inst, facts))
+                    // Ask about the flagged value where it is computed: found through a slot or a
+                    // phi, it may come from an earlier loop iteration, which the ranges and the
+                    // path condition of the call do not describe.
+                    const llvm::Instruction* flagged = risk->arithmeticOp;
+                    if (!flagged)
+                        flagged = llvm::dyn_cast_or_null<llvm::Instruction>(risk->relatedValue);
+                    const llvm::Instruction& queryAt = flagged ? *flagged : inst;
+                    if (shouldSuppressRiskWithSmt(evaluator, pointRanges.at(queryAt), *risk,
+                                                  queryAt, facts))
                         continue;
 
                     IntegerOverflowIssue issue;
