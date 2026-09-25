@@ -491,7 +491,8 @@ namespace ctrace::stack::analysis
     }
 
     std::optional<IntRange> ProgramPointRanges::at(const llvm::Value* key,
-                                                   const llvm::Instruction& at) const
+                                                   const llvm::Instruction& at,
+                                                   IntReading /*reading*/) const
     {
         std::optional<IntRange> result;
         if (const auto it = proven_.find(key); it != proven_.end())

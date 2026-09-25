@@ -32,6 +32,14 @@ namespace ctrace::stack::analysis
         std::uint64_t reservedFlags : 62 = 0;
     };
 
+    /// How a use reads the bits of an integer: `sext` and signed comparisons read them as
+    /// signed, `zext` and unsigned comparisons as unsigned.
+    enum class IntReading
+    {
+        Signed,
+        Unsigned
+    };
+
     class FunctionFacts;
 
     /// @brief Bounds for the integer values of @p F that hold everywhere, keyed by value.
@@ -60,9 +68,11 @@ namespace ctrace::stack::analysis
       public:
         ProgramPointRanges(llvm::Function& F, const FunctionFacts& facts);
 
-        /// Bounds on @p key that hold at @p at, or nullopt if nothing is known.
+        /// Bounds on @p key, read as @p reading, that hold at @p at, or nullopt if nothing
+        /// is known.
         [[nodiscard]] std::optional<IntRange> at(const llvm::Value* key,
-                                                 const llvm::Instruction& at) const;
+                                                 const llvm::Instruction& at,
+                                                 IntReading reading = IntReading::Signed) const;
 
         /// Every bound that holds at @p at, keyed by value.
         [[nodiscard]] std::map<const llvm::Value*, IntRange> at(const llvm::Instruction& at) const;
