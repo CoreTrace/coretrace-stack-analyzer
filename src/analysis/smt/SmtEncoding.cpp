@@ -283,11 +283,23 @@ namespace ctrace::stack::analysis::smt
                 return builder_.makeBinary(ExprKind::Ne, *expr, zero, 1);
             }
 
+            /// @p value as an integer. A comparison, and And, Or or Not of comparisons, is a
+            /// boolean for the solver, while LLVM gives an i1 used as an integer the value 0 or
+            /// 1 (a flag stored, extended or added): such a node becomes ite(node, 1, 0).
+            std::optional<ExprId> encodeAsInteger(const llvm::Value* value)
+            {
+                std::optional<ExprId> expr = encodeValue(value);
+                if (!expr || !isBooleanExprKind(builder_.node(*expr).kind))
+                    return expr;
+                return builder_.makeTernary(ExprKind::Ite, *expr, builder_.makeConstant(1, 1),
+                                            builder_.makeConstant(0, 1), 1);
+            }
+
           private:
             std::optional<ExprId> encodeBinaryOperator(const llvm::BinaryOperator& binaryOp)
             {
-                std::optional<ExprId> lhs = encodeValue(binaryOp.getOperand(0));
-                std::optional<ExprId> rhs = encodeValue(binaryOp.getOperand(1));
+                std::optional<ExprId> lhs = encodeAsInteger(binaryOp.getOperand(0));
+                std::optional<ExprId> rhs = encodeAsInteger(binaryOp.getOperand(1));
                 if (!lhs || !rhs)
                     return std::nullopt;
 
@@ -392,7 +404,7 @@ namespace ctrace::stack::analysis::smt
 
                 if (const auto* castInst = llvm::dyn_cast<llvm::CastInst>(&value))
                 {
-                    std::optional<ExprId> operand = encodeValue(castInst->getOperand(0));
+                    std::optional<ExprId> operand = encodeAsInteger(castInst->getOperand(0));
                     if (!operand)
                         return std::nullopt;
 
@@ -412,8 +424,8 @@ namespace ctrace::stack::analysis::smt
 
                 if (const auto* icmp = llvm::dyn_cast<llvm::ICmpInst>(&value))
                 {
-                    std::optional<ExprId> lhs = encodeValue(icmp->getOperand(0));
-                    std::optional<ExprId> rhs = encodeValue(icmp->getOperand(1));
+                    std::optional<ExprId> lhs = encodeAsInteger(icmp->getOperand(0));
+                    std::optional<ExprId> rhs = encodeAsInteger(icmp->getOperand(1));
                     if (!lhs || !rhs)
                         return std::nullopt;
 
@@ -528,7 +540,7 @@ namespace ctrace::stack::analysis::smt
 
                 // The bounds constrain the expression the rest of the query uses for `value`: a
                 // load, for one, may be encoded as the value it reads rather than as a symbol.
-                const std::optional<ExprId> expr = exprEncoder.encodeValue(value);
+                const std::optional<ExprId> expr = exprEncoder.encodeAsInteger(value);
                 if (!expr)
                     continue;
 
@@ -706,7 +718,7 @@ namespace ctrace::stack::analysis::smt
             if (!switchInst)
                 return std::nullopt;
             const std::optional<ExprId> selector =
-                exprEncoder.encodeValue(switchInst->getCondition());
+                exprEncoder.encodeAsInteger(switchInst->getCondition());
             if (!selector)
                 return std::nullopt;
             const std::uint32_t bitWidth = builder.node(*selector).bitWidth;
@@ -918,9 +930,9 @@ namespace ctrace::stack::analysis::smt
                     return;
 
                 const std::optional<ExprId> lhs =
-                    exprEncoder.encodeValue(binaryOperation.getOperand(0));
+                    exprEncoder.encodeAsInteger(binaryOperation.getOperand(0));
                 const std::optional<ExprId> rhs =
-                    exprEncoder.encodeValue(binaryOperation.getOperand(1));
+                    exprEncoder.encodeAsInteger(binaryOperation.getOperand(1));
                 if (!lhs || !rhs)
                     return;
 
@@ -960,9 +972,9 @@ namespace ctrace::stack::analysis::smt
                     return;
 
                 const std::optional<ExprId> lhs =
-                    exprEncoder.encodeValue(binaryOperation.getOperand(0));
+                    exprEncoder.encodeAsInteger(binaryOperation.getOperand(0));
                 const std::optional<ExprId> rhs =
-                    exprEncoder.encodeValue(binaryOperation.getOperand(1));
+                    exprEncoder.encodeAsInteger(binaryOperation.getOperand(1));
                 if (!lhs || !rhs)
                     return;
 
@@ -996,7 +1008,7 @@ namespace ctrace::stack::analysis::smt
             {
                 encodeAssumesBeforeInstruction(point.inst, builder, exprEncoder);
 
-                const std::optional<ExprId> lhsExpr = exprEncoder.encodeValue(&lhs);
+                const std::optional<ExprId> lhsExpr = exprEncoder.encodeAsInteger(&lhs);
                 if (!lhsExpr)
                     return;
 
