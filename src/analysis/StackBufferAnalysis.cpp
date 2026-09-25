@@ -689,29 +689,27 @@ namespace ctrace::stack::analysis
         }
 
         /// Whether the solver proves the index the access really uses, @p indexExpr (casts
-        /// included), inside [0, @p arraySize - 1]. @p localRange is known for @p rangedValue, the
-        /// index without its casts, and the encoded casts carry it to the index. Both bounds are
-        /// required whichever the report: a cast can turn an index that stays below the end into
-        /// a negative one, or a negative one into one far past the end.
+        /// included), inside [0, @p arraySize - 1]. Both bounds are required whichever the report:
+        /// a cast can turn an index that stays below the end into a negative one, or a negative
+        /// one into one far past the end. The interval range of the index is not a premise: some
+        /// of its sources are unsound (an unsigned comparison read as a signed bound, the `!=`
+        /// loop heuristic, which ignores writes through calls and pointers), and the path
+        /// condition already carries the guards.
         static bool isIndexInBoundsBySmt(const StackBufferConstraintEvaluator& evaluator,
-                                         const IntRange& localRange, const llvm::Value* indexExpr,
-                                         const llvm::Value* rangedValue, StackSize arraySize,
+                                         const llvm::Value* indexExpr, StackSize arraySize,
                                          const llvm::Instruction& accessInst,
                                          const FunctionFacts& facts)
         {
             if (!indexExpr || !indexExpr->getType()->isIntegerTy())
                 return false;
 
-            std::map<const llvm::Value*, IntRange> queryRanges;
-            queryRanges[rangedValue] = localRange;
-
-            if (evaluator.isNegativeIndexFeasible(queryRanges, *indexExpr, &accessInst, &facts) !=
+            const std::map<const llvm::Value*, IntRange> noRanges;
+            if (evaluator.isNegativeIndexFeasible(noRanges, *indexExpr, &accessInst, &facts) !=
                 SmtFeasibility::Infeasible)
             {
                 return false;
             }
-            return evaluator.isUpperOverflowFeasible(queryRanges, *indexExpr, arraySize,
-                                                     &accessInst,
+            return evaluator.isUpperOverflowFeasible(noRanges, *indexExpr, arraySize, &accessInst,
                                                      &facts) == SmtFeasibility::Infeasible;
         }
 
@@ -997,8 +995,7 @@ namespace ctrace::stack::analysis
                         {
                             if (auto* S = dyn_cast<StoreInst>(GU))
                             {
-                                if (isIndexInBoundsBySmt(evaluator, R, idxVal, baseIdxVal,
-                                                         arraySize, *S, facts))
+                                if (isIndexInBoundsBySmt(evaluator, idxVal, arraySize, *S, facts))
                                 {
                                     continue;
                                 }
@@ -1018,8 +1015,7 @@ namespace ctrace::stack::analysis
                             }
                             else if (auto* L = dyn_cast<LoadInst>(GU))
                             {
-                                if (isIndexInBoundsBySmt(evaluator, R, idxVal, baseIdxVal,
-                                                         arraySize, *L, facts))
+                                if (isIndexInBoundsBySmt(evaluator, idxVal, arraySize, *L, facts))
                                 {
                                     continue;
                                 }
@@ -1047,8 +1043,7 @@ namespace ctrace::stack::analysis
                         {
                             if (auto* S = dyn_cast<StoreInst>(GU))
                             {
-                                if (isIndexInBoundsBySmt(evaluator, R, idxVal, baseIdxVal,
-                                                         arraySize, *S, facts))
+                                if (isIndexInBoundsBySmt(evaluator, idxVal, arraySize, *S, facts))
                                 {
                                     continue;
                                 }
@@ -1069,8 +1064,7 @@ namespace ctrace::stack::analysis
                             }
                             else if (auto* L = dyn_cast<LoadInst>(GU))
                             {
-                                if (isIndexInBoundsBySmt(evaluator, R, idxVal, baseIdxVal,
-                                                         arraySize, *L, facts))
+                                if (isIndexInBoundsBySmt(evaluator, idxVal, arraySize, *L, facts))
                                 {
                                     continue;
                                 }
