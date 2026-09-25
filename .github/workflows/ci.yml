@@ -98,6 +98,7 @@ jobs:
           -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
           -DUSE_SHARED_LIB=OFF \
           -DBUILD_TESTS=OFF \
+          -DBUILD_ANALYZER_UNIT_TESTS=ON \
           ${{ runner.os == 'Linux' && '-DCMAKE_EXE_LINKER_FLAGS=-fuse-ld=lld -DCMAKE_SHARED_LINKER_FLAGS=-fuse-ld=lld' || '' }}
 
     # Build
@@ -138,6 +139,10 @@ jobs:
     - name: Test Stack Usage Analyzer
       timeout-minutes: 15
       run: |
+        # run_test.py skips the unit tests when their binaries are missing: require them here.
+        for bin in stack_usage_analyzer_unit_tests ownership_engine_unit_tests; do
+          test -x "build/$bin" || { echo "::error::build/$bin is missing"; exit 1; }
+        done
         TEST_JOBS="$(python3 -c 'import os; print(max(1, min(8, os.cpu_count() or 1)))')"
         echo "Running run_test.py with ${TEST_JOBS} job(s)"
         EXTRA_ANALYZER_ARGS="--compile-ir-cache-dir=.cache/compile-ir"
