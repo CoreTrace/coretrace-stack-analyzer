@@ -231,6 +231,8 @@ namespace ctrace::stack::analyzer
                     .filePath(functionResult.filePath)
                     .severity(DiagnosticSeverity::Info)
                     .errCode(DescriptiveErrorCode::None)
+                    // A pattern to know about, not a flaw: no CWE.
+                    .ruleId("Recursion.Detected")
                     .message("\t" + std::string(prefixForSeverity(DiagnosticSeverity::Info)) +
                              " recursive or mutually recursive function detected\n");
                 if (hasFunctionLoc)
@@ -245,6 +247,8 @@ namespace ctrace::stack::analyzer
                     .filePath(functionResult.filePath)
                     .severity(DiagnosticSeverity::Error)
                     .errCode(DescriptiveErrorCode::None)
+                    .ruleId("Recursion.Unconditional")
+                    .cwe("CWE-674")
                     .message("\t" + std::string(prefixForSeverity(DiagnosticSeverity::Error)) +
                              " unconditional self recursion detected (no base case)\n"
                              "\t\t ↳ this will eventually overflow the stack at runtime\n");
