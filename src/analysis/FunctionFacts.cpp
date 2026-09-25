@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "analysis/FunctionFacts.hpp"
 
+#include <llvm/Analysis/AliasAnalysis.h>
 #include <llvm/Analysis/AssumptionCache.h>
+#include <llvm/Analysis/BasicAliasAnalysis.h>
 #include <llvm/Analysis/LazyValueInfo.h>
 #include <llvm/Analysis/MemoryBuiltins.h>
+#include <llvm/Analysis/MemorySSA.h>
 #include <llvm/Analysis/TargetLibraryInfo.h>
 #include <llvm/Analysis/ValueTracking.h>
 #include <llvm/IR/ConstantRange.h>
@@ -32,6 +35,26 @@ namespace ctrace::stack::analysis
             out.upper = range.getSignedMax().getSExtValue();
             return out;
         }
+
+        /// BasicAA and the MemorySSA built on it. MemorySSA keeps a pointer to the AA, so both
+        /// live together.
+        struct MemoryModel final
+        {
+            MemoryModel(llvm::Function& function, const llvm::DataLayout& dataLayout,
+                        const llvm::TargetLibraryInfo& libraryInfo,
+                        llvm::AssumptionCache& assumptions, llvm::DominatorTree& dominators)
+                : basicAA(dataLayout, function, libraryInfo, assumptions, &dominators),
+                  aliasAnalysis(libraryInfo)
+            {
+                aliasAnalysis.addAAResult(basicAA);
+                memorySSA =
+                    std::make_unique<llvm::MemorySSA>(function, &aliasAnalysis, &dominators);
+            }
+
+            llvm::BasicAAResult basicAA;
+            llvm::AAResults aliasAnalysis;
+            std::unique_ptr<llvm::MemorySSA> memorySSA;
+        };
     } // namespace
 
     struct FunctionFacts::Impl final
@@ -50,6 +73,8 @@ namespace ctrace::stack::analysis
         llvm::TargetLibraryInfoImpl libraryInfoImpl;
         llvm::TargetLibraryInfo targetLibraryInfo;
         llvm::LazyValueInfo lazyValueInfo;
+        // Last, so it is destroyed before the analyses it references.
+        std::unique_ptr<MemoryModel> memoryModel;
     };
 
     FunctionFacts::FunctionFacts(llvm::Function& function) : impl_(std::make_unique<Impl>(function))
@@ -141,5 +166,17 @@ namespace ctrace::stack::analysis
             return std::nullopt;
 
         return result.Size.getZExtValue();
+    }
+
+    const llvm::MemoryAccess* FunctionFacts::clobberingAccess(const llvm::LoadInst& load) const
+    {
+        Impl& impl = *impl_;
+        if (!impl.memoryModel)
+        {
+            impl.memoryModel = std::make_unique<MemoryModel>(
+                impl.function, impl.dataLayout, impl.targetLibraryInfo, impl.assumptionCache,
+                impl.dominatorTree);
+        }
+        return impl.memoryModel->memorySSA->getWalker()->getClobberingMemoryAccess(&load);
     }
 } // namespace ctrace::stack::analysis

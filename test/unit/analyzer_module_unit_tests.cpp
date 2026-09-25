@@ -27,7 +27,9 @@
 #include <string>
 #include <vector>
 
+#include <llvm/Analysis/MemorySSA.h>
 #include <llvm/IR/Function.h>
+#include <llvm/IR/InstIterator.h>
 #include <llvm/IR/Instruction.h>
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/Operator.h>
@@ -1167,6 +1169,74 @@ namespace
         return report.failures == 0;
     }
 
+    /// Loads of @p fn whose pointer operand is named @p slot, in instruction order.
+    std::vector<const llvm::LoadInst*> loadsFrom(const llvm::Function* fn, llvm::StringRef slot)
+    {
+        std::vector<const llvm::LoadInst*> out;
+        if (!fn)
+            return out;
+        for (const llvm::Instruction& inst : llvm::instructions(*fn))
+        {
+            const auto* load = llvm::dyn_cast<llvm::LoadInst>(&inst);
+            if (load && load->getPointerOperand()->getName() == slot)
+                out.push_back(load);
+        }
+        return out;
+    }
+
+    /// FunctionFacts::clobberingAccess: MemorySSA clobbers of -O0 slot reads.
+    bool testFunctionFactsClobberingAccess(const std::filesystem::path& repoRoot,
+                                           TestReport& report)
+    {
+        using namespace ctrace::stack::analysis;
+        const ctrace::stack::AnalysisConfig config;
+        LoadedModule loaded;
+        std::string loadError;
+        if (!loadModuleFromSource(repoRoot / "test/unit/smt_path_input.c", config, loaded,
+                                  loadError))
+        {
+            report.expect(false, "clobberingAccess setup: failed to load module: " + loadError);
+            return false;
+        }
+
+        {
+            llvm::Function* fn = loaded.module->getFunction("reads_param_twice");
+            const std::vector<const llvm::LoadInst*> loads = loadsFrom(fn, "x.addr");
+            report.expect(loads.size() == 2, "clobberingAccess: reads_param_twice reads x twice");
+            if (loads.size() == 2)
+            {
+                const FunctionFacts facts(*fn);
+                const llvm::MemoryAccess* first = facts.clobberingAccess(*loads[0]);
+                report.expect(first != nullptr && first == facts.clobberingAccess(*loads[1]),
+                              "clobberingAccess: two reads with no write between share it");
+                const auto* def = llvm::dyn_cast_or_null<llvm::MemoryDef>(first);
+                const auto* store =
+                    def ? llvm::dyn_cast_or_null<llvm::StoreInst>(def->getMemoryInst()) : nullptr;
+                report.expect(store && llvm::isa<llvm::Argument>(store->getValueOperand()),
+                              "clobberingAccess: it is the store of the parameter");
+            }
+        }
+
+        {
+            llvm::Function* fn = loaded.module->getFunction("reads_across_calls");
+            const std::vector<const llvm::LoadInst*> loads = loadsFrom(fn, "x");
+            report.expect(loads.size() == 2, "clobberingAccess: reads_across_calls reads x twice");
+            if (loads.size() == 2)
+            {
+                const FunctionFacts facts(*fn);
+                const auto* first =
+                    llvm::dyn_cast_or_null<llvm::MemoryDef>(facts.clobberingAccess(*loads[0]));
+                const auto* second =
+                    llvm::dyn_cast_or_null<llvm::MemoryDef>(facts.clobberingAccess(*loads[1]));
+                report.expect(first && second && first != second &&
+                                  llvm::isa_and_nonnull<llvm::CallBase>(first->getMemoryInst()) &&
+                                  llvm::isa_and_nonnull<llvm::CallBase>(second->getMemoryInst()),
+                              "clobberingAccess: a call that may write the slot separates reads");
+            }
+        }
+        return report.failures == 0;
+    }
+
     /// SMT refinement: an evaluator whose rule has SMT off never builds its query.
     bool testSmtEvaluatorEncodesLazily(TestReport& report)
     {
@@ -1554,6 +1624,7 @@ int main(int argc, char** argv)
     (void)testUninitializedFixpointBudgetIsExplicit(repoRoot, report);
     (void)testProgramPointRanges(repoRoot, report);
     (void)testSmtEvaluatorEncodesLazily(report);
+    (void)testFunctionFactsClobberingAccess(repoRoot, report);
 #ifdef CTRACE_STACK_ENABLE_Z3_BACKEND
     (void)testZ3WideNegativeConstant(report);
 #endif

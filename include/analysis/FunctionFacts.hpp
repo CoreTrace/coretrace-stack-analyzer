@@ -13,6 +13,8 @@ namespace llvm
     class Function;
     class Instruction;
     class LazyValueInfo;
+    class LoadInst;
+    class MemoryAccess;
     class TargetLibraryInfo;
     class Value;
 } // namespace llvm
@@ -68,6 +70,14 @@ namespace ctrace::stack::analysis
         /// Merge points keep the smallest candidate, so the size holds on every path.
         [[nodiscard]] std::optional<std::uint64_t>
         objectSizeBytes(const llvm::Value* pointer) const;
+
+        /// @brief Access that may last have written the memory read by @p load (MemorySSA
+        /// clobber).
+        ///
+        /// BasicAA and MemorySSA are built on the first call, so functions that never ask pay
+        /// nothing. Loads of one pointer with one clobber read the same value; a clobber that
+        /// stores to that pointer is the value they read.
+        [[nodiscard]] const llvm::MemoryAccess* clobberingAccess(const llvm::LoadInst& load) const;
 
       private:
         struct Impl;
