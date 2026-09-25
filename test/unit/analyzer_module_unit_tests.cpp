@@ -20,6 +20,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <map>
+#include <set>
 #include <functional>
 #include <iostream>
 #include <memory>
@@ -33,6 +34,7 @@
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
 #include <llvm/Support/JSON.h>
+#include <llvm/Support/MemoryBuffer.h>
 #include <llvm/Support/SourceMgr.h>
 #include <llvm/Support/raw_ostream.h>
 
@@ -1349,6 +1351,63 @@ namespace
         return std::nullopt;
     }
 
+    /// SARIF: every CWE the diagnostics report has a security severity, so the rules that report
+    /// it are security rules; dead code (CWE-561), a quality issue for CodeQL, is the exception.
+    /// The CWEs are read from the emitters' sources, so a new one cannot be left unscored
+    /// unnoticed.
+    bool testEveryReportedCweIsScored(const std::filesystem::path& repoRoot, TestReport& report)
+    {
+        std::set<std::string> cwes;
+        for (const char* source :
+             {"src/analyzer/DiagnosticEmitter.cpp", "src/analysis/FrontendDiagnostics.cpp"})
+        {
+            llvm::ErrorOr<std::unique_ptr<llvm::MemoryBuffer>> buffer =
+                llvm::MemoryBuffer::getFile((repoRoot / source).string());
+            if (!buffer)
+                continue;
+            const llvm::StringRef text = (*buffer)->getBuffer();
+            for (std::size_t at = text.find("\"CWE-"); at != llvm::StringRef::npos;
+                 at = text.find("\"CWE-", at + 1))
+            {
+                cwes.insert(text.substr(at + 1).take_until([](char c) { return c == '"'; }).str());
+            }
+        }
+        report.expect(cwes.count("CWE-121") && cwes.count("CWE-134"),
+                      "SARIF: the CWEs of both emitters are read from their sources");
+
+        const auto severity = [](const std::string& rule, const std::string& cwe)
+        {
+            ctrace::stack::Diagnostic d;
+            d.ruleId = rule;
+            d.cweId = cwe;
+            d.filePath = "demo.c";
+            d.line = 1;
+            d.column = 1;
+            d.message = rule;
+            ctrace::stack::AnalysisResult result;
+            result.diagnostics = {d};
+            const std::optional<llvm::json::Object> properties =
+                sarifRuleProperties(ctrace::stack::toSarif(result, "demo.c"), rule);
+            const std::optional<llvm::StringRef> score =
+                properties ? properties->getString("security-severity") : std::nullopt;
+            return score ? score->str() : std::string();
+        };
+
+        std::string wrong;
+        for (const std::string& cwe : cwes)
+        {
+            if (severity("Rule", cwe).empty() != (cwe == "CWE-561"))
+                wrong += " " + cwe;
+        }
+        report.expect(wrong.empty(),
+                      "SARIF: every reported CWE but dead code (CWE-561) has a security severity" +
+                          (wrong.empty() ? std::string() : " (wrong:" + wrong + ")"));
+        report.expect(
+            severity("Recursion.Unconditional", "CWE-674") == "7.5",
+            "SARIF: an unconditional recursion (CWE-674) scores 7.5, as an infinite loop");
+        return report.failures == 0;
+    }
+
     /// SARIF: GitHub code scanning ranks the alerts of a rule by its security-severity when the
     /// rule has the security tag. A rule gets both from its scored CWEs, and a hint gets neither.
     bool testSarifSecuritySeverity(TestReport& report)
@@ -1422,6 +1481,7 @@ int main(int argc, char** argv)
     (void)testReachabilityService(repoRoot, report);
     (void)testModulePreparationService(repoRoot, report);
     (void)testIntRangeFacts(repoRoot, report);
+    (void)testEveryReportedCweIsScored(repoRoot, report);
     (void)testAnalysisReportContract(repoRoot, report);
     (void)testSarifRuleCweTags(report);
     (void)testSarifSecuritySeverity(report);
