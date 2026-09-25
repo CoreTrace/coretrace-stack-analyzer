@@ -101,23 +101,23 @@ namespace ctrace::stack::analysis
             {
             }
 
-            SmtFeasibility
-            isNegativeIndexFeasible(const std::map<const llvm::Value*, IntRange>& ranges,
-                                    const llvm::Value& indexExpr,
-                                    const llvm::Instruction* contextInst) const
+            SmtFeasibility isNegativeIndexFeasible(
+                const std::map<const llvm::Value*, IntRange>& ranges, const llvm::Value& indexExpr,
+                const llvm::Instruction* contextInst, const FunctionFacts* facts) const
             {
                 return smt::SmtConstraintEvaluator::evaluateQuery(
                     [&]
                     {
                         return smt::encodeSignedComparisonFeasibility(
-                            ranges, indexExpr, -1, false, smt::QueryPoint{.inst = contextInst});
+                            ranges, indexExpr, -1, false, queryPoint(contextInst, facts));
                     });
             }
 
             SmtFeasibility
             isUpperOverflowFeasible(const std::map<const llvm::Value*, IntRange>& ranges,
                                     const llvm::Value& indexExpr, StackSize limitExclusive,
-                                    const llvm::Instruction* contextInst) const
+                                    const llvm::Instruction* contextInst,
+                                    const FunctionFacts* facts) const
             {
                 if (limitExclusive == 0 ||
                     limitExclusive >
@@ -132,7 +132,7 @@ namespace ctrace::stack::analysis
                     {
                         return smt::encodeSignedComparisonFeasibility(
                             ranges, indexExpr, upperInclusive, true,
-                            smt::QueryPoint{.inst = contextInst});
+                            queryPoint(contextInst, facts));
                     });
             }
         };
@@ -687,35 +687,31 @@ namespace ctrace::stack::analysis
             return deriveBoundedRangeFromNeLoopGuard(target, *pred, key, *C, takesTrueEdge);
         }
 
-        static bool isUpperViolationInfeasibleBySmt(const StackBufferConstraintEvaluator& evaluator,
-                                                    const IntRange& localRange,
-                                                    const llvm::Value* indexExpr,
-                                                    StackSize arraySize,
-                                                    const llvm::Instruction& accessInst)
+        /// Whether the solver proves the index the access really uses, @p indexExpr (casts
+        /// included), inside [0, @p arraySize - 1]. @p localRange is known for @p rangedValue, the
+        /// index without its casts, and the encoded casts carry it to the index. Both bounds are
+        /// required whichever the report: a cast can turn an index that stays below the end into
+        /// a negative one, or a negative one into one far past the end.
+        static bool isIndexInBoundsBySmt(const StackBufferConstraintEvaluator& evaluator,
+                                         const IntRange& localRange, const llvm::Value* indexExpr,
+                                         const llvm::Value* rangedValue, StackSize arraySize,
+                                         const llvm::Instruction& accessInst,
+                                         const FunctionFacts& facts)
         {
             if (!indexExpr || !indexExpr->getType()->isIntegerTy())
                 return false;
 
             std::map<const llvm::Value*, IntRange> queryRanges;
-            queryRanges[indexExpr] = localRange;
+            queryRanges[rangedValue] = localRange;
 
+            if (evaluator.isNegativeIndexFeasible(queryRanges, *indexExpr, &accessInst, &facts) !=
+                SmtFeasibility::Infeasible)
+            {
+                return false;
+            }
             return evaluator.isUpperOverflowFeasible(queryRanges, *indexExpr, arraySize,
-                                                     &accessInst) == SmtFeasibility::Infeasible;
-        }
-
-        static bool isLowerViolationInfeasibleBySmt(const StackBufferConstraintEvaluator& evaluator,
-                                                    const IntRange& localRange,
-                                                    const llvm::Value* indexExpr,
-                                                    const llvm::Instruction& accessInst)
-        {
-            if (!indexExpr || !indexExpr->getType()->isIntegerTy())
-                return false;
-
-            std::map<const llvm::Value*, IntRange> queryRanges;
-            queryRanges[indexExpr] = localRange;
-
-            return evaluator.isNegativeIndexFeasible(queryRanges, *indexExpr, &accessInst) ==
-                   SmtFeasibility::Infeasible;
+                                                     &accessInst,
+                                                     &facts) == SmtFeasibility::Infeasible;
         }
 
         static void
@@ -1000,8 +996,8 @@ namespace ctrace::stack::analysis
                         {
                             if (auto* S = dyn_cast<StoreInst>(GU))
                             {
-                                if (isUpperViolationInfeasibleBySmt(evaluator, R, baseIdxVal,
-                                                                    arraySize, *S))
+                                if (isIndexInBoundsBySmt(evaluator, R, idxVal, baseIdxVal,
+                                                         arraySize, *S, facts))
                                 {
                                     continue;
                                 }
@@ -1021,8 +1017,8 @@ namespace ctrace::stack::analysis
                             }
                             else if (auto* L = dyn_cast<LoadInst>(GU))
                             {
-                                if (isUpperViolationInfeasibleBySmt(evaluator, R, baseIdxVal,
-                                                                    arraySize, *L))
+                                if (isIndexInBoundsBySmt(evaluator, R, idxVal, baseIdxVal,
+                                                         arraySize, *L, facts))
                                 {
                                     continue;
                                 }
@@ -1050,7 +1046,8 @@ namespace ctrace::stack::analysis
                         {
                             if (auto* S = dyn_cast<StoreInst>(GU))
                             {
-                                if (isLowerViolationInfeasibleBySmt(evaluator, R, baseIdxVal, *S))
+                                if (isIndexInBoundsBySmt(evaluator, R, idxVal, baseIdxVal,
+                                                         arraySize, *S, facts))
                                 {
                                     continue;
                                 }
@@ -1071,7 +1068,8 @@ namespace ctrace::stack::analysis
                             }
                             else if (auto* L = dyn_cast<LoadInst>(GU))
                             {
-                                if (isLowerViolationInfeasibleBySmt(evaluator, R, baseIdxVal, *L))
+                                if (isIndexInBoundsBySmt(evaluator, R, idxVal, baseIdxVal,
+                                                         arraySize, *L, facts))
                                 {
                                     continue;
                                 }

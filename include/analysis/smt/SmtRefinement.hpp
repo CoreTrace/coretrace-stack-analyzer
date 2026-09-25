@@ -3,6 +3,7 @@
 
 #include "StackUsageAnalyzer.hpp"
 #include "analysis/smt/ConstraintIR.hpp"
+#include "analysis/smt/SmtEncoding.hpp"
 #include "analysis/smt/SolverOrchestrator.hpp"
 #include "analysis/smt/TextUtil.hpp"
 
@@ -66,6 +67,13 @@ namespace ctrace::stack::analysis::smt
             if (!orchestrator_)
                 return SmtFeasibility::Inconclusive;
             return solve(encode());
+        }
+
+        /// @brief Query point for @p inst, with this rule's node budget.
+        [[nodiscard]] QueryPoint queryPoint(const llvm::Instruction* inst,
+                                            const FunctionFacts* facts) const
+        {
+            return QueryPoint{.inst = inst, .facts = facts, .budgetNodes = budgetNodes_};
         }
 
       private:
