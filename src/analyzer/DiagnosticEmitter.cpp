@@ -775,6 +775,9 @@ namespace ctrace::stack::analyzer
             if (issue.kind == analysis::UninitializedLocalIssueKind::AnalysisIncomplete)
             {
                 // calleeName carries "<iterations>/<blocks>" for this kind.
+                // An analysis limit, not a finding: its own rule, with no CWE, so code scanning
+                // does not rank it with the findings' security severity.
+                ruleId = "UninitializedLocalRead.AnalysisIncomplete";
                 severity = DiagnosticSeverity::Info;
                 confidence = -1.0;
                 cwe.clear();
@@ -1323,8 +1326,9 @@ namespace ctrace::stack::analyzer
                 break;
             }
             case analysis::ResourceLifetimeIssueKind::AnalysisIncomplete:
+                // An analysis limit, not a finding: its own rule, with no CWE.
                 builder.severity(DiagnosticSeverity::Info)
-                    .ruleId("ResourceLifetime.MissingRelease")
+                    .ruleId("ResourceLifetime.AnalysisIncomplete")
                     .confidence(-1.0);
                 body << "\t" << prefixForSeverity(DiagnosticSeverity::Info)
                      << " resource ownership analysis did not converge in this function "

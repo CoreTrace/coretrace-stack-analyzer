@@ -20,6 +20,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <map>
+#include <set>
 #include <functional>
 #include <iostream>
 #include <memory>
@@ -669,8 +670,8 @@ namespace
                 downgraded,
                 "UninitFixpointBudget: non-converged summary downgrades writes to unknown");
 
-            // The emitter renders it as an Info diagnostic under the uninitialized rule,
-            // so it is visible in JSON/SARIF but hidden by --warnings-only.
+            // The emitter renders it as an Info diagnostic under a rule of its own (an analysis
+            // limit, not a finding), so it is visible in JSON/SARIF but hidden by --warnings-only.
             ctrace::stack::AnalysisResult rendered;
             ctrace::stack::analyzer::appendUninitializedLocalReadDiagnostics(rendered, issues);
             std::size_t infoCount = 0;
@@ -682,7 +683,7 @@ namespace
                 ++infoCount;
                 infoMentionsBudget = infoMentionsBudget ||
                                      (diag.message.find("did not converge") != std::string::npos &&
-                                      diag.ruleId == "UninitializedLocalRead");
+                                      diag.ruleId == "UninitializedLocalRead.AnalysisIncomplete");
             }
             report.expect(infoCount == 2 && infoMentionsBudget,
                           "UninitFixpointBudget: AnalysisIncomplete renders as an Info diagnostic");
@@ -1407,6 +1408,69 @@ namespace
     }
 } // namespace
 
+namespace
+{
+    /// An analysis that exhausts its budget reports an Info note under a rule of its own, with
+    /// no CWE. Under the rule of the findings, code scanning would show the note as a security
+    /// alert with the findings' severity.
+    bool testAnalysisIncompleteNotesHaveTheirOwnRules(TestReport& report)
+    {
+        using namespace ctrace::stack::analysis;
+
+        UninitializedLocalReadIssue read;
+        read.funcName = "reads";
+        read.varName = "v";
+        read.line = 3;
+        read.column = 5;
+        UninitializedLocalReadIssue readBudget = read;
+        readBudget.kind = UninitializedLocalIssueKind::AnalysisIncomplete;
+        readBudget.calleeName = "8/4"; // "<iterations>/<blocks>" for this kind
+
+        ResourceLifetimeIssue leak;
+        leak.funcName = "leaks";
+        leak.resourceKind = "FILE";
+        leak.handleName = "fp";
+        ResourceLifetimeIssue leakBudget = leak;
+        leakBudget.kind = ResourceLifetimeIssueKind::AnalysisIncomplete;
+
+        ctrace::stack::AnalysisResult result;
+        ctrace::stack::analyzer::appendUninitializedLocalReadDiagnostics(result,
+                                                                         {read, readBudget});
+        ctrace::stack::analyzer::appendResourceLifetimeDiagnostics(result, {leak, leakBudget});
+
+        std::set<std::string> noteRules;
+        for (const ctrace::stack::Diagnostic& diag : result.diagnostics)
+        {
+            if (diag.message.find("did not converge") != std::string::npos)
+                noteRules.insert(diag.ruleId);
+        }
+        report.expect(noteRules ==
+                          std::set<std::string>{"UninitializedLocalRead.AnalysisIncomplete",
+                                                "ResourceLifetime.AnalysisIncomplete"},
+                      "AnalysisIncomplete: each note has its own rule");
+
+        // Whether the SARIF rule has the security tag, or std::nullopt when the rule is absent.
+        const std::string sarif = ctrace::stack::toSarif(result, "demo.c");
+        const auto securityTag = [&sarif](llvm::StringRef rule) -> std::optional<bool>
+        {
+            const std::optional<llvm::json::Object> properties = sarifRuleProperties(sarif, rule);
+            if (!properties)
+                return std::nullopt;
+            const llvm::json::Array* tags = properties->getArray("tags");
+            return tags &&
+                   llvm::any_of(*tags, [](const llvm::json::Value& tag)
+                                { return tag.getAsString() == llvm::StringRef("security"); });
+        };
+        report.expect(securityTag("UninitializedLocalRead") == true &&
+                          securityTag("ResourceLifetime.MissingRelease") == true,
+                      "AnalysisIncomplete: the findings' rules stay security rules");
+        report.expect(securityTag("UninitializedLocalRead.AnalysisIncomplete") == false &&
+                          securityTag("ResourceLifetime.AnalysisIncomplete") == false,
+                      "AnalysisIncomplete: the notes' rules are not security rules");
+        return report.failures == 0;
+    }
+} // namespace
+
 int main(int argc, char** argv)
 {
     if (argc != 2)
@@ -1425,6 +1489,7 @@ int main(int argc, char** argv)
     (void)testAnalysisReportContract(repoRoot, report);
     (void)testSarifRuleCweTags(report);
     (void)testSarifSecuritySeverity(report);
+    (void)testAnalysisIncompleteNotesHaveTheirOwnRules(report);
     (void)testUnresolvedCallsMarkStackUnknown(repoRoot, report);
     (void)testAssumeExternalFrameReplacesUnknown(repoRoot, report);
     (void)testUninitializedFixpointBudgetIsExplicit(repoRoot, report);
