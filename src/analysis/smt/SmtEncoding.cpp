@@ -1,14 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "analysis/smt/SmtEncoding.hpp"
 
+#include "analysis/FunctionFacts.hpp"
+
 #include <algorithm>
 #include <functional>
 #include <limits>
+#include <map>
 #include <optional>
 #include <string>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 
+#include <llvm/Analysis/MemorySSA.h>
 #include <llvm/IR/BasicBlock.h>
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/DerivedTypes.h>
@@ -117,6 +122,30 @@ namespace ctrace::stack::analysis::smt
                 return symbolExprById_.at(id);
             }
 
+            /// One symbol per (pointer, clobbering access, width): the loads it stands for read
+            /// the same memory, hence the same value.
+            ExprId makeMemorySymbol(const llvm::Value* pointer, const void* access,
+                                    std::uint32_t bitWidth)
+            {
+                const MemoryKey key{pointer, access, bitWidth};
+                if (const auto it = memorySymbols_.find(key); it != memorySymbols_.end())
+                    return it->second;
+
+                const SymbolId id = nextSymbolId_++;
+                const ExprId expr = appendNode(ExprNode{.kind = ExprKind::Symbol,
+                                                        .symbol = id,
+                                                        .constant = 0,
+                                                        .bitWidth = normalizeBitWidth(bitWidth),
+                                                        .lhs = 0,
+                                                        .rhs = 0,
+                                                        .extra = 0});
+                memorySymbols_.emplace(key, expr);
+                ir_.symbols.push_back(SymbolInfo{.id = id,
+                                                 .debugName = buildSymbolName(pointer, id) + "@mem",
+                                                 .sourceToken = toSourceToken(pointer)});
+                return expr;
+            }
+
             ExprId makeBinary(ExprKind kind, ExprId lhs, ExprId rhs, std::uint32_t bitWidth)
             {
                 return appendNode(ExprNode{.kind = kind,
@@ -197,13 +226,16 @@ namespace ctrace::stack::analysis::smt
             SymbolId nextSymbolId_ = 1;
             std::unordered_map<const llvm::Value*, SymbolId> symbolByValue_;
             std::unordered_map<SymbolId, ExprId> symbolExprById_;
+            using MemoryKey = std::tuple<const llvm::Value*, const void*, std::uint32_t>;
+            std::map<MemoryKey, ExprId> memorySymbols_;
         };
 
         class LlvmExprEncoder
         {
           public:
-            LlvmExprEncoder(ConstraintIrBuilder& builder, const llvm::BasicBlock* incomingBlock)
-                : builder_(builder), incomingBlock_(incomingBlock)
+            LlvmExprEncoder(ConstraintIrBuilder& builder, const llvm::BasicBlock* incomingBlock,
+                            const FunctionFacts* facts = nullptr)
+                : builder_(builder), incomingBlock_(incomingBlock), facts_(facts)
             {
             }
 
@@ -421,11 +453,42 @@ namespace ctrace::stack::analysis::smt
                 if (const auto* binaryOp = llvm::dyn_cast<llvm::BinaryOperator>(&value))
                     return encodeBinaryOperator(*binaryOp);
 
+                if (const auto* load = llvm::dyn_cast<llvm::LoadInst>(&value);
+                    load && facts_ && load->isSimple() && load->getType()->isIntegerTy())
+                {
+                    return encodeLoad(*load);
+                }
+
                 return builder_.makeSymbol(&value, inferBitWidth(&value));
+            }
+
+            /// A load reads what its MemorySSA clobber left in memory: the stored value when the
+            /// clobber stores the same type to the same pointer, otherwise one value shared by
+            /// every load of that pointer with that clobber.
+            std::optional<ExprId> encodeLoad(const llvm::LoadInst& load)
+            {
+                const llvm::Value* pointer = load.getPointerOperand()->stripPointerCasts();
+                const llvm::MemoryAccess* clobber = facts_->clobberingAccess(load);
+                if (!clobber)
+                    return builder_.makeSymbol(&load, inferBitWidth(&load));
+
+                if (const auto* def = llvm::dyn_cast<llvm::MemoryDef>(clobber))
+                {
+                    const auto* store =
+                        llvm::dyn_cast_or_null<llvm::StoreInst>(def->getMemoryInst());
+                    if (store && store->isSimple() &&
+                        store->getPointerOperand()->stripPointerCasts() == pointer &&
+                        store->getValueOperand()->getType() == load.getType())
+                    {
+                        return encodeValue(store->getValueOperand());
+                    }
+                }
+                return builder_.makeMemorySymbol(pointer, clobber, inferBitWidth(&load));
             }
 
             ConstraintIrBuilder& builder_;
             const llvm::BasicBlock* incomingBlock_ = nullptr;
+            const FunctionFacts* facts_ = nullptr;
             std::unordered_map<const llvm::Value*, ExprId> cache_;
             std::unordered_set<const llvm::Value*> inProgress_;
         };
@@ -457,35 +520,35 @@ namespace ctrace::stack::analysis::smt
                 if (!shouldEncodeRangeConstraint(value, range))
                     continue;
 
-                std::optional<ExprId> symbolExpr = exprEncoder.encodeValue(value);
-                if (!symbolExpr)
+                // The bounds constrain the expression the rest of the query uses for `value`: a
+                // load, for one, may be encoded as the value it reads rather than as a symbol.
+                const std::optional<ExprId> expr = exprEncoder.encodeValue(value);
+                if (!expr)
                     continue;
 
-                SymbolId symbolId = builder.lookupSymbolId(value);
-                if (symbolId == 0)
+                const ExprKind kind = builder.node(*expr).kind;
+                const SymbolId symbol = builder.node(*expr).symbol;
+                const std::uint32_t bitWidth = builder.node(*expr).bitWidth;
+                if (kind == ExprKind::Symbol)
                 {
-                    symbolExpr = builder.makeSymbol(value, inferBitWidth(value));
-                    symbolId = builder.lookupSymbolId(value);
+                    ir.intervals.push_back(
+                        IntervalConstraint{.symbol = symbol,
+                                           .lower = static_cast<std::int64_t>(range.lower),
+                                           .upper = static_cast<std::int64_t>(range.upper),
+                                           .hasLower = range.hasLower,
+                                           .hasUpper = range.hasUpper});
                 }
-
-                ir.intervals.push_back(
-                    IntervalConstraint{.symbol = symbolId,
-                                       .lower = static_cast<std::int64_t>(range.lower),
-                                       .upper = static_cast<std::int64_t>(range.upper),
-                                       .hasLower = range.hasLower,
-                                       .hasUpper = range.hasUpper});
-
                 if (range.hasLower)
                 {
-                    const ExprId lower = builder.makeConstant(
-                        static_cast<std::int64_t>(range.lower), builder.node(*symbolExpr).bitWidth);
-                    builder.addAssertion(builder.makeBinary(ExprKind::Sge, *symbolExpr, lower, 1));
+                    const ExprId lower =
+                        builder.makeConstant(static_cast<std::int64_t>(range.lower), bitWidth);
+                    builder.addAssertion(builder.makeBinary(ExprKind::Sge, *expr, lower, 1));
                 }
                 if (range.hasUpper)
                 {
-                    const ExprId upper = builder.makeConstant(
-                        static_cast<std::int64_t>(range.upper), builder.node(*symbolExpr).bitWidth);
-                    builder.addAssertion(builder.makeBinary(ExprKind::Sle, *symbolExpr, upper, 1));
+                    const ExprId upper =
+                        builder.makeConstant(static_cast<std::int64_t>(range.upper), bitWidth);
+                    builder.addAssertion(builder.makeBinary(ExprKind::Sle, *expr, upper, 1));
                 }
             }
         }
@@ -581,6 +644,19 @@ namespace ctrace::stack::analysis::smt
 
             return ir;
         }
+
+        /// Builds the query at @p point: the rule's ranges, then what @p postEncode asserts.
+        static ConstraintIR encodeQuery(const std::map<const llvm::Value*, IntRange>& ranges,
+                                        const QueryPoint& point, const QueryPostEncoder& postEncode)
+        {
+            ConstraintIR ir;
+            ir.intervals.reserve(ranges.size());
+            ConstraintIrBuilder builder(ir);
+            LlvmExprEncoder exprEncoder(builder, nullptr, point.facts);
+            encodeRangeAssertions(ranges, ir, builder, exprEncoder);
+            postEncode(builder, exprEncoder);
+            return ir;
+        }
     } // namespace
 
     ConstraintIR LlvmConstraintEncoder::encode(const std::map<const llvm::Value*, IntRange>& ranges,
@@ -601,13 +677,13 @@ namespace ctrace::stack::analysis::smt
     ConstraintIR
     encodeSignedOverflowFeasibility(const std::map<const llvm::Value*, IntRange>& ranges,
                                     const llvm::BinaryOperator& binaryOperation,
-                                    const llvm::Instruction* contextInst)
+                                    const QueryPoint& point)
     {
-        return encodeWithCustomAssertions(
-            ranges, nullptr, true, nullptr, nullptr,
+        return encodeQuery(
+            ranges, point,
             [&](ConstraintIrBuilder& builder, LlvmExprEncoder& exprEncoder)
             {
-                encodeAssumesBeforeInstruction(contextInst, builder, exprEncoder);
+                encodeAssumesBeforeInstruction(point.inst, builder, exprEncoder);
 
                 const std::optional<ExprKind> opKind =
                     getArithmeticExprKind(binaryOperation.getOpcode());
@@ -643,13 +719,13 @@ namespace ctrace::stack::analysis::smt
     ConstraintIR
     encodeUnsignedOverflowFeasibility(const std::map<const llvm::Value*, IntRange>& ranges,
                                       const llvm::BinaryOperator& binaryOperation,
-                                      const llvm::Instruction* contextInst)
+                                      const QueryPoint& point)
     {
-        return encodeWithCustomAssertions(
-            ranges, nullptr, true, nullptr, nullptr,
+        return encodeQuery(
+            ranges, point,
             [&](ConstraintIrBuilder& builder, LlvmExprEncoder& exprEncoder)
             {
-                encodeAssumesBeforeInstruction(contextInst, builder, exprEncoder);
+                encodeAssumesBeforeInstruction(point.inst, builder, exprEncoder);
 
                 const std::optional<ExprKind> opKind =
                     getArithmeticExprKind(binaryOperation.getOpcode());
@@ -685,13 +761,13 @@ namespace ctrace::stack::analysis::smt
     ConstraintIR
     encodeSignedComparisonFeasibility(const std::map<const llvm::Value*, IntRange>& ranges,
                                       const llvm::Value& lhs, std::int64_t rhsConstant,
-                                      bool greaterThan, const llvm::Instruction* contextInst)
+                                      bool greaterThan, const QueryPoint& point)
     {
-        return encodeWithCustomAssertions(
-            ranges, nullptr, true, nullptr, nullptr,
+        return encodeQuery(
+            ranges, point,
             [&](ConstraintIrBuilder& builder, LlvmExprEncoder& exprEncoder)
             {
-                encodeAssumesBeforeInstruction(contextInst, builder, exprEncoder);
+                encodeAssumesBeforeInstruction(point.inst, builder, exprEncoder);
 
                 const std::optional<ExprId> lhsExpr = exprEncoder.encodeValue(&lhs);
                 if (!lhsExpr)

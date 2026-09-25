@@ -85,8 +85,8 @@ namespace ctrace::stack::analysis
                 return smt::SmtConstraintEvaluator::evaluateQuery(
                     [&]
                     {
-                        return smt::encodeSignedComparisonFeasibility(ranges, lhs, rhsConstant,
-                                                                      false, contextInst);
+                        return smt::encodeSignedComparisonFeasibility(
+                            ranges, lhs, rhsConstant, false, smt::QueryPoint{.inst = contextInst});
                     });
             }
         };

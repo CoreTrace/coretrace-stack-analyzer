@@ -15,8 +15,25 @@ namespace llvm
     class Value;
 } // namespace llvm
 
+namespace ctrace::stack::analysis
+{
+    class FunctionFacts;
+} // namespace ctrace::stack::analysis
+
 namespace ctrace::stack::analysis::smt
 {
+    /// @brief Where a query is asked, and what the encoder may use to encode it.
+    struct QueryPoint
+    {
+        /// Instruction the query is about; nullptr encodes the bare query.
+        const llvm::Instruction* inst = nullptr;
+        /// Facts of the function holding @ref inst. When set, loads are related through
+        /// MemorySSA and the query carries the reachability condition of @ref inst.
+        const FunctionFacts* facts = nullptr;
+        /// Largest query, in ConstraintIR nodes, the path condition may grow it to; 0 = none.
+        std::uint64_t budgetNodes = 0;
+    };
+
     class LlvmConstraintEncoder
     {
       public:
@@ -31,14 +48,15 @@ namespace ctrace::stack::analysis::smt
     ConstraintIR
     encodeSignedOverflowFeasibility(const std::map<const llvm::Value*, IntRange>& ranges,
                                     const llvm::BinaryOperator& binaryOperation,
-                                    const llvm::Instruction* contextInst = nullptr);
+                                    const QueryPoint& point = {});
 
     ConstraintIR
     encodeUnsignedOverflowFeasibility(const std::map<const llvm::Value*, IntRange>& ranges,
                                       const llvm::BinaryOperator& binaryOperation,
-                                      const llvm::Instruction* contextInst = nullptr);
+                                      const QueryPoint& point = {});
 
-    ConstraintIR encodeSignedComparisonFeasibility(
-        const std::map<const llvm::Value*, IntRange>& ranges, const llvm::Value& lhs,
-        std::int64_t rhsConstant, bool greaterThan, const llvm::Instruction* contextInst = nullptr);
+    ConstraintIR
+    encodeSignedComparisonFeasibility(const std::map<const llvm::Value*, IntRange>& ranges,
+                                      const llvm::Value& lhs, std::int64_t rhsConstant,
+                                      bool greaterThan, const QueryPoint& point = {});
 } // namespace ctrace::stack::analysis::smt

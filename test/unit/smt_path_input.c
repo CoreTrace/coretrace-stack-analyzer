@@ -20,3 +20,37 @@ int reads_across_calls(void)
     int after = x;
     return after - before;
 }
+
+int shared_counter;
+volatile int sensor;
+void touch_counter(void);
+
+int global_read_twice(void)
+{
+    return shared_counter - shared_counter;
+}
+
+int global_read_across_call(void)
+{
+    int before = shared_counter;
+    touch_counter();
+    return shared_counter - before;
+}
+
+int forwarded_local(int x)
+{
+    int y = x;
+    return y - x;
+}
+
+int punned_store(void)
+{
+    int x = 0;
+    *(char*)&x = 5;
+    return x - 1;
+}
+
+int volatile_read_twice(void)
+{
+    return sensor - sensor;
+}

@@ -61,7 +61,10 @@ namespace ctrace::stack::analysis
             {
                 return smt::SmtConstraintEvaluator::evaluateQuery(
                     [&]
-                    { return smt::encodeSignedOverflowFeasibility(ranges, binary, contextInst); });
+                    {
+                        return smt::encodeSignedOverflowFeasibility(
+                            ranges, binary, smt::QueryPoint{.inst = contextInst});
+                    });
             }
 
             SmtFeasibility
@@ -72,7 +75,8 @@ namespace ctrace::stack::analysis
                 return smt::SmtConstraintEvaluator::evaluateQuery(
                     [&]
                     {
-                        return smt::encodeUnsignedOverflowFeasibility(ranges, binary, contextInst);
+                        return smt::encodeUnsignedOverflowFeasibility(
+                            ranges, binary, smt::QueryPoint{.inst = contextInst});
                     });
             }
 
@@ -84,8 +88,8 @@ namespace ctrace::stack::analysis
                 return smt::SmtConstraintEvaluator::evaluateQuery(
                     [&]
                     {
-                        return smt::encodeSignedComparisonFeasibility(ranges, lhs, rhsConstant,
-                                                                      true, contextInst);
+                        return smt::encodeSignedComparisonFeasibility(
+                            ranges, lhs, rhsConstant, true, smt::QueryPoint{.inst = contextInst});
                     });
             }
 
@@ -97,8 +101,8 @@ namespace ctrace::stack::analysis
                 return smt::SmtConstraintEvaluator::evaluateQuery(
                     [&]
                     {
-                        return smt::encodeSignedComparisonFeasibility(ranges, lhs, rhsConstant,
-                                                                      false, contextInst);
+                        return smt::encodeSignedComparisonFeasibility(
+                            ranges, lhs, rhsConstant, false, smt::QueryPoint{.inst = contextInst});
                     });
             }
         };
