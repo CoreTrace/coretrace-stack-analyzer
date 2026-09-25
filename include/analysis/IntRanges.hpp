@@ -63,6 +63,10 @@ namespace ctrace::stack::analysis
     /// store to the slot can reach I without re-entering the block that established it
     /// (a loop's own increment re-evaluates the guard; `i = 1` after the loop does not).
     /// Slots whose address is taken carry no constraints at all.
+    ///
+    /// Bounds are on the signed reading of a value unless a query asks for the unsigned one.
+    /// An unsigned comparison bounds the unsigned reading; the signed reading keeps that bound
+    /// only where the two readings agree, when every value it admits is below the sign bit.
     class ProgramPointRanges
     {
       public:
@@ -80,6 +84,14 @@ namespace ctrace::stack::analysis
       private:
         using RangeMap = std::map<const llvm::Value*, IntRange>;
         using BlockSet = llvm::DenseSet<const llvm::BasicBlock*>;
+        using EdgeConstraints = llvm::DenseMap<const llvm::BasicBlock*, RangeMap>;
+
+        /// Intersects into @p range the constraints of @p edges on @p key that hold at @p at.
+        void narrowByEdges(const EdgeConstraints& edges, const llvm::Value* key,
+                           const llvm::Instruction& at, std::optional<IntRange>& range) const;
+        /// Intersects into @p ranges every constraint of @p edges that holds at @p at.
+        void narrowByEdges(const EdgeConstraints& edges, const llvm::Instruction& at,
+                           RangeMap& ranges) const;
 
         [[nodiscard]] bool constraintKilledAt(const llvm::BasicBlock& establishing,
                                               const llvm::Value* key,
@@ -89,7 +101,8 @@ namespace ctrace::stack::analysis
                                   const llvm::AllocaInst& slot) const;
 
         RangeMap proven_;
-        llvm::DenseMap<const llvm::BasicBlock*, RangeMap> edgeConstraints_;
+        EdgeConstraints edgeConstraints_;
+        EdgeConstraints unsignedEdgeConstraints_;
         llvm::DenseMap<const llvm::AllocaInst*, llvm::SmallVector<const llvm::StoreInst*, 4>>
             slotStores_;
         mutable llvm::DenseMap<std::pair<const llvm::BasicBlock*, const llvm::AllocaInst*>,

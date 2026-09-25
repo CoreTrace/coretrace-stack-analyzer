@@ -891,10 +891,15 @@ namespace ctrace::stack::analysis
                             GV->hasName() ? GV->getName().str() : std::string("<unnamed-global>");
                     }
 
-                    // "baseIdxVal" = loop variable "i" without casts (sext/zext...)
+                    // "baseIdxVal" = loop variable "i" without casts (sext/zext...). The cast
+                    // applied to the variable itself says how the index reads it: a zext reads
+                    // it as unsigned.
                     Value* baseIdxVal = idxVal;
+                    IntReading indexReading = IntReading::Signed;
                     while (auto* cast = dyn_cast<CastInst>(baseIdxVal))
                     {
+                        indexReading =
+                            isa<ZExtInst>(cast) ? IntReading::Unsigned : IntReading::Signed;
                         baseIdxVal = cast->getOperand(0);
                     }
 
@@ -955,7 +960,12 @@ namespace ctrace::stack::analysis
                     IntRange R;
                     bool hasRange = false;
 
-                    if (const auto pointRange = ranges.at(key, *GEP))
+                    // Whatever the cast, the index is in [0, arraySize) exactly when its
+                    // unsigned reading is: that reading stands in when the signed one is empty.
+                    std::optional<IntRange> pointRange = ranges.at(key, *GEP, indexReading);
+                    if (!pointRange && indexReading == IntReading::Signed)
+                        pointRange = ranges.at(key, *GEP, IntReading::Unsigned);
+                    if (pointRange)
                     {
                         R = *pointRange;
                         hasRange = R.hasLower || R.hasUpper;
