@@ -114,9 +114,15 @@ namespace ctrace::stack
         }
 
         /// GitHub code-scanning security severity of CWE @p cwe in tenths (93 is 9.3), or 0 (no
-        /// severity, for GitHub too) when the CWE is not a security weakness. Each score is the
-        /// one GitHub gives the CodeQL C/C++ query named beside it, which detects the same
-        /// weakness: the 75th percentile of the CVSS scores of the CVEs sharing its CWE tags.
+        /// severity, for GitHub too) when the CWE is not a security weakness. GitHub scores a
+        /// CodeQL query as the 75th percentile of the CVSS scores of the CVEs sharing its CWE
+        /// tags; each CWE takes, from the first rule that gives one:
+        ///  1. the score of the CodeQL C/C++ query that detects the same weakness;
+        ///  2. the score of CodeQL's queries tagged with this CWE alone, in any language, or no
+        ///     score when they are quality queries;
+        ///  3. the score of the closest CWE with a C/C++ query in the CWE research view: parent
+        ///     or child, then sibling; the highest when several are as close.
+        /// The comment beside each case names the query, or the rule and CWE it comes through.
         static unsigned securitySeverityTenths(unsigned cwe)
         {
             switch (cwe)
@@ -127,9 +133,9 @@ namespace ctrace::stack
                 return 98;
             case 120: // cpp/unbounded-write
             case 121: // cpp/overflow-buffer
-            case 124: // no query; an out-of-bounds write (787): cpp/unbounded-write
+            case 124: // rule 3, parent 787 (out-of-bounds write): cpp/unbounded-write
             case 125: // cpp/invalid-pointer-deref
-            case 127: // no query; an out-of-bounds read (125): cpp/invalid-pointer-deref
+            case 127: // rule 3, parent 125 (out-of-bounds read): cpp/invalid-pointer-deref
             case 134: // cpp/non-constant-format
             case 415: // cpp/double-free
             case 416: // cpp/use-after-free
@@ -143,26 +149,28 @@ namespace ctrace::stack
             case 191: // cpp/uncontrolled-arithmetic
                 return 86;
             case 190: // cpp/integer-overflow-tainted
-            case 195: // no query; its parent (681): cpp/integer-overflow-tainted
+            case 195: // rule 3, parent 681: cpp/integer-overflow-tainted
             case 197: // cpp/integer-overflow-tainted
             case 789: // cpp/uncontrolled-allocation-size
                 return 81;
             case 457: // cpp/uninitialized-local
             case 665: // cpp/uninitialized-local
-            case 772: // no query; the higher of its children: cpp/descriptor-never-closed
+            case 772: // rule 3, the higher child, 775: cpp/descriptor-never-closed
                 return 78;
             case 367: // cpp/toctou-race-condition
                 return 77;
             case 476: // cpp/missing-null-test
             case 770: // cpp/alloca-in-loop
+            case 674: // rule 3, sibling 835 (infinite loop) under 834:
+                      // cpp/infinite-loop-with-unsatisfiable-exit-condition
                 return 75;
-            case 200: // no C/C++ query; every CodeQL query tagged CWE-200 alone scores 6.5
+            case 200: // rule 2: every CodeQL query tagged CWE-200 alone scores 6.5
                 return 65;
             case 685: // cpp/wrong-number-format-arguments
                 return 50;
             }
-            // Dead code (561) among them: CodeQL's duplicate-condition queries, which carry it,
-            // are quality queries, not security ones.
+            // Dead code (561) among them, by rule 2: CodeQL's duplicate-condition queries, which
+            // carry it alone, are quality queries, not security ones.
             return 0;
         }
 
