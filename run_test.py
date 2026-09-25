@@ -3256,6 +3256,51 @@ def check_sarif_rule_cwe_tags() -> bool:
     return ok
 
 
+def check_sarif_security_severity() -> bool:
+    """
+    GitHub code scanning ranks the alerts of a rule by its security-severity when the rule
+    has the security tag: a stack buffer overflow is a security rule, a const hint is not.
+    """
+    print("=== Testing SARIF security severity ===")
+    source = (
+        "char write_past_end(int i) { char buf[10] = {0}; if (i <= 10) buf[i] = 'x'; return buf[0]; }\n"
+        "int read_only(int *p) { return *p; }\n"
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "security-severity.c"
+        path.write_text(source)
+        result = run_analyzer([str(path), "--format=sarif"])
+    try:
+        rules = json.loads(result.stdout or "")["runs"][0]["tool"]["driver"]["rules"]
+    except (ValueError, KeyError, IndexError):
+        print("  ❌ no SARIF rules in the output")
+        print()
+        return False
+
+    properties = {r.get("id"): r.get("properties", {}) for r in rules}
+    ok = True
+    overflow = properties.get("StackBufferOverflow")
+    if (
+        overflow is None
+        or "security" not in overflow.get("tags", [])
+        or overflow.get("security-severity") != "9.3"
+    ):
+        print(f"  ❌ StackBufferOverflow properties {overflow}, expected the security tag and 9.3")
+        ok = False
+    hints = {rid: p for rid, p in properties.items() if rid.startswith("ConstParameterNotModified.")}
+    if not hints:
+        print("  ❌ no ConstParameterNotModified rule in the output")
+        ok = False
+    for rid, p in hints.items():
+        if "security" in p.get("tags", []) or "security-severity" in p:
+            print(f"  ❌ {rid} properties {p}, expected no security tag and no score")
+            ok = False
+    if ok:
+        print("  ✅ SARIF security severity OK")
+    print()
+    return ok
+
+
 def check_unresolved_call_max_stack() -> bool:
     """
     A function containing an unresolved call (indirect, or to an external
@@ -3677,6 +3722,7 @@ def main() -> int:
         check_diagnostic_rule_coverage_regression,
         check_diagnostic_cwe_coverage,
         check_sarif_rule_cwe_tags,
+        check_sarif_security_severity,
     ]
     # Env-mutating check — must run outside the parallel pool.
     sequential_checks = [

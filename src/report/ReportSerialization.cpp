@@ -113,6 +113,59 @@ namespace ctrace::stack
             return "external/cwe/cwe-" + digits;
         }
 
+        /// GitHub code-scanning security severity of CWE @p cwe in tenths (93 is 9.3), or 0 (no
+        /// severity, for GitHub too) when the CWE is not a security weakness. Each score is the
+        /// one GitHub gives the CodeQL C/C++ query named beside it, which detects the same
+        /// weakness: the 75th percentile of the CVSS scores of the CVEs sharing its CWE tags.
+        static unsigned securitySeverityTenths(unsigned cwe)
+        {
+            switch (cwe)
+            {
+            case 676: // cpp/dangerous-function-overflow (gets)
+                return 100;
+            case 78: // cpp/command-line-injection
+                return 98;
+            case 120: // cpp/unbounded-write
+            case 121: // cpp/overflow-buffer
+            case 124: // no query; an out-of-bounds write (787): cpp/unbounded-write
+            case 125: // cpp/invalid-pointer-deref
+            case 127: // no query; an out-of-bounds read (125): cpp/invalid-pointer-deref
+            case 134: // cpp/non-constant-format
+            case 415: // cpp/double-free
+            case 416: // cpp/use-after-free
+            case 562: // cpp/return-stack-allocated-memory
+            case 787: // cpp/unbounded-write
+            case 823: // cpp/missing-negativity-test
+            case 843: // cpp/type-confusion
+                return 93;
+            case 467: // cpp/suspicious-sizeof
+                return 88;
+            case 191: // cpp/uncontrolled-arithmetic
+                return 86;
+            case 190: // cpp/integer-overflow-tainted
+            case 195: // no query; its parent (681): cpp/integer-overflow-tainted
+            case 197: // cpp/integer-overflow-tainted
+            case 789: // cpp/uncontrolled-allocation-size
+                return 81;
+            case 457: // cpp/uninitialized-local
+            case 665: // cpp/uninitialized-local
+            case 772: // no query; the higher of its children: cpp/descriptor-never-closed
+                return 78;
+            case 367: // cpp/toctou-race-condition
+                return 77;
+            case 476: // cpp/missing-null-test
+            case 770: // cpp/alloca-in-loop
+                return 75;
+            case 200: // no C/C++ query; every CodeQL query tagged CWE-200 alone scores 6.5
+                return 65;
+            case 685: // cpp/wrong-number-format-arguments
+                return 50;
+            }
+            // Dead code (561) among them: CodeQL's duplicate-condition queries, which carry it,
+            // are quality queries, not security ones.
+            return 0;
+        }
+
         static std::string resolveRuleId(const Diagnostic& d)
         {
             if (!d.ruleId.empty())
@@ -379,16 +432,32 @@ namespace ctrace::stack
                << "\" }";
             if (!rule.cwes.empty())
             {
+                // One score for the whole rule: the highest of its CWEs.
+                unsigned severity = 0;
+                for (const unsigned cwe : rule.cwes)
+                    severity = std::max(severity, securitySeverityTenths(cwe));
+
                 os << ",\n";
                 os << "              \"properties\": {\n";
                 os << "                \"tags\": [";
                 const char* separator = "";
+                if (severity > 0)
+                {
+                    os << "\"security\"";
+                    separator = ", ";
+                }
                 for (const unsigned cwe : rule.cwes)
                 {
                     os << separator << "\"" << cweTag(cwe) << "\"";
                     separator = ", ";
                 }
-                os << "]\n";
+                os << "]";
+                if (severity > 0)
+                {
+                    os << ",\n                \"security-severity\": \"" << severity / 10 << "."
+                       << severity % 10 << "\"";
+                }
+                os << "\n";
                 os << "              }\n";
             }
             else
