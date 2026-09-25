@@ -2,11 +2,15 @@
 #include "StackUsageAnalyzer.hpp"
 
 #include <algorithm>
+#include <charconv>
 #include <cstdio> // std::snprintf
 #include <filesystem>
 #include <iomanip>
+#include <optional>
+#include <set>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -84,6 +88,29 @@ namespace ctrace::stack
                 return "error";
             }
             return "note";
+        }
+
+        /// Number of a "CWE-<n>" id, or std::nullopt for anything else.
+        static std::optional<unsigned> parseCweNumber(std::string_view id)
+        {
+            constexpr std::string_view prefix = "CWE-";
+            if (!id.starts_with(prefix))
+                return std::nullopt;
+            id.remove_prefix(prefix.size());
+            unsigned number = 0;
+            const auto [end, error] = std::from_chars(id.data(), id.data() + id.size(), number);
+            if (error != std::errc{} || end != id.data() + id.size())
+                return std::nullopt;
+            return number;
+        }
+
+        /// CWE tag in CodeQL's form, which GitHub reads: external/cwe/cwe-078.
+        static std::string cweTag(unsigned number)
+        {
+            std::string digits = std::to_string(number);
+            if (digits.size() < 3)
+                digits.insert(0, 3 - digits.size(), '0');
+            return "external/cwe/cwe-" + digits;
         }
 
         static std::string resolveRuleId(const Diagnostic& d)
@@ -310,7 +337,10 @@ namespace ctrace::stack
         struct SarifRuleEntry
         {
             std::string id;
-            std::string cweId;
+            // Every CWE the rule's diagnostics carry in this run: one rule can detect several
+            // weaknesses (a stack write and a read), and its tags must not depend on which
+            // diagnostic comes first.
+            std::set<unsigned> cwes;
         };
 
         std::vector<SarifRuleEntry> rules;
@@ -318,16 +348,11 @@ namespace ctrace::stack
         for (const auto& d : result.diagnostics)
         {
             const std::string rid = resolveRuleId(d);
-            auto it = ruleIndices.find(rid);
-            if (it == ruleIndices.end())
-            {
-                ruleIndices.emplace(rid, rules.size());
-                rules.push_back({rid, d.cweId});
-            }
-            else if (rules[it->second].cweId.empty() && !d.cweId.empty())
-            {
-                rules[it->second].cweId = d.cweId;
-            }
+            const auto [it, inserted] = ruleIndices.emplace(rid, rules.size());
+            if (inserted)
+                rules.push_back({rid, {}});
+            if (const std::optional<unsigned> cwe = parseCweNumber(d.cweId))
+                rules[it->second].cwes.insert(*cwe);
         }
         std::sort(rules.begin(), rules.end(),
                   [](const SarifRuleEntry& lhs, const SarifRuleEntry& rhs)
@@ -352,11 +377,18 @@ namespace ctrace::stack
             os << "              \"id\": \"" << jsonEscape(rule.id) << "\",\n";
             os << "              \"shortDescription\": { \"text\": \"" << jsonEscape(rule.id)
                << "\" }";
-            if (!rule.cweId.empty())
+            if (!rule.cwes.empty())
             {
                 os << ",\n";
                 os << "              \"properties\": {\n";
-                os << "                \"tags\": [\"" << jsonEscape(rule.cweId) << "\"]\n";
+                os << "                \"tags\": [";
+                const char* separator = "";
+                for (const unsigned cwe : rule.cwes)
+                {
+                    os << separator << "\"" << cweTag(cwe) << "\"";
+                    separator = ", ";
+                }
+                os << "]\n";
                 os << "              }\n";
             }
             else
