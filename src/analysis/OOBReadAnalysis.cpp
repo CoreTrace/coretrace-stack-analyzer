@@ -202,23 +202,24 @@ namespace ctrace::stack::analysis
             {
             }
 
-            SmtFeasibility
-            isNegativeIndexFeasible(const std::map<const llvm::Value*, IntRange>& ranges,
-                                    const llvm::Value& indexExpr,
-                                    const llvm::Instruction* contextInst) const
+            SmtFeasibility isNegativeIndexFeasible(
+                const std::map<const llvm::Value*, IntRange>& ranges, const llvm::Value& indexExpr,
+                const llvm::Instruction* contextInst, const FunctionFacts* facts) const
             {
-                return smt::SmtConstraintEvaluator::evaluateQuery(
-                    [&]
-                    {
-                        return smt::encodeSignedComparisonFeasibility(ranges, indexExpr, -1, false,
-                                                                      contextInst);
-                    });
+                const smt::QueryPoint point = queryPoint(contextInst, facts);
+                return evaluateQueryAt(ranges, point,
+                                       [&]
+                                       {
+                                           return smt::encodeSignedComparisonFeasibility(
+                                               ranges, indexExpr, -1, false, point);
+                                       });
             }
 
             SmtFeasibility
             isUpperOverflowFeasible(const std::map<const llvm::Value*, IntRange>& ranges,
                                     const llvm::Value& indexExpr, std::uint64_t limitExclusive,
-                                    const llvm::Instruction* contextInst) const
+                                    const llvm::Instruction* contextInst,
+                                    const FunctionFacts* facts) const
             {
                 if (limitExclusive == 0 ||
                     limitExclusive >
@@ -228,12 +229,13 @@ namespace ctrace::stack::analysis
                 }
 
                 const std::int64_t upperInclusive = static_cast<std::int64_t>(limitExclusive - 1);
-                return smt::SmtConstraintEvaluator::evaluateQuery(
-                    [&]
-                    {
-                        return smt::encodeSignedComparisonFeasibility(
-                            ranges, indexExpr, upperInclusive, true, contextInst);
-                    });
+                const smt::QueryPoint point = queryPoint(contextInst, facts);
+                return evaluateQueryAt(ranges, point,
+                                       [&]
+                                       {
+                                           return smt::encodeSignedComparisonFeasibility(
+                                               ranges, indexExpr, upperInclusive, true, point);
+                                       });
             }
         };
 
@@ -245,7 +247,7 @@ namespace ctrace::stack::analysis
             const OOBReadConstraintEvaluator& evaluator,
             const std::map<const llvm::Value*, IntRange>& baseRanges, const llvm::Value* indexExpr,
             const llvm::Value* rangedValue, std::uint64_t capacity,
-            const llvm::Instruction& accessInst)
+            const llvm::Instruction& accessInst, const FunctionFacts& facts)
         {
             if (!indexExpr || !indexExpr->getType()->isIntegerTy())
                 return false;
@@ -256,14 +258,14 @@ namespace ctrace::stack::analysis
                 queryRanges[rangedValue] = *range;
             }
 
-            if (evaluator.isNegativeIndexFeasible(queryRanges, *indexExpr, &accessInst) !=
+            if (evaluator.isNegativeIndexFeasible(queryRanges, *indexExpr, &accessInst, &facts) !=
                 SmtFeasibility::Infeasible)
             {
                 return false;
             }
 
-            return evaluator.isUpperOverflowFeasible(queryRanges, *indexExpr, capacity,
-                                                     &accessInst) == SmtFeasibility::Infeasible;
+            return evaluator.isUpperOverflowFeasible(queryRanges, *indexExpr, capacity, &accessInst,
+                                                     &facts) == SmtFeasibility::Infeasible;
         }
     } // namespace
 
@@ -542,7 +544,7 @@ namespace ctrace::stack::analysis
 
                         if (isHeapIndexViolationInfeasibleBySmt(evaluator, pointRanges.at(inst),
                                                                 indexValue, queryIndex, capacity,
-                                                                inst))
+                                                                inst, facts))
                         {
                             continue;
                         }

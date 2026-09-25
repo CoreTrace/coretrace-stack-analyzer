@@ -57,49 +57,55 @@ namespace ctrace::stack::analysis
             SmtFeasibility
             isSignedOverflowFeasible(const std::map<const llvm::Value*, IntRange>& ranges,
                                      const llvm::BinaryOperator& binary,
-                                     const llvm::Instruction* contextInst) const
+                                     const llvm::Instruction* contextInst,
+                                     const FunctionFacts* facts) const
             {
-                return smt::SmtConstraintEvaluator::evaluateQuery(
-                    [&]
-                    { return smt::encodeSignedOverflowFeasibility(ranges, binary, contextInst); });
+                const smt::QueryPoint point = queryPoint(contextInst, facts);
+                return evaluateQueryAt(
+                    ranges, point,
+                    [&] { return smt::encodeSignedOverflowFeasibility(ranges, binary, point); });
             }
 
             SmtFeasibility
             isUnsignedOverflowFeasible(const std::map<const llvm::Value*, IntRange>& ranges,
                                        const llvm::BinaryOperator& binary,
-                                       const llvm::Instruction* contextInst) const
+                                       const llvm::Instruction* contextInst,
+                                       const FunctionFacts* facts) const
             {
-                return smt::SmtConstraintEvaluator::evaluateQuery(
-                    [&]
-                    {
-                        return smt::encodeUnsignedOverflowFeasibility(ranges, binary, contextInst);
-                    });
+                const smt::QueryPoint point = queryPoint(contextInst, facts);
+                return evaluateQueryAt(
+                    ranges, point,
+                    [&] { return smt::encodeUnsignedOverflowFeasibility(ranges, binary, point); });
             }
 
             SmtFeasibility
             isSignedGreaterThanFeasible(const std::map<const llvm::Value*, IntRange>& ranges,
                                         const llvm::Value& lhs, std::int64_t rhsConstant,
-                                        const llvm::Instruction* contextInst) const
+                                        const llvm::Instruction* contextInst,
+                                        const FunctionFacts* facts) const
             {
-                return smt::SmtConstraintEvaluator::evaluateQuery(
-                    [&]
-                    {
-                        return smt::encodeSignedComparisonFeasibility(ranges, lhs, rhsConstant,
-                                                                      true, contextInst);
-                    });
+                const smt::QueryPoint point = queryPoint(contextInst, facts);
+                return evaluateQueryAt(ranges, point,
+                                       [&]
+                                       {
+                                           return smt::encodeSignedComparisonFeasibility(
+                                               ranges, lhs, rhsConstant, true, point);
+                                       });
             }
 
             SmtFeasibility
             isSignedLessEqualFeasible(const std::map<const llvm::Value*, IntRange>& ranges,
                                       const llvm::Value& lhs, std::int64_t rhsConstant,
-                                      const llvm::Instruction* contextInst) const
+                                      const llvm::Instruction* contextInst,
+                                      const FunctionFacts* facts) const
             {
-                return smt::SmtConstraintEvaluator::evaluateQuery(
-                    [&]
-                    {
-                        return smt::encodeSignedComparisonFeasibility(ranges, lhs, rhsConstant,
-                                                                      false, contextInst);
-                    });
+                const smt::QueryPoint point = queryPoint(contextInst, facts);
+                return evaluateQueryAt(ranges, point,
+                                       [&]
+                                       {
+                                           return smt::encodeSignedComparisonFeasibility(
+                                               ranges, lhs, rhsConstant, false, point);
+                                       });
             }
         };
 
@@ -715,7 +721,8 @@ namespace ctrace::stack::analysis
         static bool shouldSuppressRiskWithSmt(const IntegerOverflowConstraintEvaluator& evaluator,
                                               const std::map<const llvm::Value*, IntRange>& ranges,
                                               const RiskSummary& risk,
-                                              const llvm::Instruction& contextInst)
+                                              const llvm::Instruction& contextInst,
+                                              const FunctionFacts& facts)
         {
             switch (risk.kind)
             {
@@ -725,7 +732,7 @@ namespace ctrace::stack::analysis
                     const std::map<const llvm::Value*, IntRange> queryRanges =
                         buildArithmeticQueryRanges(*risk.arithmeticOp, ranges);
                     return evaluator.isUnsignedOverflowFeasible(queryRanges, *risk.arithmeticOp,
-                                                                &contextInst) ==
+                                                                &contextInst, &facts) ==
                            SmtFeasibility::Infeasible;
                 }
                 return false;
@@ -735,7 +742,7 @@ namespace ctrace::stack::analysis
                     const std::map<const llvm::Value*, IntRange> queryRanges =
                         buildValueQueryRanges(*risk.relatedValue, ranges);
                     return evaluator.isSignedLessEqualFeasible(queryRanges, *risk.relatedValue, -1,
-                                                               &contextInst) ==
+                                                               &contextInst, &facts) ==
                            SmtFeasibility::Infeasible;
                 }
                 return false;
@@ -750,9 +757,9 @@ namespace ctrace::stack::analysis
                     buildValueQueryRanges(*risk.relatedValue, ranges);
                 const std::int64_t truncMax = (std::int64_t{1} << risk.truncTargetBitWidth) - 1;
                 const SmtFeasibility negativeFeasible = evaluator.isSignedLessEqualFeasible(
-                    queryRanges, *risk.relatedValue, -1, &contextInst);
+                    queryRanges, *risk.relatedValue, -1, &contextInst, &facts);
                 const SmtFeasibility aboveMaxFeasible = evaluator.isSignedGreaterThanFeasible(
-                    queryRanges, *risk.relatedValue, truncMax, &contextInst);
+                    queryRanges, *risk.relatedValue, truncMax, &contextInst, &facts);
                 return negativeFeasible == SmtFeasibility::Infeasible &&
                        aboveMaxFeasible == SmtFeasibility::Infeasible;
             }
@@ -801,7 +808,8 @@ namespace ctrace::stack::analysis
                         {
                             const std::map<const llvm::Value*, IntRange> queryRanges =
                                 buildArithmeticQueryRanges(*binary, ranges);
-                            if (evaluator.isSignedOverflowFeasible(queryRanges, *binary, &inst) ==
+                            if (evaluator.isSignedOverflowFeasible(queryRanges, *binary, &inst,
+                                                                   &facts) ==
                                 SmtFeasibility::Infeasible)
                             {
                                 continue;
@@ -863,7 +871,7 @@ namespace ctrace::stack::analysis
                         classifySizeOperand(sizeOperand, ranges);
                     if (!risk)
                         continue;
-                    if (shouldSuppressRiskWithSmt(evaluator, ranges, *risk, inst))
+                    if (shouldSuppressRiskWithSmt(evaluator, ranges, *risk, inst, facts))
                         continue;
 
                     IntegerOverflowIssue issue;

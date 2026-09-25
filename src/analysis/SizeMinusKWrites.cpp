@@ -56,6 +56,8 @@ namespace ctrace::stack::analysis
         {
             llvm::Value* base = nullptr;
             int64_t k = 0;
+            /// The size the subtraction really uses: @ref base with its casts.
+            llvm::Value* operand = nullptr;
         };
 
         struct SizeMinusKSink
@@ -80,14 +82,16 @@ namespace ctrace::stack::analysis
             SmtFeasibility
             isSignedLessEqualFeasible(const std::map<const llvm::Value*, IntRange>& ranges,
                                       const llvm::Value& lhs, std::int64_t rhsConstant,
-                                      const llvm::Instruction* contextInst) const
+                                      const llvm::Instruction* contextInst,
+                                      const FunctionFacts* facts) const
             {
-                return smt::SmtConstraintEvaluator::evaluateQuery(
-                    [&]
-                    {
-                        return smt::encodeSignedComparisonFeasibility(ranges, lhs, rhsConstant,
-                                                                      false, contextInst);
-                    });
+                const smt::QueryPoint point = queryPoint(contextInst, facts);
+                return evaluateQueryAt(ranges, point,
+                                       [&]
+                                       {
+                                           return smt::encodeSignedComparisonFeasibility(
+                                               ranges, lhs, rhsConstant, false, point);
+                                       });
             }
         };
 
@@ -165,7 +169,7 @@ namespace ctrace::stack::analysis
                     {
                         int64_t k = c->getSExtValue();
                         if (k > 0)
-                            return {lhs, k};
+                            return {lhs, k, bin->getOperand(0)};
                     }
                 }
                 if (bin->getOpcode() == llvm::Instruction::Add)
@@ -174,7 +178,7 @@ namespace ctrace::stack::analysis
                     {
                         int64_t k = -c->getSExtValue();
                         if (k > 0)
-                            return {lhs, k};
+                            return {lhs, k, bin->getOperand(0)};
                     }
                 }
             }
@@ -482,21 +486,25 @@ namespace ctrace::stack::analysis
                 return v;
             };
 
-            auto emitIssue = [&](Instruction* at, Value* dest, Value* sizeBase, StringRef sinkName,
-                                 bool hasPtrDest, int64_t k)
+            auto emitIssue = [&](Instruction* at, Value* dest, const SizeMinusKMatch& match,
+                                 StringRef sinkName, bool hasPtrDest)
             {
                 SizeMinusKWriteIssue issue;
                 issue.funcName = F.getName().str();
                 issue.sinkName = sinkName.str();
                 issue.hasPointerDest = hasPtrDest;
                 issue.ptrNonNull = hasPtrDest ? isNonNullAt(dest, at, LVI) : true;
-                issue.sizeAboveK = isGreaterThanAt(sizeBase, k, at, LVI);
-                if (!issue.sizeAboveK && sizeBase && sizeBase->getType()->isIntegerTy())
+                const int64_t k = match.k;
+                issue.sizeAboveK = isGreaterThanAt(match.base, k, at, LVI);
+                if (!issue.sizeAboveK && match.operand && match.operand->getType()->isIntegerTy())
                 {
+                    // Bound the size the call really uses, casts included: a narrowing cast can
+                    // make it small however large the value before the cast. The range is known
+                    // for match.base, and the encoded casts carry it to the operand.
                     const std::map<const llvm::Value*, IntRange> queryRanges =
-                        buildValueQueryRanges(*sizeBase, pointRanges.at(*at));
-                    if (evaluator.isSignedLessEqualFeasible(queryRanges, *sizeBase, k, at) ==
-                        SmtFeasibility::Infeasible)
+                        buildValueQueryRanges(*match.base, pointRanges.at(*at));
+                    if (evaluator.isSignedLessEqualFeasible(queryRanges, *match.operand, k, at,
+                                                            &facts) == SmtFeasibility::Infeasible)
                         issue.sizeAboveK = true;
                 }
                 issue.k = k;
@@ -521,8 +529,7 @@ namespace ctrace::stack::analysis
                             std::string label = canonicalizeSinkName(sinkName);
                             if (label == "llvm.mem*" || label == "lib call")
                                 label += " (len = size-k)";
-                            emitIssue(&I, canonical(CB->getArgOperand(dstIdx)), match.base, label,
-                                      true, match.k);
+                            emitIssue(&I, canonical(CB->getArgOperand(dstIdx)), match, label, true);
                         }
                         continue;
                     }
@@ -542,8 +549,8 @@ namespace ctrace::stack::analysis
                                     matchSizeMinusK(CB->getArgOperand(sink.lenIdx), canonical);
                                 if (!match.base)
                                     continue;
-                                emitIssue(&I, canonical(CB->getArgOperand(sink.dstIdx)), match.base,
-                                          calleeFn->getName(), true, match.k);
+                                emitIssue(&I, canonical(CB->getArgOperand(sink.dstIdx)), match,
+                                          calleeFn->getName(), true);
                             }
                         }
                     }
@@ -563,8 +570,8 @@ namespace ctrace::stack::analysis
                     }
                     if (!match.base)
                         continue;
-                    emitIssue(&I, canonical(gep->getPointerOperand()), match.base,
-                              "store (idx = size-k)", true, match.k);
+                    emitIssue(&I, canonical(gep->getPointerOperand()), match,
+                              "store (idx = size-k)", true);
                 }
             }
         }

@@ -11,11 +11,13 @@
 #include "analysis/ownership/ResourceFactCollector.hpp"
 #include "analysis/StackBufferAnalysis.hpp"
 #include "analysis/UninitializedVarAnalysis.hpp"
+#include "analysis/smt/SmtEncoding.hpp"
 #include "analysis/smt/SmtRefinement.hpp"
 #include "analyzer/DiagnosticEmitter.hpp"
 #include "analyzer/LocationResolver.hpp"
 #include "analyzer/ModulePreparationService.hpp"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -24,10 +26,13 @@
 #include <functional>
 #include <iostream>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
+#include <llvm/Analysis/MemorySSA.h>
 #include <llvm/IR/Function.h>
+#include <llvm/IR/InstIterator.h>
 #include <llvm/IR/Instruction.h>
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/Operator.h>
@@ -1167,6 +1172,332 @@ namespace
         return report.failures == 0;
     }
 
+    /// Loads of @p fn whose pointer operand is named @p slot, in instruction order.
+    std::vector<const llvm::LoadInst*> loadsFrom(const llvm::Function* fn, llvm::StringRef slot)
+    {
+        std::vector<const llvm::LoadInst*> out;
+        if (!fn)
+            return out;
+        for (const llvm::Instruction& inst : llvm::instructions(*fn))
+        {
+            const auto* load = llvm::dyn_cast<llvm::LoadInst>(&inst);
+            if (load && load->getPointerOperand()->getName() == slot)
+                out.push_back(load);
+        }
+        return out;
+    }
+
+    /// FunctionFacts::clobberingAccess: MemorySSA clobbers of -O0 slot reads.
+    bool testFunctionFactsClobberingAccess(const std::filesystem::path& repoRoot,
+                                           TestReport& report)
+    {
+        using namespace ctrace::stack::analysis;
+        const ctrace::stack::AnalysisConfig config;
+        LoadedModule loaded;
+        std::string loadError;
+        if (!loadModuleFromSource(repoRoot / "test/unit/smt_path_input.c", config, loaded,
+                                  loadError))
+        {
+            report.expect(false, "clobberingAccess setup: failed to load module: " + loadError);
+            return false;
+        }
+
+        {
+            llvm::Function* fn = loaded.module->getFunction("reads_param_twice");
+            const std::vector<const llvm::LoadInst*> loads = loadsFrom(fn, "x.addr");
+            report.expect(loads.size() == 2, "clobberingAccess: reads_param_twice reads x twice");
+            if (loads.size() == 2)
+            {
+                const FunctionFacts facts(*fn);
+                const llvm::MemoryAccess* first = facts.clobberingAccess(*loads[0]);
+                report.expect(first != nullptr && first == facts.clobberingAccess(*loads[1]),
+                              "clobberingAccess: two reads with no write between share it");
+                const auto* def = llvm::dyn_cast_or_null<llvm::MemoryDef>(first);
+                const auto* store =
+                    def ? llvm::dyn_cast_or_null<llvm::StoreInst>(def->getMemoryInst()) : nullptr;
+                report.expect(store && llvm::isa<llvm::Argument>(store->getValueOperand()),
+                              "clobberingAccess: it is the store of the parameter");
+            }
+        }
+
+        {
+            llvm::Function* fn = loaded.module->getFunction("reads_across_calls");
+            const std::vector<const llvm::LoadInst*> loads = loadsFrom(fn, "x");
+            report.expect(loads.size() == 2, "clobberingAccess: reads_across_calls reads x twice");
+            if (loads.size() == 2)
+            {
+                const FunctionFacts facts(*fn);
+                const auto* first =
+                    llvm::dyn_cast_or_null<llvm::MemoryDef>(facts.clobberingAccess(*loads[0]));
+                const auto* second =
+                    llvm::dyn_cast_or_null<llvm::MemoryDef>(facts.clobberingAccess(*loads[1]));
+                report.expect(first && second && first != second &&
+                                  llvm::isa_and_nonnull<llvm::CallBase>(first->getMemoryInst()) &&
+                                  llvm::isa_and_nonnull<llvm::CallBase>(second->getMemoryInst()),
+                              "clobberingAccess: a call that may write the slot separates reads");
+            }
+        }
+        return report.failures == 0;
+    }
+
+    using ctrace::stack::analysis::smt::ConstraintIR;
+    using ctrace::stack::analysis::smt::ExprId;
+    using ctrace::stack::analysis::smt::ExprKind;
+    using ctrace::stack::analysis::smt::ExprNode;
+    using ctrace::stack::analysis::smt::QueryPoint;
+
+    /// First binary operator of @p fn with @p opcode, or nullptr.
+    const llvm::BinaryOperator* firstBinary(const llvm::Function* fn, unsigned opcode)
+    {
+        if (!fn)
+            return nullptr;
+        for (const llvm::Instruction& inst : llvm::instructions(*fn))
+        {
+            const auto* binary = llvm::dyn_cast<llvm::BinaryOperator>(&inst);
+            if (binary && binary->getOpcode() == opcode)
+                return binary;
+        }
+        return nullptr;
+    }
+
+    /// Last binary operator of @p fn with @p opcode, or nullptr.
+    const llvm::BinaryOperator* lastBinary(const llvm::Function* fn, unsigned opcode)
+    {
+        const llvm::BinaryOperator* last = nullptr;
+        if (!fn)
+            return last;
+        for (const llvm::Instruction& inst : llvm::instructions(*fn))
+        {
+            const auto* binary = llvm::dyn_cast<llvm::BinaryOperator>(&inst);
+            if (binary && binary->getOpcode() == opcode)
+                last = binary;
+        }
+        return last;
+    }
+
+    /// First node of @p ir with @p kind, or nullptr.
+    const ExprNode* firstNode(const ConstraintIR& ir, ExprKind kind)
+    {
+        const auto it = std::find_if(ir.nodes.begin(), ir.nodes.end(),
+                                     [&](const ExprNode& node) { return node.kind == kind; });
+        return it == ir.nodes.end() ? nullptr : &*it;
+    }
+
+    /// Left operand of the first @p kind node whose right operand is the constant @p value.
+    std::optional<ExprId> lhsAgainstConstant(const ConstraintIR& ir, ExprKind kind,
+                                             std::int64_t value)
+    {
+        for (const ExprNode& node : ir.nodes)
+        {
+            if (node.kind != kind)
+                continue;
+            const ExprNode& rhs = ir.nodes.at(node.rhs);
+            if (rhs.kind == ExprKind::Constant && rhs.constant == value)
+                return node.lhs;
+        }
+        return std::nullopt;
+    }
+
+    /// Whether @p ir negates a @p kind comparison against the constant @p value.
+    bool hasNegatedComparison(const ConstraintIR& ir, ExprKind kind, std::int64_t value)
+    {
+        return std::any_of(ir.nodes.begin(), ir.nodes.end(),
+                           [&](const ExprNode& node)
+                           {
+                               if (node.kind != ExprKind::Not)
+                                   return false;
+                               const ExprNode& operand = ir.nodes.at(node.lhs);
+                               if (operand.kind != kind)
+                                   return false;
+                               const ExprNode& rhs = ir.nodes.at(operand.rhs);
+                               return rhs.kind == ExprKind::Constant && rhs.constant == value;
+                           });
+    }
+
+    /// SMT encoder: loads are encoded through their MemorySSA clobber.
+    bool testSmtEncoderMemoryModel(const std::filesystem::path& repoRoot, TestReport& report)
+    {
+        using namespace ctrace::stack::analysis;
+        const ctrace::stack::AnalysisConfig config;
+        LoadedModule loaded;
+        std::string loadError;
+        if (!loadModuleFromSource(repoRoot / "test/unit/smt_path_input.c", config, loaded,
+                                  loadError))
+        {
+            report.expect(false, "SMT memory model setup: failed to load module: " + loadError);
+            return false;
+        }
+
+        // The query on `lhs - rhs` rebuilds the `sub` from its encoded operands, so the first
+        // Sub node of the IR says how each operand was encoded.
+        const auto subOperands = [&](const char* name,
+                                     bool withFacts) -> std::optional<std::pair<ExprId, ExprId>>
+        {
+            llvm::Function* fn = loaded.module->getFunction(name);
+            const llvm::BinaryOperator* sub = firstBinary(fn, llvm::Instruction::Sub);
+            if (!sub)
+                return std::nullopt;
+            const FunctionFacts facts(*fn);
+            const ConstraintIR ir = smt::encodeSignedOverflowFeasibility(
+                {}, *sub, QueryPoint{.inst = sub, .facts = withFacts ? &facts : nullptr});
+            const ExprNode* node = firstNode(ir, ExprKind::Sub);
+            if (!node)
+                return std::nullopt;
+            return std::make_pair(node->lhs, node->rhs);
+        };
+
+        {
+            const auto with = subOperands("global_read_twice", true);
+            const auto without = subOperands("global_read_twice", false);
+            report.expect(with && with->first == with->second,
+                          "SMT memory model: two reads with no write between are one symbol");
+            report.expect(without && without->first != without->second,
+                          "SMT memory model: without facts every load stays its own symbol");
+        }
+        {
+            const auto with = subOperands("global_read_across_call", true);
+            report.expect(with && with->first != with->second,
+                          "SMT memory model: a call that may write the global separates reads");
+        }
+        {
+            llvm::Function* fn = loaded.module->getFunction("forwarded_local");
+            const llvm::BinaryOperator* sub = firstBinary(fn, llvm::Instruction::Sub);
+            const auto with = subOperands("forwarded_local", true);
+            report.expect(with && with->first == with->second,
+                          "SMT memory model: a load after a store reads the stored value");
+            if (fn && sub)
+            {
+                const FunctionFacts facts(*fn);
+                const ConstraintIR ir = smt::encodeSignedOverflowFeasibility(
+                    {}, *sub, QueryPoint{.inst = sub, .facts = &facts});
+                const ExprNode* node = firstNode(ir, ExprKind::Sub);
+                const ExprNode* operand = node ? &ir.nodes.at(node->lhs) : nullptr;
+                const bool isParameter =
+                    operand && operand->kind == ExprKind::Symbol &&
+                    std::any_of(
+                        ir.symbols.begin(), ir.symbols.end(), [&](const auto& symbol)
+                        { return symbol.id == operand->symbol && symbol.debugName == "x"; });
+                report.expect(isParameter,
+                              "SMT memory model: forwarding reaches the parameter itself");
+
+                // Ranges must bound the very expression the violation uses.
+                const std::vector<const llvm::LoadInst*> loads = loadsFrom(fn, "y");
+                if (!loads.empty())
+                {
+                    std::map<const llvm::Value*, IntRange> ranges;
+                    ranges[loads[0]] =
+                        IntRange{.lower = 0, .upper = 3, .hasLower = true, .hasUpper = true};
+                    const ConstraintIR ranged = smt::encodeSignedComparisonFeasibility(
+                        ranges, *loads[0], 15, true, QueryPoint{.inst = sub, .facts = &facts});
+                    const std::optional<ExprId> bounded =
+                        lhsAgainstConstant(ranged, ExprKind::Sle, 3);
+                    const std::optional<ExprId> violated =
+                        lhsAgainstConstant(ranged, ExprKind::Sgt, 15);
+                    report.expect(bounded && violated && *bounded == *violated,
+                                  "SMT memory model: a range on a load bounds its encoding");
+                }
+            }
+        }
+        {
+            // Review focus 1: an i8 store does not define the i32 read that follows it.
+            llvm::Function* fn = loaded.module->getFunction("punned_store");
+            const llvm::BinaryOperator* sub = firstBinary(fn, llvm::Instruction::Sub);
+            if (fn && sub)
+            {
+                const FunctionFacts facts(*fn);
+                const ConstraintIR ir = smt::encodeSignedOverflowFeasibility(
+                    {}, *sub, QueryPoint{.inst = sub, .facts = &facts});
+                const ExprNode* node = firstNode(ir, ExprKind::Sub);
+                report.expect(node && ir.nodes.at(node->lhs).kind == ExprKind::Symbol &&
+                                  !lhsAgainstConstant(ir, ExprKind::Eq, 5),
+                              "SMT memory model: a narrower store is not forwarded");
+            }
+            else
+            {
+                report.expect(false, "SMT memory model: punned_store has a sub");
+            }
+        }
+        {
+            // Review focus 2: volatile reads never share a symbol.
+            const auto with = subOperands("volatile_read_twice", true);
+            report.expect(with && with->first != with->second,
+                          "SMT memory model: volatile reads stay distinct");
+        }
+        return report.failures == 0;
+    }
+
+    /// SMT encoder: queries carry the reachability condition of their instruction.
+    bool testSmtEncoderPathCondition(const std::filesystem::path& repoRoot, TestReport& report)
+    {
+        using namespace ctrace::stack::analysis;
+        const ctrace::stack::AnalysisConfig config;
+        LoadedModule loaded;
+        std::string loadError;
+        if (!loadModuleFromSource(repoRoot / "test/unit/smt_path_input.c", config, loaded,
+                                  loadError))
+        {
+            report.expect(false, "SMT path condition setup: failed to load module: " + loadError);
+            return false;
+        }
+
+        // Overflow query on @p add, with or without the function's facts.
+        const auto query = [&](const char* name, bool last, bool withFacts,
+                               std::uint64_t budget) -> std::optional<ConstraintIR>
+        {
+            llvm::Function* fn = loaded.module->getFunction(name);
+            const llvm::BinaryOperator* add = last ? lastBinary(fn, llvm::Instruction::Add)
+                                                   : firstBinary(fn, llvm::Instruction::Add);
+            if (!add)
+                return std::nullopt;
+            const FunctionFacts facts(*fn);
+            return smt::encodeSignedOverflowFeasibility(
+                {}, *add,
+                QueryPoint{
+                    .inst = add, .facts = withFacts ? &facts : nullptr, .budgetNodes = budget});
+        };
+
+        {
+            const auto with = query("guarded_increment", false, true, 0);
+            const auto without = query("guarded_increment", false, false, 0);
+            report.expect(with && hasNegatedComparison(*with, ExprKind::Sgt, 5),
+                          "SMT path condition: the false edge of `i > 5` guards the add");
+            report.expect(without && !hasNegatedComparison(*without, ExprKind::Sgt, 5),
+                          "SMT path condition: without facts the query has no path condition");
+            const auto tight = query("guarded_increment", false, true, 1);
+            report.expect(tight && !hasNegatedComparison(*tight, ExprKind::Sgt, 5),
+                          "SMT path condition: a region over budget falls back to no condition");
+        }
+        {
+            const auto with = query("either_positive", false, true, 0);
+            report.expect(with && firstNode(*with, ExprKind::Or) != nullptr,
+                          "SMT path condition: a block with two predecessors gives a disjunction");
+        }
+        {
+            const auto with = query("irreducible_loop", true, true, 0);
+            report.expect(with && !lhsAgainstConstant(*with, ExprKind::Slt, 10) &&
+                              !lhsAgainstConstant(*with, ExprKind::Sgt, 0) &&
+                              firstNode(*with, ExprKind::Not) == nullptr,
+                          "SMT path condition: an irreducible function gets no path condition");
+        }
+        {
+            // Review focus 3: two cases reach the block; the default edge does not.
+            const auto with = query("switch_case", false, true, 0);
+            report.expect(with && lhsAgainstConstant(*with, ExprKind::Eq, 1) &&
+                              lhsAgainstConstant(*with, ExprKind::Eq, 2) &&
+                              firstNode(*with, ExprKind::Or) != nullptr,
+                          "SMT path condition: switch cases reaching a block are a disjunction");
+        }
+        {
+            // Review focus 4: an instruction of the entry block has no dominator.
+            const auto with = query("entry_block_add", false, true, 0);
+            report.expect(with && !with->assertions.empty() &&
+                              firstNode(*with, ExprKind::Not) == nullptr &&
+                              firstNode(*with, ExprKind::Or) == nullptr,
+                          "SMT path condition: an entry-block query has no path condition");
+        }
+        return report.failures == 0;
+    }
+
     /// SMT refinement: an evaluator whose rule has SMT off never builds its query.
     bool testSmtEvaluatorEncodesLazily(TestReport& report)
     {
@@ -1554,6 +1885,9 @@ int main(int argc, char** argv)
     (void)testUninitializedFixpointBudgetIsExplicit(repoRoot, report);
     (void)testProgramPointRanges(repoRoot, report);
     (void)testSmtEvaluatorEncodesLazily(report);
+    (void)testFunctionFactsClobberingAccess(repoRoot, report);
+    (void)testSmtEncoderMemoryModel(repoRoot, report);
+    (void)testSmtEncoderPathCondition(repoRoot, report);
 #ifdef CTRACE_STACK_ENABLE_Z3_BACKEND
     (void)testZ3WideNegativeConstant(report);
 #endif

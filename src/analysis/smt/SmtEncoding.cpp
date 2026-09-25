@@ -1,17 +1,28 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "analysis/smt/SmtEncoding.hpp"
 
+#include "analysis/FunctionFacts.hpp"
+
 #include <algorithm>
 #include <functional>
 #include <limits>
+#include <map>
 #include <optional>
+#include <set>
 #include <string>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
+#include <llvm/ADT/PostOrderIterator.h>
+#include <llvm/Analysis/CFG.h>
+#include <llvm/Analysis/MemorySSA.h>
 #include <llvm/IR/BasicBlock.h>
+#include <llvm/IR/CFG.h>
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/DerivedTypes.h>
+#include <llvm/IR/Dominators.h>
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/IntrinsicInst.h>
 #include <llvm/IR/Intrinsics.h>
@@ -117,6 +128,30 @@ namespace ctrace::stack::analysis::smt
                 return symbolExprById_.at(id);
             }
 
+            /// One symbol per (pointer, clobbering access, width): the loads it stands for read
+            /// the same memory, hence the same value.
+            ExprId makeMemorySymbol(const llvm::Value* pointer, const void* access,
+                                    std::uint32_t bitWidth)
+            {
+                const MemoryKey key{pointer, access, bitWidth};
+                if (const auto it = memorySymbols_.find(key); it != memorySymbols_.end())
+                    return it->second;
+
+                const SymbolId id = nextSymbolId_++;
+                const ExprId expr = appendNode(ExprNode{.kind = ExprKind::Symbol,
+                                                        .symbol = id,
+                                                        .constant = 0,
+                                                        .bitWidth = normalizeBitWidth(bitWidth),
+                                                        .lhs = 0,
+                                                        .rhs = 0,
+                                                        .extra = 0});
+                memorySymbols_.emplace(key, expr);
+                ir_.symbols.push_back(SymbolInfo{.id = id,
+                                                 .debugName = buildSymbolName(pointer, id) + "@mem",
+                                                 .sourceToken = toSourceToken(pointer)});
+                return expr;
+            }
+
             ExprId makeBinary(ExprKind kind, ExprId lhs, ExprId rhs, std::uint32_t bitWidth)
             {
                 return appendNode(ExprNode{.kind = kind,
@@ -197,13 +232,16 @@ namespace ctrace::stack::analysis::smt
             SymbolId nextSymbolId_ = 1;
             std::unordered_map<const llvm::Value*, SymbolId> symbolByValue_;
             std::unordered_map<SymbolId, ExprId> symbolExprById_;
+            using MemoryKey = std::tuple<const llvm::Value*, const void*, std::uint32_t>;
+            std::map<MemoryKey, ExprId> memorySymbols_;
         };
 
         class LlvmExprEncoder
         {
           public:
-            LlvmExprEncoder(ConstraintIrBuilder& builder, const llvm::BasicBlock* incomingBlock)
-                : builder_(builder), incomingBlock_(incomingBlock)
+            LlvmExprEncoder(ConstraintIrBuilder& builder, const llvm::BasicBlock* incomingBlock,
+                            const FunctionFacts* facts = nullptr)
+                : builder_(builder), incomingBlock_(incomingBlock), facts_(facts)
             {
             }
 
@@ -245,11 +283,23 @@ namespace ctrace::stack::analysis::smt
                 return builder_.makeBinary(ExprKind::Ne, *expr, zero, 1);
             }
 
+            /// @p value as an integer. A comparison, and And, Or or Not of comparisons, is a
+            /// boolean for the solver, while LLVM gives an i1 used as an integer the value 0 or
+            /// 1 (a flag stored, extended or added): such a node becomes ite(node, 1, 0).
+            std::optional<ExprId> encodeAsInteger(const llvm::Value* value)
+            {
+                std::optional<ExprId> expr = encodeValue(value);
+                if (!expr || !isBooleanExprKind(builder_.node(*expr).kind))
+                    return expr;
+                return builder_.makeTernary(ExprKind::Ite, *expr, builder_.makeConstant(1, 1),
+                                            builder_.makeConstant(0, 1), 1);
+            }
+
           private:
             std::optional<ExprId> encodeBinaryOperator(const llvm::BinaryOperator& binaryOp)
             {
-                std::optional<ExprId> lhs = encodeValue(binaryOp.getOperand(0));
-                std::optional<ExprId> rhs = encodeValue(binaryOp.getOperand(1));
+                std::optional<ExprId> lhs = encodeAsInteger(binaryOp.getOperand(0));
+                std::optional<ExprId> rhs = encodeAsInteger(binaryOp.getOperand(1));
                 if (!lhs || !rhs)
                     return std::nullopt;
 
@@ -354,7 +404,7 @@ namespace ctrace::stack::analysis::smt
 
                 if (const auto* castInst = llvm::dyn_cast<llvm::CastInst>(&value))
                 {
-                    std::optional<ExprId> operand = encodeValue(castInst->getOperand(0));
+                    std::optional<ExprId> operand = encodeAsInteger(castInst->getOperand(0));
                     if (!operand)
                         return std::nullopt;
 
@@ -374,8 +424,8 @@ namespace ctrace::stack::analysis::smt
 
                 if (const auto* icmp = llvm::dyn_cast<llvm::ICmpInst>(&value))
                 {
-                    std::optional<ExprId> lhs = encodeValue(icmp->getOperand(0));
-                    std::optional<ExprId> rhs = encodeValue(icmp->getOperand(1));
+                    std::optional<ExprId> lhs = encodeAsInteger(icmp->getOperand(0));
+                    std::optional<ExprId> rhs = encodeAsInteger(icmp->getOperand(1));
                     if (!lhs || !rhs)
                         return std::nullopt;
 
@@ -421,11 +471,42 @@ namespace ctrace::stack::analysis::smt
                 if (const auto* binaryOp = llvm::dyn_cast<llvm::BinaryOperator>(&value))
                     return encodeBinaryOperator(*binaryOp);
 
+                if (const auto* load = llvm::dyn_cast<llvm::LoadInst>(&value);
+                    load && facts_ && load->isSimple() && load->getType()->isIntegerTy())
+                {
+                    return encodeLoad(*load);
+                }
+
                 return builder_.makeSymbol(&value, inferBitWidth(&value));
+            }
+
+            /// A load reads what its MemorySSA clobber left in memory: the stored value when the
+            /// clobber stores the same type to the same pointer, otherwise one value shared by
+            /// every load of that pointer with that clobber.
+            std::optional<ExprId> encodeLoad(const llvm::LoadInst& load)
+            {
+                const llvm::Value* pointer = load.getPointerOperand()->stripPointerCasts();
+                const llvm::MemoryAccess* clobber = facts_->clobberingAccess(load);
+                if (!clobber)
+                    return builder_.makeSymbol(&load, inferBitWidth(&load));
+
+                if (const auto* def = llvm::dyn_cast<llvm::MemoryDef>(clobber))
+                {
+                    const auto* store =
+                        llvm::dyn_cast_or_null<llvm::StoreInst>(def->getMemoryInst());
+                    if (store && store->isSimple() &&
+                        store->getPointerOperand()->stripPointerCasts() == pointer &&
+                        store->getValueOperand()->getType() == load.getType())
+                    {
+                        return encodeValue(store->getValueOperand());
+                    }
+                }
+                return builder_.makeMemorySymbol(pointer, clobber, inferBitWidth(&load));
             }
 
             ConstraintIrBuilder& builder_;
             const llvm::BasicBlock* incomingBlock_ = nullptr;
+            const FunctionFacts* facts_ = nullptr;
             std::unordered_map<const llvm::Value*, ExprId> cache_;
             std::unordered_set<const llvm::Value*> inProgress_;
         };
@@ -457,35 +538,35 @@ namespace ctrace::stack::analysis::smt
                 if (!shouldEncodeRangeConstraint(value, range))
                     continue;
 
-                std::optional<ExprId> symbolExpr = exprEncoder.encodeValue(value);
-                if (!symbolExpr)
+                // The bounds constrain the expression the rest of the query uses for `value`: a
+                // load, for one, may be encoded as the value it reads rather than as a symbol.
+                const std::optional<ExprId> expr = exprEncoder.encodeAsInteger(value);
+                if (!expr)
                     continue;
 
-                SymbolId symbolId = builder.lookupSymbolId(value);
-                if (symbolId == 0)
+                const ExprKind kind = builder.node(*expr).kind;
+                const SymbolId symbol = builder.node(*expr).symbol;
+                const std::uint32_t bitWidth = builder.node(*expr).bitWidth;
+                if (kind == ExprKind::Symbol)
                 {
-                    symbolExpr = builder.makeSymbol(value, inferBitWidth(value));
-                    symbolId = builder.lookupSymbolId(value);
+                    ir.intervals.push_back(
+                        IntervalConstraint{.symbol = symbol,
+                                           .lower = static_cast<std::int64_t>(range.lower),
+                                           .upper = static_cast<std::int64_t>(range.upper),
+                                           .hasLower = range.hasLower,
+                                           .hasUpper = range.hasUpper});
                 }
-
-                ir.intervals.push_back(
-                    IntervalConstraint{.symbol = symbolId,
-                                       .lower = static_cast<std::int64_t>(range.lower),
-                                       .upper = static_cast<std::int64_t>(range.upper),
-                                       .hasLower = range.hasLower,
-                                       .hasUpper = range.hasUpper});
-
                 if (range.hasLower)
                 {
-                    const ExprId lower = builder.makeConstant(
-                        static_cast<std::int64_t>(range.lower), builder.node(*symbolExpr).bitWidth);
-                    builder.addAssertion(builder.makeBinary(ExprKind::Sge, *symbolExpr, lower, 1));
+                    const ExprId lower =
+                        builder.makeConstant(static_cast<std::int64_t>(range.lower), bitWidth);
+                    builder.addAssertion(builder.makeBinary(ExprKind::Sge, *expr, lower, 1));
                 }
                 if (range.hasUpper)
                 {
-                    const ExprId upper = builder.makeConstant(
-                        static_cast<std::int64_t>(range.upper), builder.node(*symbolExpr).bitWidth);
-                    builder.addAssertion(builder.makeBinary(ExprKind::Sle, *symbolExpr, upper, 1));
+                    const ExprId upper =
+                        builder.makeConstant(static_cast<std::int64_t>(range.upper), bitWidth);
+                    builder.addAssertion(builder.makeBinary(ExprKind::Sle, *expr, upper, 1));
                 }
             }
         }
@@ -581,6 +662,232 @@ namespace ctrace::stack::analysis::smt
 
             return ir;
         }
+
+        using BlockEdge = std::pair<const llvm::BasicBlock*, const llvm::BasicBlock*>;
+
+        /// Back edges of @p function, or std::nullopt when one enters a cycle through a block
+        /// that does not dominate its source (irreducible control flow).
+        static std::optional<std::set<BlockEdge>>
+        reducibleBackEdges(const llvm::Function& function, const llvm::DominatorTree& dominators)
+        {
+            llvm::SmallVector<BlockEdge, 8> edges;
+            llvm::FindFunctionBackedges(function, edges);
+            std::set<BlockEdge> out;
+            for (const BlockEdge& edge : edges)
+            {
+                if (!dominators.dominates(edge.second, edge.first))
+                    return std::nullopt;
+                out.insert(edge);
+            }
+            return out;
+        }
+
+        /// Dominators of @p block, nearest first, @p block excluded.
+        static std::vector<const llvm::BasicBlock*>
+        strictDominators(const llvm::BasicBlock& block, const llvm::DominatorTree& dominators)
+        {
+            std::vector<const llvm::BasicBlock*> out;
+            const llvm::DomTreeNode* node = dominators.getNode(&block);
+            for (node = node ? node->getIDom() : nullptr; node; node = node->getIDom())
+                out.push_back(node->getBlock());
+            return out;
+        }
+
+        /// Condition under which control flows from @p from to @p to; std::nullopt means
+        /// always (unconditional edge, or a condition the encoder cannot translate).
+        static std::optional<ExprId> encodeFlowCondition(const llvm::BasicBlock& from,
+                                                         const llvm::BasicBlock& to,
+                                                         ConstraintIrBuilder& builder,
+                                                         LlvmExprEncoder& exprEncoder)
+        {
+            const llvm::Instruction* terminator = from.getTerminator();
+            if (const auto* branch = llvm::dyn_cast<llvm::BranchInst>(terminator))
+            {
+                if (!branch->isConditional() || branch->getSuccessor(0) == branch->getSuccessor(1))
+                    return std::nullopt;
+                const std::optional<ExprId> condition =
+                    exprEncoder.encodeAsBoolean(branch->getCondition());
+                if (!condition)
+                    return std::nullopt;
+                if (branch->getSuccessor(0) == &to)
+                    return condition;
+                return builder.makeUnary(ExprKind::Not, *condition, 1);
+            }
+
+            const auto* switchInst = llvm::dyn_cast<llvm::SwitchInst>(terminator);
+            if (!switchInst)
+                return std::nullopt;
+            const std::optional<ExprId> selector =
+                exprEncoder.encodeAsInteger(switchInst->getCondition());
+            if (!selector)
+                return std::nullopt;
+            const std::uint32_t bitWidth = builder.node(*selector).bitWidth;
+            if (bitWidth > 64)
+                return std::nullopt;
+
+            const bool isDefault = switchInst->getDefaultDest() == &to;
+            std::optional<ExprId> taken;     // a case leading to `to` matches
+            std::optional<ExprId> noneMatch; // no case matches: the default is taken
+            for (const auto& caseHandle : switchInst->cases())
+            {
+                const ExprId value =
+                    builder.makeConstant(caseHandle.getCaseValue()->getSExtValue(), bitWidth);
+                if (caseHandle.getCaseSuccessor() == &to)
+                {
+                    const ExprId equal = builder.makeBinary(ExprKind::Eq, *selector, value, 1);
+                    taken = taken ? builder.makeBinary(ExprKind::Or, *taken, equal, 1) : equal;
+                }
+                if (isDefault)
+                {
+                    const ExprId differ = builder.makeBinary(ExprKind::Ne, *selector, value, 1);
+                    noneMatch = noneMatch ? builder.makeBinary(ExprKind::And, *noneMatch, differ, 1)
+                                          : differ;
+                }
+            }
+            if (isDefault)
+            {
+                if (!noneMatch)
+                    return std::nullopt;
+                return taken ? builder.makeBinary(ExprKind::Or, *taken, *noneMatch, 1) : *noneMatch;
+            }
+            return taken;
+        }
+
+        /// Condition under which @p target is reached from @p head, one of its dominators, over
+        /// the CFG without @p backEdges. std::nullopt means always. Booleans only: a constant
+        /// would be a bitvector for the backends, so "always" is the absence of a node.
+        static std::optional<ExprId> encodeReachCondition(const llvm::BasicBlock& head,
+                                                          const llvm::BasicBlock& target,
+                                                          const std::set<BlockEdge>& backEdges,
+                                                          ConstraintIrBuilder& builder,
+                                                          LlvmExprEncoder& exprEncoder)
+        {
+            const auto forward = [&](const llvm::BasicBlock* from, const llvm::BasicBlock* to)
+            { return !backEdges.contains({from, to}); };
+
+            // Region: blocks on a forward path from `head` to `target`.
+            std::set<const llvm::BasicBlock*> reachable{&head};
+            std::vector<const llvm::BasicBlock*> work{&head};
+            while (!work.empty())
+            {
+                const llvm::BasicBlock* block = work.back();
+                work.pop_back();
+                for (const llvm::BasicBlock* succ : llvm::successors(block))
+                {
+                    if (forward(block, succ) && reachable.insert(succ).second)
+                        work.push_back(succ);
+                }
+            }
+            std::set<const llvm::BasicBlock*> region{&target};
+            work = {&target};
+            while (!work.empty())
+            {
+                const llvm::BasicBlock* block = work.back();
+                work.pop_back();
+                if (block == &head)
+                    continue;
+                for (const llvm::BasicBlock* pred : llvm::predecessors(block))
+                {
+                    if (forward(pred, block) && reachable.contains(pred) &&
+                        region.insert(pred).second)
+                        work.push_back(pred);
+                }
+            }
+
+            // Reverse post-order puts the source of every forward edge before its target.
+            std::map<const llvm::BasicBlock*, std::optional<ExprId>> reach;
+            const llvm::ReversePostOrderTraversal<const llvm::Function*> order(head.getParent());
+            for (const llvm::BasicBlock* block : order)
+            {
+                if (!region.contains(block))
+                    continue;
+                if (block == &head)
+                {
+                    reach[block] = std::nullopt;
+                    continue;
+                }
+                std::optional<ExprId> any;
+                bool always = false;
+                std::set<const llvm::BasicBlock*> seen;
+                for (const llvm::BasicBlock* pred : llvm::predecessors(block))
+                {
+                    if (!region.contains(pred) || !forward(pred, block) ||
+                        !seen.insert(pred).second)
+                        continue;
+                    std::optional<ExprId> term = reach.at(pred);
+                    if (const std::optional<ExprId> edge =
+                            encodeFlowCondition(*pred, *block, builder, exprEncoder))
+                        term = term ? builder.makeBinary(ExprKind::And, *term, *edge, 1) : *edge;
+                    if (!term)
+                        always = true;
+                    else
+                        any = any ? builder.makeBinary(ExprKind::Or, *any, *term, 1) : *term;
+                }
+                reach[block] = always ? std::nullopt : any;
+            }
+            return reach.contains(&target) ? reach.at(&target) : std::nullopt;
+        }
+
+        /// Builds the query at @p point: the rule's ranges, the reachability condition of
+        /// @p point from the farthest dominator that keeps the query within the node budget,
+        /// then what @p postEncode asserts. Without facts, in the entry block, in an
+        /// irreducible function, or when even the immediate dominator is over budget, the
+        /// query has no path condition.
+        static ConstraintIR encodeQuery(const std::map<const llvm::Value*, IntRange>& ranges,
+                                        const QueryPoint& point, const QueryPostEncoder& postEncode)
+        {
+            const auto build =
+                [&](const llvm::BasicBlock* head, const std::set<BlockEdge>* backEdges)
+            {
+                ConstraintIR ir;
+                ir.intervals.reserve(ranges.size());
+                ConstraintIrBuilder builder(ir);
+                LlvmExprEncoder exprEncoder(builder, nullptr, point.facts);
+                encodeRangeAssertions(ranges, ir, builder, exprEncoder);
+                if (head)
+                {
+                    if (const std::optional<ExprId> reach = encodeReachCondition(
+                            *head, *point.inst->getParent(), *backEdges, builder, exprEncoder))
+                        builder.addAssertion(*reach);
+                }
+                postEncode(builder, exprEncoder);
+                return ir;
+            };
+
+            if (!point.facts || !point.inst)
+                return build(nullptr, nullptr);
+
+            const llvm::DominatorTree& dominators = point.facts->dominatorTree();
+            const std::optional<std::set<BlockEdge>> backEdges =
+                reducibleBackEdges(*point.inst->getFunction(), dominators);
+            const std::vector<const llvm::BasicBlock*> heads =
+                strictDominators(*point.inst->getParent(), dominators);
+            if (!backEdges || heads.empty())
+                return build(nullptr, nullptr);
+            if (point.budgetNodes == 0)
+                return build(heads.back(), &*backEdges);
+
+            // A farther dominator heads a larger region, so the heads that fit form a prefix of
+            // `heads`: binary search for its last element.
+            std::optional<ConstraintIR> best;
+            std::size_t low = 0;
+            std::size_t high = heads.size();
+            while (low < high)
+            {
+                const std::size_t middle = low + (high - low) / 2;
+                ConstraintIR candidate = build(heads[middle], &*backEdges);
+                if (candidate.nodes.size() <= point.budgetNodes)
+                {
+                    best = std::move(candidate);
+                    low = middle + 1;
+                }
+                else
+                {
+                    high = middle;
+                }
+            }
+            return best ? std::move(*best) : build(nullptr, nullptr);
+        }
     } // namespace
 
     ConstraintIR LlvmConstraintEncoder::encode(const std::map<const llvm::Value*, IntRange>& ranges,
@@ -598,16 +905,24 @@ namespace ctrace::stack::analysis::smt
         return encoder.encode(ranges);
     }
 
+    ConstraintIR encodeReachability(const std::map<const llvm::Value*, IntRange>& ranges,
+                                    const QueryPoint& point)
+    {
+        return encodeQuery(ranges, point,
+                           [&](ConstraintIrBuilder& builder, LlvmExprEncoder& exprEncoder)
+                           { encodeAssumesBeforeInstruction(point.inst, builder, exprEncoder); });
+    }
+
     ConstraintIR
     encodeSignedOverflowFeasibility(const std::map<const llvm::Value*, IntRange>& ranges,
                                     const llvm::BinaryOperator& binaryOperation,
-                                    const llvm::Instruction* contextInst)
+                                    const QueryPoint& point)
     {
-        return encodeWithCustomAssertions(
-            ranges, nullptr, true, nullptr, nullptr,
+        return encodeQuery(
+            ranges, point,
             [&](ConstraintIrBuilder& builder, LlvmExprEncoder& exprEncoder)
             {
-                encodeAssumesBeforeInstruction(contextInst, builder, exprEncoder);
+                encodeAssumesBeforeInstruction(point.inst, builder, exprEncoder);
 
                 const std::optional<ExprKind> opKind =
                     getArithmeticExprKind(binaryOperation.getOpcode());
@@ -615,9 +930,9 @@ namespace ctrace::stack::analysis::smt
                     return;
 
                 const std::optional<ExprId> lhs =
-                    exprEncoder.encodeValue(binaryOperation.getOperand(0));
+                    exprEncoder.encodeAsInteger(binaryOperation.getOperand(0));
                 const std::optional<ExprId> rhs =
-                    exprEncoder.encodeValue(binaryOperation.getOperand(1));
+                    exprEncoder.encodeAsInteger(binaryOperation.getOperand(1));
                 if (!lhs || !rhs)
                     return;
 
@@ -643,13 +958,13 @@ namespace ctrace::stack::analysis::smt
     ConstraintIR
     encodeUnsignedOverflowFeasibility(const std::map<const llvm::Value*, IntRange>& ranges,
                                       const llvm::BinaryOperator& binaryOperation,
-                                      const llvm::Instruction* contextInst)
+                                      const QueryPoint& point)
     {
-        return encodeWithCustomAssertions(
-            ranges, nullptr, true, nullptr, nullptr,
+        return encodeQuery(
+            ranges, point,
             [&](ConstraintIrBuilder& builder, LlvmExprEncoder& exprEncoder)
             {
-                encodeAssumesBeforeInstruction(contextInst, builder, exprEncoder);
+                encodeAssumesBeforeInstruction(point.inst, builder, exprEncoder);
 
                 const std::optional<ExprKind> opKind =
                     getArithmeticExprKind(binaryOperation.getOpcode());
@@ -657,9 +972,9 @@ namespace ctrace::stack::analysis::smt
                     return;
 
                 const std::optional<ExprId> lhs =
-                    exprEncoder.encodeValue(binaryOperation.getOperand(0));
+                    exprEncoder.encodeAsInteger(binaryOperation.getOperand(0));
                 const std::optional<ExprId> rhs =
-                    exprEncoder.encodeValue(binaryOperation.getOperand(1));
+                    exprEncoder.encodeAsInteger(binaryOperation.getOperand(1));
                 if (!lhs || !rhs)
                     return;
 
@@ -685,15 +1000,15 @@ namespace ctrace::stack::analysis::smt
     ConstraintIR
     encodeSignedComparisonFeasibility(const std::map<const llvm::Value*, IntRange>& ranges,
                                       const llvm::Value& lhs, std::int64_t rhsConstant,
-                                      bool greaterThan, const llvm::Instruction* contextInst)
+                                      bool greaterThan, const QueryPoint& point)
     {
-        return encodeWithCustomAssertions(
-            ranges, nullptr, true, nullptr, nullptr,
+        return encodeQuery(
+            ranges, point,
             [&](ConstraintIrBuilder& builder, LlvmExprEncoder& exprEncoder)
             {
-                encodeAssumesBeforeInstruction(contextInst, builder, exprEncoder);
+                encodeAssumesBeforeInstruction(point.inst, builder, exprEncoder);
 
-                const std::optional<ExprId> lhsExpr = exprEncoder.encodeValue(&lhs);
+                const std::optional<ExprId> lhsExpr = exprEncoder.encodeAsInteger(&lhs);
                 if (!lhsExpr)
                     return;
 
