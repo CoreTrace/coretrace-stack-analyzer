@@ -3183,6 +3183,9 @@ def check_diagnostic_cwe_coverage() -> bool:
         ),
         ("StackPointerEscape", "CWE-562", ["test/escape-stack/return-buf.c"]),
         ("DuplicateIfCondition", "CWE-561", ["test/diagnostics/duplicate-else-if-basic.c"]),
+        # Also reports Recursion.Detected, the informational diagnostic, which names no CWE:
+        # the check below still requires it to carry a rule.
+        ("Recursion.Unconditional", "CWE-674", ["test/recursion/c/infinite-recursion.c"]),
     ]
 
     for rule, cwe, args in cases:
