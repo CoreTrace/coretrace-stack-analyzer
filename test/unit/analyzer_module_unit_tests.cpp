@@ -1426,6 +1426,78 @@ namespace
         return report.failures == 0;
     }
 
+    /// SMT encoder: queries carry the reachability condition of their instruction.
+    bool testSmtEncoderPathCondition(const std::filesystem::path& repoRoot, TestReport& report)
+    {
+        using namespace ctrace::stack::analysis;
+        const ctrace::stack::AnalysisConfig config;
+        LoadedModule loaded;
+        std::string loadError;
+        if (!loadModuleFromSource(repoRoot / "test/unit/smt_path_input.c", config, loaded,
+                                  loadError))
+        {
+            report.expect(false, "SMT path condition setup: failed to load module: " + loadError);
+            return false;
+        }
+
+        // Overflow query on @p add, with or without the function's facts.
+        const auto query = [&](const char* name, bool last, bool withFacts,
+                               std::uint64_t budget) -> std::optional<ConstraintIR>
+        {
+            llvm::Function* fn = loaded.module->getFunction(name);
+            const llvm::BinaryOperator* add = last ? lastBinary(fn, llvm::Instruction::Add)
+                                                   : firstBinary(fn, llvm::Instruction::Add);
+            if (!add)
+                return std::nullopt;
+            const FunctionFacts facts(*fn);
+            return smt::encodeSignedOverflowFeasibility(
+                {}, *add,
+                QueryPoint{
+                    .inst = add, .facts = withFacts ? &facts : nullptr, .budgetNodes = budget});
+        };
+
+        {
+            const auto with = query("guarded_increment", false, true, 0);
+            const auto without = query("guarded_increment", false, false, 0);
+            report.expect(with && hasNegatedComparison(*with, ExprKind::Sgt, 5),
+                          "SMT path condition: the false edge of `i > 5` guards the add");
+            report.expect(without && !hasNegatedComparison(*without, ExprKind::Sgt, 5),
+                          "SMT path condition: without facts the query has no path condition");
+            const auto tight = query("guarded_increment", false, true, 1);
+            report.expect(tight && !hasNegatedComparison(*tight, ExprKind::Sgt, 5),
+                          "SMT path condition: a region over budget falls back to no condition");
+        }
+        {
+            const auto with = query("either_positive", false, true, 0);
+            report.expect(with && firstNode(*with, ExprKind::Or) != nullptr,
+                          "SMT path condition: a block with two predecessors gives a disjunction");
+        }
+        {
+            const auto with = query("irreducible_loop", true, true, 0);
+            report.expect(with && !lhsAgainstConstant(*with, ExprKind::Slt, 10) &&
+                              !lhsAgainstConstant(*with, ExprKind::Sgt, 0) &&
+                              firstNode(*with, ExprKind::Not) == nullptr,
+                          "SMT path condition: an irreducible function gets no path condition");
+        }
+        {
+            // Review focus 3: two cases reach the block; the default edge does not.
+            const auto with = query("switch_case", false, true, 0);
+            report.expect(with && lhsAgainstConstant(*with, ExprKind::Eq, 1) &&
+                              lhsAgainstConstant(*with, ExprKind::Eq, 2) &&
+                              firstNode(*with, ExprKind::Or) != nullptr,
+                          "SMT path condition: switch cases reaching a block are a disjunction");
+        }
+        {
+            // Review focus 4: an instruction of the entry block has no dominator.
+            const auto with = query("entry_block_add", false, true, 0);
+            report.expect(with && !with->assertions.empty() &&
+                              firstNode(*with, ExprKind::Not) == nullptr &&
+                              firstNode(*with, ExprKind::Or) == nullptr,
+                          "SMT path condition: an entry-block query has no path condition");
+        }
+        return report.failures == 0;
+    }
+
     /// SMT refinement: an evaluator whose rule has SMT off never builds its query.
     bool testSmtEvaluatorEncodesLazily(TestReport& report)
     {
@@ -1815,6 +1887,7 @@ int main(int argc, char** argv)
     (void)testSmtEvaluatorEncodesLazily(report);
     (void)testFunctionFactsClobberingAccess(repoRoot, report);
     (void)testSmtEncoderMemoryModel(repoRoot, report);
+    (void)testSmtEncoderPathCondition(repoRoot, report);
 #ifdef CTRACE_STACK_ENABLE_Z3_BACKEND
     (void)testZ3WideNegativeConstant(report);
 #endif

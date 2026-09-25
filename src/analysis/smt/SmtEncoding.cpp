@@ -8,15 +8,21 @@
 #include <limits>
 #include <map>
 #include <optional>
+#include <set>
 #include <string>
 #include <tuple>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
+#include <llvm/ADT/PostOrderIterator.h>
+#include <llvm/Analysis/CFG.h>
 #include <llvm/Analysis/MemorySSA.h>
 #include <llvm/IR/BasicBlock.h>
+#include <llvm/IR/CFG.h>
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/DerivedTypes.h>
+#include <llvm/IR/Dominators.h>
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/IntrinsicInst.h>
 #include <llvm/IR/Intrinsics.h>
@@ -645,17 +651,230 @@ namespace ctrace::stack::analysis::smt
             return ir;
         }
 
-        /// Builds the query at @p point: the rule's ranges, then what @p postEncode asserts.
+        using BlockEdge = std::pair<const llvm::BasicBlock*, const llvm::BasicBlock*>;
+
+        /// Back edges of @p function, or std::nullopt when one enters a cycle through a block
+        /// that does not dominate its source (irreducible control flow).
+        static std::optional<std::set<BlockEdge>>
+        reducibleBackEdges(const llvm::Function& function, const llvm::DominatorTree& dominators)
+        {
+            llvm::SmallVector<BlockEdge, 8> edges;
+            llvm::FindFunctionBackedges(function, edges);
+            std::set<BlockEdge> out;
+            for (const BlockEdge& edge : edges)
+            {
+                if (!dominators.dominates(edge.second, edge.first))
+                    return std::nullopt;
+                out.insert(edge);
+            }
+            return out;
+        }
+
+        /// Dominators of @p block, nearest first, @p block excluded.
+        static std::vector<const llvm::BasicBlock*>
+        strictDominators(const llvm::BasicBlock& block, const llvm::DominatorTree& dominators)
+        {
+            std::vector<const llvm::BasicBlock*> out;
+            const llvm::DomTreeNode* node = dominators.getNode(&block);
+            for (node = node ? node->getIDom() : nullptr; node; node = node->getIDom())
+                out.push_back(node->getBlock());
+            return out;
+        }
+
+        /// Condition under which control flows from @p from to @p to; std::nullopt means
+        /// always (unconditional edge, or a condition the encoder cannot translate).
+        static std::optional<ExprId> encodeFlowCondition(const llvm::BasicBlock& from,
+                                                         const llvm::BasicBlock& to,
+                                                         ConstraintIrBuilder& builder,
+                                                         LlvmExprEncoder& exprEncoder)
+        {
+            const llvm::Instruction* terminator = from.getTerminator();
+            if (const auto* branch = llvm::dyn_cast<llvm::BranchInst>(terminator))
+            {
+                if (!branch->isConditional() || branch->getSuccessor(0) == branch->getSuccessor(1))
+                    return std::nullopt;
+                const std::optional<ExprId> condition =
+                    exprEncoder.encodeAsBoolean(branch->getCondition());
+                if (!condition)
+                    return std::nullopt;
+                if (branch->getSuccessor(0) == &to)
+                    return condition;
+                return builder.makeUnary(ExprKind::Not, *condition, 1);
+            }
+
+            const auto* switchInst = llvm::dyn_cast<llvm::SwitchInst>(terminator);
+            if (!switchInst)
+                return std::nullopt;
+            const std::optional<ExprId> selector =
+                exprEncoder.encodeValue(switchInst->getCondition());
+            if (!selector)
+                return std::nullopt;
+            const std::uint32_t bitWidth = builder.node(*selector).bitWidth;
+            if (bitWidth > 64)
+                return std::nullopt;
+
+            const bool isDefault = switchInst->getDefaultDest() == &to;
+            std::optional<ExprId> taken;     // a case leading to `to` matches
+            std::optional<ExprId> noneMatch; // no case matches: the default is taken
+            for (const auto& caseHandle : switchInst->cases())
+            {
+                const ExprId value =
+                    builder.makeConstant(caseHandle.getCaseValue()->getSExtValue(), bitWidth);
+                if (caseHandle.getCaseSuccessor() == &to)
+                {
+                    const ExprId equal = builder.makeBinary(ExprKind::Eq, *selector, value, 1);
+                    taken = taken ? builder.makeBinary(ExprKind::Or, *taken, equal, 1) : equal;
+                }
+                if (isDefault)
+                {
+                    const ExprId differ = builder.makeBinary(ExprKind::Ne, *selector, value, 1);
+                    noneMatch = noneMatch ? builder.makeBinary(ExprKind::And, *noneMatch, differ, 1)
+                                          : differ;
+                }
+            }
+            if (isDefault)
+            {
+                if (!noneMatch)
+                    return std::nullopt;
+                return taken ? builder.makeBinary(ExprKind::Or, *taken, *noneMatch, 1) : *noneMatch;
+            }
+            return taken;
+        }
+
+        /// Condition under which @p target is reached from @p head, one of its dominators, over
+        /// the CFG without @p backEdges. std::nullopt means always. Booleans only: a constant
+        /// would be a bitvector for the backends, so "always" is the absence of a node.
+        static std::optional<ExprId> encodeReachCondition(const llvm::BasicBlock& head,
+                                                          const llvm::BasicBlock& target,
+                                                          const std::set<BlockEdge>& backEdges,
+                                                          ConstraintIrBuilder& builder,
+                                                          LlvmExprEncoder& exprEncoder)
+        {
+            const auto forward = [&](const llvm::BasicBlock* from, const llvm::BasicBlock* to)
+            { return !backEdges.contains({from, to}); };
+
+            // Region: blocks on a forward path from `head` to `target`.
+            std::set<const llvm::BasicBlock*> reachable{&head};
+            std::vector<const llvm::BasicBlock*> work{&head};
+            while (!work.empty())
+            {
+                const llvm::BasicBlock* block = work.back();
+                work.pop_back();
+                for (const llvm::BasicBlock* succ : llvm::successors(block))
+                {
+                    if (forward(block, succ) && reachable.insert(succ).second)
+                        work.push_back(succ);
+                }
+            }
+            std::set<const llvm::BasicBlock*> region{&target};
+            work = {&target};
+            while (!work.empty())
+            {
+                const llvm::BasicBlock* block = work.back();
+                work.pop_back();
+                if (block == &head)
+                    continue;
+                for (const llvm::BasicBlock* pred : llvm::predecessors(block))
+                {
+                    if (forward(pred, block) && reachable.contains(pred) &&
+                        region.insert(pred).second)
+                        work.push_back(pred);
+                }
+            }
+
+            // Reverse post-order puts the source of every forward edge before its target.
+            std::map<const llvm::BasicBlock*, std::optional<ExprId>> reach;
+            const llvm::ReversePostOrderTraversal<const llvm::Function*> order(head.getParent());
+            for (const llvm::BasicBlock* block : order)
+            {
+                if (!region.contains(block))
+                    continue;
+                if (block == &head)
+                {
+                    reach[block] = std::nullopt;
+                    continue;
+                }
+                std::optional<ExprId> any;
+                bool always = false;
+                std::set<const llvm::BasicBlock*> seen;
+                for (const llvm::BasicBlock* pred : llvm::predecessors(block))
+                {
+                    if (!region.contains(pred) || !forward(pred, block) ||
+                        !seen.insert(pred).second)
+                        continue;
+                    std::optional<ExprId> term = reach.at(pred);
+                    if (const std::optional<ExprId> edge =
+                            encodeFlowCondition(*pred, *block, builder, exprEncoder))
+                        term = term ? builder.makeBinary(ExprKind::And, *term, *edge, 1) : *edge;
+                    if (!term)
+                        always = true;
+                    else
+                        any = any ? builder.makeBinary(ExprKind::Or, *any, *term, 1) : *term;
+                }
+                reach[block] = always ? std::nullopt : any;
+            }
+            return reach.contains(&target) ? reach.at(&target) : std::nullopt;
+        }
+
+        /// Builds the query at @p point: the rule's ranges, the reachability condition of
+        /// @p point from the farthest dominator that keeps the query within the node budget,
+        /// then what @p postEncode asserts. Without facts, in the entry block, in an
+        /// irreducible function, or when even the immediate dominator is over budget, the
+        /// query has no path condition.
         static ConstraintIR encodeQuery(const std::map<const llvm::Value*, IntRange>& ranges,
                                         const QueryPoint& point, const QueryPostEncoder& postEncode)
         {
-            ConstraintIR ir;
-            ir.intervals.reserve(ranges.size());
-            ConstraintIrBuilder builder(ir);
-            LlvmExprEncoder exprEncoder(builder, nullptr, point.facts);
-            encodeRangeAssertions(ranges, ir, builder, exprEncoder);
-            postEncode(builder, exprEncoder);
-            return ir;
+            const auto build =
+                [&](const llvm::BasicBlock* head, const std::set<BlockEdge>* backEdges)
+            {
+                ConstraintIR ir;
+                ir.intervals.reserve(ranges.size());
+                ConstraintIrBuilder builder(ir);
+                LlvmExprEncoder exprEncoder(builder, nullptr, point.facts);
+                encodeRangeAssertions(ranges, ir, builder, exprEncoder);
+                if (head)
+                {
+                    if (const std::optional<ExprId> reach = encodeReachCondition(
+                            *head, *point.inst->getParent(), *backEdges, builder, exprEncoder))
+                        builder.addAssertion(*reach);
+                }
+                postEncode(builder, exprEncoder);
+                return ir;
+            };
+
+            if (!point.facts || !point.inst)
+                return build(nullptr, nullptr);
+
+            const llvm::DominatorTree& dominators = point.facts->dominatorTree();
+            const std::optional<std::set<BlockEdge>> backEdges =
+                reducibleBackEdges(*point.inst->getFunction(), dominators);
+            const std::vector<const llvm::BasicBlock*> heads =
+                strictDominators(*point.inst->getParent(), dominators);
+            if (!backEdges || heads.empty())
+                return build(nullptr, nullptr);
+            if (point.budgetNodes == 0)
+                return build(heads.back(), &*backEdges);
+
+            // A farther dominator heads a larger region, so the heads that fit form a prefix of
+            // `heads`: binary search for its last element.
+            std::optional<ConstraintIR> best;
+            std::size_t low = 0;
+            std::size_t high = heads.size();
+            while (low < high)
+            {
+                const std::size_t middle = low + (high - low) / 2;
+                ConstraintIR candidate = build(heads[middle], &*backEdges);
+                if (candidate.nodes.size() <= point.budgetNodes)
+                {
+                    best = std::move(candidate);
+                    low = middle + 1;
+                }
+                else
+                {
+                    high = middle;
+                }
+            }
+            return best ? std::move(*best) : build(nullptr, nullptr);
         }
     } // namespace
 
