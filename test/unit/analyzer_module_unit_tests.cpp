@@ -1563,6 +1563,38 @@ namespace
                       "Z3 backend: -1 at 128 bits is negative (x == -1 && x > 0 is unsat)");
         return report.failures == 0;
     }
+
+    /// Z3 backend: two symbols are two solver variables, even when they print the same. The
+    /// memory model names every symbol of a variable `<name>@mem`, whatever its clobber.
+    bool testZ3SymbolsWithOneNameStayApart(TestReport& report)
+    {
+        using namespace ctrace::stack::analysis::smt;
+        ConstraintIR ir;
+        ir.symbols.push_back(SymbolInfo{.id = 1, .debugName = "x@mem", .sourceToken = 0});
+        ir.symbols.push_back(SymbolInfo{.id = 2, .debugName = "x@mem", .sourceToken = 0});
+        const auto add = [&](ExprNode node)
+        {
+            ir.nodes.push_back(node);
+            return static_cast<ExprId>(ir.nodes.size() - 1);
+        };
+        const ExprId before = add({.kind = ExprKind::Symbol, .symbol = 1, .bitWidth = 32});
+        const ExprId after = add({.kind = ExprKind::Symbol, .symbol = 2, .bitWidth = 32});
+        const ExprId zero = add({.kind = ExprKind::Constant, .constant = 0, .bitWidth = 32});
+        const ExprId five = add({.kind = ExprKind::Constant, .constant = 5, .bitWidth = 32});
+        ir.assertions.push_back(
+            add({.kind = ExprKind::Eq, .bitWidth = 1, .lhs = before, .rhs = zero}));
+        ir.assertions.push_back(
+            add({.kind = ExprKind::Eq, .bitWidth = 1, .lhs = after, .rhs = five}));
+
+        SmtQuery query;
+        query.ir = std::move(ir);
+        query.timeoutMs = 1000;
+        const SmtDecision decision =
+            SolverOrchestrator(SolverOrchestratorConfig{.primaryBackend = "z3"}).solve(query);
+        report.expect(decision.status == SmtStatus::Sat,
+                      "Z3 backend: two symbols with one name are two variables (x == 0, x' == 5)");
+        return report.failures == 0;
+    }
 #endif
 
     /// Tags of rule @p rule in the SARIF log @p sarif, or std::nullopt when the rule is absent.
@@ -1890,6 +1922,7 @@ int main(int argc, char** argv)
     (void)testSmtEncoderPathCondition(repoRoot, report);
 #ifdef CTRACE_STACK_ENABLE_Z3_BACKEND
     (void)testZ3WideNegativeConstant(report);
+    (void)testZ3SymbolsWithOneNameStayApart(report);
 #endif
     (void)testResourceModelConditions(report);
     (void)testOwnershipFactCollector(repoRoot, report);
