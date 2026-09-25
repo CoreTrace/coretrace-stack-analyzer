@@ -3242,11 +3242,13 @@ def check_sarif_rule_cwe_tags() -> bool:
                 ok = False
                 continue
             tags = next(
-                (r.get("properties", {}).get("tags") for r in rules if r.get("id") == "StackBufferOverflow"),
+                (r.get("properties", {}).get("tags", []) for r in rules if r.get("id") == "StackBufferOverflow"),
                 None,
             )
-            if tags != expected:
-                print(f"  ❌ {label}: StackBufferOverflow tags {tags}, expected {expected}")
+            # Only the CWE tags: a rule may carry others (the security tag).
+            cwe_tags = None if tags is None else [t for t in tags if t.startswith("external/cwe/")]
+            if cwe_tags != expected:
+                print(f"  ❌ {label}: StackBufferOverflow CWE tags {cwe_tags}, expected {expected}")
                 ok = False
     if ok:
         print("  ✅ SARIF rule CWE tags OK")

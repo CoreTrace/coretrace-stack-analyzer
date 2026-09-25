@@ -1297,15 +1297,23 @@ namespace
                                   diagnostic("StackBufferOverflow", "CWE-125"),
                                   diagnostic("CommandInjection.NonLiteralCommand", "CWE-78")};
 
+        // Only the CWE tags: a rule may carry others (the security tag).
+        const auto cweTags = [](const ctrace::stack::AnalysisResult& result, llvm::StringRef rule)
+        {
+            std::optional<std::vector<std::string>> tags =
+                sarifRuleTags(ctrace::stack::toSarif(result, "demo.c"), rule);
+            if (tags)
+                std::erase_if(*tags, [](const std::string& tag)
+                              { return !llvm::StringRef(tag).starts_with("external/cwe/"); });
+            return tags;
+        };
+
         const std::vector<std::string> both{"external/cwe/cwe-121", "external/cwe/cwe-125"};
-        report.expect(sarifRuleTags(ctrace::stack::toSarif(readFirst, "demo.c"),
-                                    "StackBufferOverflow") == both,
+        report.expect(cweTags(readFirst, "StackBufferOverflow") == both,
                       "SARIF: a rule lists every CWE of its diagnostics, sorted, once each");
-        report.expect(sarifRuleTags(ctrace::stack::toSarif(writeFirst, "demo.c"),
-                                    "StackBufferOverflow") == both,
+        report.expect(cweTags(writeFirst, "StackBufferOverflow") == both,
                       "SARIF: the CWE tags of a rule do not depend on diagnostic order");
-        report.expect(sarifRuleTags(ctrace::stack::toSarif(readFirst, "demo.c"),
-                                    "CommandInjection.NonLiteralCommand") ==
+        report.expect(cweTags(readFirst, "CommandInjection.NonLiteralCommand") ==
                           std::vector<std::string>{"external/cwe/cwe-078"},
                       "SARIF: CWE tags are zero-padded to three digits");
         return report.failures == 0;
