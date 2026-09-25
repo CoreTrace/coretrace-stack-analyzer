@@ -3220,6 +3220,33 @@ def check_diagnostic_cwe_coverage() -> bool:
     return ok
 
 
+def check_diagnostic_paths_follow_the_input() -> bool:
+    """
+    Every diagnostic and function names its file as the input was given, whether the rule
+    locates it through debug info (signed overflow: an absolute path) or not (an uninitialized
+    read: the input name). A relative input stays relative, an absolute one absolute.
+    """
+    print("=== Testing diagnostic paths follow the input ===")
+    relative = "test/integer-overflow/cross-tu-tricky-def.c"
+    ok = True
+    for label, given in (("relative input", relative), ("absolute input", str(Path(relative).resolve()))):
+        result = run_analyzer([given, "--format=json"])
+        try:
+            payload = json.loads(result.stdout or "")
+        except json.JSONDecodeError:
+            ok = fail_check(f"{label}: no JSON output", (result.stdout or "") + (result.stderr or ""))
+            continue
+        files = {d.get("location", {}).get("file", "") for d in payload.get("diagnostics", [])}
+        files |= {f.get("file", "") for f in payload.get("functions", [])}
+        rules = {d.get("ruleId") for d in payload.get("diagnostics", [])}
+        if files != {given} or "IntegerOverflow.SignedArithmetic" not in rules:
+            ok = fail_check(f"{label}: expected every file to be {given!r}, got {sorted(files)}")
+            continue
+        print(f"  ✅ {label}: {given}")
+    print()
+    return ok
+
+
 def check_sarif_rule_cwe_tags() -> bool:
     """
     A SARIF rule lists every CWE of its diagnostics in the run, whatever the order of the
@@ -3721,6 +3748,7 @@ def main() -> int:
         check_human_vs_json_parity,
         check_diagnostic_rule_coverage_regression,
         check_diagnostic_cwe_coverage,
+        check_diagnostic_paths_follow_the_input,
         check_sarif_rule_cwe_tags,
         check_sarif_security_severity,
     ]

@@ -604,18 +604,48 @@ buildCrossTUGlobalReadBeforeWriteSummaryIndex(const std::vector<LoadedInputModul
 
 static void accumulateSummary(DiagnosticSummary& total, const DiagnosticSummary& add);
 
+/// Spells the file of a result the same way whichever rule located it: the rules that go
+/// through debug info get the compiler's absolute path, the others the input as given. The
+/// input keeps the user's spelling; another file (a header) is relative to the working
+/// directory when below it, else unchanged.
+class ResultPathSpelling
+{
+  public:
+    explicit ResultPathSpelling(const std::string& inputFilename)
+        : input_(inputFilename), inputIdentity_(normalizePath(inputFilename)),
+          workingDirectory_(normalizePath(std::filesystem::current_path().string()))
+    {
+    }
+
+    std::string operator()(const std::string& path) const
+    {
+        if (path.empty())
+            return input_;
+        const std::string identity = normalizePath(path);
+        if (identity == inputIdentity_)
+            return input_;
+        if (!std::filesystem::path(path).is_absolute())
+            return path;
+        const std::filesystem::path relative =
+            std::filesystem::path(identity).lexically_relative(workingDirectory_);
+        if (!relative.empty() && *relative.begin() != "..")
+            return relative.generic_string();
+        return path;
+    }
+
+  private:
+    std::string input_;
+    std::string inputIdentity_;
+    std::filesystem::path workingDirectory_;
+};
+
 static void stampResultFilePaths(AnalysisResult& result, const std::string& inputFilename)
 {
+    const ResultPathSpelling spell(inputFilename);
     for (auto& f : result.functions)
-    {
-        if (f.filePath.empty())
-            f.filePath = inputFilename;
-    }
+        f.filePath = spell(f.filePath);
     for (auto& d : result.diagnostics)
-    {
-        if (d.filePath.empty())
-            d.filePath = inputFilename;
-    }
+        d.filePath = spell(d.filePath);
 }
 
 static std::string noFunctionMessage(const AnalysisResult& result, const std::string& inputFilename,
