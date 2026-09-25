@@ -60,12 +60,12 @@ namespace ctrace::stack::analysis::smt
         ///
         /// When SMT is off for this rule, answers Inconclusive without calling @p encode: the
         /// encoding, and for path-sensitive queries MemorySSA, is only paid for when a solver
-        /// will read it.
-        template <typename Encode> SmtFeasibility evaluateQuery(Encode&& encode) const
+        /// will read it. @p encode is taken by value: the callers' lambdas capture by reference.
+        template <typename Encode> SmtFeasibility evaluateQuery(Encode encode) const
         {
             if (!orchestrator_)
                 return SmtFeasibility::Inconclusive;
-            return solve(std::forward<Encode>(encode)());
+            return solve(encode());
         }
 
       private:
