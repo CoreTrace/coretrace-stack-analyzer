@@ -261,7 +261,7 @@ This is required to track precision/performance tradeoffs.
 - Integrate selected stack-buffer and size-arg ambiguous diagnostics.
 - Tune budgets per rule category.
 
-## Current Implementation Status (March 2026)
+## Current Implementation Status (September 2026)
 
 Implemented in codebase:
 
@@ -271,12 +271,21 @@ Implemented in codebase:
 4. Recursion rule onboarding using a dedicated encoder (`LLVM range state -> ConstraintIR`).
 5. Conservative fallback policy for recursion (`Unknown`/`Timeout`/`Error` never suppresses baseline diagnostics).
 6. Optional Z3 backend integration with CMake auto-detection and safe fallback when unavailable.
+7. Path-sensitive queries for integer-overflow, size-minus-k, stack-buffer and oob-read: the
+   reachability condition of the query point over the CFG without back edges, from the farthest
+   dominator within the node budget; loads encoded through their MemorySSA clobber
+   (`FunctionFacts::clobberingAccess`); wrapping semantics, no `nsw`/`nuw` assumption. A query
+   suppresses a report only at a point proven reachable, so a defect in code that never runs
+   stays reported, as the default pass reports it. Stack-buffer, size-minus-k and oob-read
+   query the index or size the access really uses, casts included.
+8. Queries are built only when SMT is on for the rule, and asked even when no range is known.
+9. CI builds and exercises the Z3 backend.
 
 Planned next:
 
-1. Extend encoder coverage beyond interval-derived constraints for richer path conditions.
+1. Recursion still encodes interval-derived constraints only; path-sensitive base-case queries
+   would make `unsat` add diagnostics, which is a separate decision.
 2. Add query cache and telemetry counters (query count/status/latency).
-3. Onboard SMT to additional high-FP rules (integer overflow, size-minus-k, ambiguous stack buffer cases).
 
 ## Risk Register
 
