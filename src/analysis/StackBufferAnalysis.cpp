@@ -616,6 +616,8 @@ namespace ctrace::stack::analysis
 
             const long long boundValue = boundConstant.getSExtValue();
 
+            // The body never sees the counter equal to the bound: its last value there is one
+            // step short of it.
             IntRange out;
             if (stepValue > 0)
             {
@@ -627,7 +629,7 @@ namespace ctrace::stack::analysis
                 out.hasLower = true;
                 out.lower = initValue;
                 out.hasUpper = true;
-                out.upper = boundValue;
+                out.upper = boundValue - stepValue;
                 return out;
             }
 
@@ -638,7 +640,7 @@ namespace ctrace::stack::analysis
             if (delta % stepMagnitude != 0)
                 return std::nullopt;
             out.hasLower = true;
-            out.lower = boundValue;
+            out.lower = boundValue + stepMagnitude;
             out.hasUpper = true;
             out.upper = initValue;
             return out;

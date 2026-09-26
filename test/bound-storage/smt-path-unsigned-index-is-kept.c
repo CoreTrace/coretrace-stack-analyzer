@@ -23,5 +23,7 @@ void unsigned_index(int i, int n)
 // at line 20, column 22
 // [ !!Warn ] potential stack buffer overflow on variable 'buf' (size 16)
 // ↳ alias path: buf
-// ↳ index variable may go up to 20 (array last valid index: 15)
+// ↳ index variable may go up to 4294967295 (array last valid index: 15)
 // ↳ (this is a write access)
+
+// strict-expectation-details: true
