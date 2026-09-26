@@ -170,10 +170,15 @@ def is_merge_commit(commit: Commit) -> bool:
     return subject.startswith("Merge ") or subject.startswith("Merge pull request")
 
 
+def is_git_revert(commit: Commit) -> bool:
+    # The subject `git revert` and GitHub's Revert button write; the commit-msg hook accepts it.
+    return commit.subject.startswith("Revert ")
+
+
 def validate_commits(commits: Iterable[Commit]) -> List[InvalidCommit]:
     invalid: List[InvalidCommit] = []
     for commit in commits:
-        if is_merge_commit(commit):
+        if is_merge_commit(commit) or is_git_revert(commit):
             continue
         if len(commit.subject) > MAX_SUBJECT_LEN:
             invalid.append(
