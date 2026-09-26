@@ -13,5 +13,9 @@ jobs:
         with:
           fetch-depth: 0
       - name: Validate commit messages
+        # Without a base, the checker falls back to the branch's upstream, which
+        # actions/checkout points at HEAD: it would check no commit (#145).
+        env:
+          BASE_BRANCH: origin/main
         run: |
           python3 scripts/ci/commit_checker.py

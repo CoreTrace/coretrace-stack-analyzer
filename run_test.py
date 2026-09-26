@@ -3595,6 +3595,93 @@ def check_ci_script_sarif_chunks() -> bool:
     return ok
 
 
+COMMIT_CHECKER = Path(__file__).resolve().parent / "scripts" / "ci" / "commit_checker.py"
+COMMIT_CHECK_WORKFLOW = Path(__file__).resolve().parent / ".github" / "workflows" / "commit-check.yml"
+
+
+def check_ci_commit_checker_range() -> bool:
+    """
+    The Commit conventions workflow must check the commits of the pushed branch. actions/checkout
+    makes origin/<branch> the upstream of the branch it checks out, so commit_checker.py, which
+    falls back to the upstream, would diff HEAD against itself and check nothing (#145). The
+    check replays that checkout in a scratch repository and runs the checker with the
+    workflow's BASE_BRANCH: a branch with bad subjects must fail and list them, a branch of
+    conventional, revert and merge commits must pass after checking a non-empty range.
+    """
+    print("=== Testing CI commit checker range ===")
+    step = COMMIT_CHECK_WORKFLOW.read_text().split("- name: Validate commit messages", 1)[-1]
+    base = re.search(r"^\s+BASE_BRANCH: (\S+)\s*$", step, re.MULTILINE)
+    long_subject = "fix: " + "x" * 90
+    ok = True
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+
+        def git(cwd: Path, *args: str) -> str:
+            config = ["-c", "user.name=ci", "-c", "user.email=ci@example.com",
+                      "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null",
+                      "-c", "branch.autoSetupMerge=true", "-c", "init.defaultBranch=main"]
+            result = subprocess.run(["git", *config, *args], cwd=cwd, check=True,
+                                    capture_output=True, text=True)
+            return result.stdout.strip()
+
+        origin = root / "origin.git"
+        work = root / "work"
+        git(root, "init", "-q", "--bare", str(origin))
+        git(root, "clone", "-q", str(origin), str(work))
+        git(work, "commit", "-q", "--allow-empty", "-m", "chore: start")
+        git(work, "push", "-q", "origin", "HEAD:main")
+
+        for branch, subjects in (
+            ("bad", ["fix: fine", "update stuff", long_subject]),
+            ("good", ["fix: keep the range", 'Revert "fix: keep the range"']),
+        ):
+            git(work, "checkout", "-q", "-b", branch, "origin/main")
+            for subject in subjects:
+                git(work, "commit", "-q", "--allow-empty", "-m", subject)
+        # main moves on, and good merges it back.
+        git(work, "checkout", "-q", "-B", "main", "origin/main")
+        git(work, "commit", "-q", "--allow-empty", "-m", "docs: later")
+        git(work, "push", "-q", "origin", "main")
+        git(work, "checkout", "-q", "good")
+        git(work, "merge", "-q", "--no-ff", "main", "-m", "Merge branch 'main' into good")
+        git(work, "push", "-q", "origin", "bad", "good")
+
+        def run_as_ci(branch: str) -> tuple[subprocess.CompletedProcess, int]:
+            ci = root / f"ci-{branch}"
+            git(root, "clone", "-q", "--no-checkout", str(origin), str(ci))
+            # What actions/checkout runs: the branch is recreated on, and tracks, its remote ref.
+            git(ci, "checkout", "-q", "--force", "-B", branch, f"refs/remotes/origin/{branch}")
+            env = {k: v for k, v in os.environ.items()
+                   if not k.startswith("GITHUB_") and k not in ("CHECK_RANGE", "BASE_BRANCH")}
+            env.update(GITHUB_EVENT_NAME="push", GITHUB_SHA=git(ci, "rev-parse", "HEAD"))
+            if base:
+                env["BASE_BRANCH"] = base.group(1)
+            result = subprocess.run([sys.executable, str(COMMIT_CHECKER)], cwd=ci, env=env,
+                                    capture_output=True, text=True)
+            checked = 0
+            for line in result.stdout.splitlines():
+                if line.startswith("Commit check range: "):
+                    checked = int(git(ci, "rev-list", "--count", line.split(": ", 1)[1]))
+            return result, checked
+
+        result, checked = run_as_ci("bad")
+        if result.returncode != 1 or "update stuff" not in result.stderr or long_subject not in result.stderr:
+            print(f"  ❌ a branch with bad subjects exits {result.returncode} after checking "
+                  f"{checked} commit(s), expected 1 and both subjects listed")
+            ok = False
+
+        result, checked = run_as_ci("good")
+        if result.returncode != 0 or checked == 0:
+            print(f"  ❌ conventional, revert and merge commits exit {result.returncode} after "
+                  f"checking {checked} commit(s), expected 0 and a non-empty range")
+            print("     " + result.stderr.strip().replace("\n", "\n     "))
+            ok = False
+    if ok:
+        print("  ✅ CI commit checker range OK")
+    print()
+    return ok
+
+
 def check_unresolved_call_max_stack() -> bool:
     """
     A function containing an unresolved call (indirect, or to an external
@@ -4024,6 +4111,7 @@ def main() -> int:
         check_ci_script_sarif_merge,
         check_ci_script_sarif_rule_join,
         check_ci_script_sarif_chunks,
+        check_ci_commit_checker_range,
     ]
     # Env-mutating check — must run outside the parallel pool.
     sequential_checks = [
