@@ -3256,6 +3256,41 @@ def check_diagnostic_paths_follow_the_input() -> bool:
     return ok
 
 
+def check_const_param_abi_split_struct() -> bool:
+    """
+    ConstParameterNotModified names the same source parameters whatever the ABI does with a
+    struct taken by value: x86-64 System V passes a 16-byte struct as two IR parameters
+    (name.coerce0, name.coerce1), AArch64 as one. Both targets must match what the source says.
+    """
+    print("=== Testing const-parameter findings across a split by-value struct ===")
+    source = RUN_CONFIG.test_dir / "pointer_reference-const_correctness/abi-split-parameter.cpp"
+    expected = {("p", "read_only_pointer"), ("p", "in_lambda")}
+    ok = True
+    for target in ("x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"):
+        result = run_analyzer([str(source), "--format=json", f"--compile-arg=--target={target}"])
+        try:
+            diagnostics = json.loads(result.stdout or "").get("diagnostics", [])
+        except json.JSONDecodeError:
+            print(f"  ❌ {target}: no JSON output")
+            ok = False
+            continue
+        found = set()
+        for d in diagnostics:
+            if not str(d.get("ruleId", "")).startswith("ConstParameterNotModified."):
+                continue
+            message = d.get("details", {}).get("message", "")
+            match = re.search(r"parameter '([^']+)' in function '([A-Za-z_]\w*)", message)
+            if match:
+                found.add((match.group(1), match.group(2)))
+        if found == expected:
+            print(f"  ✅ {target}: {sorted(found)}")
+        else:
+            print(f"  ❌ {target}: {sorted(found)}, expected {sorted(expected)}")
+            ok = False
+    print()
+    return ok
+
+
 def check_sarif_rule_cwe_tags() -> bool:
     """
     A SARIF rule lists every CWE of its diagnostics in the run, whatever the order of the
@@ -3949,6 +3984,7 @@ def main() -> int:
         check_diagnostic_rule_coverage_regression,
         check_diagnostic_cwe_coverage,
         check_diagnostic_paths_follow_the_input,
+        check_const_param_abi_split_struct,
         check_sarif_rule_cwe_tags,
         check_sarif_security_severity,
         check_ci_script_sarif_merge,
