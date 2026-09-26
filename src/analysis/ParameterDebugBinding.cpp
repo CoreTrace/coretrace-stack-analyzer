@@ -15,6 +15,31 @@
 
 namespace ctrace::stack::analysis
 {
+    const llvm::DILocalVariable* spilledParameter(const llvm::Argument& Arg)
+    {
+        for (const llvm::User* user : Arg.users())
+        {
+            const auto* store = llvm::dyn_cast<llvm::StoreInst>(user);
+            if (!store || store->getValueOperand() != &Arg)
+                continue;
+            auto* slot = const_cast<llvm::Value*>(
+                store->getPointerOperand()->stripInBoundsConstantOffsets());
+            if (!llvm::isa<llvm::AllocaInst>(slot))
+                continue;
+            for (llvm::DbgVariableRecord* dvr : llvm::findDVRDeclares(slot))
+            {
+                if (dvr && dvr->getVariable() && dvr->getVariable()->isParameter())
+                    return dvr->getVariable();
+            }
+            for (llvm::DbgDeclareInst* ddi : llvm::findDbgDeclares(slot))
+            {
+                if (ddi && ddi->getVariable() && ddi->getVariable()->isParameter())
+                    return ddi->getVariable();
+            }
+        }
+        return nullptr;
+    }
+
     namespace
     {
         enum class BindingOrigin : std::uint8_t
@@ -48,37 +73,6 @@ namespace ctrace::stack::analysis
             bool argMatchesExpected = false;
             std::uint8_t paddingTail[7] = {};
         };
-
-        /// The parameter declared on the slot that -O0 code spills @p Arg to, or nullptr.
-        ///
-        /// Clang stores each argument into an alloca that carries the parameter's declaration.
-        /// A struct that the ABI splits into several IR arguments (x86-64 System V passes a
-        /// 16-byte struct as name.coerce0 and name.coerce1) has each part stored into a field
-        /// of that one alloca, so every part leads back to its source parameter.
-        static const llvm::DILocalVariable* spilledParameter(const llvm::Argument& Arg)
-        {
-            for (const llvm::User* user : Arg.users())
-            {
-                const auto* store = llvm::dyn_cast<llvm::StoreInst>(user);
-                if (!store || store->getValueOperand() != &Arg)
-                    continue;
-                auto* slot = const_cast<llvm::Value*>(
-                    store->getPointerOperand()->stripInBoundsConstantOffsets());
-                if (!llvm::isa<llvm::AllocaInst>(slot))
-                    continue;
-                for (llvm::DbgVariableRecord* dvr : llvm::findDVRDeclares(slot))
-                {
-                    if (dvr && dvr->getVariable() && dvr->getVariable()->isParameter())
-                        return dvr->getVariable();
-                }
-                for (llvm::DbgDeclareInst* ddi : llvm::findDbgDeclares(slot))
-                {
-                    if (ddi && ddi->getVariable() && ddi->getVariable()->isParameter())
-                        return ddi->getVariable();
-                }
-            }
-            return nullptr;
-        }
 
         static DebugParamLayout buildDebugParamLayout(const llvm::Function& F,
                                                       const llvm::Argument& Arg,

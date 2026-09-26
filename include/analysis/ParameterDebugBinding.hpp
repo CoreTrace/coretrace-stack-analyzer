@@ -7,6 +7,7 @@
 namespace llvm
 {
     class Argument;
+    class DILocalVariable;
     class DIType;
     class Function;
 } // namespace llvm
@@ -32,6 +33,14 @@ namespace ctrace::stack::analysis
         // Keep layout explicit to avoid compiler-inserted tail padding under -Wpadded.
         std::uint8_t paddingTail[5] = {};
     };
+
+    /// The parameter declared on the slot that -O0 code spills @p Arg to, or nullptr.
+    ///
+    /// Clang stores each argument into an alloca that carries the parameter's declaration.
+    /// A struct that the ABI splits into several IR arguments (x86-64 System V passes a
+    /// 16-byte struct as name.coerce0 and name.coerce1) has each part stored into a field
+    /// of that one alloca, so every part leads back to its source parameter.
+    const llvm::DILocalVariable* spilledParameter(const llvm::Argument& Arg);
 
     ParameterDebugBinding resolveParameterDebugBinding(const llvm::Function& F,
                                                        const llvm::Argument& Arg);

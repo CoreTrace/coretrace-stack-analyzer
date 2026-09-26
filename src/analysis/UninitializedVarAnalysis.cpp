@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "analysis/UninitializedVarAnalysis.hpp"
+#include "analysis/ParameterDebugBinding.hpp"
 #include "mangle.hpp"
 
 #include <algorithm>
@@ -1525,6 +1526,18 @@ namespace ctrace::stack::analysis
             const llvm::DISubprogram* SP = callee.getSubprogram();
             if (!SP)
                 return false;
+
+            // The argument spilled to the slot that declares the object pointer is `this`,
+            // whatever the ABI did to the parameters around it. Position below is the fallback.
+            for (const llvm::Argument& arg : callee.args())
+            {
+                if (const llvm::DILocalVariable* var = spilledParameter(arg);
+                    var && var->isObjectPointer())
+                {
+                    outObjectArgIdx = arg.getArgNo();
+                    return true;
+                }
+            }
 
             const auto* subroutineType =
                 llvm::dyn_cast_or_null<llvm::DISubroutineType>(SP->getType());
