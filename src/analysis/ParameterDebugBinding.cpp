@@ -10,6 +10,7 @@
 #include <llvm/IR/DebugInfo.h>
 #include <llvm/IR/DebugInfoMetadata.h>
 #include <llvm/IR/Function.h>
+#include <llvm/IR/Instructions.h>
 #include <llvm/IR/IntrinsicInst.h>
 
 namespace ctrace::stack::analysis
@@ -48,6 +49,37 @@ namespace ctrace::stack::analysis
             std::uint8_t paddingTail[7] = {};
         };
 
+        /// The parameter declared on the slot that -O0 code spills @p Arg to, or nullptr.
+        ///
+        /// Clang stores each argument into an alloca that carries the parameter's declaration.
+        /// A struct that the ABI splits into several IR arguments (x86-64 System V passes a
+        /// 16-byte struct as name.coerce0 and name.coerce1) has each part stored into a field
+        /// of that one alloca, so every part leads back to its source parameter.
+        static const llvm::DILocalVariable* spilledParameter(const llvm::Argument& Arg)
+        {
+            for (const llvm::User* user : Arg.users())
+            {
+                const auto* store = llvm::dyn_cast<llvm::StoreInst>(user);
+                if (!store || store->getValueOperand() != &Arg)
+                    continue;
+                auto* slot = const_cast<llvm::Value*>(
+                    store->getPointerOperand()->stripInBoundsConstantOffsets());
+                if (!llvm::isa<llvm::AllocaInst>(slot))
+                    continue;
+                for (llvm::DbgVariableRecord* dvr : llvm::findDVRDeclares(slot))
+                {
+                    if (dvr && dvr->getVariable() && dvr->getVariable()->isParameter())
+                        return dvr->getVariable();
+                }
+                for (llvm::DbgDeclareInst* ddi : llvm::findDbgDeclares(slot))
+                {
+                    if (ddi && ddi->getVariable() && ddi->getVariable()->isParameter())
+                        return ddi->getVariable();
+                }
+            }
+            return nullptr;
+        }
+
         static DebugParamLayout buildDebugParamLayout(const llvm::Function& F,
                                                       const llvm::Argument& Arg,
                                                       const llvm::DISubprogram* SP)
@@ -65,6 +97,16 @@ namespace ctrace::stack::analysis
             const auto typeArray = subroutineType->getTypeArray();
             if (typeArray.size() < 2)
                 return layout; // [0] return type, [1..] params.
+
+            // The spill slot names the source parameter whatever the ABI did to the list; the
+            // position below only serves arguments that are not spilled, like a hidden sret.
+            if (const llvm::DILocalVariable* spilled = spilledParameter(Arg);
+                spilled && spilled->getArg() != 0 && spilled->getArg() < typeArray.size())
+            {
+                layout.debugArgIndex = spilled->getArg();
+                layout.hasCanonicalDebugIndex = true;
+                return layout;
+            }
 
             const unsigned irArgCount = static_cast<unsigned>(F.arg_size());
             const unsigned debugParamCount = static_cast<unsigned>(typeArray.size() - 1);
