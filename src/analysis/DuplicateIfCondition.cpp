@@ -704,6 +704,10 @@ namespace ctrace::stack::analysis
                 auto* gb = llvm::dyn_cast<llvm::GEPOperator>(b);
                 if (!gb)
                     return false;
+                // The same indices into different types reach different fields: s->a[1] is
+                // `gep [4 x i32], s, 0, 1` and s->b is `gep %struct.S, s, 0, 1`.
+                if (ga->getSourceElementType() != gb->getSourceElementType())
+                    return false;
                 if (ga->getNumIndices() != gb->getNumIndices())
                     return false;
                 if (!valuesEquivalent(ga->getPointerOperand()->stripPointerCasts(),
@@ -718,7 +722,10 @@ namespace ctrace::stack::analysis
                     auto* cb = llvm::dyn_cast<llvm::ConstantInt>(itB->get());
                     if (!ca || !cb)
                         return false;
-                    if (ca->getValue() != cb->getValue())
+                    // Indices are signed, and their widths may differ: compare them
+                    // sign-extended to the wider one.
+                    const unsigned width = std::max(ca->getBitWidth(), cb->getBitWidth());
+                    if (ca->getValue().sext(width) != cb->getValue().sext(width))
                         return false;
                 }
 

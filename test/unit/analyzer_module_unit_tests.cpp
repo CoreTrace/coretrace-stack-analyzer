@@ -2,6 +2,7 @@
 #include "StackUsageAnalyzer.hpp"
 #include "app/AnalyzerApp.hpp"
 #include "cli/ArgParser.hpp"
+#include "analysis/DuplicateIfCondition.hpp"
 #include "analysis/FunctionFacts.hpp"
 #include "analysis/InputPipeline.hpp"
 #include "analysis/IntRanges.hpp"
@@ -31,6 +32,7 @@
 #include <vector>
 
 #include <llvm/Analysis/MemorySSA.h>
+#include <llvm/IR/Constants.h>
 #include <llvm/IR/Function.h>
 #include <llvm/IR/InstIterator.h>
 #include <llvm/IR/Instruction.h>
@@ -1597,6 +1599,49 @@ namespace
     }
 #endif
 
+    /// Duplicate-if: GEP indices are compared as signed values, whatever their width. A C
+    /// frontend uses one width per element type; IR from elsewhere may not.
+    bool testDuplicateIfIndexWidths(const std::filesystem::path& repoRoot, TestReport& report)
+    {
+        using namespace ctrace::stack::analysis;
+        const ctrace::stack::AnalysisConfig config;
+        LoadedModule loaded;
+        std::string loadError;
+        if (!loadModuleFromSource(repoRoot / "test/unit/duplicate_if_input.c", config, loaded,
+                                  loadError))
+        {
+            report.expect(false,
+                          "duplicate-if index widths setup: failed to load module: " + loadError);
+            return false;
+        }
+
+        const auto analyzeAll = [&loaded]
+        {
+            return analyzeDuplicateIfConditions(*loaded.module,
+                                                [](const llvm::Function&) { return true; });
+        };
+        report.expect(analyzeAll().size() == 1,
+                      "duplicate-if: p[-1] tested twice is a duplicate condition");
+
+        std::vector<llvm::GetElementPtrInst*> geps;
+        for (llvm::Instruction& inst :
+             llvm::instructions(*loaded.module->getFunction("same_element_twice")))
+        {
+            if (auto* gep = llvm::dyn_cast<llvm::GetElementPtrInst>(&inst))
+                geps.push_back(gep);
+        }
+        report.expect(geps.size() == 2, "duplicate-if: each condition indexes p once");
+        if (geps.size() != 2)
+            return false;
+
+        // i64 -1 becomes i32 -1: the same element, but not the same APInt word.
+        geps[1]->setOperand(1, llvm::ConstantInt::getSigned(
+                                   llvm::Type::getInt32Ty(loaded.module->getContext()), -1));
+        report.expect(analyzeAll().size() == 1,
+                      "duplicate-if: the same index as i64 and as i32 is the same element");
+        return report.failures == 0;
+    }
+
     /// ProgramPointRanges: an unsigned comparison bounds the unsigned reading of a value. The
     /// signed reading keeps that bound only where the two readings agree.
     bool testProgramPointRangesUnsignedReadings(const std::filesystem::path& repoRoot,
@@ -1994,6 +2039,7 @@ int main(int argc, char** argv)
     (void)testZ3WideNegativeConstant(report);
     (void)testZ3SymbolsWithOneNameStayApart(report);
 #endif
+    (void)testDuplicateIfIndexWidths(repoRoot, report);
     (void)testResourceModelConditions(report);
     (void)testOwnershipFactCollector(repoRoot, report);
     (void)testOwnershipCollectorExceptions(repoRoot, report);
