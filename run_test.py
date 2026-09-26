@@ -3291,6 +3291,39 @@ def check_const_param_abi_split_struct() -> bool:
     return ok
 
 
+def check_uninitialized_receiver_abi_split_struct() -> bool:
+    """
+    A method call marks its receiver as constructed whatever the ABI does with a struct taken by
+    value: x86-64 System V passes a 16-byte struct as two IR parameters after `this`, AArch64 as
+    one. Neither target may report the receiver as never initialized.
+    """
+    print("=== Testing the method receiver across a split by-value struct ===")
+    source = RUN_CONFIG.test_dir / "uninitialized-variable/abi-split-method-receiver.cpp"
+    ok = True
+    for target in ("x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"):
+        result = run_analyzer([str(source), "--format=json", f"--compile-arg=--target={target}"])
+        try:
+            diagnostics = json.loads(result.stdout or "").get("diagnostics", [])
+        except json.JSONDecodeError:
+            print(f"  ❌ {target}: no JSON output")
+            ok = False
+            continue
+        reported = sorted(
+            {
+                str(d.get("location", {}).get("function", ""))
+                for d in diagnostics
+                if str(d.get("ruleId", "")).startswith("UninitializedLocal")
+            }
+        )
+        if not reported:
+            print(f"  ✅ {target}: no uninitialized-local finding")
+        else:
+            print(f"  ❌ {target}: uninitialized-local findings in {reported}")
+            ok = False
+    print()
+    return ok
+
+
 def check_sarif_rule_cwe_tags() -> bool:
     """
     A SARIF rule lists every CWE of its diagnostics in the run, whatever the order of the
@@ -3985,6 +4018,7 @@ def main() -> int:
         check_diagnostic_cwe_coverage,
         check_diagnostic_paths_follow_the_input,
         check_const_param_abi_split_struct,
+        check_uninitialized_receiver_abi_split_struct,
         check_sarif_rule_cwe_tags,
         check_sarif_security_severity,
         check_ci_script_sarif_merge,
