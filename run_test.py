@@ -36,6 +36,11 @@ DEFAULT_ANALYZER_TIMEOUT = 300.0
 # mistaken for an ordinary failure.
 ANALYZER_TIMEOUT_RETURNCODE = -9001
 
+# The smt-z3 fixture pass checks what the solver can prove, not how fast it proves it. At the
+# analyzer's default budget of 50 ms per query, a proof that takes 7 ms on a laptop ran out of
+# time on a loaded CI runner (#144), and the fixture kept a report the solver removes.
+SMT_FIXTURE_TIMEOUT_MS = 1000
+
 
 @dataclass
 class TestRunConfig:
@@ -3863,6 +3868,7 @@ def check_file(c_path: Path):
                 "--smt-backend=z3",
                 "--smt-mode=single",
                 f"--smt-rules={smt_rules_csv}",
+                f"--smt-timeout-ms={SMT_FIXTURE_TIMEOUT_MS}",
             ),
         )
         smt_ok, smt_total, smt_passed, smt_lines = evaluate_pass("smt-z3", smt_output)
