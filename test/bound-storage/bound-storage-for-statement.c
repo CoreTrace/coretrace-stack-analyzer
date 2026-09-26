@@ -39,7 +39,7 @@ int main(void)
 // at line 12, column 17
 // [ !!Warn ] potential stack buffer overflow on variable 'test' (size 10)
 // ↳ alias path: test
-// ↳ index variable may go up to 11 (array last valid index: 9)
+// ↳ index variable may go up to 10 (array last valid index: 9)
 // ↳ (this is a write access)
 
 // at line 22, column 16
@@ -56,3 +56,5 @@ int main(void)
 
 // [!Info!] multiple stores to stack buffer 'test' in this function (4 store instruction(s), 4 distinct index expression(s))
 // [!Info!] stores use different index expressions; verify indices are correct and non-overlapping
+
+// strict-expectation-details: true

@@ -32,7 +32,7 @@ int main(void)
     // at line 37, column 17
     // [ !!Warn ] potential stack buffer overflow on variable 'test' (size 10)
     // ↳ alias path: test
-    // ↳ index variable may go up to 11 (array last valid index: 9)
+    // ↳ index variable may go up to 10 (array last valid index: 9)
     // ↳ (this is a write access)
     for (int i = 0; i != 11; ++i)
         test[i] = 'a';
@@ -63,4 +63,11 @@ int main(void)
 
 // at line 13, column 5
 // [ !!Warn ] potential UB: invalid base reconstruction via offsetof/container_of
+// ↳ variable: 'test'
+// ↳ source member: base
+// ↳ offset applied: +14 bytes
+// ↳ target type: ptr
 // [!!!Error] derived pointer points OUTSIDE the valid object range
+// ↳ (this will cause undefined behavior if dereferenced)
+
+// strict-expectation-details: true
