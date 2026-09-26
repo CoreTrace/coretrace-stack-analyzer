@@ -1642,6 +1642,75 @@ namespace
         return report.failures == 0;
     }
 
+    /// ProgramPointRanges: an unsigned comparison bounds the unsigned reading of a value. The
+    /// signed reading keeps that bound only where the two readings agree.
+    bool testProgramPointRangesUnsignedReadings(const std::filesystem::path& repoRoot,
+                                                TestReport& report)
+    {
+        using namespace ctrace::stack::analysis;
+        const ctrace::stack::AnalysisConfig config;
+        LoadedModule loaded;
+        std::string loadError;
+        if (!loadModuleFromSource(repoRoot / "test/unit/int_range_unsigned_input.c", config, loaded,
+                                  loadError))
+        {
+            report.expect(false, "unsigned readings setup: failed to load module: " + loadError);
+            return false;
+        }
+
+        // The range of the index at the function's array access. The index is a cast of a
+        // load, and the loaded slot is the key.
+        const auto rangeAtAccess = [&loaded](const char* name,
+                                             IntReading reading) -> std::optional<IntRange>
+        {
+            llvm::Function* fn = loaded.module->getFunction(name);
+            if (!fn)
+                return std::nullopt;
+            for (llvm::Instruction& inst : llvm::instructions(*fn))
+            {
+                const auto* gep = llvm::dyn_cast<llvm::GetElementPtrInst>(&inst);
+                const auto* cast =
+                    gep ? llvm::dyn_cast<llvm::CastInst>(gep->getOperand(gep->getNumOperands() - 1))
+                        : nullptr;
+                const auto* load =
+                    cast ? llvm::dyn_cast<llvm::LoadInst>(cast->getOperand(0)) : nullptr;
+                if (!load)
+                    continue;
+                const FunctionFacts facts(*fn);
+                const ProgramPointRanges ranges(*fn, facts);
+                return ranges.at(load->getPointerOperand(), *gep, reading);
+            }
+            return std::nullopt;
+        };
+        const auto is = [](const std::optional<IntRange>& r, std::optional<long long> lower,
+                           std::optional<long long> upper)
+        {
+            return r && r->hasLower == lower.has_value() && r->hasUpper == upper.has_value() &&
+                   (!lower || r->lower == *lower) && (!upper || r->upper == *upper);
+        };
+        const auto unbounded = [](const std::optional<IntRange>& r)
+        { return !r || (!r->hasLower && !r->hasUpper); };
+
+        report.expect(is(rangeAtAccess("ugt_guard", IntReading::Signed), -9, 15),
+                      "ProgramPointRanges: under (unsigned)i > 10u, i > -10 && i < 16 give "
+                      "i in [-9, 15]");
+        report.expect(is(rangeAtAccess("ult_guard", IntReading::Signed), 0, 15),
+                      "ProgramPointRanges: (unsigned)i < 16u puts i in [0, 15]");
+        report.expect(unbounded(rangeAtAccess("wide_ule_guard", IntReading::Signed)),
+                      "ProgramPointRanges: (unsigned)i <= 0x80000000u gives no signed bound");
+        report.expect(is(rangeAtAccess("unsigned_index", IntReading::Unsigned), 21, std::nullopt),
+                      "ProgramPointRanges: u > 20u puts the unsigned reading of u at 21 or more");
+        report.expect(unbounded(rangeAtAccess("unsigned_index", IntReading::Signed)),
+                      "ProgramPointRanges: u > 20u gives no bound on the signed reading of u");
+        report.expect(is(rangeAtAccess("signed_guard_unsigned_index", IntReading::Unsigned), 21,
+                         std::nullopt),
+                      "ProgramPointRanges: (int)u > 20 also bounds the unsigned reading of u");
+        report.expect(is(rangeAtAccess("unsigned_read_of_signed_guard", IntReading::Unsigned), 0,
+                         4294967295LL),
+                      "ProgramPointRanges: under i <= 20, (unsigned)i may be any 32-bit value");
+        return report.failures == 0;
+    }
+
     /// Tags of rule @p rule in the SARIF log @p sarif, or std::nullopt when the rule is absent.
     std::optional<std::vector<std::string>> sarifRuleTags(const std::string& sarif,
                                                           llvm::StringRef rule)
@@ -1961,6 +2030,7 @@ int main(int argc, char** argv)
     (void)testAssumeExternalFrameReplacesUnknown(repoRoot, report);
     (void)testUninitializedFixpointBudgetIsExplicit(repoRoot, report);
     (void)testProgramPointRanges(repoRoot, report);
+    (void)testProgramPointRangesUnsignedReadings(repoRoot, report);
     (void)testSmtEvaluatorEncodesLazily(report);
     (void)testFunctionFactsClobberingAccess(repoRoot, report);
     (void)testSmtEncoderMemoryModel(repoRoot, report);

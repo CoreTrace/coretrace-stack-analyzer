@@ -47,7 +47,8 @@ namespace ctrace::stack::analysis
         }
 
         /// The bound on one operand of `icmp pred V, C` when the comparison evaluates to
-        /// @p holds. NE yields nothing; its negation (EQ) yields the point range.
+        /// @p holds, on the reading of V the predicate uses: unsigned for an unsigned
+        /// predicate. NE yields nothing; its negation (EQ) yields the point range.
         std::optional<std::pair<const llvm::Value*, IntRange>>
         boundFromComparison(const llvm::ICmpInst& icmp, bool holds)
         {
@@ -114,6 +115,51 @@ namespace ctrace::stack::analysis
             if (upper)
                 out.upper = *bound;
             return std::make_pair(V, out);
+        }
+
+        /// Width of the integer @p key stands for: its type, or the type a slot holds.
+        unsigned integerWidth(const llvm::Value* key)
+        {
+            const llvm::Type* type = key->getType();
+            if (const auto* slot = llvm::dyn_cast<llvm::AllocaInst>(key))
+                type = slot->getAllocatedType();
+            const auto* intType = llvm::dyn_cast<llvm::IntegerType>(type);
+            return intType ? intType->getBitWidth() : 0;
+        }
+
+        /// The signed reading of @p bits-wide values whose unsigned reading lies in @p range:
+        /// the same bounds when all of them are below the sign bit, nothing otherwise.
+        std::optional<IntRange> signedFromUnsigned(IntRange range, unsigned bits)
+        {
+            if (bits == 0 || !range.hasUpper)
+                return std::nullopt;
+            const long long signedMax =
+                bits >= 64 ? std::numeric_limits<long long>::max() : (1LL << (bits - 1)) - 1;
+            if (range.upper > signedMax)
+                return std::nullopt;
+            if (!range.hasLower)
+            {
+                range.hasLower = true;
+                range.lower = 0;
+            }
+            return range;
+        }
+
+        /// The unsigned reading of @p bits-wide values whose signed reading lies in @p range:
+        /// the same bounds when none of them is negative. A negative value reads as more than
+        /// the signed maximum, so otherwise it is the whole unsigned range.
+        std::optional<IntRange> unsignedFromSigned(const IntRange& range, unsigned bits)
+        {
+            if (range.hasLower && range.lower >= 0)
+                return range;
+            if (bits == 0 || bits > 62)
+                return std::nullopt;
+            IntRange all;
+            all.hasLower = true;
+            all.lower = 0;
+            all.hasUpper = true;
+            all.upper = (1LL << bits) - 1;
+            return all;
         }
     } // namespace
 
@@ -335,6 +381,17 @@ namespace ctrace::stack::analysis
             return llvm::dyn_cast<llvm::AllocaInst>(key);
         }
 
+        /// Narrows @p range by @p with, or takes @p with when @p range knows nothing yet.
+        void intersect(std::optional<IntRange>& range, const std::optional<IntRange>& with)
+        {
+            if (!with)
+                return;
+            if (range)
+                narrowWith(*range, *with);
+            else
+                range = with;
+        }
+
         /// Whether every write to @p slot is a plain store through the slot pointer.
         /// A slot whose address is taken can be written behind the analysis' back.
         bool onlyDirectlyStored(const llvm::AllocaInst& slot)
@@ -387,7 +444,9 @@ namespace ctrace::stack::analysis
                 if (!bound)
                     continue;
 
-                RangeMap& constraints = edgeConstraints_[successor];
+                // Inverting or swapping a predicate keeps its signedness.
+                RangeMap& constraints =
+                    (icmp->isUnsigned() ? unsignedEdgeConstraints_ : edgeConstraints_)[successor];
                 const auto record = [&constraints, &bound](const llvm::Value* key)
                 {
                     const auto [it, inserted] = constraints.try_emplace(key, bound->second);
@@ -490,47 +549,82 @@ namespace ctrace::stack::analysis
         return false;
     }
 
-    std::optional<IntRange> ProgramPointRanges::at(const llvm::Value* key,
-                                                   const llvm::Instruction& at) const
+    void ProgramPointRanges::narrowByEdges(const EdgeConstraints& edges, const llvm::Value* key,
+                                           const llvm::Instruction& at,
+                                           std::optional<IntRange>& range) const
     {
-        std::optional<IntRange> result;
-        if (const auto it = proven_.find(key); it != proven_.end())
-            result = it->second;
-
         for (const llvm::DomTreeNode* node = dominators_.getNode(at.getParent()); node;
              node = node->getIDom())
         {
-            const auto blockIt = edgeConstraints_.find(node->getBlock());
-            if (blockIt == edgeConstraints_.end())
+            const auto blockIt = edges.find(node->getBlock());
+            if (blockIt == edges.end())
                 continue;
             const auto it = blockIt->second.find(key);
             if (it == blockIt->second.end() || constraintKilledAt(*node->getBlock(), key, at))
                 continue;
-            if (result)
-                narrowWith(*result, it->second);
-            else
-                result = it->second;
+            intersect(range, it->second);
         }
-        return result;
     }
 
-    std::map<const llvm::Value*, IntRange> ProgramPointRanges::at(const llvm::Instruction& at) const
+    void ProgramPointRanges::narrowByEdges(const EdgeConstraints& edges,
+                                           const llvm::Instruction& at, RangeMap& ranges) const
     {
-        RangeMap result = proven_;
         for (const llvm::DomTreeNode* node = dominators_.getNode(at.getParent()); node;
              node = node->getIDom())
         {
-            const auto blockIt = edgeConstraints_.find(node->getBlock());
-            if (blockIt == edgeConstraints_.end())
+            const auto blockIt = edges.find(node->getBlock());
+            if (blockIt == edges.end())
                 continue;
             for (const auto& [key, range] : blockIt->second)
             {
                 if (constraintKilledAt(*node->getBlock(), key, at))
                     continue;
-                const auto [it, inserted] = result.try_emplace(key, range);
+                const auto [it, inserted] = ranges.try_emplace(key, range);
                 if (!inserted)
                     narrowWith(it->second, range);
             }
+        }
+    }
+
+    std::optional<IntRange> ProgramPointRanges::at(const llvm::Value* key,
+                                                   const llvm::Instruction& at,
+                                                   IntReading reading) const
+    {
+        std::optional<IntRange> signedRange;
+        if (const auto it = proven_.find(key); it != proven_.end())
+            signedRange = it->second;
+        narrowByEdges(edgeConstraints_, key, at, signedRange);
+        std::optional<IntRange> unsignedRange;
+        narrowByEdges(unsignedEdgeConstraints_, key, at, unsignedRange);
+
+        // Each reading takes from the other what holds in both.
+        if (reading == IntReading::Signed)
+        {
+            if (unsignedRange)
+                intersect(signedRange, signedFromUnsigned(*unsignedRange, integerWidth(key)));
+            return signedRange;
+        }
+        if (signedRange)
+            intersect(unsignedRange, unsignedFromSigned(*signedRange, integerWidth(key)));
+        return unsignedRange;
+    }
+
+    std::map<const llvm::Value*, IntRange> ProgramPointRanges::at(const llvm::Instruction& at) const
+    {
+        RangeMap result = proven_;
+        narrowByEdges(edgeConstraints_, at, result);
+
+        // An unsigned bound joins the signed reading only where the two readings agree.
+        RangeMap unsignedRanges;
+        narrowByEdges(unsignedEdgeConstraints_, at, unsignedRanges);
+        for (const auto& [key, range] : unsignedRanges)
+        {
+            const std::optional<IntRange> asSigned = signedFromUnsigned(range, integerWidth(key));
+            if (!asSigned)
+                continue;
+            const auto [it, inserted] = result.try_emplace(key, *asSigned);
+            if (!inserted)
+                narrowWith(it->second, *asSigned);
         }
         return result;
     }
