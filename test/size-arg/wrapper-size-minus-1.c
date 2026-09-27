@@ -16,7 +16,8 @@ void caller(char* dst, const char* src, size_t n)
 {
     // at line 20, column 5
     // [ !!Warn ] potential unsafe write with length (size - 1) in test
-    //          ↳ destination pointer may be null
-    //          ↳ size operand may be <= 1
+    //          ↳ size operand may be less than 1
     test(dst, src, n - 1);
 }
+
+// strict-expectation-details: true
