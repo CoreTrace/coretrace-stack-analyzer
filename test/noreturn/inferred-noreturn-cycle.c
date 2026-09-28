@@ -1,10 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // A cycle of error functions whose every path ends in a noreturn call (#153): neither function
-// returns, so the guard protects what follows it.
-//
-// The recursion rule also reports this cycle, which is not this fixture's subject: the count
-// of diagnostics is not pinned.
+// returns, so the guard protects what follows it. The cycle recurses at most once before
+// raise_error leaves: it is not an unconditional recursion either (#160).
 
 #include <stddef.h>
 #include <string.h>
@@ -35,5 +33,3 @@ void copy_cycle(char* dst, const char* src, size_t n)
 }
 
 // not contains: potential unsafe write with length (size - 1)
-
-// strict-diagnostic-count: false
