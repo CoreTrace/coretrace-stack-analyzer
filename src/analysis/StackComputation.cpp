@@ -905,28 +905,22 @@ namespace ctrace::stack::analysis
         return {};
     }
 
-    InternalAnalysisState
-    computeGlobalStackUsage(const CallGraph& CG,
-                            const std::map<const llvm::Function*, LocalStackInfo>& LocalStack,
-                            const AnalysisConfig& config)
+    InternalAnalysisState computeGlobalStackUsage(
+        const CallGraph& CG, const std::map<const llvm::Function*, LocalStackInfo>& LocalStack,
+        const std::vector<const llvm::Function*>& Order, const AnalysisConfig& config)
     {
         InternalAnalysisState Res;
         std::map<const llvm::Function*, VisitState> State;
 
-        std::vector<const llvm::Function*> nodes;
-        nodes.reserve(LocalStack.size());
-
         for (auto& p : LocalStack)
-        {
             State[p.first] = NotVisited;
-            nodes.push_back(p.first);
-        }
 
-        Res.RecursiveFuncs = computeRecursiveFunctions(CG, nodes);
+        Res.RecursiveFuncs = computeRecursiveFunctions(CG, Order);
 
-        for (auto& p : LocalStack)
+        // Not LocalStack's order: it follows heap addresses, which change from one run to the
+        // next.
+        for (const llvm::Function* F : Order)
         {
-            const llvm::Function* F = p.first;
             if (State[F] == NotVisited)
             {
                 dfsComputeStack(F, CG, LocalStack, config, State, Res);

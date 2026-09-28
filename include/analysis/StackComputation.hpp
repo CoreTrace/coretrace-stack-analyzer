@@ -53,10 +53,12 @@ namespace ctrace::stack::analysis
     // Unresolved calls make the max stack unknown unless
     // config.assumeExternalFrame is set, in which case each one is charged
     // config.assumeExternalFrameBytes as its callee subtree.
-    InternalAnalysisState
-    computeGlobalStackUsage(const CallGraph& CG,
-                            const std::map<const llvm::Function*, LocalStackInfo>& LocalStack,
-                            const AnalysisConfig& config);
+    //
+    // A cycle's members get different totals depending on the function the traversal enters
+    // it from, so @p Order fixes that: the functions of LocalStack, in the module's order.
+    InternalAnalysisState computeGlobalStackUsage(
+        const CallGraph& CG, const std::map<const llvm::Function*, LocalStackInfo>& LocalStack,
+        const std::vector<const llvm::Function*>& Order, const AnalysisConfig& config);
 
     std::vector<std::vector<const llvm::Function*>>
     computeRecursiveComponents(const CallGraph& CG,

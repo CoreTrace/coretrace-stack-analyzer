@@ -155,13 +155,13 @@ namespace ctrace::stack::analyzer
         computeRecursionState(const ModuleAnalysisContext& ctx, const analysis::CallGraph& graph,
                               const LocalStackMap& localStack)
         {
-            analysis::InternalAnalysisState state =
-                analysis::computeGlobalStackUsage(graph, localStack, ctx.config);
-
             std::vector<const llvm::Function*> nodes;
             nodes.reserve(ctx.allDefinedFunctions.size());
             for (llvm::Function* F : ctx.allDefinedFunctions)
                 nodes.push_back(F);
+
+            analysis::InternalAnalysisState state =
+                analysis::computeGlobalStackUsage(graph, localStack, nodes, ctx.config);
 
             const auto recursiveComponents = analysis::computeRecursiveComponents(graph, nodes);
             for (const auto& component : recursiveComponents)
