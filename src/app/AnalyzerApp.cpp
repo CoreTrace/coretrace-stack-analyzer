@@ -3,6 +3,7 @@
 #include "CrossTUSummaryDriver.hpp"
 
 #include "StackUsageAnalyzer.hpp"
+#include "passes/ModulePasses.hpp"
 #include "analyzer/HotspotProfiler.hpp"
 #include "cli/ArgParser.hpp"
 
@@ -960,6 +961,24 @@ static AppStatus analyzeWithSharedModuleLoading(const std::vector<std::string>& 
         orderedLoadedModules.push_back(std::move(loadedModules[index]));
     }
     loadedModules.swap(orderedLoadedModules);
+
+    {
+        // A function found never to return in one module ends the paths that call it in the
+        // others; repeat until no module finds a new one, for chains across several files.
+        const analyzer::ScopedHotspot hotspot(cfg.timing, "app.shared_loading.never_return");
+        auto neverReturn = std::make_shared<std::set<std::string>>();
+        for (bool grew = true; grew;)
+        {
+            grew = false;
+            for (auto& loaded : loadedModules)
+            {
+                for (const std::string& name :
+                     endPathsAtCallsThatNeverReturn(*loaded.module, *neverReturn))
+                    grew |= neverReturn->insert(name).second;
+            }
+        }
+        cfg.neverReturnFunctions = std::move(neverReturn);
+    }
 
     if (needsCrossTUResourceSummaries)
     {

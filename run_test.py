@@ -2593,6 +2593,67 @@ def check_integer_overflow_advanced_inter_tu() -> bool:
     return True
 
 
+def check_noreturn_cross_tu() -> bool:
+    """
+    #153: a call to a function that never returns ends the path, also when the function is
+    defined in another file analyzed alongside, or at the end of a chain over three files,
+    whatever the order of the files and --jobs. A static function is never matched by name with
+    a function of another file.
+    """
+    print("=== Testing functions that never return across files ===")
+    fixtures = RUN_CONFIG.test_dir / "noreturn"
+    smt_args = [
+        "--smt=on",
+        "--smt-backend=z3",
+        "--smt-mode=single",
+        f"--smt-rules={','.join(_all_smt_rules())}",
+        f"--smt-timeout-ms={SMT_FIXTURE_TIMEOUT_MS}",
+    ]
+    watched = {"SizeMinusOneWrite", "IntegerOverflow.SignedArithmetic", "UninitializedLocalRead"}
+
+    def reported(files: list[str], extra: list[str]) -> Optional[list[str]]:
+        result = run_analyzer([*(str(fixtures / name) for name in files), "--format=json", *extra])
+        try:
+            diagnostics = json.loads(result.stdout or "").get("diagnostics", [])
+        except json.JSONDecodeError:
+            return None
+        return sorted(
+            {
+                str(d.get("location", {}).get("function", ""))
+                for d in diagnostics
+                if d.get("ruleId") in watched
+            }
+        )
+
+    pair = ["cross-tu-noreturn-def.c", "cross-tu-noreturn-use.c"]
+    chain = [
+        "cross-tu-noreturn-chain-fail.c",
+        "cross-tu-noreturn-chain-twice.c",
+        "cross-tu-noreturn-chain-use.c",
+    ]
+    statics = ["cross-tu-noreturn-static-a.c", "cross-tu-noreturn-static-b.c"]
+    cases = []
+    for pass_name, pass_args in (("default", []), ("smt-z3", smt_args)):
+        # pick's guard relates i to n: only the solver uses it.
+        kept = ["copy_elsewhere", "copy_maybe"] + (["pick"] if pass_name == "default" else [])
+        for order, files in (("def, use", pair), ("use, def", pair[::-1])):
+            for jobs in ("--jobs=1", "--jobs=2"):
+                cases.append((f"{pass_name}, {order}, {jobs}", files, [*pass_args, jobs], kept))
+        cases.append((f"{pass_name}, chain over three files", chain, pass_args, []))
+        cases.append((f"{pass_name}, static homonyms", statics, pass_args, ["copy_b"]))
+
+    ok = True
+    for label, files, extra, expected in cases:
+        found = reported(files, extra)
+        if found == expected:
+            print(f"  ✅ {label}: {found}")
+        else:
+            print(f"  ❌ {label}: {found}, expected {expected}")
+            ok = False
+    print()
+    return ok
+
+
 def check_use_after_free_advanced_inter_tu() -> bool:
     """
     Regression: nested use-after-free and double-release cases must be detected
@@ -4098,6 +4159,7 @@ def main() -> int:
         check_uninitialized_cross_tu,
         check_null_deref_nested_inter_tu,
         check_integer_overflow_advanced_inter_tu,
+        check_noreturn_cross_tu,
         check_use_after_free_advanced_inter_tu,
         check_escape_model_rejects_unsupported_brackets,
         check_human_vs_json_parity,

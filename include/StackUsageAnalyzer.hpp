@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <set>
 #include <span>
 #include <string>
 #include <vector>
@@ -65,6 +66,8 @@ namespace ctrace::stack
         std::shared_ptr<const analysis::UninitializedSummaryIndex> uninitializedSummaryIndex;
         std::shared_ptr<const analysis::GlobalReadBeforeWriteSummaryIndex>
             globalReadBeforeWriteSummaryIndex;
+        // External functions that never return, found across the modules analyzed together.
+        std::shared_ptr<const std::set<std::string>> neverReturnFunctions;
 
         std::vector<std::string> excludeDirs;
         std::vector<std::string> extraCompileArgs;

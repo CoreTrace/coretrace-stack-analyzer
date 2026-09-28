@@ -318,8 +318,14 @@ namespace ctrace::stack::analyzer
         const ArtifactMask kDerivedArtifacts = maskOf(ArtifactId::DerivedModuleArtifacts);
 
         std::vector<PipelineStep> steps;
-        steps.push_back({StepId::FunctionAttrsPass,
-                         [](const PipelineData& state) { runFunctionAttrsPass(state.mod); }});
+        steps.push_back({StepId::FunctionAttrsPass, [](const PipelineData& state)
+                         {
+                             endPathsAtCallsThatNeverReturn(state.mod,
+                                                            state.config.neverReturnFunctions
+                                                                ? *state.config.neverReturnFunctions
+                                                                : std::set<std::string>{});
+                             runFunctionAttrsPass(state.mod);
+                         }});
 
         steps.push_back(
             {StepId::PrepareModule,
