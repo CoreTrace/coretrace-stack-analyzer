@@ -263,7 +263,7 @@ namespace ctrace::stack::analysis
         /// goes on.
         template <typename IsRecursiveCallee>
         static bool leavesThroughNoreturnCall(const llvm::Instruction& I,
-                                              IsRecursiveCallee& isRecursiveCallee)
+                                              const IsRecursiveCallee& isRecursiveCallee)
         {
             const auto* call = llvm::dyn_cast<llvm::CallInst>(&I);
             if (!call || !call->doesNotReturn())
