@@ -6,6 +6,7 @@
 
 namespace llvm
 {
+    class AllocaInst;
     class Argument;
     class DILocalVariable;
     class DIType;
@@ -33,6 +34,10 @@ namespace ctrace::stack::analysis
         // Keep layout explicit to avoid compiler-inserted tail padding under -Wpadded.
         std::uint8_t paddingTail[5] = {};
     };
+
+    /// The source variable, parameter or local, that a debug declaration places in @p slot, or
+    /// nullptr when no declaration names it.
+    const llvm::DILocalVariable* declaredVariable(const llvm::AllocaInst& slot);
 
     /// The parameter declared on the slot that -O0 code spills @p Arg to, or nullptr.
     ///

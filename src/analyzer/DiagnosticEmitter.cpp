@@ -607,10 +607,11 @@ namespace ctrace::stack::analyzer
             if (!issue.sinkName.empty())
                 body << " in " << issue.sinkName;
             body << "\n";
-            if (issue.hasPointerDest && !issue.ptrNonNull)
-                body << "\t\t ↳ destination pointer may be null\n";
-            if (!issue.sizeAboveK)
-                body << "\t\t ↳ size operand may be <= " << issue.k << "\n";
+            if (issue.wrapsSigned)
+                body << "\t\t ↳ signed size - " << issue.k
+                     << " may fall below the minimum of its type\n";
+            else
+                body << "\t\t ↳ size operand may be less than " << issue.k << "\n";
 
             DiagnosticBuilder builder;
             builder.function(issue.funcName)

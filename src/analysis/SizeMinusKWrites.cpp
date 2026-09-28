@@ -3,22 +3,27 @@
 
 #include "analysis/IntRanges.hpp"
 #include "analysis/FunctionFacts.hpp"
+#include "analysis/ParameterDebugBinding.hpp"
 #include "analysis/smt/SmtEncoding.hpp"
 #include "analysis/smt/SmtRefinement.hpp"
 
+#include <algorithm>
 #include <map>
 #include <optional>
 #include <utility>
 
+#include <llvm/ADT/APInt.h>
 #include <llvm/ADT/DenseMap.h>
 #include <llvm/ADT/SmallPtrSet.h>
 #include <llvm/Analysis/AssumptionCache.h>
 #include <llvm/Analysis/LazyValueInfo.h>
 #include <llvm/Analysis/TargetLibraryInfo.h>
+#include <llvm/BinaryFormat/Dwarf.h>
 #include <llvm/Config/llvm-config.h>
 #include <llvm/IR/Argument.h>
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/DataLayout.h>
+#include <llvm/IR/DebugInfoMetadata.h>
 #include <llvm/IR/Function.h>
 #include <llvm/IR/InstrTypes.h>
 #include <llvm/IR/Instruction.h>
@@ -58,6 +63,9 @@ namespace ctrace::stack::analysis
             int64_t k = 0;
             /// The size the subtraction really uses: @ref base with its casts.
             llvm::Value* operand = nullptr;
+            /// The signedness the program gives the result, from the cast that widens it:
+            /// clang sign-extends a signed value and zero-extends an unsigned one.
+            std::optional<IntReading> reading;
         };
 
         struct SizeMinusKSink
@@ -79,18 +87,18 @@ namespace ctrace::stack::analysis
             {
             }
 
-            SmtFeasibility
-            isSignedLessEqualFeasible(const std::map<const llvm::Value*, IntRange>& ranges,
-                                      const llvm::Value& lhs, std::int64_t rhsConstant,
-                                      const llvm::Instruction* contextInst,
-                                      const FunctionFacts* facts) const
+            SmtFeasibility isBelowFeasible(const std::map<const llvm::Value*, IntRange>& ranges,
+                                           const llvm::Value& lhs, std::int64_t bound,
+                                           IntReading reading, const llvm::Instruction* contextInst,
+                                           const FunctionFacts* facts) const
             {
                 const smt::QueryPoint point = queryPoint(contextInst, facts);
                 return evaluateQueryAt(ranges, point,
                                        [&]
                                        {
-                                           return smt::encodeSignedComparisonFeasibility(
-                                               ranges, lhs, rhsConstant, false, point);
+                                           return smt::encodeBelowConstantFeasibility(
+                                               ranges, lhs, bound, reading == IntReading::Unsigned,
+                                               point);
                                        });
             }
         };
@@ -157,6 +165,18 @@ namespace ctrace::stack::analysis
         template <typename Canonicalize>
         static SizeMinusKMatch matchSizeMinusK(llvm::Value* v, Canonicalize canonicalize)
         {
+            // The cast applied to the subtraction itself, the innermost one, says how its
+            // result is read, as for a stack-buffer index.
+            std::optional<IntReading> reading;
+            while (auto* cast = llvm::dyn_cast<llvm::CastInst>(v))
+            {
+                reading.reset();
+                if (llvm::isa<llvm::SExtInst>(cast))
+                    reading = IntReading::Signed;
+                else if (llvm::isa<llvm::ZExtInst>(cast))
+                    reading = IntReading::Unsigned;
+                v = cast->getOperand(0);
+            }
             v = canonicalize(v);
             if (auto* bin = llvm::dyn_cast<llvm::BinaryOperator>(v))
             {
@@ -169,7 +189,7 @@ namespace ctrace::stack::analysis
                     {
                         int64_t k = c->getSExtValue();
                         if (k > 0)
-                            return {lhs, k, bin->getOperand(0)};
+                            return {lhs, k, bin->getOperand(0), reading};
                     }
                 }
                 if (bin->getOpcode() == llvm::Instruction::Add)
@@ -178,7 +198,7 @@ namespace ctrace::stack::analysis
                     {
                         int64_t k = -c->getSExtValue();
                         if (k > 0)
-                            return {lhs, k, bin->getOperand(0)};
+                            return {lhs, k, bin->getOperand(0), reading};
                     }
                 }
             }
@@ -189,7 +209,9 @@ namespace ctrace::stack::analysis
                                 llvm::Value* lhs, llvm::Value* rhs, llvm::Instruction* at)
         {
 #if LLVM_VERSION_MAJOR >= 17
-            if (llvm::Constant* c = lvi.getPredicateAt(pred, lhs, rhs, at, false))
+            // The block value bounds a cast by its source: a zero-extended byte is never
+            // negative.
+            if (llvm::Constant* c = lvi.getPredicateAt(pred, lhs, rhs, at, true))
             {
                 if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(c))
                     return ci->isOne();
@@ -200,34 +222,28 @@ namespace ctrace::stack::analysis
 #endif
         }
 
-        static bool isNonNullAt(llvm::Value* v, llvm::Instruction* at, llvm::LazyValueInfo& lvi)
+        /// Whether @p size loads a variable declared with an unsigned type as wide as @p size.
+        /// Subtracting a constant from it is then unsigned whatever the constant's type. A
+        /// signed variable proves nothing: `n - sizeof(T)` is unsigned for a `long n`.
+        static bool readsUnsignedVariable(const llvm::Value& size)
         {
-            if (!v || !v->getType()->isPointerTy())
-                return false;
-            if (auto* arg = llvm::dyn_cast<llvm::Argument>(v))
+            const auto* load = llvm::dyn_cast<llvm::LoadInst>(&size);
+            const auto* slot = load ? llvm::dyn_cast<llvm::AllocaInst>(
+                                          load->getPointerOperand()->stripPointerCasts())
+                                    : nullptr;
+            const llvm::DILocalVariable* variable = slot ? declaredVariable(*slot) : nullptr;
+            const llvm::DIType* type = variable ? variable->getType() : nullptr;
+            while (const auto* derived = llvm::dyn_cast_or_null<llvm::DIDerivedType>(type))
             {
-                if (arg->hasNonNullAttr())
-                    return true;
+                const unsigned tag = derived->getTag();
+                if (tag != llvm::dwarf::DW_TAG_typedef && tag != llvm::dwarf::DW_TAG_const_type &&
+                    tag != llvm::dwarf::DW_TAG_volatile_type)
+                    break;
+                type = derived->getBaseType();
             }
-            if (auto* call = llvm::dyn_cast<llvm::CallBase>(v))
-            {
-                if (call->hasRetAttr(llvm::Attribute::NonNull))
-                    return true;
-            }
-            auto* ptrTy = llvm::cast<llvm::PointerType>(v->getType());
-            auto* nullPtr = llvm::ConstantPointerNull::get(ptrTy);
-            return predicateAt(lvi, llvm::CmpInst::ICMP_NE, v, nullPtr, at);
-        }
-
-        static bool isGreaterThanAt(llvm::Value* v, int64_t bound, llvm::Instruction* at,
-                                    llvm::LazyValueInfo& lvi)
-        {
-            if (!v || !v->getType()->isIntegerTy())
-                return false;
-            if (auto* c = llvm::dyn_cast<llvm::ConstantInt>(v))
-                return c->getSExtValue() > bound;
-            auto* boundConst = llvm::ConstantInt::get(v->getType(), bound, true);
-            return predicateAt(lvi, llvm::CmpInst::ICMP_SGT, v, boundConst, at);
+            const auto* basic = llvm::dyn_cast_or_null<llvm::DIBasicType>(type);
+            return basic && basic->getEncoding() == llvm::dwarf::DW_ATE_unsigned &&
+                   basic->getSizeInBits() == size.getType()->getIntegerBitWidth();
         }
 
         static bool getKnownSinkCallInfo(llvm::CallBase* CB, const llvm::TargetLibraryInfo& TLI,
@@ -486,31 +502,69 @@ namespace ctrace::stack::analysis
                 return v;
             };
 
-            auto emitIssue = [&](Instruction* at, Value* dest, const SizeMinusKMatch& match,
-                                 StringRef sinkName, bool hasPtrDest)
+            // Whether `size >= bound` holds at @p at, read as @p reading.
+            auto provenAtLeast = [&](const SizeMinusKMatch& match, IntReading reading,
+                                     int64_t bound, Instruction* at)
             {
+                Value* size = match.operand;
+                const bool isUnsigned = reading == IntReading::Unsigned;
+                if (predicateAt(LVI, isUnsigned ? CmpInst::ICMP_UGE : CmpInst::ICMP_SGE, size,
+                                ConstantInt::get(size->getType(), bound, true), at))
+                    return true;
+
+                // -O0 code re-reads a variable from its slot, which carries its bounds. Take
+                // them where the value is read: `b[--l]` stores to the slot before the write.
+                const Value* key = size;
+                const Instruction* readAt = at;
+                if (auto* load = dyn_cast<LoadInst>(size))
+                {
+                    key = load->getPointerOperand();
+                    readAt = load;
+                }
+                if (const std::optional<IntRange> range = pointRanges.at(key, *readAt, reading);
+                    range && range->hasLower && range->lower >= bound)
+                    return true;
+
+                // Bound the size the call really uses, casts included: a narrowing cast can
+                // make it small however large the value before the cast. The range is known
+                // for match.base, and the encoded casts carry it to the operand.
+                const std::map<const llvm::Value*, IntRange> queryRanges =
+                    buildValueQueryRanges(*match.base, pointRanges.at(*at));
+                return evaluator.isBelowFeasible(queryRanges, *size, bound, reading, at, &facts) ==
+                       SmtFeasibility::Infeasible;
+            };
+
+            // Reports `size - k` when the subtraction can wrap in the signedness the program
+            // gives it (CWE-191): below 0 when unsigned, below the type's minimum when signed.
+            // A signed result that is only negative is exact: an index then writes before the
+            // buffer (CWE-124), and a length becomes a huge size_t on conversion (CWE-195),
+            // neither of which is an underflow of the subtraction.
+            auto emitIssue = [&](Instruction* at, const SizeMinusKMatch& match, StringRef sinkName)
+            {
+                std::optional<IntReading> reading = match.reading;
+                if (!reading && readsUnsignedVariable(*match.operand))
+                    reading = IntReading::Unsigned;
+                // Unknown signedness asks both questions. A type wider than 64 bits takes the
+                // 64-bit minimum: proving the size above it still rules out the wrap.
+                const unsigned width =
+                    std::min(match.operand->getType()->getIntegerBitWidth(), 64u);
+                const int64_t signedMin = APInt::getSignedMinValue(width).getSExtValue();
+                const bool mayWrapUnsigned =
+                    reading != IntReading::Signed &&
+                    !provenAtLeast(match, IntReading::Unsigned, match.k, at);
+                const bool mayWrapSigned =
+                    !mayWrapUnsigned && reading != IntReading::Unsigned &&
+                    !provenAtLeast(match, IntReading::Signed, signedMin + match.k, at);
+                if (!mayWrapUnsigned && !mayWrapSigned)
+                    return;
+
                 SizeMinusKWriteIssue issue;
                 issue.funcName = F.getName().str();
                 issue.sinkName = sinkName.str();
-                issue.hasPointerDest = hasPtrDest;
-                issue.ptrNonNull = hasPtrDest ? isNonNullAt(dest, at, LVI) : true;
-                const int64_t k = match.k;
-                issue.sizeAboveK = isGreaterThanAt(match.base, k, at, LVI);
-                if (!issue.sizeAboveK && match.operand && match.operand->getType()->isIntegerTy())
-                {
-                    // Bound the size the call really uses, casts included: a narrowing cast can
-                    // make it small however large the value before the cast. The range is known
-                    // for match.base, and the encoded casts carry it to the operand.
-                    const std::map<const llvm::Value*, IntRange> queryRanges =
-                        buildValueQueryRanges(*match.base, pointRanges.at(*at));
-                    if (evaluator.isSignedLessEqualFeasible(queryRanges, *match.operand, k, at,
-                                                            &facts) == SmtFeasibility::Infeasible)
-                        issue.sizeAboveK = true;
-                }
-                issue.k = k;
+                issue.k = match.k;
                 issue.inst = at;
-                if (!issue.ptrNonNull || !issue.sizeAboveK)
-                    out.push_back(std::move(issue));
+                issue.wrapsSigned = mayWrapSigned;
+                out.push_back(std::move(issue));
             };
 
             for (Instruction& I : instructions(F))
@@ -529,7 +583,7 @@ namespace ctrace::stack::analysis
                             std::string label = canonicalizeSinkName(sinkName);
                             if (label == "llvm.mem*" || label == "lib call")
                                 label += " (len = size-k)";
-                            emitIssue(&I, canonical(CB->getArgOperand(dstIdx)), match, label, true);
+                            emitIssue(&I, match, label);
                         }
                         continue;
                     }
@@ -549,8 +603,7 @@ namespace ctrace::stack::analysis
                                     matchSizeMinusK(CB->getArgOperand(sink.lenIdx), canonical);
                                 if (!match.base)
                                     continue;
-                                emitIssue(&I, canonical(CB->getArgOperand(sink.dstIdx)), match,
-                                          calleeFn->getName(), true);
+                                emitIssue(&I, match, calleeFn->getName());
                             }
                         }
                     }
@@ -570,8 +623,7 @@ namespace ctrace::stack::analysis
                     }
                     if (!match.base)
                         continue;
-                    emitIssue(&I, canonical(gep->getPointerOperand()), match,
-                              "store (idx = size-k)", true);
+                    emitIssue(&I, match, "store (idx = size-k)");
                 }
             }
         }

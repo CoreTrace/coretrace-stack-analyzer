@@ -15,6 +15,22 @@
 
 namespace ctrace::stack::analysis
 {
+    const llvm::DILocalVariable* declaredVariable(const llvm::AllocaInst& slot)
+    {
+        auto* declared = const_cast<llvm::AllocaInst*>(&slot);
+        for (llvm::DbgVariableRecord* dvr : llvm::findDVRDeclares(declared))
+        {
+            if (dvr && dvr->getVariable())
+                return dvr->getVariable();
+        }
+        for (llvm::DbgDeclareInst* ddi : llvm::findDbgDeclares(declared))
+        {
+            if (ddi && ddi->getVariable())
+                return ddi->getVariable();
+        }
+        return nullptr;
+    }
+
     const llvm::DILocalVariable* spilledParameter(const llvm::Argument& Arg)
     {
         for (const llvm::User* user : Arg.users())
