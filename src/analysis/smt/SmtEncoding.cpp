@@ -997,25 +997,45 @@ namespace ctrace::stack::analysis::smt
             });
     }
 
+    namespace
+    {
+        /// Asserts `lhs <predicate> rhsConstant`, with the constant at the width of @p lhs.
+        ConstraintIR encodeConstantComparison(const std::map<const llvm::Value*, IntRange>& ranges,
+                                              const llvm::Value& lhs, std::int64_t rhsConstant,
+                                              ExprKind predicate, const QueryPoint& point)
+        {
+            return encodeQuery(
+                ranges, point,
+                [&](ConstraintIrBuilder& builder, LlvmExprEncoder& exprEncoder)
+                {
+                    encodeAssumesBeforeInstruction(point.inst, builder, exprEncoder);
+
+                    const std::optional<ExprId> lhsExpr = exprEncoder.encodeAsInteger(&lhs);
+                    if (!lhsExpr)
+                        return;
+
+                    const std::uint32_t bitWidth = builder.node(*lhsExpr).bitWidth;
+                    const ExprId rhsExpr = builder.makeConstant(rhsConstant, bitWidth);
+                    builder.addAssertion(builder.makeBinary(predicate, *lhsExpr, rhsExpr, 1));
+                });
+        }
+    } // namespace
+
     ConstraintIR
     encodeSignedComparisonFeasibility(const std::map<const llvm::Value*, IntRange>& ranges,
                                       const llvm::Value& lhs, std::int64_t rhsConstant,
                                       bool greaterThan, const QueryPoint& point)
     {
-        return encodeQuery(
-            ranges, point,
-            [&](ConstraintIrBuilder& builder, LlvmExprEncoder& exprEncoder)
-            {
-                encodeAssumesBeforeInstruction(point.inst, builder, exprEncoder);
+        return encodeConstantComparison(ranges, lhs, rhsConstant,
+                                        greaterThan ? ExprKind::Sgt : ExprKind::Sle, point);
+    }
 
-                const std::optional<ExprId> lhsExpr = exprEncoder.encodeAsInteger(&lhs);
-                if (!lhsExpr)
-                    return;
-
-                const std::uint32_t bitWidth = builder.node(*lhsExpr).bitWidth;
-                const ExprId rhsExpr = builder.makeConstant(rhsConstant, bitWidth);
-                const ExprKind predicate = greaterThan ? ExprKind::Sgt : ExprKind::Sle;
-                builder.addAssertion(builder.makeBinary(predicate, *lhsExpr, rhsExpr, 1));
-            });
+    ConstraintIR
+    encodeBelowConstantFeasibility(const std::map<const llvm::Value*, IntRange>& ranges,
+                                   const llvm::Value& lhs, std::int64_t bound, bool isUnsigned,
+                                   const QueryPoint& point)
+    {
+        return encodeConstantComparison(ranges, lhs, bound,
+                                        isUnsigned ? ExprKind::Ult : ExprKind::Slt, point);
     }
 } // namespace ctrace::stack::analysis::smt

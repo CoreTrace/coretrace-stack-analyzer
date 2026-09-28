@@ -24,10 +24,10 @@ namespace ctrace::stack::analysis
         std::string sinkName; // call name or "store"
         int64_t k = 1;
         const llvm::Instruction* inst = nullptr;
-        std::uint64_t ptrNonNull : 1 = false;
-        std::uint64_t sizeAboveK : 1 = false;
         std::uint64_t hasPointerDest : 1 = true;
-        std::uint64_t reservedFlags : 61 = 0;
+        /// `size - k` may fall below the minimum of a signed type, not below 0.
+        std::uint64_t wrapsSigned : 1 = false;
+        std::uint64_t reservedFlags : 62 = 0;
     };
 
     std::vector<SizeMinusKWriteIssue> analyzeSizeMinusKWrites(

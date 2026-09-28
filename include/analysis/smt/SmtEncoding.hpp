@@ -60,6 +60,13 @@ namespace ctrace::stack::analysis::smt
                                       const llvm::Value& lhs, std::int64_t rhsConstant,
                                       bool greaterThan, const QueryPoint& point = {});
 
+    /// @brief Whether @p lhs can be below @p bound at @p point, compared as unsigned when
+    /// @p isUnsigned and as signed otherwise.
+    ConstraintIR
+    encodeBelowConstantFeasibility(const std::map<const llvm::Value*, IntRange>& ranges,
+                                   const llvm::Value& lhs, std::int64_t bound, bool isUnsigned,
+                                   const QueryPoint& point = {});
+
     /// @brief The query of @p point without any violation: the rule's ranges, the assumptions
     /// before @p point and its reachability condition. Satisfiable when @p point can run.
     ConstraintIR encodeReachability(const std::map<const llvm::Value*, IntRange>& ranges,
