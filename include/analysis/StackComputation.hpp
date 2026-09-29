@@ -54,8 +54,9 @@ namespace ctrace::stack::analysis
     // config.assumeExternalFrame is set, in which case each one is charged
     // config.assumeExternalFrameBytes as its callee subtree.
     //
-    // A cycle's members get different totals depending on the function the traversal enters
-    // it from, so @p Order fixes that: the functions of LocalStack, in the module's order.
+    // A function in a call cycle, or one that calls into a cycle, has an unknown max stack: the
+    // depth of the recursion is not bounded. Its lower bound depends on the call graph and the
+    // frames only, not on @p Order, the functions of LocalStack in the module's order.
     InternalAnalysisState computeGlobalStackUsage(
         const CallGraph& CG, const std::map<const llvm::Function*, LocalStackInfo>& LocalStack,
         const std::vector<const llvm::Function*>& Order, const AnalysisConfig& config);
