@@ -3743,6 +3743,59 @@ def check_ci_commit_checker_range() -> bool:
     return ok
 
 
+def check_cycle_max_stack() -> bool:
+    """
+    #159: a function in a call cycle has no bounded depth, so its max stack is unknown, and so
+    is that of every function that calls into a cycle, directly or not. The lower bound of a
+    cycle member is its frame plus the largest of: the bound of a callee outside the cycle, the
+    frame of a member it calls. It depends on the call graph only, not on the order of the
+    definitions. Functions that reach no cycle keep a known max stack.
+    """
+    print("=== Testing the max stack of call cycles ===")
+    sample = RUN_CONFIG.test_dir / "recursion/c/cycle-max-stack.c"
+    result = run_analyzer(["--format=json", str(sample)])
+    try:
+        payload = json.loads(result.stdout or "")
+    except json.JSONDecodeError as exc:
+        print(f"  ❌ invalid JSON: {exc}")
+        return False
+    functions = {fn.get("name"): fn for fn in payload.get("functions", [])}
+
+    # Every frame here is 16 bytes, but caller's, which is 0.
+    # - cycle_c, cycle_d, other_e, other_f: 16 + the frame of the member each calls (16).
+    # - self_loop: 16 + its own frame (16), the member it calls.
+    # - enter_cycle: 16 + the bound of cycle_c (32); enter_twice: 16 + that of enter_cycle (48).
+    unknown = {
+        "cycle_c": 32,
+        "cycle_d": 32,
+        "other_e": 32,
+        "other_f": 32,
+        "self_loop": 32,
+        "enter_cycle": 48,
+        "enter_twice": 64,
+    }
+    known = {"leaf": 16, "caller": 16}
+    ok = True
+    for name, lower in unknown.items():
+        fn = functions.get(name, {})
+        got = (fn.get("maxStackUnknown"), fn.get("maxStack"), fn.get("maxStackLowerBound"))
+        if got == (True, None, lower):
+            print(f"  ✅ {name}: unknown, >= {lower} bytes")
+        else:
+            print(f"  ❌ {name}: expected unknown, >= {lower} bytes, got {got}")
+            ok = False
+    for name, total in known.items():
+        fn = functions.get(name, {})
+        got = (fn.get("maxStackUnknown"), fn.get("maxStack"))
+        if got == (False, total):
+            print(f"  ✅ {name}: {total} bytes")
+        else:
+            print(f"  ❌ {name}: expected {total} bytes, got {got}")
+            ok = False
+    print()
+    return ok
+
+
 def check_unresolved_call_max_stack() -> bool:
     """
     A function containing an unresolved call (indirect, or to an external
@@ -4141,6 +4194,7 @@ def main() -> int:
         check_multi_file_failure,
         check_cli_parsing_and_filters,
         check_unresolved_call_max_stack,
+        check_cycle_max_stack,
         check_compile_ir_format_switch,
         check_pipeline_subscriber_rollout_parity,
         check_pipeline_timing_traversal_instrumentation,
