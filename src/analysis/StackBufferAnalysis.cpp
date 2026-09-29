@@ -7,6 +7,7 @@
 #include <optional>
 #include <unordered_map>
 
+#include <llvm/ADT/APInt.h>
 #include <llvm/ADT/SmallPtrSet.h>
 #include <llvm/Analysis/ValueTracking.h>
 #include <llvm/BinaryFormat/Dwarf.h>
@@ -648,6 +649,33 @@ namespace ctrace::stack::analysis
 
         // The `i != N` loop guard is the one branch shape ProgramPointRanges cannot turn
         // into an interval; with a constant init and step it still bounds the index.
+        /// Shifts @p range, the bounds of x, into those of @p op, x + @p offset. Fails when a
+        /// value of x may make the sum wrap, which a missing bound on that side allows.
+        static bool shiftRangeWithoutWrap(IntRange& range, std::int64_t offset,
+                                          const llvm::BinaryOperator& op, IntReading reading)
+        {
+            const unsigned width = op.getType()->getIntegerBitWidth();
+            if (width >= 64)
+                return false;
+            const std::int64_t min = reading == IntReading::Unsigned
+                                         ? 0
+                                         : llvm::APInt::getSignedMinValue(width).getSExtValue();
+            const std::int64_t max =
+                reading == IntReading::Unsigned
+                    ? static_cast<std::int64_t>(llvm::APInt::getMaxValue(width).getZExtValue())
+                    : llvm::APInt::getSignedMaxValue(width).getSExtValue();
+            // Going down, the lowest x must stay above min; going up, the highest below max.
+            if (offset < 0 && (!range.hasLower || range.lower + offset < min))
+                return false;
+            if (offset > 0 && (!range.hasUpper || range.upper + offset > max))
+                return false;
+            if (range.hasLower)
+                range.lower += offset;
+            if (range.hasUpper)
+                range.upper += offset;
+            return true;
+        }
+
         static std::optional<IntRange> deriveNeLoopGuardRange(const llvm::BasicBlock& target,
                                                               const llvm::Value* key)
         {
@@ -949,6 +977,29 @@ namespace ctrace::stack::analysis
                     }
 
                     // 5) Variable index case: test[i] / ptr[i]
+                    // An index computed as x + C or x - C has the bounds of x shifted by C: look
+                    // for those of x, and shift them once found.
+                    const auto* offsetOp = dyn_cast<BinaryOperator>(baseIdxVal);
+                    const auto* offsetConst =
+                        offsetOp ? dyn_cast<ConstantInt>(offsetOp->getOperand(1)) : nullptr;
+                    std::int64_t offset = 0;
+                    if (offsetConst && offsetConst->getBitWidth() <= 64 &&
+                        !offsetConst->isMinValue(true) &&
+                        (offsetOp->getOpcode() == Instruction::Add ||
+                         offsetOp->getOpcode() == Instruction::Sub))
+                    {
+                        offset = offsetOp->getOpcode() == Instruction::Add
+                                     ? offsetConst->getSExtValue()
+                                     : -offsetConst->getSExtValue();
+                        baseIdxVal = offsetOp->getOperand(0);
+                        while (auto* cast = dyn_cast<CastInst>(baseIdxVal))
+                        {
+                            indexReading =
+                                isa<ZExtInst>(cast) ? IntReading::Unsigned : IntReading::Signed;
+                            baseIdxVal = cast->getOperand(0);
+                        }
+                    }
+
                     // Check whether we have a range for the base value (i, not the cast)
                     const Value* key = baseIdxVal;
 
@@ -986,6 +1037,10 @@ namespace ctrace::stack::analysis
                         }
                         hasRange = R.hasLower || R.hasUpper;
                     }
+
+                    if (hasRange && offset != 0 &&
+                        !shiftRangeWithoutWrap(R, offset, *offsetOp, indexReading))
+                        hasRange = false;
 
                     if (!hasRange)
                         continue;
