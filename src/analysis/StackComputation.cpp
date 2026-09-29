@@ -36,13 +36,6 @@ namespace ctrace::stack::analysis
             return F && F->hasFnAttribute(llvm::Attribute::NoRecurse);
         }
 
-        enum VisitState
-        {
-            NotVisited = 0,
-            Visiting = 1,
-            Visited = 2
-        };
-
         static bool hasNonSelfCall(const llvm::Function& F)
         {
             const llvm::Function* Self = &F;
@@ -172,72 +165,6 @@ namespace ctrace::stack::analysis
 
             info.bytes = frameSize;
             return info;
-        }
-
-        static StackEstimate
-        dfsComputeStack(const llvm::Function* F, const CallGraph& CG,
-                        const std::map<const llvm::Function*, LocalStackInfo>& LocalStack,
-                        const AnalysisConfig& config,
-                        std::map<const llvm::Function*, VisitState>& State,
-                        InternalAnalysisState& Res)
-        {
-            auto itState = State.find(F);
-            if (itState != State.end())
-            {
-                if (itState->second == Visiting)
-                {
-                    auto itLocal = LocalStack.find(F);
-                    if (itLocal != LocalStack.end())
-                    {
-                        return StackEstimate{itLocal->second.bytes, itLocal->second.unknown};
-                    }
-                    return {};
-                }
-                else if (itState->second == Visited)
-                {
-                    auto itTotal = Res.TotalStack.find(F);
-                    return (itTotal != Res.TotalStack.end()) ? itTotal->second : StackEstimate{};
-                }
-            }
-
-            State[F] = Visiting;
-
-            auto itLocal = LocalStack.find(F);
-            StackEstimate local = {};
-            if (itLocal != LocalStack.end())
-            {
-                local.bytes = itLocal->second.bytes;
-                local.unknown = itLocal->second.unknown;
-            }
-            StackEstimate maxCallee = {};
-            if (itLocal != LocalStack.end() && itLocal->second.unresolvedCallCount > 0)
-            {
-                if (config.assumeExternalFrame)
-                    maxCallee.bytes = config.assumeExternalFrameBytes;
-                else
-                    maxCallee.unknown = true;
-            }
-
-            auto itCG = CG.find(F);
-            if (itCG != CG.end())
-            {
-                for (const llvm::Function* Callee : itCG->second)
-                {
-                    StackEstimate calleeStack =
-                        dfsComputeStack(Callee, CG, LocalStack, config, State, Res);
-                    if (calleeStack.bytes > maxCallee.bytes)
-                        maxCallee.bytes = calleeStack.bytes;
-                    if (calleeStack.unknown)
-                        maxCallee.unknown = true;
-                }
-            }
-
-            StackEstimate total;
-            total.bytes = local.bytes + maxCallee.bytes;
-            total.unknown = local.unknown || maxCallee.unknown;
-            Res.TotalStack[F] = total;
-            State[F] = Visited;
-            return total;
         }
 
         static bool hasSelfCall(const llvm::Function* F, const CallGraph& CG)
@@ -847,28 +774,96 @@ namespace ctrace::stack::analysis
             }
         }
 
-        static std::set<const llvm::Function*>
-        computeRecursiveFunctions(const CallGraph& CG,
-                                  const std::vector<const llvm::Function*>& nodes)
+        /// The max stack of each function, as two computations over the call graph, the frames
+        /// and the recursive components, independent of any visiting order (#159):
+        /// - the lower bound: the frame, plus the largest of the bound of a callee outside the
+        ///   function's component, the frame of a member it calls, and the external frame
+        ///   charged for an unresolved call;
+        /// - the unknown status: a frame of unknown size, an unresolved call left uncharged,
+        ///   membership in a component, since its depth is not bounded, or an unknown callee.
+        /// A callee outside the component of F cannot reach F, so both follow the acyclic graph
+        /// of components down and never loop.
+        class StackTotals
         {
-            TarjanState state;
-            state.index.reserve(nodes.size());
-            state.lowlink.reserve(nodes.size());
-            state.stack.reserve(nodes.size());
-            state.onStack.reserve(nodes.size());
-
-            for (const llvm::Function* V : nodes)
+          public:
+            StackTotals(const CallGraph& CG,
+                        const std::map<const llvm::Function*, LocalStackInfo>& LocalStack,
+                        const std::unordered_map<const llvm::Function*, std::size_t>& componentOf,
+                        const AnalysisConfig& config)
+                : CG_(CG), LocalStack_(LocalStack), componentOf_(componentOf), config_(config)
             {
-                if (hasNoRecurseContract(V))
-                    continue;
-                if (state.index.find(V) == state.index.end())
-                {
-                    strongConnect(V, CG, state);
-                }
             }
 
-            return state.recursive;
-        }
+            StackSize lowerBound(const llvm::Function* F)
+            {
+                if (auto it = bounds_.find(F); it != bounds_.end())
+                    return it->second;
+                // A norecurse function is kept out of the components; were it on a cycle all
+                // the same, the cycle is cut where it comes back, as a component would be.
+                if (!inProgress_.insert(F).second)
+                    return frameOf(F);
+                StackSize callees = 0;
+                if (const LocalStackInfo* local = localOf(F);
+                    local && local->unresolvedCallCount > 0 && config_.assumeExternalFrame)
+                    callees = config_.assumeExternalFrameBytes;
+                for (const llvm::Function* G : calleesOf(F))
+                    callees = std::max(callees, sameComponent(F, G) ? frameOf(G) : lowerBound(G));
+                inProgress_.erase(F);
+                return bounds_[F] = frameOf(F) + callees;
+            }
+
+            bool unknown(const llvm::Function* F)
+            {
+                if (auto it = unknown_.find(F); it != unknown_.end())
+                    return it->second;
+                const LocalStackInfo* local = localOf(F);
+                bool result =
+                    componentOf_.count(F) != 0 || (local && local->unknown) ||
+                    (local && local->unresolvedCallCount > 0 && !config_.assumeExternalFrame);
+                if (!result && inProgress_.insert(F).second)
+                {
+                    for (const llvm::Function* G : calleesOf(F))
+                        result = result || unknown(G);
+                    inProgress_.erase(F);
+                }
+                return unknown_[F] = result;
+            }
+
+          private:
+            const LocalStackInfo* localOf(const llvm::Function* F) const
+            {
+                auto it = LocalStack_.find(F);
+                return it != LocalStack_.end() ? &it->second : nullptr;
+            }
+
+            StackSize frameOf(const llvm::Function* F) const
+            {
+                const LocalStackInfo* local = localOf(F);
+                return local ? local->bytes : 0;
+            }
+
+            const std::vector<const llvm::Function*>& calleesOf(const llvm::Function* F) const
+            {
+                static const std::vector<const llvm::Function*> none;
+                auto it = CG_.find(F);
+                return it != CG_.end() ? it->second : none;
+            }
+
+            bool sameComponent(const llvm::Function* F, const llvm::Function* G) const
+            {
+                auto f = componentOf_.find(F);
+                auto g = componentOf_.find(G);
+                return f != componentOf_.end() && g != componentOf_.end() && f->second == g->second;
+            }
+
+            const CallGraph& CG_;
+            const std::map<const llvm::Function*, LocalStackInfo>& LocalStack_;
+            const std::unordered_map<const llvm::Function*, std::size_t>& componentOf_;
+            const AnalysisConfig& config_;
+            std::unordered_map<const llvm::Function*, StackSize> bounds_;
+            std::unordered_map<const llvm::Function*, bool> unknown_;
+            std::unordered_set<const llvm::Function*> inProgress_;
+        };
     } // namespace
 
     CallGraph buildCallGraph(llvm::Module& M)
@@ -926,23 +921,26 @@ namespace ctrace::stack::analysis
         const std::vector<const llvm::Function*>& Order, const AnalysisConfig& config)
     {
         InternalAnalysisState Res;
-        std::map<const llvm::Function*, VisitState> State;
-
-        for (auto& p : LocalStack)
-            State[p.first] = NotVisited;
-
-        Res.RecursiveFuncs = computeRecursiveFunctions(CG, Order);
-
-        // Not LocalStack's order: it follows heap addresses, which change from one run to the
-        // next.
-        for (const llvm::Function* F : Order)
+        std::unordered_map<const llvm::Function*, std::size_t> componentOf;
+        const std::vector<std::vector<const llvm::Function*>> components =
+            computeRecursiveComponents(CG, Order);
+        for (std::size_t index = 0; index < components.size(); ++index)
         {
-            if (State[F] == NotVisited)
+            for (const llvm::Function* F : components[index])
             {
-                dfsComputeStack(F, CG, LocalStack, config, State, Res);
+                componentOf[F] = index;
+                Res.RecursiveFuncs.insert(F);
             }
         }
 
+        StackTotals totals(CG, LocalStack, componentOf, config);
+        for (const auto& [F, local] : LocalStack)
+        {
+            StackEstimate total;
+            total.bytes = totals.lowerBound(F);
+            total.unknown = totals.unknown(F);
+            Res.TotalStack[F] = total;
+        }
         return Res;
     }
 
