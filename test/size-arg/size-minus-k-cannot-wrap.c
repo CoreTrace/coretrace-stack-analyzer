@@ -44,12 +44,4 @@ void terminate_negative(char* buf, int n)
         buf[n - 1] = '\0';
 }
 
-// The same for a length: strncpy converts a negative n - 1 to a huge size_t, a signed to
-// unsigned conversion error (CWE-195), not an underflow of the subtraction.
-void copy_negative(char* dst, const char* src, int n)
-{
-    if (n > INT_MIN)
-        strncpy(dst, src, n - 1);
-}
-
 // not contains: potential unsafe write with length (size - 1)
