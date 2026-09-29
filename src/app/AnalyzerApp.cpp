@@ -963,19 +963,31 @@ static AppStatus analyzeWithSharedModuleLoading(const std::vector<std::string>& 
     loadedModules.swap(orderedLoadedModules);
 
     {
-        // A function found never to return in one module ends the paths that call it in the
-        // others; repeat until no module finds a new one, for chains across several files.
+        // A function found never to return ends the paths that call it in the other modules;
+        // repeat until no round finds a new one, for chains across several files. A caller may
+        // be linked with any definition of the symbol: it never returns only if every one of
+        // them is exact and never returns (#170). A weak one is never exported, so it keeps the
+        // count short. Every module sees the same set in a round, whatever their order.
         const analyzer::ScopedHotspot hotspot(cfg.timing, "app.shared_loading.never_return");
+        std::map<std::string, std::size_t> definitions;
+        for (const auto& loaded : loadedModules)
+            for (const llvm::Function& function : *loaded.module)
+                if (!function.isDeclaration() && !function.hasLocalLinkage())
+                    ++definitions[function.getName().str()];
         auto neverReturn = std::make_shared<std::set<std::string>>();
         for (bool grew = true; grew;)
         {
-            grew = false;
+            std::map<std::string, std::size_t> neverReturning;
             for (auto& loaded : loadedModules)
             {
                 for (const std::string& name :
                      endPathsAtCallsThatNeverReturn(*loaded.module, *neverReturn))
-                    grew |= neverReturn->insert(name).second;
+                    ++neverReturning[name];
             }
+            grew = false;
+            for (const auto& [name, count] : neverReturning)
+                if (count == definitions[name])
+                    grew |= neverReturn->insert(name).second;
         }
         cfg.neverReturnFunctions = std::move(neverReturn);
     }
