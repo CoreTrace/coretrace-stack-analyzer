@@ -3,6 +3,7 @@
 #include "analysis/IRValueUtils.hpp"
 
 #include "analysis/AnalyzerUtils.hpp"
+#include "analysis/BufferWriteModel.hpp"
 #include "analysis/IntRanges.hpp"
 #include "analysis/FunctionFacts.hpp"
 #include "analysis/smt/SmtEncoding.hpp"
@@ -15,10 +16,13 @@
 #include <optional>
 #include <utility>
 
+#include <llvm/ADT/APInt.h>
+#include <llvm/ADT/DenseMap.h>
 #include <llvm/ADT/SmallPtrSet.h>
 #include <llvm/ADT/StringRef.h>
 #include <llvm/IR/Function.h>
 #include <llvm/IR/Instruction.h>
+#include <llvm/IR/InstIterator.h>
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/IntrinsicInst.h>
 #include <llvm/IR/Module.h>
@@ -183,6 +187,19 @@ namespace ctrace::stack::analysis
             return std::nullopt;
         }
 
+        /// Functions that write as many bytes as a size_t length they receive, beyond
+        /// resolveSizeSink's. Only a negative signed length is checked for them.
+        static std::optional<SizeSink> resolveLengthOnlySink(llvm::StringRef calleeName)
+        {
+            if (calleeName == "strncpy" || calleeName == "strncpy_chk")
+                return SizeSink{"strncpy", 2u};
+            if (calleeName == "strncat" || calleeName == "strncat_chk")
+                return SizeSink{"strncat", 2u};
+            if (calleeName == "stpncpy" || calleeName == "stpncpy_chk")
+                return SizeSink{"stpncpy", 2u};
+            return std::nullopt;
+        }
+
         static const llvm::Value* peelLoadFromSingleStoreSlot(const llvm::Value* value)
         {
             const auto* load = llvm::dyn_cast<llvm::LoadInst>(value);
@@ -307,6 +324,42 @@ namespace ctrace::stack::analysis
         {
             llvm::SmallPtrSet<const llvm::Value*, 32> visited;
             return resolveKnownRangeRecursive(value, ranges, visited, 0);
+        }
+
+        /// Whether @p value is `x + C` or `x - C` and the known range of x keeps it at or above
+        /// 0 without overflowing: `n - 1` under `n > 0`.
+        static bool isNonNegativeOffset(const llvm::Value* value,
+                                        const std::map<const llvm::Value*, IntRange>& ranges)
+        {
+            const auto* binary = llvm::dyn_cast<llvm::BinaryOperator>(value);
+            if (!binary || !binary->getType()->isIntegerTy() ||
+                binary->getType()->getIntegerBitWidth() > 64)
+                return false;
+            const auto* constant = llvm::dyn_cast<llvm::ConstantInt>(binary->getOperand(1));
+            if (!constant || constant->getBitWidth() > 64)
+                return false;
+            const std::int64_t c = constant->getSExtValue();
+            if (c == std::numeric_limits<std::int64_t>::min())
+                return false;
+            std::int64_t delta = 0;
+            if (binary->getOpcode() == llvm::Instruction::Add)
+                delta = c;
+            else if (binary->getOpcode() == llvm::Instruction::Sub)
+                delta = -c;
+            else
+                return false;
+
+            const std::optional<IntRange> base = resolveKnownRange(binary->getOperand(0), ranges);
+            // lower + delta >= 0, written so that it cannot overflow: -delta fits, c is not min.
+            if (!base || !base->hasLower || base->lower < -delta)
+                return false;
+            if (delta <= 0)
+                return true;
+            // Moving up, the upper end must stay below the type's maximum.
+            const std::int64_t max =
+                llvm::APInt::getSignedMaxValue(binary->getType()->getIntegerBitWidth())
+                    .getSExtValue();
+            return base->hasUpper && base->upper <= max - delta;
         }
 
         static const llvm::ConstantInt*
@@ -562,6 +615,13 @@ namespace ctrace::stack::analysis
             if (const auto* sext = llvm::dyn_cast<llvm::SExtInst>(value))
             {
                 const llvm::Value* source = sext->getOperand(0);
+                // Neither negative nor overflowed: only what x itself carries is left.
+                if (isNonNegativeOffset(source, ranges))
+                {
+                    return classifySizeOperandRecursive(
+                        llvm::cast<llvm::BinaryOperator>(source)->getOperand(0), ranges, visited,
+                        depth + 1);
+                }
                 if (dependsOnFunctionArgument(source) && !hasKnownNonNegativeRange(source, ranges))
                 {
                     return RiskSummary{.kind = IntegerOverflowIssueKind::SignedToUnsignedSize,
@@ -768,6 +828,95 @@ namespace ctrace::stack::analysis
             }
             return false;
         }
+        /// The sinks checked for a negative signed length only: strncpy and the like, the
+        /// bounded writes of the buffer model, and the functions of the module that pass one of
+        /// their parameters on as the length of a sink.
+        class LengthOnlySinks
+        {
+          public:
+            LengthOnlySinks(llvm::Module& mod, const AnalysisConfig& config)
+            {
+                std::string error;
+                BufferWriteModel parsed;
+                if (!config.bufferModelPath.empty() &&
+                    parseBufferWriteModel(config.bufferModelPath, parsed, error))
+                    model_ = std::move(parsed);
+                // Wrappers of wrappers: repeat until no function becomes a sink.
+                for (bool grew = true; grew;)
+                {
+                    grew = false;
+                    for (llvm::Function& F : mod)
+                    {
+                        if (!F.isDeclaration() && !wrappers_.count(&F))
+                            grew |= findWrappedLength(F);
+                    }
+                }
+            }
+
+            std::optional<SizeSink> lookup(const llvm::CallBase& call)
+            {
+                const llvm::Function* callee = getDirectCallee(call);
+                if (!callee)
+                    return std::nullopt;
+                if (auto sink = resolveLengthOnlySink(canonicalCalleeName(callee->getName())))
+                    return sink;
+                if (auto it = wrappers_.find(callee); it != wrappers_.end())
+                    return SizeSink{callee->getName(), it->second};
+                if (!model_.rules.empty())
+                {
+                    const BufferWriteRule* rule =
+                        matcher_.findMatchingRule(model_, *callee, call.arg_size());
+                    if (rule && rule->kind == BufferWriteRuleKind::BoundedWrite)
+                        return SizeSink{callee->getName(), rule->sizeArgIndex};
+                }
+                return std::nullopt;
+            }
+
+          private:
+            /// Records @p F as a sink when one of its parameters, spilled to its slot at -O0 and
+            /// converted or not, is the length it passes to a sink.
+            // ponytail: one length per wrapper; keep a list when a function forwards two.
+            bool findWrappedLength(const llvm::Function& F)
+            {
+                for (const llvm::Instruction& inst : llvm::instructions(F))
+                {
+                    const auto* call = llvm::dyn_cast<llvm::CallBase>(&inst);
+                    if (!call)
+                        continue;
+                    std::optional<SizeSink> sink = resolveIntrinsicSizeSink(*call);
+                    if (!sink)
+                    {
+                        if (const llvm::Function* callee = getDirectCallee(*call))
+                            sink = resolveSizeSink(canonicalCalleeName(callee->getName()));
+                    }
+                    if (!sink)
+                        sink = lookup(*call);
+                    if (!sink || sink->sizeArgIndex >= call->arg_size())
+                        continue;
+                    const llvm::Value* length =
+                        stripIntCasts(call->getArgOperand(sink->sizeArgIndex));
+                    if (const llvm::Value* spilled = peelLoadFromSingleStoreSlot(length))
+                        length = stripIntCasts(spilled);
+                    if (const auto* param = llvm::dyn_cast<llvm::Argument>(length))
+                    {
+                        wrappers_[&F] = param->getArgNo();
+                        return true;
+                    }
+                }
+                return false;
+            }
+
+            static const llvm::Value* stripIntCasts(const llvm::Value* value)
+            {
+                while (const auto* cast = llvm::dyn_cast<llvm::CastInst>(value))
+                    value = cast->getOperand(0);
+                return value;
+            }
+
+            BufferWriteModel model_;
+            BufferWriteRuleMatcher matcher_;
+            llvm::DenseMap<const llvm::Function*, unsigned> wrappers_;
+        };
     } // namespace
 
     std::vector<IntegerOverflowIssue>
@@ -785,6 +934,7 @@ namespace ctrace::stack::analysis
     {
         std::vector<IntegerOverflowIssue> issues;
         IntegerOverflowConstraintEvaluator evaluator(config);
+        LengthOnlySinks lengthOnlySinks(mod, config);
 
         for (llvm::Function& function : mod)
         {
@@ -863,6 +1013,12 @@ namespace ctrace::stack::analysis
 
                     if (!sink)
                         sink = resolveSizeSink(sinkName);
+                    bool lengthOnly = false;
+                    if (!sink)
+                    {
+                        sink = lengthOnlySinks.lookup(*call);
+                        lengthOnly = sink.has_value();
+                    }
                     if (!sink || sink->sizeArgIndex >= call->arg_size())
                         continue;
 
@@ -870,6 +1026,8 @@ namespace ctrace::stack::analysis
                     const std::optional<RiskSummary> risk =
                         classifySizeOperand(sizeOperand, ranges);
                     if (!risk)
+                        continue;
+                    if (lengthOnly && risk->kind != IntegerOverflowIssueKind::SignedToUnsignedSize)
                         continue;
                     // Ask about the flagged value where it is computed: found through a slot or a
                     // phi, it may come from an earlier loop iteration, which the ranges and the
