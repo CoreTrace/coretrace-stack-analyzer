@@ -257,6 +257,21 @@ namespace ctrace::stack::analysis
             return false;
         }
 
+        /// Whether @p I leaves the function as surely as a `ret`: a call, outside the recursion,
+        /// to a function that never returns, such as exit(), abort(), a throw or a function
+        /// inferred never to return. An invoke may unwind into a handler of the function, which
+        /// goes on.
+        template <typename IsRecursiveCallee>
+        static bool leavesThroughNoreturnCall(const llvm::Instruction& I,
+                                              const IsRecursiveCallee& isRecursiveCallee)
+        {
+            const auto* call = llvm::dyn_cast<llvm::CallInst>(&I);
+            if (!call || !call->doesNotReturn())
+                return false;
+            const llvm::Function* callee = call->getCalledFunction();
+            return !(callee && isRecursiveCallee(callee));
+        }
+
         template <typename IsRecursiveCallee>
         static bool detectInfiniteRecursionByDominance(const llvm::Function& F,
                                                        IsRecursiveCallee&& isRecursiveCallee)
@@ -296,7 +311,8 @@ namespace ctrace::stack::analysis
             {
                 for (const llvm::Instruction& I : BB)
                 {
-                    if (!llvm::isa<llvm::ReturnInst>(&I))
+                    if (!llvm::isa<llvm::ReturnInst>(&I) &&
+                        !leavesThroughNoreturnCall(I, isRecursiveCallee))
                         continue;
 
                     hasReturn = true;
@@ -690,7 +706,7 @@ namespace ctrace::stack::analysis
                     if (callee && isRecursiveCallee(callee))
                         sawRecursiveCall = true;
 
-                    if (isa<ReturnInst>(&I))
+                    if (isa<ReturnInst>(&I) || leavesThroughNoreturnCall(I, isRecursiveCallee))
                     {
                         if (!sawRecursiveCall)
                             return NonRecursiveReturnFeasibility::Exists;
