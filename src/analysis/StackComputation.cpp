@@ -781,55 +781,107 @@ namespace ctrace::stack::analysis
         ///   charged for an unresolved call;
         /// - the unknown status: a frame of unknown size, an unresolved call left uncharged,
         ///   membership in a component, since its depth is not bounded, or an unknown callee.
-        /// A callee outside the component of F cannot reach F, so both follow the acyclic graph
-        /// of components down and never loop.
+        /// Both are computed callees first, without recursion: a callee outside the component of F
+        /// cannot reach F, so it has its values before F.
         class StackTotals
         {
           public:
             StackTotals(const CallGraph& CG,
                         const std::map<const llvm::Function*, LocalStackInfo>& LocalStack,
                         const std::unordered_map<const llvm::Function*, std::size_t>& componentOf,
-                        const AnalysisConfig& config)
+                        const AnalysisConfig& config,
+                        const std::vector<const llvm::Function*>& Order)
                 : CG_(CG), LocalStack_(LocalStack), componentOf_(componentOf), config_(config)
             {
+                for (const llvm::Function* F : calleesFirst(Order))
+                {
+                    bounds_[F] = computeBound(F);
+                    unknown_[F] = computeUnknown(F);
+                }
             }
 
-            StackSize lowerBound(const llvm::Function* F)
+            StackSize lowerBound(const llvm::Function* F) const
             {
-                if (auto it = bounds_.find(F); it != bounds_.end())
-                    return it->second;
-                // A norecurse function is kept out of the components; were it on a cycle all
-                // the same, the cycle is cut where it comes back, as a component would be.
-                if (!inProgress_.insert(F).second)
-                    return frameOf(F);
+                return bounds_.at(F);
+            }
+
+            bool unknown(const llvm::Function* F) const
+            {
+                return unknown_.at(F);
+            }
+
+          private:
+            /// The functions reached from @p roots, each after its callees but those on a cycle
+            /// with it: a depth-first post-order, walked with an explicit stack.
+            std::vector<const llvm::Function*>
+            calleesFirst(const std::vector<const llvm::Function*>& roots) const
+            {
+                std::vector<const llvm::Function*> order;
+                std::unordered_set<const llvm::Function*> seen;
+                std::vector<std::pair<const llvm::Function*, std::size_t>> path;
+                for (const llvm::Function* root : roots)
+                {
+                    if (seen.insert(root).second)
+                        path.emplace_back(root, 0);
+                    while (!path.empty())
+                    {
+                        auto& [F, next] = path.back();
+                        const std::vector<const llvm::Function*>& callees = calleesOf(F);
+                        if (next < callees.size())
+                        {
+                            const llvm::Function* G = callees[next++];
+                            if (seen.insert(G).second)
+                                path.emplace_back(G, 0);
+                        }
+                        else
+                        {
+                            order.push_back(F);
+                            path.pop_back();
+                        }
+                    }
+                }
+                return order;
+            }
+
+            // A callee without values yet is on a cycle with F. A member of the component of F
+            // counts for its frame. A norecurse function is kept out of the components; were it
+            // on a cycle all the same, the cycle is cut where it comes back, and the callee there
+            // counts for itself only.
+            StackSize computeBound(const llvm::Function* F) const
+            {
                 StackSize callees = 0;
                 if (const LocalStackInfo* local = localOf(F);
                     local && local->unresolvedCallCount > 0 && config_.assumeExternalFrame)
                     callees = config_.assumeExternalFrameBytes;
                 for (const llvm::Function* G : calleesOf(F))
-                    callees = std::max(callees, sameComponent(F, G) ? frameOf(G) : lowerBound(G));
-                inProgress_.erase(F);
-                return bounds_[F] = frameOf(F) + callees;
-            }
-
-            bool unknown(const llvm::Function* F)
-            {
-                if (auto it = unknown_.find(F); it != unknown_.end())
-                    return it->second;
-                const LocalStackInfo* local = localOf(F);
-                bool result =
-                    componentOf_.count(F) != 0 || (local && local->unknown) ||
-                    (local && local->unresolvedCallCount > 0 && !config_.assumeExternalFrame);
-                if (!result && inProgress_.insert(F).second)
                 {
-                    for (const llvm::Function* G : calleesOf(F))
-                        result = result || unknown(G);
-                    inProgress_.erase(F);
+                    auto it = bounds_.find(G);
+                    bool frameOnly = sameComponent(F, G) || it == bounds_.end();
+                    callees = std::max(callees, frameOnly ? frameOf(G) : it->second);
                 }
-                return unknown_[F] = result;
+                return frameOf(F) + callees;
             }
 
-          private:
+            bool computeUnknown(const llvm::Function* F) const
+            {
+                if (unknownByItself(F))
+                    return true;
+                for (const llvm::Function* G : calleesOf(F))
+                {
+                    auto it = unknown_.find(G);
+                    if (it != unknown_.end() ? it->second : unknownByItself(G))
+                        return true;
+                }
+                return false;
+            }
+
+            bool unknownByItself(const llvm::Function* F) const
+            {
+                const LocalStackInfo* local = localOf(F);
+                return componentOf_.count(F) != 0 || (local && local->unknown) ||
+                       (local && local->unresolvedCallCount > 0 && !config_.assumeExternalFrame);
+            }
+
             const LocalStackInfo* localOf(const llvm::Function* F) const
             {
                 auto it = LocalStack_.find(F);
@@ -862,7 +914,6 @@ namespace ctrace::stack::analysis
             const AnalysisConfig& config_;
             std::unordered_map<const llvm::Function*, StackSize> bounds_;
             std::unordered_map<const llvm::Function*, bool> unknown_;
-            std::unordered_set<const llvm::Function*> inProgress_;
         };
     } // namespace
 
@@ -933,7 +984,7 @@ namespace ctrace::stack::analysis
             }
         }
 
-        StackTotals totals(CG, LocalStack, componentOf, config);
+        StackTotals totals(CG, LocalStack, componentOf, config, Order);
         for (const auto& [F, local] : LocalStack)
         {
             StackEstimate total;
