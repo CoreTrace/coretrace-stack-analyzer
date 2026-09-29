@@ -26,8 +26,8 @@ void terminate_signed(char* buf, int n)
         buf[n - 1] = '\0';
 }
 
-// The same for a length: n - 1 overflows at INT_MIN. That a negative n - 1 converts to a huge
-// size_t is not an underflow of the subtraction.
+// The same for a length: n - 1 overflows at INT_MIN. A negative n - 1, converted to a huge
+// size_t, is another defect, which IntegerConversion.SignedToSize reports (CWE-195).
 void copy_signed(char* dst, const char* src, int n)
 {
     if (n != 0)
@@ -49,5 +49,10 @@ void copy_signed(char* dst, const char* src, int n)
 // at line 34, column 9
 // [ !!Warn ] potential unsafe write with length (size - 1) in strncpy
 // ↳ signed size - 1 may fall below the minimum of its type
+
+// at line 34, column 9
+// [ !!Warn ] potential signed-to-size conversion before 'strncpy'
+// ↳ a possibly negative signed value is converted to an unsigned length
+// ↳ this can become a very large size value and trigger out-of-bounds access
 
 // strict-expectation-details: true

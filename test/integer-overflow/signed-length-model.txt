@@ -1,0 +1,2 @@
+# bounded_write <function-pattern> <dst-arg-index> <size-arg-index>
+bounded_write copy_bytes 0 2
