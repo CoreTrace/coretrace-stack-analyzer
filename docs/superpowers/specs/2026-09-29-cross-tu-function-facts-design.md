@@ -612,9 +612,9 @@ Cas de validation, par invariant :
 - **Résumés de ressources.** Leur clé reste `canonicalizeMangledName` (§4.2).
 - **Lectures avant écriture d'un symbole défini plusieurs fois.** Elles restent réunies, comme
   aujourd'hui. Elles peuvent déclencher un diagnostic sans valoir pour toutes les définitions.
-- **Fonctions sans retour (#158).** Le canal publie un nom dès qu'une de ses définitions exactes ne
-  retourne jamais, même si une autre définition du même symbole retourne. La règle de §4.2 sur
-  les garanties universelles ne s'y applique pas encore.
+- **Fonctions sans retour** (#170). Le canal de #158 publie un nom dès qu'une de ses définitions
+  exactes ne retourne jamais, même si une autre définition du même symbole retourne. La règle de
+  §4.2 sur les garanties universelles ne s'y applique pas encore.
 
 ## 12. Livraison
 
