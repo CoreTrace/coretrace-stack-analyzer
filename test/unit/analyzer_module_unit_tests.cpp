@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "StackUsageAnalyzer.hpp"
+#include "analysis/AnalyzerUtils.hpp"
 #include "app/AnalyzerApp.hpp"
 #include "cli/ArgParser.hpp"
 #include "analysis/DuplicateIfCondition.hpp"
@@ -32,6 +33,7 @@
 #include <vector>
 
 #include <llvm/Analysis/MemorySSA.h>
+#include <llvm/AsmParser/Parser.h>
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/Function.h>
 #include <llvm/IR/InstIterator.h>
@@ -700,6 +702,41 @@ namespace
         return report.failures == 0;
     }
     /// Program-point ranges: a branch constraint must hold only where its edge dominates.
+    bool testLinkerSymbolName(TestReport& report)
+    {
+        using ctrace::stack::analysis::linkerSymbolName;
+        llvm::LLVMContext context;
+        llvm::SMDiagnostic error;
+        const auto parse = [&](const std::string& dataLayout)
+        {
+            return llvm::parseAssemblyString(
+                "target datalayout = \"" + dataLayout +
+                    "\"\n"
+                    "declare void @plain()\n"
+                    "declare void @\"\\01verbatim\"()\n"
+                    "declare void @_ZN5probe4peekEPNSt3__13tagE()\n"
+                    "declare void @_ZN5probe4peekEPNSt7__cxx113tagE()\n",
+                error, context);
+        };
+        const std::unique_ptr<llvm::Module> elf = parse("e-m:e-i64:64-n32:64-S128");
+        const std::unique_ptr<llvm::Module> macho = parse("e-m:o-i64:64-n32:64-S128");
+        if (!elf || !macho)
+        {
+            report.expect(false, "LinkerSymbolName setup: the IR does not parse");
+            return false;
+        }
+        report.expect(linkerSymbolName(*elf->getFunction("plain")) == "plain",
+                      "LinkerSymbolName: ELF adds no prefix");
+        report.expect(linkerSymbolName(*macho->getFunction("plain")) == "_plain",
+                      "LinkerSymbolName: Mach-O adds its underscore");
+        report.expect(linkerSymbolName(*macho->getFunction("\1verbatim")) == "verbatim",
+                      "LinkerSymbolName: an assembler name is taken as written");
+        report.expect(linkerSymbolName(*elf->getFunction("_ZN5probe4peekEPNSt3__13tagE")) !=
+                          linkerSymbolName(*elf->getFunction("_ZN5probe4peekEPNSt7__cxx113tagE")),
+                      "LinkerSymbolName: std::__1 and std::__cxx11 symbols stay distinct");
+        return report.failures == 0;
+    }
+
     bool testProgramPointRanges(const std::filesystem::path& repoRoot, TestReport& report)
     {
         using namespace ctrace::stack::analysis;
@@ -2029,6 +2066,7 @@ int main(int argc, char** argv)
     (void)testUnresolvedCallsMarkStackUnknown(repoRoot, report);
     (void)testAssumeExternalFrameReplacesUnknown(repoRoot, report);
     (void)testUninitializedFixpointBudgetIsExplicit(repoRoot, report);
+    (void)testLinkerSymbolName(report);
     (void)testProgramPointRanges(repoRoot, report);
     (void)testProgramPointRangesUnsignedReadings(repoRoot, report);
     (void)testSmtEvaluatorEncodesLazily(report);

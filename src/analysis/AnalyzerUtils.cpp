@@ -8,8 +8,10 @@
 #include <system_error>
 #include <vector>
 
-#include <llvm/IR/Function.h>
+#include <llvm/ADT/SmallString.h>
 #include <llvm/IR/DebugInfoMetadata.h>
+#include <llvm/IR/Function.h>
+#include <llvm/IR/Mangler.h>
 
 #include "mangle.hpp"
 
@@ -280,5 +282,12 @@ namespace ctrace::stack::analysis
         }
 
         return false;
+    }
+
+    std::string linkerSymbolName(const llvm::GlobalValue& GV)
+    {
+        llvm::SmallString<64> name;
+        llvm::Mangler().getNameWithPrefix(name, &GV, /*CannotUsePrivateLabel=*/false);
+        return std::string(name);
     }
 } // namespace ctrace::stack::analysis
