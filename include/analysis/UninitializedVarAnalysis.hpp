@@ -56,6 +56,11 @@ namespace ctrace::stack::analysis
     struct UninitializedSummaryFunction
     {
         std::vector<UninitializedSummaryParamEffect> paramEffects;
+        // False when the analysis that produced this summary stopped early, or used an
+        // incomplete summary. A caller then takes it as absent for its effects, and becomes
+        // incomplete in turn (#157).
+        std::uint64_t complete : 1 = true;
+        std::uint64_t reservedFlags : 63 = 0;
     };
 
     struct UninitializedSummaryIndex

@@ -138,10 +138,14 @@ namespace ctrace::stack::analysis
         struct FunctionSummary
         {
             std::vector<PointerParamEffectSummary> paramEffects;
+            // See UninitializedSummaryFunction::complete. Compared, so that the caller-dirty
+            // loop of computeFunctionSummaries carries it from callee to caller.
+            std::uint64_t complete : 1 = true;
+            std::uint64_t reservedFlags : 63 = 0;
 
             bool operator==(const FunctionSummary& other) const
             {
-                return paramEffects == other.paramEffects;
+                return paramEffects == other.paramEffects && complete == other.complete;
             }
         };
 
@@ -1442,8 +1446,9 @@ namespace ctrace::stack::analysis
                 }
 
                 trimTrailingEmptyParamEffects(summary);
-                if (!summary.paramEffects.empty())
-                    out.emplace(entry.first, std::move(summary));
+                // An empty summary is kept: complete, it says "writes nothing" (#157).
+                summary.complete = entry.second.complete;
+                out.emplace(entry.first, std::move(summary));
             }
 
             return out;
@@ -3137,6 +3142,7 @@ namespace ctrace::stack::analysis
 
             const llvm::Function* callee = CB->getCalledFunction();
             const FunctionSummary* calleeSummary = nullptr;
+            bool imported = false;
             if (callee)
             {
                 auto itSummary = summaries.find(callee);
@@ -3157,8 +3163,21 @@ namespace ctrace::stack::analysis
                         symbolName ? externalSummariesByName->find(*symbolName)
                                    : externalSummariesByName->find(linkerSymbolName(*callee));
                     if (itExternal != externalSummariesByName->end())
+                    {
                         calleeSummary = &itExternal->second;
+                        imported = true;
+                    }
                 }
+            }
+            if (calleeSummary && !calleeSummary->complete)
+            {
+                // The caller is no more complete than what it used. Imported, an incomplete
+                // summary counts as absent for its effects: the call gets the presumption for
+                // declarations, exactly as an unknown function (#157).
+                if (currentSummary)
+                    currentSummary->complete = false;
+                if (imported)
+                    calleeSummary = nullptr;
             }
             const bool hasSummary = (calleeSummary != nullptr);
             if (!hasSummary)
@@ -3362,7 +3381,10 @@ namespace ctrace::stack::analysis
                     }
                 }
                 if (!converged)
+                {
                     downgradeWriteClaims(*outSummary);
+                    outSummary->complete = false;
+                }
                 return;
             }
 
@@ -3519,6 +3541,10 @@ namespace ctrace::stack::analysis
                 dirtyFunctions = std::move(nextDirty);
             }
 
+            // Summaries still moving at the round cap are no fixpoint: none is complete (#157).
+            if (changed)
+                for (auto& entry : summaries)
+                    entry.second.complete = false;
             return summaries;
         }
 
@@ -3613,6 +3639,7 @@ namespace ctrace::stack::analysis
                 dst.hasUnknownWrite = src.hasUnknownWrite;
             }
             trimTrailingEmptyParamEffects(out);
+            out.complete = publicSummary.complete;
             return out;
         }
 
@@ -3657,6 +3684,7 @@ namespace ctrace::stack::analysis
                 out.paramEffects.pop_back();
             }
 
+            out.complete = summary.complete;
             return out;
         }
 
@@ -3767,6 +3795,8 @@ namespace ctrace::stack::analysis
         static bool publicFunctionSummaryEquals(const UninitializedSummaryFunction& lhs,
                                                 const UninitializedSummaryFunction& rhs)
         {
+            if (lhs.complete != rhs.complete)
+                return false;
             const std::size_t lhsSize = effectivePublicParamEffectCount(lhs);
             const std::size_t rhsSize = effectivePublicParamEffectCount(rhs);
             if (lhsSize != rhsSize)
@@ -3832,6 +3862,11 @@ namespace ctrace::stack::analysis
             trimTrailingEmptyPublicParamEffects(dst);
             if (dst.paramEffects.size() != beforeTrim)
                 changed = true;
+            if (!src.complete && dst.complete)
+            {
+                dst.complete = false;
+                changed = true;
+            }
             return changed;
         }
 
@@ -3850,7 +3885,9 @@ namespace ctrace::stack::analysis
 
                 FunctionSummary normalized = it->second;
                 trimTrailingEmptyParamEffects(normalized);
-                if (normalized.paramEffects.empty())
+                // An empty summary says "writes nothing" only from an exact definition: the
+                // linker may replace any other one (#157).
+                if (normalized.paramEffects.empty() && !F.hasExactDefinition())
                     continue;
 
                 out.functions[linkerSymbolName(F)] = exportPublicFunctionSummary(normalized);
@@ -3960,10 +3997,6 @@ namespace ctrace::stack::analysis
         bool changed = false;
         for (const auto& entry : src.functions)
         {
-            const std::size_t srcSize = effectivePublicParamEffectCount(entry.second);
-            if (srcSize == 0)
-                continue;
-
             auto it = dst.functions.find(entry.first);
             if (it == dst.functions.end())
             {

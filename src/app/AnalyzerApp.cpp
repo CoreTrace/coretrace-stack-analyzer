@@ -1928,6 +1928,9 @@ struct UninitializedSummaryOperations
     const std::vector<LoadedInputModule>& modules;
     const AnalysisConfig& cfg;
     std::vector<analysis::PreparedUninitializedModuleContext> preparedModules;
+    // Symbols defined by several modules: a caller may see one definition before the others, so
+    // none of their summaries proves "writes nothing" (#157).
+    std::unordered_set<std::string> multiplyDefined;
 
     UninitializedSummaryOperations(const std::vector<LoadedInputModule>& modules,
                                    const AnalysisConfig& cfg)
@@ -1955,8 +1958,17 @@ struct UninitializedSummaryOperations
     {
         const analyzer::ScopedHotspot hotspot(cfg.timing,
                                               "app.cross_tu.uninitialized.build_module");
-        return analysis::buildUninitializedSummaryIndex(*modules[module].module,
-                                                        &preparedModules[module], &external);
+        Index index = analysis::buildUninitializedSummaryIndex(*modules[module].module,
+                                                               &preparedModules[module], &external);
+        for (auto& entry : index.functions)
+            if (multiplyDefined.count(entry.first) != 0)
+                entry.second.complete = false;
+        return index;
+    }
+    static void markIncomplete(Index& index)
+    {
+        for (auto& entry : index.functions)
+            entry.second.complete = false;
     }
     bool tryCache(std::size_t, const External&, Index&) const
     {
@@ -2194,6 +2206,9 @@ buildCrossTUUninitializedSummaryIndex(const std::vector<LoadedInputModule>& load
     const auto definedBy =
         collectModuleDefinitions(loadedModules, [](const llvm::Function& function)
                                  { return analysis::linkerSymbolName(function); });
+    for (const auto& [symbol, modules] : definedBy)
+        if (modules.size() > 1)
+            operations.multiplyDefined.insert(symbol);
 
     // ── SCC instrumentation: diagnose inter-module call graph structure ──
     if (cfg.timing)
