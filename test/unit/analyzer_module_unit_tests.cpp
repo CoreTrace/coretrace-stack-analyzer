@@ -878,7 +878,7 @@ namespace
             {
                 return {{module == 0 ? "a" : "b", {converges ? 1 : ++round, true}}};
             }
-            bool tryCache(std::size_t, const External&, Index&) const
+            bool tryCache(std::size_t, const External&, const Index&) const
             {
                 return false;
             }
@@ -926,7 +926,7 @@ namespace
         const std::unordered_map<std::string, std::vector<std::size_t>> definitions = {{"a", {0}},
                                                                                        {"b", {1}}};
         const CrossTUSummaryPlan plan(callees, definitions);
-        const auto serial = [](const std::vector<std::size_t>& modules, auto&& build)
+        const auto serial = [](const std::vector<std::size_t>& modules, const auto& build)
         {
             for (std::size_t module : modules)
                 build(module);
