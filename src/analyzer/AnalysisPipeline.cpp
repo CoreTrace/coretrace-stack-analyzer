@@ -640,8 +640,10 @@ namespace ctrace::stack::analyzer
                          {
                              auto shouldAnalyze = [&](const llvm::Function& F) -> bool
                              { return state.prepared->ctx.shouldAnalyze(F); };
+                             const auto* otherModules = state.config.constPointeeParamIndex.get();
                              const std::vector<analysis::ConstParamIssue> issues =
-                                 analysis::analyzeConstParams(state.mod, shouldAnalyze);
+                                 analysis::analyzeConstParams(state.mod, shouldAnalyze,
+                                                              otherModules);
                              appendConstParamDiagnostics(state.result, issues);
                          },
                          kPrepared, kNone, true, ExecutionModel::SubscriberCompatible});

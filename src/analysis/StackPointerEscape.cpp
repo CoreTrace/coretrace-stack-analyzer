@@ -649,7 +649,7 @@ namespace ctrace::stack::analysis
         static void analyzeStackPointerEscapesInFunction(
             llvm::Function& F, const FunctionEscapeSummaryMap& summaries,
             const FunctionArgHardEscapeMap& hardEscapesByArg,
-            IndirectTargetResolver& targetResolver,
+            const IndirectTargetResolver& targetResolver,
             const ReturnedPointerArgAliasMap& returnedArgAliases, const StackEscapeModel& model,
             StackEscapeRuleMatcher& ruleMatcher, std::vector<StackPointerEscapeIssue>& out)
         {
