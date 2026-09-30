@@ -122,7 +122,7 @@ namespace ctrace::stack::analysis
                                              const UninitializedSummaryIndex& next);
 
     std::unordered_set<std::string>
-    getCanonicalCalleeNames(const PreparedUninitializedModuleContext& prepared);
+    getCalleeSymbolNames(const PreparedUninitializedModuleContext& prepared);
 
     std::vector<UninitializedLocalReadIssue>
     analyzeUninitializedLocalReads(llvm::Module& mod,

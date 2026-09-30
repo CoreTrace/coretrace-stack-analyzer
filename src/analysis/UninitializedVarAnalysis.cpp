@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "analysis/UninitializedVarAnalysis.hpp"
 #include "analysis/ParameterDebugBinding.hpp"
-#include "mangle.hpp"
+#include "analysis/AnalyzerUtils.hpp"
 
 #include <algorithm>
 #include <array>
@@ -147,7 +147,7 @@ namespace ctrace::stack::analysis
 
         using FunctionSummaryMap = llvm::DenseMap<const llvm::Function*, FunctionSummary>;
         using ExternalSummaryMapByName = std::unordered_map<std::string, FunctionSummary>;
-        using CanonicalCalleeNameMap = llvm::DenseMap<const llvm::Function*, std::string>;
+        using CalleeSymbolNameMap = llvm::DenseMap<const llvm::Function*, std::string>;
 
         static constexpr std::uint64_t kUnknownObjectFullRange =
             std::numeric_limits<std::uint64_t>::max() / 4;
@@ -1443,8 +1443,7 @@ namespace ctrace::stack::analysis
 
                 trimTrailingEmptyParamEffects(summary);
                 if (!summary.paramEffects.empty())
-                    out.emplace(ctrace_tools::canonicalizeMangledName(entry.first),
-                                std::move(summary));
+                    out.emplace(entry.first, std::move(summary));
             }
 
             return out;
@@ -2812,7 +2811,7 @@ namespace ctrace::stack::analysis
         transferInstruction(const llvm::Instruction& I, const TrackedObjectContext& tracked,
                             const llvm::DataLayout& DL, const FunctionSummaryMap& summaries,
                             const ExternalSummaryMapByName* externalSummariesByName,
-                            const CanonicalCalleeNameMap* canonicalCalleeNames,
+                            const CalleeSymbolNameMap* calleeSymbolNames,
                             InitRangeState& initialized, llvm::BitVector* writeSeen,
                             llvm::BitVector* constructedSeen, llvm::BitVector* defaultCtorSeen,
                             llvm::BitVector* readBeforeInitSeen, FunctionSummary* currentSummary,
@@ -3147,18 +3146,16 @@ namespace ctrace::stack::analysis
                 }
                 else if (externalSummariesByName)
                 {
-                    const std::string* canonicalName = nullptr;
-                    if (canonicalCalleeNames)
+                    const std::string* symbolName = nullptr;
+                    if (calleeSymbolNames)
                     {
-                        auto itName = canonicalCalleeNames->find(callee);
-                        if (itName != canonicalCalleeNames->end())
-                            canonicalName = &itName->second;
+                        auto itName = calleeSymbolNames->find(callee);
+                        if (itName != calleeSymbolNames->end())
+                            symbolName = &itName->second;
                     }
                     auto itExternal =
-                        canonicalName
-                            ? externalSummariesByName->find(*canonicalName)
-                            : externalSummariesByName->find(
-                                  ctrace_tools::canonicalizeMangledName(callee->getName().str()));
+                        symbolName ? externalSummariesByName->find(*symbolName)
+                                   : externalSummariesByName->find(linkerSymbolName(*callee));
                     if (itExternal != externalSummariesByName->end())
                         calleeSummary = &itExternal->second;
                 }
@@ -3197,7 +3194,7 @@ namespace ctrace::stack::analysis
         static void analyzeFunction(const llvm::Function& F, const llvm::DataLayout& DL,
                                     const FunctionSummaryMap& summaries,
                                     const ExternalSummaryMapByName* externalSummariesByName,
-                                    const CanonicalCalleeNameMap* canonicalCalleeNames,
+                                    const CalleeSymbolNameMap* calleeSymbolNames,
                                     unsigned fixpointIterationLimit, FunctionSummary* outSummary,
                                     std::vector<UninitializedLocalReadIssue>* outIssues)
         {
@@ -3248,10 +3245,10 @@ namespace ctrace::stack::analysis
                         isLeaf = false;
                         break;
                     }
-                    if (externalSummariesByName && canonicalCalleeNames)
+                    if (externalSummariesByName && calleeSymbolNames)
                     {
-                        auto nameIt = canonicalCalleeNames->find(callee);
-                        if (nameIt != canonicalCalleeNames->end() &&
+                        auto nameIt = calleeSymbolNames->find(callee);
+                        if (nameIt != calleeSymbolNames->end() &&
                             externalSummariesByName->find(nameIt->second) !=
                                 externalSummariesByName->end())
                         {
@@ -3314,7 +3311,7 @@ namespace ctrace::stack::analysis
                         for (const llvm::Instruction& I : BB)
                         {
                             transferInstruction(I, tracked, DL, summaries, externalSummariesByName,
-                                                canonicalCalleeNames, state, &writeSeen,
+                                                calleeSymbolNames, state, &writeSeen,
                                                 &constructedSeen, &defaultCtorSeen,
                                                 &readBeforeInitSeen, nullptr, &pendingIssues);
                         }
@@ -3324,8 +3321,8 @@ namespace ctrace::stack::analysis
                         for (const llvm::Instruction& I : BB)
                         {
                             transferInstruction(I, tracked, DL, summaries, externalSummariesByName,
-                                                canonicalCalleeNames, state, nullptr, nullptr,
-                                                nullptr, nullptr, nullptr, nullptr);
+                                                calleeSymbolNames, state, nullptr, nullptr, nullptr,
+                                                nullptr, nullptr, nullptr);
                         }
                     }
 
@@ -3360,7 +3357,7 @@ namespace ctrace::stack::analysis
                     for (const llvm::Instruction& I : BB)
                     {
                         transferInstruction(I, tracked, DL, summaries, externalSummariesByName,
-                                            canonicalCalleeNames, state, nullptr, nullptr, nullptr,
+                                            calleeSymbolNames, state, nullptr, nullptr, nullptr,
                                             nullptr, outSummary, nullptr);
                     }
                 }
@@ -3451,7 +3448,7 @@ namespace ctrace::stack::analysis
         static FunctionSummaryMap computeFunctionSummaries(
             llvm::Module& mod, const std::function<bool(const llvm::Function&)>& shouldAnalyze,
             const ExternalSummaryMapByName* externalSummariesByName,
-            const CanonicalCalleeNameMap* canonicalCalleeNames, unsigned fixpointIterationLimit)
+            const CalleeSymbolNameMap* calleeSymbolNames, unsigned fixpointIterationLimit)
         {
             FunctionSummaryMap summaries;
             llvm::SmallVector<const llvm::Function*, 64> analysisFunctions;
@@ -3504,7 +3501,7 @@ namespace ctrace::stack::analysis
 
                     FunctionSummary next = makeEmptySummary(*func);
                     analyzeFunction(*func, mod.getDataLayout(), summaries, externalSummariesByName,
-                                    canonicalCalleeNames, fixpointIterationLimit, &next, nullptr);
+                                    calleeSymbolNames, fixpointIterationLimit, &next, nullptr);
                     FunctionSummary& cur = summaries[func];
                     if (!(cur == next))
                     {
@@ -3567,11 +3564,11 @@ namespace ctrace::stack::analysis
             return inScope;
         }
 
-        static CanonicalCalleeNameMap
-        buildCanonicalCalleeNameMap(llvm::Module& mod,
-                                    const llvm::DenseSet<const llvm::Function*>& summaryScope)
+        static CalleeSymbolNameMap
+        buildCalleeSymbolNameMap(llvm::Module& mod,
+                                 const llvm::DenseSet<const llvm::Function*>& summaryScope)
         {
-            CanonicalCalleeNameMap names;
+            CalleeSymbolNameMap names;
             for (const llvm::Function& F : mod)
             {
                 if (summaryScope.find(&F) == summaryScope.end())
@@ -3588,8 +3585,7 @@ namespace ctrace::stack::analysis
                             continue;
                         if (!callee->hasName() || callee->getName().empty())
                             continue;
-                        names.try_emplace(
-                            callee, ctrace_tools::canonicalizeMangledName(callee->getName().str()));
+                        names.try_emplace(callee, linkerSymbolName(*callee));
                     }
                 }
             }
@@ -3857,8 +3853,7 @@ namespace ctrace::stack::analysis
                 if (normalized.paramEffects.empty())
                     continue;
 
-                out.functions[ctrace_tools::canonicalizeMangledName(F.getName().str())] =
-                    exportPublicFunctionSummary(normalized);
+                out.functions[linkerSymbolName(F)] = exportPublicFunctionSummary(normalized);
             }
             return out;
         }
@@ -3872,7 +3867,7 @@ namespace ctrace::stack::analysis
     struct PreparedUninitializedModuleContextOpaque
     {
         llvm::DenseSet<const llvm::Function*> summaryScope;
-        CanonicalCalleeNameMap canonicalCalleeNames;
+        CalleeSymbolNameMap calleeSymbolNames;
     };
 
     PreparedUninitializedExternalSummaries
@@ -3891,7 +3886,7 @@ namespace ctrace::stack::analysis
         PreparedUninitializedModuleContext prepared;
         auto opaque = std::make_shared<PreparedUninitializedModuleContextOpaque>();
         opaque->summaryScope = collectSummaryScope(mod, shouldAnalyze);
-        opaque->canonicalCalleeNames = buildCanonicalCalleeNameMap(mod, opaque->summaryScope);
+        opaque->calleeSymbolNames = buildCalleeSymbolNameMap(mod, opaque->summaryScope);
         prepared.opaque = std::move(opaque);
         return prepared;
     }
@@ -3936,8 +3931,7 @@ namespace ctrace::stack::analysis
         }
         const llvm::DenseSet<const llvm::Function*>& summaryScope =
             preparedModule->opaque->summaryScope;
-        const CanonicalCalleeNameMap* canonicalCalleeNames =
-            &preparedModule->opaque->canonicalCalleeNames;
+        const CalleeSymbolNameMap* calleeSymbolNames = &preparedModule->opaque->calleeSymbolNames;
 
         auto shouldSummarize = [&](const llvm::Function& F) -> bool
         { return summaryScope.find(&F) != summaryScope.end(); };
@@ -3948,7 +3942,7 @@ namespace ctrace::stack::analysis
             externalMap = &preparedExternal->opaque->summariesByName;
         }
         FunctionSummaryMap summaries = computeFunctionSummaries(
-            mod, shouldSummarize, externalMap, canonicalCalleeNames, fixpointIterationLimit);
+            mod, shouldSummarize, externalMap, calleeSymbolNames, fixpointIterationLimit);
         return exportSummaryIndexForModule(mod, summaries);
     }
 
@@ -4035,12 +4029,12 @@ namespace ctrace::stack::analysis
     }
 
     std::unordered_set<std::string>
-    getCanonicalCalleeNames(const PreparedUninitializedModuleContext& prepared)
+    getCalleeSymbolNames(const PreparedUninitializedModuleContext& prepared)
     {
         std::unordered_set<std::string> result;
         if (!prepared.opaque)
             return result;
-        for (const auto& entry : prepared.opaque->canonicalCalleeNames)
+        for (const auto& entry : prepared.opaque->calleeSymbolNames)
             result.insert(entry.second);
         return result;
     }
@@ -4055,12 +4049,11 @@ namespace ctrace::stack::analysis
             collectSummaryScope(mod, shouldAnalyze);
         auto shouldSummarize = [&](const llvm::Function& F) -> bool
         { return summaryScope.find(&F) != summaryScope.end(); };
-        const CanonicalCalleeNameMap canonicalCalleeNames =
-            buildCanonicalCalleeNameMap(mod, summaryScope);
+        const CalleeSymbolNameMap calleeSymbolNames = buildCalleeSymbolNameMap(mod, summaryScope);
         const ExternalSummaryMapByName externalMap = importExternalSummaryMap(externalSummaries);
         FunctionSummaryMap summaries = computeFunctionSummaries(
-            mod, shouldSummarize, externalMap.empty() ? nullptr : &externalMap,
-            &canonicalCalleeNames, fixpointIterationLimit);
+            mod, shouldSummarize, externalMap.empty() ? nullptr : &externalMap, &calleeSymbolNames,
+            fixpointIterationLimit);
 
         for (const llvm::Function& F : mod)
         {
@@ -4070,7 +4063,7 @@ namespace ctrace::stack::analysis
                 continue;
 
             analyzeFunction(F, mod.getDataLayout(), summaries,
-                            externalMap.empty() ? nullptr : &externalMap, &canonicalCalleeNames,
+                            externalMap.empty() ? nullptr : &externalMap, &calleeSymbolNames,
                             fixpointIterationLimit, nullptr, &issues);
         }
 

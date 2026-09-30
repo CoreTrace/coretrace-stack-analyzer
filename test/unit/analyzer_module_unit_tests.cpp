@@ -642,7 +642,8 @@ namespace
 
             const UninitializedSummaryIndex summaries = buildUninitializedSummaryIndex(
                 *loaded.module, analyzeAll, static_cast<const UninitializedSummaryIndex*>(nullptr));
-            const auto it = summaries.functions.find("fill");
+            const auto it =
+                summaries.functions.find(linkerSymbolName(*loaded.module->getFunction("fill")));
             const bool claimsWrite = it != summaries.functions.end() &&
                                      !it->second.paramEffects.empty() &&
                                      !it->second.paramEffects[0].writeRanges.empty() &&
@@ -670,7 +671,8 @@ namespace
             const UninitializedSummaryIndex summaries = buildUninitializedSummaryIndex(
                 *loaded.module, analyzeAll, static_cast<const UninitializedSummaryIndex*>(nullptr),
                 /*fixpointIterationLimit=*/1);
-            const auto it = summaries.functions.find("fill");
+            const auto it =
+                summaries.functions.find(linkerSymbolName(*loaded.module->getFunction("fill")));
             const bool downgraded = it != summaries.functions.end() &&
                                     !it->second.paramEffects.empty() &&
                                     it->second.paramEffects[0].writeRanges.empty() &&
@@ -734,6 +736,28 @@ namespace
         report.expect(linkerSymbolName(*elf->getFunction("_ZN5probe4peekEPNSt3__13tagE")) !=
                           linkerSymbolName(*elf->getFunction("_ZN5probe4peekEPNSt7__cxx113tagE")),
                       "LinkerSymbolName: std::__1 and std::__cxx11 symbols stay distinct");
+        return report.failures == 0;
+    }
+
+    bool testUninitializedSummaryKeysAreLinkerSymbols(const std::filesystem::path& repoRoot,
+                                                      TestReport& report)
+    {
+        using namespace ctrace::stack::analysis;
+        const ctrace::stack::AnalysisConfig config;
+        LoadedModule loaded;
+        std::string loadError;
+        if (!loadModuleFromSource(repoRoot / "test/unit/uninit_fixpoint_budget_input.c", config,
+                                  loaded, loadError))
+        {
+            report.expect(false, "UninitSummaryKeys setup: failed to load module: " + loadError);
+            return false;
+        }
+        const UninitializedSummaryIndex index = buildUninitializedSummaryIndex(
+            *loaded.module, [](const llvm::Function&) { return true; },
+            static_cast<const UninitializedSummaryIndex*>(nullptr));
+        const std::string key = linkerSymbolName(*loaded.module->getFunction("fill"));
+        report.expect(index.functions.count(key) == 1,
+                      "UninitSummaryKeys: the summary of fill is keyed by its linker symbol");
         return report.failures == 0;
     }
 
@@ -2067,6 +2091,7 @@ int main(int argc, char** argv)
     (void)testAssumeExternalFrameReplacesUnknown(repoRoot, report);
     (void)testUninitializedFixpointBudgetIsExplicit(repoRoot, report);
     (void)testLinkerSymbolName(report);
+    (void)testUninitializedSummaryKeysAreLinkerSymbols(repoRoot, report);
     (void)testProgramPointRanges(repoRoot, report);
     (void)testProgramPointRangesUnsignedReadings(repoRoot, report);
     (void)testSmtEvaluatorEncodesLazily(report);
