@@ -23,6 +23,7 @@ namespace llvm
 namespace ctrace::stack::analysis
 {
     class CompilationDatabase;
+    struct ConstPointeeParamIndex;
     struct GlobalReadBeforeWriteSummaryIndex;
     struct ResourceSummaryIndex;
     struct UninitializedSummaryIndex;
@@ -68,6 +69,9 @@ namespace ctrace::stack
             globalReadBeforeWriteSummaryIndex;
         // External functions that never return, found across the modules analyzed together.
         std::shared_ptr<const std::set<std::string>> neverReturnFunctions;
+        // Parameters that every definition, across the modules analyzed together, declares to
+        // point to const.
+        std::shared_ptr<const analysis::ConstPointeeParamIndex> constPointeeParamIndex;
 
         std::vector<std::string> excludeDirs;
         std::vector<std::string> extraCompileArgs;

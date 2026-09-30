@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "analysis/ConstParamAnalysis.hpp"
+#include "analysis/AnalyzerUtils.hpp"
 
 #include <cctype>
 
@@ -322,7 +323,8 @@ namespace ctrace::stack::analysis
             return typeInfo.pointeeConst;
         }
 
-        static ParamWriteState callArgWriteState(const llvm::CallBase& CB, unsigned argIndex)
+        static ParamWriteState callArgWriteState(const llvm::CallBase& CB, unsigned argIndex,
+                                                 const ConstPointeeParamIndex* otherModules)
         {
             using namespace llvm;
 
@@ -369,6 +371,19 @@ namespace ctrace::stack::analysis
             if (callee->onlyReadsMemory())
                 return ParamWriteState::NoWrite;
 
+            // Defined in another module: its parameter types, when the call passes one argument per
+            // parameter (#157). A declaration without a prototype is variadic in the IR, and still
+            // qualifies.
+            if (otherModules && callee->isDeclaration())
+            {
+                const auto it = otherModules->functions.find(linkerSymbolName(*callee));
+                if (it != otherModules->functions.end() && it->second.size() == CB.arg_size() &&
+                    it->second[argIndex])
+                {
+                    return ParamWriteState::NoWrite;
+                }
+            }
+
             if (argIndex >= callee->arg_size())
                 return ParamWriteState::Unknown; // varargs or unknown
 
@@ -409,7 +424,8 @@ namespace ctrace::stack::analysis
             return ParamWriteState::Unknown;
         }
 
-        static ParamWriteState valueWriteState(const llvm::Value* root, const llvm::Function& F)
+        static ParamWriteState valueWriteState(const llvm::Value* root, const llvm::Function& F,
+                                               const ConstPointeeParamIndex* otherModules)
         {
             using namespace llvm;
             (void)F;
@@ -476,7 +492,8 @@ namespace ctrace::stack::analysis
                         {
                             if (CB->getArgOperand(i) == V)
                             {
-                                const ParamWriteState callWriteState = callArgWriteState(*CB, i);
+                                const ParamWriteState callWriteState =
+                                    callArgWriteState(*CB, i, otherModules);
                                 if (callWriteState == ParamWriteState::MayWrite)
                                     return ParamWriteState::MayWrite;
                                 aggregate = mergeParamWriteState(aggregate, callWriteState);
@@ -654,7 +671,8 @@ namespace ctrace::stack::analysis
         }
 
         static void analyzeConstParamsInFunction(llvm::Function& F,
-                                                 std::vector<ConstParamIssue>& out)
+                                                 std::vector<ConstParamIssue>& out,
+                                                 const ConstPointeeParamIndex* otherModules)
         {
             using namespace llvm;
 
@@ -685,8 +703,9 @@ namespace ctrace::stack::analysis
                     continue;
                 const bool readOnlyByMetadata = metadataWriteState == ParamWriteState::NoWrite;
 
-                const ParamWriteState writeState =
-                    readOnlyByMetadata ? ParamWriteState::NoWrite : valueWriteState(&Arg, F);
+                const ParamWriteState writeState = readOnlyByMetadata
+                                                       ? ParamWriteState::NoWrite
+                                                       : valueWriteState(&Arg, F, otherModules);
                 if (writeState != ParamWriteState::NoWrite)
                     continue;
 
@@ -726,9 +745,26 @@ namespace ctrace::stack::analysis
         }
     } // namespace
 
+    ConstPointeeParamIndex collectConstPointeeParams(const llvm::Module& mod)
+    {
+        ConstPointeeParamIndex index;
+        for (const llvm::Function& F : mod)
+        {
+            if (F.isDeclaration() || F.hasLocalLinkage())
+                continue;
+            const bool declaresParams = F.hasExactDefinition() && !F.isVarArg();
+            std::vector<bool> params(F.arg_size(), false);
+            for (unsigned i = 0; declaresParams && i < F.arg_size(); ++i)
+                params[i] = calleeParamIsReadOnly(&F, i);
+            index.functions[linkerSymbolName(F)] = std::move(params);
+        }
+        return index;
+    }
+
     std::vector<ConstParamIssue>
     analyzeConstParams(llvm::Module& mod,
-                       const std::function<bool(const llvm::Function&)>& shouldAnalyze)
+                       const std::function<bool(const llvm::Function&)>& shouldAnalyze,
+                       const ConstPointeeParamIndex* otherModules)
     {
         std::vector<ConstParamIssue> out;
 
@@ -738,7 +774,7 @@ namespace ctrace::stack::analysis
                 continue;
             if (!shouldAnalyze(F))
                 continue;
-            analyzeConstParamsInFunction(F, out);
+            analyzeConstParamsInFunction(F, out, otherModules);
         }
 
         return out;

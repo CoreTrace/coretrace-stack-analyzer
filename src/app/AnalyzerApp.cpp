@@ -45,6 +45,7 @@
 #include <llvm/Support/raw_ostream.h>
 #include "analysis/AnalyzerUtils.hpp"
 #include "analysis/CompileCommands.hpp"
+#include "analysis/ConstParamAnalysis.hpp"
 #include "analysis/FunctionFilter.hpp"
 #include "analysis/GlobalReadBeforeWriteAnalysis.hpp"
 #include "analysis/InputPipeline.hpp"
@@ -992,6 +993,30 @@ static AppStatus analyzeWithSharedModuleLoading(const std::vector<std::string>& 
                     grew |= neverReturn->insert(name).second;
         }
         cfg.neverReturnFunctions = std::move(neverReturn);
+    }
+
+    {
+        // A caller may be linked with any definition of the symbol: a parameter points to const
+        // only if every definition, each with as many parameters, declares it so (#157).
+        const analyzer::ScopedHotspot hotspot(cfg.timing, "app.shared_loading.const_params");
+        auto published = std::make_shared<analysis::ConstPointeeParamIndex>();
+        for (const auto& loaded : loadedModules)
+        {
+            const analysis::ConstPointeeParamIndex index =
+                analysis::collectConstPointeeParams(*loaded.module);
+            for (const auto& [symbol, params] : index.functions)
+            {
+                const auto [it, first] = published->functions.try_emplace(symbol, params);
+                if (first)
+                    continue;
+                std::vector<bool>& merged = it->second;
+                if (merged.size() != params.size())
+                    merged.clear();
+                for (std::size_t i = 0; i < merged.size(); ++i)
+                    merged[i] = merged[i] && params[i];
+            }
+        }
+        cfg.constPointeeParamIndex = std::move(published);
     }
 
     if (needsCrossTUResourceSummaries)
