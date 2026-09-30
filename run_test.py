@@ -2604,6 +2604,168 @@ def check_const_param_cross_tu() -> bool:
     return ok
 
 
+def _check_cross_tu_rule(
+    title: str,
+    directory: str,
+    prefix: str,
+    rule_id: str,
+    cases: list[tuple[str, list[str], list[str]]],
+    copied_cases: list[tuple[str, list[str], list[str]]],
+) -> bool:
+    """
+    Runs each case in both passes: the analyzer over its fixtures, then the functions reported
+    under rule_id. The analyzer sorts its inputs: copied_cases run on copies named so that the
+    files keep the listed order.
+    """
+    print(f"=== Testing {title} ===")
+    fixtures = RUN_CONFIG.test_dir / directory
+    smt_args = [
+        "--smt=on",
+        "--smt-backend=z3",
+        "--smt-mode=single",
+        f"--smt-rules={','.join(_all_smt_rules())}",
+        f"--smt-timeout-ms={SMT_FIXTURE_TIMEOUT_MS}",
+    ]
+
+    def reported(files: list[str], extra: list[str]) -> Optional[list[str]]:
+        result = run_analyzer([*files, "--format=json", *extra])
+        try:
+            diagnostics = json.loads(result.stdout or "").get("diagnostics", [])
+        except json.JSONDecodeError:
+            return None
+        return sorted(
+            {
+                str(d.get("location", {}).get("function", ""))
+                for d in diagnostics
+                if d.get("ruleId") == rule_id
+            }
+        )
+
+    ok = True
+    with tempfile.TemporaryDirectory(prefix="ct_rule_") as tmp:
+        runs = []
+        for pass_name, pass_args in (("default", []), ("smt-z3", smt_args)):
+            for label, parts, expected in cases:
+                files = [str(fixtures / f"{prefix}{part}") for part in parts]
+                runs.append((f"{pass_name}, {label}", files, pass_args, expected))
+            for label, parts, expected in copied_cases:
+                files = []
+                for rank, part in enumerate(parts):
+                    target = Path(tmp) / f"{rank}-{prefix}{part}"
+                    shutil.copy(fixtures / f"{prefix}{part}", target)
+                    files.append(str(target))
+                runs.append((f"{pass_name}, {label}", files, pass_args, expected))
+
+        for label, files, extra, expected in runs:
+            found = reported(files, extra)
+            if found == expected:
+                print(f"  ✅ {label}: {found}")
+            else:
+                print(f"  ❌ {label}: {found}, expected {expected}")
+                ok = False
+    print()
+    return ok
+
+
+def check_duplicate_if_cross_tu() -> bool:
+    """
+    #157: a function defined in another file is deterministic when every definition of it is, as
+    within one file, whatever the sort order: an else-if that repeats its if through it is
+    reported. The fact follows a chain of files, never a cycle, and never comes from a definition
+    that reads a mutable global, from a weak one or from a static homonym. A function that calls
+    abort() stays deterministic, and a call through a declaration without a prototype qualifies.
+    """
+    both = ["pick", "pick_or_abort"]
+    return _check_cross_tu_rule(
+        "deterministic functions defined in another file",
+        "diagnostics",
+        "cross-tu-deterministic-",
+        "DuplicateIfCondition",
+        [
+            ("use alone", ["use.c"], []),
+            ("def and use", ["def.c", "use.c"], both),
+            ("mutable global", ["global.c", "use.c"], []),
+            ("defined twice, both deterministic", ["def.c", "again.c", "use.c"], both),
+            (
+                "defined twice, one reads a mutable global",
+                ["def.c", "global.c", "use.c"],
+                ["pick_or_abort"],
+            ),
+            ("weak def", ["weak.c", "use.c"], []),
+            ("weak beside the definition", ["def.c", "weak.c", "use.c"], ["pick_or_abort"]),
+            ("static homonym alone", ["static.c", "use.c"], ["local_pick"]),
+            (
+                "static homonym beside the definition",
+                ["def.c", "static.c", "use.c"],
+                ["local_pick", *both],
+            ),
+            (
+                "chain over three files",
+                ["chain-leaf.c", "chain-mid.c", "chain-use.c"],
+                ["pick_chain"],
+            ),
+            ("chain without its leaf", ["chain-mid.c", "chain-use.c"], []),
+            ("cycle across two files", ["cycle-a.c", "cycle-b.c"], []),
+            ("no prototype", ["def.c", "noproto-use.c"], ["pick_noproto"]),
+        ],
+        [
+            ("use sorted first", ["use.c", "def.c"], both),
+            ("mutable global sorted first", ["global.c", "def.c", "use.c"], ["pick_or_abort"]),
+            (
+                "chain in reverse order",
+                ["chain-use.c", "chain-mid.c", "chain-leaf.c"],
+                ["pick_chain"],
+            ),
+        ],
+    )
+
+
+def check_size_minus_one_cross_tu() -> bool:
+    """
+    #157: the length that a function defined in another file passes to a bounded write reaches
+    its callers, as within one file, whatever the sort order: a length n - 1 that may wrap is
+    reported. The pair (destination, length) holds only if every definition has it, follows a
+    chain of files, never comes from a weak definition or a static homonym, and applies to a call
+    that passes one argument per parameter, also through a declaration without a prototype.
+    """
+    return _check_cross_tu_rule(
+        "size-minus-one lengths through functions defined in another file",
+        "size-arg",
+        "cross-tu-size-minus-one-",
+        "SizeMinusOneWrite",
+        [
+            ("use alone", ["use.c"], []),
+            ("def and use", ["def.c", "use.c"], ["copy_name"]),
+            ("defined twice, both pass n", ["def.c", "again.c", "use.c"], ["copy_name"]),
+            ("defined twice, one does not pass n", ["def.c", "other.c", "use.c"], []),
+            ("weak def", ["weak.c", "use.c"], []),
+            ("weak beside the definition", ["def.c", "weak.c", "use.c"], []),
+            ("static homonym alone", ["static.c", "use.c"], ["local_copy"]),
+            (
+                "static homonym beside the definition",
+                ["def.c", "static.c", "use.c"],
+                ["copy_name", "local_copy"],
+            ),
+            (
+                "chain over three files",
+                ["chain-leaf.c", "chain-mid.c", "chain-use.c"],
+                ["copy_chain"],
+            ),
+            ("chain without its leaf", ["chain-mid.c", "chain-use.c"], []),
+            ("no prototype", ["def.c", "noproto-use.c"], ["copy_noproto"]),
+        ],
+        [
+            ("use sorted first", ["use.c", "def.c"], ["copy_name"]),
+            ("other sorted first", ["other.c", "def.c", "use.c"], []),
+            (
+                "chain in reverse order",
+                ["chain-use.c", "chain-mid.c", "chain-leaf.c"],
+                ["copy_chain"],
+            ),
+        ],
+    )
+
+
 def check_null_deref_nested_inter_tu() -> bool:
     """
     Regression: nested null-deref cases must still be reported when the analyzer
@@ -4411,6 +4573,8 @@ def main() -> int:
         check_uninitialized_cross_tu,
         check_uninitialized_cross_tu_no_effect,
         check_const_param_cross_tu,
+        check_duplicate_if_cross_tu,
+        check_size_minus_one_cross_tu,
         check_null_deref_nested_inter_tu,
         check_integer_overflow_advanced_inter_tu,
         check_noreturn_cross_tu,
