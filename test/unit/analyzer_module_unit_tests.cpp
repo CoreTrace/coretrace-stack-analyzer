@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "StackUsageAnalyzer.hpp"
 #include "analysis/AnalyzerUtils.hpp"
+#include "app/CrossTUSummaryDriver.hpp"
 #include "app/AnalyzerApp.hpp"
 #include "cli/ArgParser.hpp"
 #include "analysis/DuplicateIfCondition.hpp"
@@ -25,6 +26,9 @@
 #include <filesystem>
 #include <map>
 #include <set>
+#include <unordered_map>
+#include <unordered_set>
+#include <utility>
 #include <functional>
 #include <iostream>
 #include <memory>
@@ -758,6 +762,193 @@ namespace
         const std::string key = linkerSymbolName(*loaded.module->getFunction("fill"));
         report.expect(index.functions.count(key) == 1,
                       "UninitSummaryKeys: the summary of fill is keyed by its linker symbol");
+        return report.failures == 0;
+    }
+
+    // Three modules (#157): A is built with a one-iteration limit, at which none of its analyses
+    // converges; B and C with the normal budget, B with the index of A, C with those of A and B.
+    bool testUninitializedIncompleteSummaries(const std::filesystem::path& repoRoot,
+                                              TestReport& report)
+    {
+        using namespace ctrace::stack::analysis;
+        const ctrace::stack::AnalysisConfig config;
+        LoadedModule a;
+        LoadedModule b;
+        LoadedModule c;
+        std::string loadError;
+        const std::pair<LoadedModule*, const char*> inputs[] = {{&a, "a"}, {&b, "b"}, {&c, "c"}};
+        for (const auto& [module, file] : inputs)
+        {
+            const std::filesystem::path source =
+                repoRoot / "test/unit" / (std::string("uninit_incomplete_") + file + ".c");
+            if (!loadModuleFromSource(source, config, *module, loadError))
+            {
+                report.expect(false, "UninitIncomplete setup: failed to load module: " + loadError);
+                return false;
+            }
+        }
+
+        auto analyzeAll = [](const llvm::Function&) { return true; };
+        // Looked up by linker symbol, which is portable: "f" on Linux, "_f" on macOS.
+        const auto entry = [](const UninitializedSummaryIndex& index, const llvm::Module& module,
+                              const char* name) -> const UninitializedSummaryFunction*
+        {
+            const auto it = index.functions.find(linkerSymbolName(*module.getFunction(name)));
+            return it == index.functions.end() ? nullptr : &it->second;
+        };
+        const auto reads = [](const std::vector<UninitializedLocalReadIssue>& issues)
+        {
+            std::set<std::string> names;
+            for (const UninitializedLocalReadIssue& issue : issues)
+                if (issue.kind == UninitializedLocalIssueKind::ReadBeforeDefiniteInit)
+                    names.insert(issue.funcName);
+            return names;
+        };
+
+        const UninitializedSummaryIndex indexA = buildUninitializedSummaryIndex(
+            *a.module, analyzeAll, static_cast<const UninitializedSummaryIndex*>(nullptr),
+            /*fixpointIterationLimit=*/1);
+        for (const char* name : {"f", "fi"})
+        {
+            const UninitializedSummaryFunction* summary = entry(indexA, *a.module, name);
+            report.expect(summary && !summary->complete,
+                          std::string("UninitIncomplete: ") + name + " is exported, incomplete");
+        }
+
+        const UninitializedSummaryIndex indexB =
+            buildUninitializedSummaryIndex(*b.module, analyzeAll, &indexA);
+        for (const char* name : {"gv", "gv2"})
+        {
+            const UninitializedSummaryFunction* summary = entry(indexB, *b.module, name);
+            report.expect(summary && !summary->complete,
+                          std::string("UninitIncomplete: ") + name +
+                              " is incomplete through an intermediate function");
+        }
+        const UninitializedSummaryFunction* h = entry(indexB, *b.module, "h");
+        report.expect(h && h->complete, "UninitIncomplete: h is complete, its empty summary kept");
+
+        const std::set<std::string> readsB =
+            reads(analyzeUninitializedLocalReads(*b.module, analyzeAll, &indexA));
+        report.expect(readsB ==
+                          reads(analyzeUninitializedLocalReads(*b.module, analyzeAll, nullptr)),
+                      "UninitIncomplete: B reports as if no summary were imported");
+        report.expect(readsB.count("use_fi") == 1 && readsB.count("use_f") == 0,
+                      "UninitIncomplete: int fi() keeps the report of an unknown declaration");
+
+        UninitializedSummaryIndex indexAB = indexA;
+        (void)mergeUninitializedSummaryIndex(indexAB, indexB);
+        const std::set<std::string> readsC =
+            reads(analyzeUninitializedLocalReads(*c.module, analyzeAll, &indexAB));
+        report.expect(readsC ==
+                          reads(analyzeUninitializedLocalReads(*c.module, analyzeAll, nullptr)),
+                      "UninitIncomplete: C reports as if no summary were imported");
+        report.expect(readsC.count("use_gv2") == 0,
+                      "UninitIncomplete: no caller reads the empty summary of gv2 as no write");
+        return report.failures == 0;
+    }
+
+    // A cyclic group stopped at its iteration cap (#157): the driver must mark its summaries
+    // incomplete, and must not when the group converges.
+    bool testCrossTUDriverMarksUnconvergedCycles(TestReport& report)
+    {
+        using ctrace::stack::app::detail::CrossTUSummaryPlan;
+        using ctrace::stack::app::detail::runCrossTUSummaryPass;
+
+        struct Entry
+        {
+            int value = 0;
+            bool complete = true;
+        };
+        struct Operations
+        {
+            using Index = std::map<std::string, Entry>;
+            using External = int;
+            bool converges = false;
+            mutable int round = 0;
+            int marked = 0;
+            External prepareLevel(const Index&) const
+            {
+                return 0;
+            }
+            External prepareCycle(const Index&) const
+            {
+                return 0;
+            }
+            Index build(std::size_t module, const Index&, const External&) const
+            {
+                return {{module == 0 ? "a" : "b", {converges ? 1 : ++round, true}}};
+            }
+            bool tryCache(std::size_t, const External&, Index&) const
+            {
+                return false;
+            }
+            void cache(std::size_t, const External&, const Index&) const {}
+            static void merge(Index& into, const Index& from)
+            {
+                for (const auto& [name, value] : from)
+                {
+                    auto [it, inserted] = into.emplace(name, value);
+                    if (!inserted)
+                        it->second = {value.value, it->second.complete && value.complete};
+                }
+            }
+            static bool equals(const Index& lhs, const Index& rhs)
+            {
+                return lhs.size() == rhs.size() &&
+                       std::equal(lhs.begin(), lhs.end(), rhs.begin(),
+                                  [](const auto& x, const auto& y)
+                                  {
+                                      return x.first == y.first &&
+                                             x.second.value == y.second.value &&
+                                             x.second.complete == y.second.complete;
+                                  });
+            }
+            static std::unordered_set<std::string> changedNames(const Index&, const Index& next)
+            {
+                std::unordered_set<std::string> names;
+                for (const auto& item : next)
+                    names.insert(item.first);
+                return names;
+            }
+            void markIncomplete(Index& index)
+            {
+                ++marked;
+                for (auto& item : index)
+                    item.second.complete = false;
+            }
+            void reportIteration(std::size_t, unsigned, bool, std::size_t) const {}
+            void reportLimit(std::size_t, unsigned) const {}
+            void reportLevel(std::size_t, const CrossTUSummaryPlan::Level&, std::int64_t) const {}
+        };
+
+        // Two modules that call each other: one cyclic group.
+        const std::vector<std::unordered_set<std::string>> callees = {{"b"}, {"a"}};
+        const std::unordered_map<std::string, std::vector<std::size_t>> definitions = {{"a", {0}},
+                                                                                       {"b", {1}}};
+        const CrossTUSummaryPlan plan(callees, definitions);
+        const auto serial = [](const std::vector<std::size_t>& modules, auto&& build)
+        {
+            for (std::size_t module : modules)
+                build(module);
+        };
+        for (const bool converges : {false, true})
+        {
+            Operations operations;
+            operations.converges = converges;
+            Operations::Index global;
+            std::vector<Operations::Index> moduleSummaries(2);
+            (void)runCrossTUSummaryPass(plan, global, moduleSummaries, operations, serial);
+            const bool both = global.size() == 2;
+            if (converges)
+                report.expect(operations.marked == 0 && both && global.at("a").complete &&
+                                  global.at("b").complete,
+                              "CrossTUDriver: a converged cycle keeps its summaries complete");
+            else
+                report.expect(operations.marked == 2 && both && !global.at("a").complete &&
+                                  !global.at("b").complete,
+                              "CrossTUDriver: a cycle stopped at its cap marks its summaries "
+                              "incomplete");
+        }
         return report.failures == 0;
     }
 
@@ -2092,6 +2283,8 @@ int main(int argc, char** argv)
     (void)testUninitializedFixpointBudgetIsExplicit(repoRoot, report);
     (void)testLinkerSymbolName(report);
     (void)testUninitializedSummaryKeysAreLinkerSymbols(repoRoot, report);
+    (void)testUninitializedIncompleteSummaries(repoRoot, report);
+    (void)testCrossTUDriverMarksUnconvergedCycles(report);
     (void)testProgramPointRanges(repoRoot, report);
     (void)testProgramPointRangesUnsignedReadings(repoRoot, report);
     (void)testSmtEvaluatorEncodesLazily(report);
