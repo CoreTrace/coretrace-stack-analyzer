@@ -2599,6 +2599,11 @@ def check_noreturn_cross_tu() -> bool:
     defined in another file analyzed alongside, or at the end of a chain over three files,
     whatever the order of the files and --jobs. A static function is never matched by name with
     a function of another file.
+
+    #170: a symbol never returns only if each of its definitions is exact and never returns,
+    whatever their sort order. A definition that returns, or a weak one, keeps the guards of
+    fail()'s callers from protecting anything, down to the callers of must_fail(). A static
+    homonym is not a definition of the symbol.
     """
     print("=== Testing functions that never return across files ===")
     fixtures = RUN_CONFIG.test_dir / "noreturn"
@@ -2632,6 +2637,8 @@ def check_noreturn_cross_tu() -> bool:
         "cross-tu-noreturn-chain-use.c",
     ]
     statics = ["cross-tu-noreturn-static-a.c", "cross-tu-noreturn-static-b.c"]
+    conflict = "cross-tu-noreturn-conflict-{}.c".format
+    both = ["copy", "copy_twice_removed"]
     cases = []
     for pass_name, pass_args in (("default", []), ("smt-z3", smt_args)):
         # pick's guard relates i to n: only the solver uses it.
@@ -2641,15 +2648,38 @@ def check_noreturn_cross_tu() -> bool:
                 cases.append((f"{pass_name}, {order}, {jobs}", files, [*pass_args, jobs], kept))
         cases.append((f"{pass_name}, chain over three files", chain, pass_args, []))
         cases.append((f"{pass_name}, static homonyms", statics, pass_args, ["copy_b"]))
+        callers = [conflict("use"), conflict("indirect")]
+        for label, parts, expected in (
+            ("fail() only defined to exit", ["exits"], []),
+            ("fail() only defined to return", ["returns"], both),
+            ("fail() also defined weak", ["exits", "weak"], both),
+            ("fail() also defined static, to return", ["exits", "static"], []),
+        ):
+            files = [*map(conflict, parts), *callers]
+            cases.append((f"{pass_name}, {label}", files, pass_args, expected))
 
     ok = True
-    for label, files, extra, expected in cases:
-        found = reported(files, extra)
-        if found == expected:
-            print(f"  ✅ {label}: {found}")
-        else:
-            print(f"  ❌ {label}: {found}, expected {expected}")
-            ok = False
+    with tempfile.TemporaryDirectory(prefix="ct_noreturn_conflict_") as tmp:
+        # The two definitions of fail(), sorted either way: the analyzer sorts its inputs.
+        for pass_name, pass_args in (("default", []), ("smt-z3", smt_args)):
+            for first, second in (("exits", "returns"), ("returns", "exits")):
+                renamed = Path(tmp) / f"{first}-first"
+                renamed.mkdir(exist_ok=True)
+                files = []
+                for rank, part in enumerate([first, second, "use", "indirect"]):
+                    target = renamed / f"{rank}-{conflict(part)}"
+                    shutil.copy(fixtures / conflict(part), target)
+                    files.append(str(target))
+                label = f"{pass_name}, fail() defined twice, the one that {first} sorted first"
+                cases.append((label, files, pass_args, both))
+
+        for label, files, extra, expected in cases:
+            found = reported(files, extra)
+            if found == expected:
+                print(f"  ✅ {label}: {found}")
+            else:
+                print(f"  ❌ {label}: {found}, expected {expected}")
+                ok = False
     print()
     return ok
 
