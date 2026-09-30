@@ -295,6 +295,12 @@ if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
         stack_usage_analyzer_lib
     )
 
+    # The cross-TU summary driver is a private header of the app (#157).
+    target_include_directories(stack_usage_analyzer_unit_tests
+      PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+
     add_test(
       NAME analyzer_module_unit_tests
       COMMAND stack_usage_analyzer_unit_tests ${CMAKE_CURRENT_SOURCE_DIR}

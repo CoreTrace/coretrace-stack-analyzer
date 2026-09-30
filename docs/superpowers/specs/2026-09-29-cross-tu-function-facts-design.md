@@ -326,10 +326,13 @@ suffit donc pas : il faut marquer aussi tout ce qui a été calculé à partir d
     diagnostic de la paire reste signalé ensemble.
 - **Analyses réellement incomplètes.** Ce sont des tests unitaires, car la limite d'itérations
   n'est pas une option de la ligne de commande.
-  - *Construction.* Mesuré sur `main` : avec une limite d'une itération, aucune fonction ne
-    converge, même sans boucle ; avec deux, toutes convergent, y compris trois boucles imbriquées.
-    Une limite ne sépare donc pas deux fonctions d'un même module. Les tests enchaînent trois
-    modules :
+  - *Construction.* C'est un constat sur les exemples mesurés sur `main` : une fonction sans
+    boucle, une boucle, deux puis trois boucles imbriquées, et des boucles avec conditions.
+    - Avec une limite d'une itération, aucun de ces exemples ne converge ; avec deux, tous
+      convergent.
+    - Sur ces exemples, une limite ne sépare donc pas deux fonctions d'un même module.
+
+    Les tests enchaînent donc trois modules :
     - **A**, construit avec `fixpointIterationLimit = 1` : `void f(int* p)` et `int fi(int* p)`
       n'écrivent rien, et leur analyse ne converge pas ;
     - **B**, construit avec le budget normal et l'index de A : `use_f` lit `v` après `f(&v)`,

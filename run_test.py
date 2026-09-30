@@ -2436,6 +2436,87 @@ def check_uninitialized_cross_tu() -> bool:
     return True
 
 
+def check_uninitialized_cross_tu_no_effect() -> bool:
+    """
+    #157: the summary of a function that writes nothing through its pointer parameters crosses
+    files, and its callers report the reads that one file reports, whatever the sort order. It
+    never comes from a weak definition, from a symbol that several files define, or from another
+    ABI symbol with the same canonical name. An assembler name reaches the same symbol, and a
+    static homonym hides nothing.
+    """
+    print("=== Testing uninitialized summaries that write nothing, across files ===")
+    fixtures = RUN_CONFIG.test_dir / "uninitialized-variable"
+    smt_args = [
+        "--smt=on",
+        "--smt-backend=z3",
+        "--smt-mode=single",
+        f"--smt-rules={','.join(_all_smt_rules())}",
+        f"--smt-timeout-ms={SMT_FIXTURE_TIMEOUT_MS}",
+    ]
+    name = "cross-tu-uninitialized-{}".format
+
+    def reported(files: list[str], extra: list[str]) -> Optional[list[str]]:
+        result = run_analyzer([*(str(fixtures / f) for f in files), "--format=json", *extra])
+        try:
+            diagnostics = json.loads(result.stdout or "").get("diagnostics", [])
+        except json.JSONDecodeError:
+            return None
+        return sorted(
+            {
+                str(d.get("location", {}).get("function", ""))
+                for d in diagnostics
+                if d.get("ruleId") == "UninitializedLocalRead"
+            }
+        )
+
+    cases = []
+    for pass_name, pass_args in (("default", []), ("smt-z3", smt_args)):
+        for label, parts, expected in (
+            ("use alone", ["noeffect-use.c"], []),
+            ("def and use", ["noeffect-def.c", "noeffect-use.c"], ["uses_peek"]),
+            ("weak def", ["noeffect-weak.c", "noeffect-use.c"], []),
+            (
+                "defined twice, neither writes",
+                ["noeffect-def.c", "noeffect-again.c", "noeffect-use.c"],
+                [],
+            ),
+            (
+                "defined twice, one writes",
+                ["noeffect-def.c", "noeffect-writes.c", "noeffect-use.c"],
+                [],
+            ),
+            (
+                "static homonym",
+                ["noeffect-def.c", "noeffect-static.c", "noeffect-use.c"],
+                ["local_peek", "uses_peek"],
+            ),
+            ("assembler name", ["noeffect-def.c", "noeffect-asm-use.c"], ["uses_asm_name"]),
+            ("other ABI symbol", ["abi-def.cpp", "abi-use.cpp"], []),
+        ):
+            cases.append((f"{pass_name}, {label}", [name(p) for p in parts], pass_args, expected))
+
+    ok = True
+    with tempfile.TemporaryDirectory(prefix="ct_uninitialized_no_effect_") as tmp:
+        # The caller sorted before the definition: the analyzer sorts its inputs.
+        for pass_name, pass_args in (("default", []), ("smt-z3", smt_args)):
+            files = []
+            for rank, part in enumerate(["noeffect-use.c", "noeffect-def.c"]):
+                target = Path(tmp) / f"{rank}-{name(part)}"
+                shutil.copy(fixtures / name(part), target)
+                files.append(str(target))
+            cases.append((f"{pass_name}, use sorted first", files, pass_args, ["uses_peek"]))
+
+        for label, files, extra, expected in cases:
+            found = reported(files, extra)
+            if found == expected:
+                print(f"  ✅ {label}: {found}")
+            else:
+                print(f"  ❌ {label}: {found}, expected {expected}")
+                ok = False
+    print()
+    return ok
+
+
 def check_null_deref_nested_inter_tu() -> bool:
     """
     Regression: nested null-deref cases must still be reported when the analyzer
@@ -4241,6 +4322,7 @@ def main() -> int:
         check_ownership_cross_tu,
         check_ownership_wrapper_metadata,
         check_uninitialized_cross_tu,
+        check_uninitialized_cross_tu_no_effect,
         check_null_deref_nested_inter_tu,
         check_integer_overflow_advanced_inter_tu,
         check_noreturn_cross_tu,

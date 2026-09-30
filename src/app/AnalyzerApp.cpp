@@ -15,6 +15,7 @@
 #include <cstddef>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <map>
 #include <memory>
@@ -42,6 +43,7 @@
 #include <llvm/Support/MD5.h>
 #include <llvm/Support/SourceMgr.h>
 #include <llvm/Support/raw_ostream.h>
+#include "analysis/AnalyzerUtils.hpp"
 #include "analysis/CompileCommands.hpp"
 #include "analysis/FunctionFilter.hpp"
 #include "analysis/GlobalReadBeforeWriteAnalysis.hpp"
@@ -1778,15 +1780,18 @@ readSummaryCacheFile(const std::filesystem::path& cacheFile)
     return index;
 }
 
+// The modules defining each symbol, under the key of the channel. A static function is no
+// definition of an external symbol (#157).
 static std::unordered_map<std::string, std::vector<std::size_t>>
-collectModuleDefinitions(const std::vector<LoadedInputModule>& loadedModules)
+collectModuleDefinitions(const std::vector<LoadedInputModule>& loadedModules,
+                         const std::function<std::string(const llvm::Function&)>& keyOf)
 {
     std::unordered_map<std::string, std::vector<std::size_t>> definitions;
     for (std::size_t i = 0; i < loadedModules.size(); ++i)
         for (const llvm::Function& function : *loadedModules[i].module)
-            if (!function.isDeclaration() && function.hasName() && !function.getName().empty())
-                definitions[ctrace_tools::canonicalizeMangledName(function.getName().str())]
-                    .push_back(i);
+            if (!function.isDeclaration() && !function.hasLocalLinkage() && function.hasName() &&
+                !function.getName().empty())
+                definitions[keyOf(function)].push_back(i);
     return definitions;
 }
 
@@ -1923,6 +1928,9 @@ struct UninitializedSummaryOperations
     const std::vector<LoadedInputModule>& modules;
     const AnalysisConfig& cfg;
     std::vector<analysis::PreparedUninitializedModuleContext> preparedModules;
+    // Symbols defined by several modules: a caller may see one definition before the others, so
+    // none of their summaries proves "writes nothing" (#157).
+    std::unordered_set<std::string> multiplyDefined;
 
     UninitializedSummaryOperations(const std::vector<LoadedInputModule>& modules,
                                    const AnalysisConfig& cfg)
@@ -1950,8 +1958,17 @@ struct UninitializedSummaryOperations
     {
         const analyzer::ScopedHotspot hotspot(cfg.timing,
                                               "app.cross_tu.uninitialized.build_module");
-        return analysis::buildUninitializedSummaryIndex(*modules[module].module,
-                                                        &preparedModules[module], &external);
+        Index index = analysis::buildUninitializedSummaryIndex(*modules[module].module,
+                                                               &preparedModules[module], &external);
+        for (auto& entry : index.functions)
+            if (multiplyDefined.count(entry.first) != 0)
+                entry.second.complete = false;
+        return index;
+    }
+    static void markIncomplete(Index& index)
+    {
+        for (auto& entry : index.functions)
+            entry.second.complete = false;
     }
     bool tryCache(std::size_t, const External&, Index&) const
     {
@@ -2014,7 +2031,9 @@ buildCrossTUSummaryIndex(const std::vector<LoadedInputModule>& loadedModules,
 
     ResourceSummaryOperations operations(loadedModules, cfg);
     const unsigned maxJobs = resolveConfiguredJobs(cfg);
-    const auto definedBy = collectModuleDefinitions(loadedModules);
+    const auto definedBy = collectModuleDefinitions(
+        loadedModules, [](const llvm::Function& function)
+        { return ctrace_tools::canonicalizeMangledName(function.getName().str()); });
 
     // Pre-compute per-module callee name sets for delta-based convergence.
     std::vector<std::unordered_set<std::string>> resourceModuleCalleeNames(loadedModules.size());
@@ -2183,8 +2202,13 @@ buildCrossTUUninitializedSummaryIndex(const std::vector<LoadedInputModule>& load
     const std::size_t N = loadedModules.size();
     std::vector<std::unordered_set<std::string>> moduleCalleeNames(N);
     for (std::size_t i = 0; i < N; ++i)
-        moduleCalleeNames[i] = analysis::getCanonicalCalleeNames(operations.preparedModules[i]);
-    const auto definedBy = collectModuleDefinitions(loadedModules);
+        moduleCalleeNames[i] = analysis::getCalleeSymbolNames(operations.preparedModules[i]);
+    const auto definedBy =
+        collectModuleDefinitions(loadedModules, [](const llvm::Function& function)
+                                 { return analysis::linkerSymbolName(function); });
+    for (const auto& [symbol, modules] : definedBy)
+        if (modules.size() > 1)
+            operations.multiplyDefined.insert(symbol);
 
     // ── SCC instrumentation: diagnose inter-module call graph structure ──
     if (cfg.timing)

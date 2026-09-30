@@ -285,7 +285,13 @@ namespace ctrace::stack::app::detail
                         operations.merge(globalIndex, moduleSummaries[module]);
                 }
                 if (!converged)
+                {
                     operations.reportLimit(scc.size(), kMaxSCCIterations);
+                    // Summaries still moving at the cap are no fixpoint (#157).
+                    if constexpr (requires(Index & index) { operations.markIncomplete(index); })
+                        for (std::size_t module : scc)
+                            operations.markIncomplete(moduleSummaries[module]);
+                }
                 for (std::size_t module : scc)
                     operations.merge(globalIndex, moduleSummaries[module]);
             }
