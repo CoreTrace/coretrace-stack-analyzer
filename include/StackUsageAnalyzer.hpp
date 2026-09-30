@@ -26,6 +26,7 @@ namespace ctrace::stack::analysis
     struct ConstPointeeParamIndex;
     struct GlobalReadBeforeWriteSummaryIndex;
     struct ResourceSummaryIndex;
+    struct SizeMinusKWrapperIndex;
     struct UninitializedSummaryIndex;
 } // namespace ctrace::stack::analysis
 
@@ -72,6 +73,10 @@ namespace ctrace::stack
         // Parameters that every definition, across the modules analyzed together, declares to
         // point to const.
         std::shared_ptr<const analysis::ConstPointeeParamIndex> constPointeeParamIndex;
+        // External functions that every definition, across the modules analyzed together, makes
+        // deterministic, and the lengths they all pass to a bounded write.
+        std::shared_ptr<const std::set<std::string>> deterministicFunctions;
+        std::shared_ptr<const analysis::SizeMinusKWrapperIndex> sizeMinusKWrapperIndex;
 
         std::vector<std::string> excludeDirs;
         std::vector<std::string> extraCompileArgs;

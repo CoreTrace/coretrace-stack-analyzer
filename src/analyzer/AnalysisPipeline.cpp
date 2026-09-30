@@ -578,8 +578,10 @@ namespace ctrace::stack::analyzer
                          {
                              auto shouldAnalyze = [&](const llvm::Function& F) -> bool
                              { return state.prepared->ctx.shouldAnalyze(F); };
+                             const auto* elsewhere = state.config.deterministicFunctions.get();
                              const std::vector<analysis::DuplicateIfConditionIssue> issues =
-                                 analysis::analyzeDuplicateIfConditions(state.mod, shouldAnalyze);
+                                 analysis::analyzeDuplicateIfConditions(state.mod, shouldAnalyze,
+                                                                        elsewhere);
                              appendDuplicateIfConditionDiagnostics(state.result, issues);
                          },
                          kPrepared, kNone, true, ExecutionModel::SubscriberCompatible});

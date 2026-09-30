@@ -302,16 +302,47 @@ namespace ctrace::stack::analysis
 
         using ConditionSignature = llvm::SmallVector<ConditionAtom, 4>;
 
+        // Every result depends on the functions that the other modules make deterministic
+        // (#157): the only way to set them, reset, also empties the memo. Each thread has its own
+        // cache, and each entry point resets it: no result is reused for another module or
+        // another set of imported facts.
         struct DeterminismCache
         {
             std::unordered_map<const llvm::Function*, bool> memo;
             llvm::SmallPtrSet<const llvm::Function*, 16> visiting;
+            const std::set<std::string>* deterministicElsewhere = nullptr;
+
+            void reset(const std::set<std::string>* elsewhere)
+            {
+                memo.clear();
+                visiting.clear();
+                deterministicElsewhere = elsewhere;
+            }
         };
 
         static DeterminismCache& getDeterminismCache()
         {
-            static DeterminismCache cache;
+            static thread_local DeterminismCache cache;
             return cache;
+        }
+
+        // A declaration of a function that the other modules define, and find deterministic.
+        static bool isDeterministicElsewhere(const llvm::Function& F)
+        {
+            const std::set<std::string>* elsewhere = getDeterminismCache().deterministicElsewhere;
+            return F.isDeclaration() && elsewhere && elsewhere->count(linkerSymbolName(F)) != 0;
+        }
+
+        // The function a call names. A call through a declaration without a prototype has another
+        // type than its callee, and getCalledFunction() gives nothing: such a declaration still
+        // counts when the other modules make it deterministic.
+        static const llvm::Function* calledFunction(const llvm::CallBase& call)
+        {
+            if (const llvm::Function* callee = call.getCalledFunction())
+                return callee;
+            const auto* declared =
+                llvm::dyn_cast<llvm::Function>(call.getCalledOperand()->stripPointerCasts());
+            return declared && isDeterministicElsewhere(*declared) ? declared : nullptr;
         }
 
         static llvm::Value* stripCasts(llvm::Value* v)
@@ -448,7 +479,7 @@ namespace ctrace::stack::analysis
             bool deterministic = true;
             if (F.isDeclaration())
             {
-                deterministic = isKnownDeterministicDeclaration(F);
+                deterministic = isKnownDeterministicDeclaration(F) || isDeterministicElsewhere(F);
             }
             else
             {
@@ -530,7 +561,7 @@ namespace ctrace::stack::analysis
                                 break;
                             }
 
-                            const llvm::Function* callee = call->getCalledFunction();
+                            const llvm::Function* callee = calledFunction(*call);
                             if (!callee)
                             {
                                 deterministic = false;
@@ -561,7 +592,8 @@ namespace ctrace::stack::analysis
                             if (callee->isDeclaration())
                             {
                                 if (!(callee->doesNotReturn() ||
-                                      isKnownDeterministicDeclaration(*callee)))
+                                      isKnownDeterministicDeclaration(*callee) ||
+                                      isDeterministicElsewhere(*callee)))
                                 {
                                     deterministic = false;
                                     break;
@@ -625,13 +657,13 @@ namespace ctrace::stack::analysis
         {
             if (!call)
                 return false;
-            const llvm::Function* callee = call->getCalledFunction();
+            const llvm::Function* callee = calledFunction(*call);
             if (!callee)
                 return false;
 
             if (callee->isDeclaration())
             {
-                if (isKnownDeterministicDeclaration(*callee))
+                if (isKnownDeterministicDeclaration(*callee) || isDeterministicElsewhere(*callee))
                     return true;
             }
 
@@ -653,8 +685,8 @@ namespace ctrace::stack::analysis
             if (a->arg_size() != b->arg_size())
                 return false;
 
-            const llvm::Function* calleeA = a->getCalledFunction();
-            const llvm::Function* calleeB = b->getCalledFunction();
+            const llvm::Function* calleeA = calledFunction(*a);
+            const llvm::Function* calleeB = calledFunction(*b);
             if (!calleeA || !calleeB || calleeA != calleeB)
                 return false;
             if (!isDeterministicConditionCall(a) || !isDeterministicConditionCall(b))
@@ -1264,14 +1296,29 @@ namespace ctrace::stack::analysis
 
     } // namespace
 
+    std::set<std::string>
+    deterministicDefinitions(const llvm::Module& mod,
+                             const std::set<std::string>& deterministicElsewhere)
+    {
+        getDeterminismCache().reset(&deterministicElsewhere);
+        std::set<std::string> symbols;
+        for (const llvm::Function& F : mod)
+        {
+            if (F.isDeclaration() || F.hasLocalLinkage() || !F.hasExactDefinition())
+                continue;
+            if (isFunctionDeterministic(F))
+                symbols.insert(linkerSymbolName(F));
+        }
+        return symbols;
+    }
+
     std::vector<DuplicateIfConditionIssue>
     analyzeDuplicateIfConditions(llvm::Module& mod,
-                                 const std::function<bool(const llvm::Function&)>& shouldAnalyze)
+                                 const std::function<bool(const llvm::Function&)>& shouldAnalyze,
+                                 const std::set<std::string>* deterministicElsewhere)
     {
         std::vector<DuplicateIfConditionIssue> issues;
-        auto& cache = getDeterminismCache();
-        cache.memo.clear();
-        cache.visiting.clear();
+        getDeterminismCache().reset(deterministicElsewhere);
 
         for (llvm::Function& F : mod)
         {
