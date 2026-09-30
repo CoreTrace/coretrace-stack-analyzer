@@ -2517,6 +2517,93 @@ def check_uninitialized_cross_tu_no_effect() -> bool:
     return ok
 
 
+def check_const_param_cross_tu() -> bool:
+    """
+    #157: a pointer passed only to a function defined in another file, whose parameter points to
+    const, could point to const, as within one file, whatever the sort order. The fact comes only
+    from external definitions that are all exact and all declare it, and applies only to a call that
+    passes one argument per parameter. An assembler name reaches the same symbol, a C++ overload is
+    another symbol, and a static homonym gives nothing and hides nothing.
+    """
+    print("=== Testing const parameters of functions defined in another file ===")
+    fixtures = RUN_CONFIG.test_dir / "pointer_reference-const_correctness"
+    smt_args = [
+        "--smt=on",
+        "--smt-backend=z3",
+        "--smt-mode=single",
+        f"--smt-rules={','.join(_all_smt_rules())}",
+        f"--smt-timeout-ms={SMT_FIXTURE_TIMEOUT_MS}",
+    ]
+    name = "cross-tu-const-param-{}".format
+
+    def reported(files: list[str], extra: list[str]) -> Optional[list[str]]:
+        result = run_analyzer([*files, "--format=json", *extra])
+        try:
+            diagnostics = json.loads(result.stdout or "").get("diagnostics", [])
+        except json.JSONDecodeError:
+            return None
+        return sorted(
+            {
+                str(d.get("location", {}).get("function", ""))
+                for d in diagnostics
+                if str(d.get("ruleId", "")).startswith("ConstParameterNotModified")
+            }
+        )
+
+    cases = []
+    for pass_name, pass_args in (("default", []), ("smt-z3", smt_args)):
+        for label, parts, expected in (
+            ("use alone", ["use.c"], []),
+            ("def and use", ["def.c", "use.c"], ["uses_read_only"]),
+            ("non-const definition", ["nonconst.c", "use.c"], ["read_only"]),
+            ("defined twice, both const", ["def.c", "again.c", "use.c"], ["uses_read_only"]),
+            ("defined twice, const and not const", ["def.c", "nonconst.c", "use.c"], ["read_only"]),
+            ("weak def", ["weak.c", "use.c"], []),
+            ("weak beside the definition", ["def.c", "weak.c", "use.c"], []),
+            ("static homonym alone", ["static.c", "use.c"], []),
+            (
+                "static homonym beside the definition",
+                ["def.c", "static.c", "use.c"],
+                ["uses_read_only"],
+            ),
+            ("no prototype", ["def.c", "noproto-use.c"], ["uses_noproto"]),
+            ("assembler name", ["def.c", "asm-use.c"], ["uses_asm_name"]),
+            (
+                "C++ overloads",
+                ["overload-def.cpp", "overload-use.cpp"],
+                ["_Z19uses_const_overloadPi"],
+            ),
+        ):
+            files = [str(fixtures / name(p)) for p in parts]
+            cases.append((f"{pass_name}, {label}", files, pass_args, expected))
+
+    ok = True
+    with tempfile.TemporaryDirectory(prefix="ct_const_param_") as tmp:
+        # The analyzer sorts its inputs: these copies put the caller, then the non-const
+        # definition, first.
+        for pass_name, pass_args in (("default", []), ("smt-z3", smt_args)):
+            for label, parts, expected in (
+                ("use sorted first", ["use.c", "def.c"], ["uses_read_only"]),
+                ("non-const sorted first", ["nonconst.c", "def.c", "use.c"], ["read_only"]),
+            ):
+                files = []
+                for rank, part in enumerate(parts):
+                    target = Path(tmp) / f"{rank}-{name(part)}"
+                    shutil.copy(fixtures / name(part), target)
+                    files.append(str(target))
+                cases.append((f"{pass_name}, {label}", files, pass_args, expected))
+
+        for label, files, extra, expected in cases:
+            found = reported(files, extra)
+            if found == expected:
+                print(f"  ✅ {label}: {found}")
+            else:
+                print(f"  ❌ {label}: {found}, expected {expected}")
+                ok = False
+    print()
+    return ok
+
+
 def check_null_deref_nested_inter_tu() -> bool:
     """
     Regression: nested null-deref cases must still be reported when the analyzer
@@ -4323,6 +4410,7 @@ def main() -> int:
         check_ownership_wrapper_metadata,
         check_uninitialized_cross_tu,
         check_uninitialized_cross_tu_no_effect,
+        check_const_param_cross_tu,
         check_null_deref_nested_inter_tu,
         check_integer_overflow_advanced_inter_tu,
         check_noreturn_cross_tu,
