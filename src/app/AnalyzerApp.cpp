@@ -46,10 +46,12 @@
 #include "analysis/AnalyzerUtils.hpp"
 #include "analysis/CompileCommands.hpp"
 #include "analysis/ConstParamAnalysis.hpp"
+#include "analysis/DuplicateIfCondition.hpp"
 #include "analysis/FunctionFilter.hpp"
 #include "analysis/GlobalReadBeforeWriteAnalysis.hpp"
 #include "analysis/InputPipeline.hpp"
 #include "analysis/ResourceLifetimeAnalysis.hpp"
+#include "analysis/SizeMinusKWrites.hpp"
 #include "analysis/UninitializedVarAnalysis.hpp"
 #include "mangle.hpp"
 
@@ -1017,6 +1019,69 @@ static AppStatus analyzeWithSharedModuleLoading(const std::vector<std::string>& 
             }
         }
         cfg.constPointeeParamIndex = std::move(published);
+    }
+
+    {
+        // Determinism and size-minus-one pairs follow calls into the other modules: repeat
+        // rounds in which every module sees the same published facts, until one adds nothing. A
+        // symbol gets a fact only if every definition, each exact, has it: a caller may be linked
+        // with any of them (#157). A static function counts as no definition.
+        const analyzer::ScopedHotspot hotspot(cfg.timing, "app.shared_loading.transitive_facts");
+        std::map<std::string, std::size_t> definitions;
+        for (const auto& loaded : loadedModules)
+            for (const llvm::Function& function : *loaded.module)
+                if (!function.isDeclaration() && !function.hasLocalLinkage())
+                    ++definitions[analysis::linkerSymbolName(function)];
+
+        auto deterministic = std::make_shared<std::set<std::string>>();
+        for (bool grew = true; grew;)
+        {
+            std::map<std::string, std::size_t> found;
+            for (const auto& loaded : loadedModules)
+                for (const std::string& symbol :
+                     analysis::deterministicDefinitions(*loaded.module, *deterministic))
+                    ++found[symbol];
+            grew = false;
+            for (const auto& [symbol, count] : found)
+                if (count == definitions[symbol])
+                    grew |= deterministic->insert(symbol).second;
+        }
+        cfg.deterministicFunctions = std::move(deterministic);
+
+        // Only the pairs common to every definition, with as many parameters, are published.
+        auto wrappers = std::make_shared<analysis::SizeMinusKWrapperIndex>();
+        for (bool grew = true; grew;)
+        {
+            std::map<std::string, std::pair<std::size_t, analysis::SizeMinusKWrapper>> found;
+            for (const auto& loaded : loadedModules)
+            {
+                for (const auto& [symbol, wrapper] :
+                     analysis::sizeMinusKWrappers(*loaded.module, *wrappers).functions)
+                {
+                    const auto [it, first] = found.try_emplace(symbol, 0, wrapper);
+                    auto& [count, common] = it->second;
+                    ++count;
+                    if (first)
+                        continue;
+                    if (common.params != wrapper.params)
+                        common.pairs.clear();
+                    std::erase_if(common.pairs,
+                                  [&](const auto& pair) { return wrapper.pairs.count(pair) == 0; });
+                }
+            }
+            grew = false;
+            for (const auto& [symbol, entry] : found)
+            {
+                const auto& [count, common] = entry;
+                if (count != definitions[symbol] || common.pairs.empty())
+                    continue;
+                analysis::SizeMinusKWrapper& published = wrappers->functions[symbol];
+                published.params = common.params;
+                for (const auto& pair : common.pairs)
+                    grew |= published.pairs.insert(pair).second;
+            }
+        }
+        cfg.sizeMinusKWrapperIndex = std::move(wrappers);
     }
 
     if (needsCrossTUResourceSummaries)

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "analysis/SizeMinusKWrites.hpp"
 
+#include "analysis/AnalyzerUtils.hpp"
 #include "analysis/IntRanges.hpp"
 #include "analysis/FunctionFacts.hpp"
 #include "analysis/ParameterDebugBinding.hpp"
@@ -345,7 +346,35 @@ namespace ctrace::stack::analysis
             return true;
         }
 
-        static SizeMinusKSummaryMap buildSizeMinusKSummaries(llvm::Module& mod)
+        // The pairs of the function a call reaches: its summary if this module defines it. For a
+        // declaration, the pairs that every definition in the other modules has, if the call
+        // passes one argument per parameter (#157). A call through a declaration without a
+        // prototype has another type than its callee, and still reaches it.
+        static std::vector<SizeMinusKSink> calleeSinks(const llvm::CallBase& CB,
+                                                       const SizeMinusKSummaryMap& summaries,
+                                                       const SizeMinusKWrapperIndex* elsewhere)
+        {
+            if (const llvm::Function* callee = CB.getCalledFunction();
+                callee && !callee->isDeclaration())
+            {
+                const auto it = summaries.find(callee);
+                return it == summaries.end() ? std::vector<SizeMinusKSink>{} : it->second;
+            }
+            const auto* declared =
+                llvm::dyn_cast<llvm::Function>(CB.getCalledOperand()->stripPointerCasts());
+            if (!elsewhere || !declared || !declared->isDeclaration())
+                return {};
+            const auto it = elsewhere->functions.find(linkerSymbolName(*declared));
+            if (it == elsewhere->functions.end() || it->second.params != CB.arg_size())
+                return {};
+            std::vector<SizeMinusKSink> sinks;
+            for (const auto& [dstIdx, lenIdx] : it->second.pairs)
+                sinks.push_back({dstIdx, lenIdx});
+            return sinks;
+        }
+
+        static SizeMinusKSummaryMap
+        buildSizeMinusKSummaries(llvm::Module& mod, const SizeMinusKWrapperIndex* elsewhere)
         {
             using namespace llvm;
             SizeMinusKSummaryMap summaries;
@@ -432,14 +461,8 @@ namespace ctrace::stack::analysis
                         auto* CB = dyn_cast<CallBase>(&I);
                         if (!CB)
                             continue;
-                        Function* callee = CB->getCalledFunction();
-                        if (!callee || callee->isDeclaration())
-                            continue;
-                        auto it = summaries.find(callee);
-                        if (it == summaries.end())
-                            continue;
 
-                        for (const auto& sink : it->second)
+                        for (const auto& sink : calleeSinks(*CB, summaries, elsewhere))
                         {
                             if (sink.dstIdx >= CB->arg_size() || sink.lenIdx >= CB->arg_size())
                                 continue;
@@ -459,7 +482,8 @@ namespace ctrace::stack::analysis
 
         static void analyzeSizeMinusKWritesInFunction(
             llvm::Function& F, const llvm::DataLayout& DL, const SizeMinusKSummaryMap& summaries,
-            const SizeMinusKConstraintEvaluator& evaluator, std::vector<SizeMinusKWriteIssue>& out)
+            const SizeMinusKWrapperIndex* elsewhere, const SizeMinusKConstraintEvaluator& evaluator,
+            std::vector<SizeMinusKWriteIssue>& out)
         {
             using namespace llvm;
 
@@ -588,24 +612,19 @@ namespace ctrace::stack::analysis
                         continue;
                     }
 
-                    if (Function* calleeFn = CB->getCalledFunction())
+                    const StringRef calleeName =
+                        CB->getCalledOperand()->stripPointerCasts()->getName();
+                    for (const auto& sink : calleeSinks(*CB, summaries, elsewhere))
                     {
-                        auto it = summaries.find(calleeFn);
-                        if (it != summaries.end())
+                        if (sink.dstIdx >= CB->arg_size() || sink.lenIdx >= CB->arg_size())
                         {
-                            for (const auto& sink : it->second)
-                            {
-                                if (sink.dstIdx >= CB->arg_size() || sink.lenIdx >= CB->arg_size())
-                                {
-                                    continue;
-                                }
-                                SizeMinusKMatch match =
-                                    matchSizeMinusK(CB->getArgOperand(sink.lenIdx), canonical);
-                                if (!match.base)
-                                    continue;
-                                emitIssue(&I, match, calleeFn->getName());
-                            }
+                            continue;
                         }
+                        SizeMinusKMatch match =
+                            matchSizeMinusK(CB->getArgOperand(sink.lenIdx), canonical);
+                        if (!match.base)
+                            continue;
+                        emitIssue(&I, match, calleeName);
                     }
                 }
 
@@ -629,6 +648,26 @@ namespace ctrace::stack::analysis
         }
     } // namespace
 
+    SizeMinusKWrapperIndex sizeMinusKWrappers(llvm::Module& mod,
+                                              const SizeMinusKWrapperIndex& elsewhere)
+    {
+        const SizeMinusKSummaryMap summaries = buildSizeMinusKSummaries(mod, &elsewhere);
+        SizeMinusKWrapperIndex index;
+        for (const llvm::Function& F : mod)
+        {
+            if (F.isDeclaration() || F.hasLocalLinkage() || !F.hasExactDefinition() || F.isVarArg())
+                continue;
+            SizeMinusKWrapper& wrapper = index.functions[linkerSymbolName(F)];
+            wrapper.params = F.arg_size();
+            if (const auto it = summaries.find(&F); it != summaries.end())
+            {
+                for (const SizeMinusKSink& sink : it->second)
+                    wrapper.pairs.insert({sink.dstIdx, sink.lenIdx});
+            }
+        }
+        return index;
+    }
+
     std::vector<SizeMinusKWriteIssue>
     analyzeSizeMinusKWrites(llvm::Module& mod, const llvm::DataLayout& DL,
                             const std::function<bool(const llvm::Function&)>& shouldAnalyzeFunction)
@@ -642,7 +681,8 @@ namespace ctrace::stack::analysis
                             const std::function<bool(const llvm::Function&)>& shouldAnalyzeFunction,
                             const AnalysisConfig& config)
     {
-        SizeMinusKSummaryMap summaries = buildSizeMinusKSummaries(mod);
+        const SizeMinusKWrapperIndex* elsewhere = config.sizeMinusKWrapperIndex.get();
+        SizeMinusKSummaryMap summaries = buildSizeMinusKSummaries(mod, elsewhere);
         std::vector<SizeMinusKWriteIssue> issues;
         const SizeMinusKConstraintEvaluator evaluator(config);
 
@@ -652,7 +692,7 @@ namespace ctrace::stack::analysis
                 continue;
             if (!shouldAnalyzeFunction(F))
                 continue;
-            analyzeSizeMinusKWritesInFunction(F, DL, summaries, evaluator, issues);
+            analyzeSizeMinusKWritesInFunction(F, DL, summaries, elsewhere, evaluator, issues);
         }
 
         return issues;
