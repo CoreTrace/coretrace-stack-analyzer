@@ -77,9 +77,11 @@ Pour chaque fait, la spec fixe trois points :
   conclusion un appelant peut en tirer.
 - **L'absence.** Elle signifie « aucune information » : l'appelant se comporte exactement comme
   aujourd'hui face à une déclaration.
-- **La complétude.** Un module n'exporte que ce qu'il a établi. Une analyse arrêtée avant la fin
-  (budget, limite d'itérations) n'exporte jamais « aucun effet » : elle exporte l'effet le plus
-  large, ou rien.
+- **La complétude.** Un module n'exporte que ce qu'il a établi. Le résumé d'une analyse arrêtée
+  avant la fin (budget, limite d'itérations) est marqué incomplet.
+  - Pour ses effets, un appelant le traite comme absent.
+  - Il garde son statut incomplet, qui se propage aux appelants (ci-dessous).
+  - Une analyse incomplète ne devient ainsi jamais « aucun effet ».
 
 « Aucun effet identifié » n'est une preuve qu'au terme d'une analyse complète. Un résumé vide issu
 d'une analyse incomplète reste une absence d'information.
@@ -263,11 +265,23 @@ suffit donc pas : il faut marquer aussi tout ce qui a été calculé à partir d
     incomplets, et devient incomplet à son tour.
 - **Résumé complet d'une définition exacte.** Il est exporté tel quel, même vide. Un résumé vide
   signifie alors : n'écrit ni ne lit rien par ses paramètres pointeurs.
-- **Usage d'un résumé incomplet importé.** À l'appel, chaque paramètre compte comme « écriture
-  inconnue » : c'est ce que fait déjà `downgradeWriteClaims` pour les paramètres qui ont un effet,
-  et ce drapeau signifie déjà « ne pas signaler ».
-  - Un résumé incomplet ne prouve donc jamais « n'écrit rien ».
-  - Les lectures avant écriture déjà trouvées sont gardées, car ce sont des lectures réelles.
+- **Usage d'un résumé incomplet importé.**
+  - *Effets : absent.* À l'appel, ses effets ne sont pas appliqués. L'appelant applique la
+    présomption des déclarations (§5.1), c'est-à-dire le traitement actuel d'une fonction inconnue.
+  - *Statut : conservé.* Le résumé de l'appelant devient incomplet (propagation ci-dessus). Aucun
+    appelant, dans le fichier ou plus loin, ne peut donc transformer cette absence en « n'écrit
+    rien ».
+  - *Garantie démontrable.* Un appel vers une fonction dont le résumé importé est incomplet donne
+    les mêmes diagnostics que si aucun résumé n'avait été importé. Ce n'est pas une absence de
+    diagnostic. Pour une fonction qui retourne `int` et dont le résultat est ignoré, la présomption
+    n'écrit rien : une lecture qui suit est signalée, comme aujourd'hui (vérifié sur `main` :
+    `int fi(int* p)`).
+  - *Pourquoi pas « écriture inconnue ».* À l'appel, ce drapeau ne marque pas l'objet comme
+    initialisé. Il n'empêche que le diagnostic « jamais initialisée », et une lecture qui suit reste
+    signalée (vérifié sur `main` avec `void poke(int* p, int i) { p[i] = 1; }`, en un fichier comme
+    en deux).
+  - *Ce qui est perdu.* Les lectures avant écriture que contenait le résumé incomplet ne sont plus
+    signalées à travers l'appel.
 - **Résumé complet d'une définition inexacte.** Comme aujourd'hui : un résumé non vide est exporté,
   un résumé vide ne l'est pas. Une définition inexacte ne donne jamais « n'écrit rien ».
 - **Symbole défini plusieurs fois.** « N'écrit rien » est une garantie universelle (§4.2), mais le
@@ -310,13 +324,29 @@ suffit donc pas : il faut marquer aussi tout ce qui a été calculé à partir d
     car c'est le même symbole.
   - *Homonyme `static`.* Un troisième fichier définit un `static void peek(int*)`. Attendu : le
     diagnostic de la paire reste signalé ensemble.
-- **Propagation de l'incomplétude**, par des tests unitaires : la limite d'itérations n'est pas une
-  option de la ligne de commande. La limite choisie laisse converger une fonction sans boucle, mais
-  pas une fonction avec boucle.
-  - *Dans un module* : `f(int *p)` contient une boucle et n'écrit rien, `g(int *p) { f(p); }`, et
-    `h(int *p)` n'appelle rien. Attendu : `f` et `g` incomplets, `h` complet et vide.
-  - *Entre deux modules* : le résumé de `f` est construit dans un module avec cette limite. Celui de
-    `g` est construit dans un autre module, avec l'index du premier. Attendu : `g` incomplet.
+- **Analyses réellement incomplètes.** Ce sont des tests unitaires, car la limite d'itérations
+  n'est pas une option de la ligne de commande.
+  - *Construction.* Mesuré sur `main` : avec une limite d'une itération, aucune fonction ne
+    converge, même sans boucle ; avec deux, toutes convergent, y compris trois boucles imbriquées.
+    Une limite ne sépare donc pas deux fonctions d'un même module. Les tests enchaînent trois
+    modules :
+    - **A**, construit avec `fixpointIterationLimit = 1` : `void f(int* p)` et `int fi(int* p)`
+      n'écrivent rien, et leur analyse ne converge pas ;
+    - **B**, construit avec le budget normal et l'index de A : `use_f` lit `v` après `f(&v)`,
+      `use_fi` lit `v` après `fi(&v)`, `gv(int* p) { fi(p); }`, `gv2(int* p) { gv(p); }`, et
+      `h(int* p)` n'appelle rien ;
+    - **C**, construit avec l'index de A et B : `use_gv2` lit `v` après `gv2(&v)`.
+  - *Statut, directement* : `f` et `fi` sont incomplets.
+  - *Statut, à travers une fonction intermédiaire* : `gv` est incomplet à cause du résumé importé de
+    `fi`, et `gv2` l'est à cause de celui de `gv`, dans le même module. `h` est complet, et son
+    résumé vide est présent.
+  - *Effets traités comme absents* : les diagnostics de B avec l'index de A sont exactement ceux de
+    B sans index, et de même pour C avec ou sans l'index de A et B. Concrètement :
+    - `use_fi` est signalé dans les deux cas, comme pour une déclaration inconnue ;
+    - `use_f` et `use_gv2` ne le sont dans aucun des deux cas.
+
+    Une implémentation qui prendrait le résumé vide de `gv2` pour « n'écrit rien » signalerait
+    `use_gv2`, et ce test échouerait.
   - *Groupe cyclique non convergé* : le pilote est testé avec des opérations factices qui ne
     convergent jamais. Attendu : les résumés du groupe sont marqués incomplets.
 - **Ordre.** La paire tourne aussi avec des noms de fichiers qui inversent l'ordre de tri.
@@ -571,7 +601,7 @@ Cas de validation, par invariant :
 
 | Invariant | Cas | Section |
 |---|---|---|
-| Absent ≠ vide ; incomplétude propagée aux appelants | module, deux modules, groupe cyclique non convergé | §5.4 |
+| Absent ≠ vide ; incomplétude propagée aux appelants | trois modules : directement, à travers une fonction intermédiaire, mêmes diagnostics que sans index ; groupe cyclique non convergé | §5.4 |
 | Identité de liaison | symboles d'ABI distincts, nom d'assembleur, homonymes `static` | §5.4, §6.3, §7.4, §8.5 |
 | Garanties universelles sur toutes les définitions | symbole défini dans deux fichiers, dans les deux ordres de tri | §5.4, §6.3, §7.4 |
 | Convergence et ordre | chaînes sur trois fichiers, cycles, noms de fichiers inversés | §7.4, §8.5 |
