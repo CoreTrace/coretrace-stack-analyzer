@@ -25,6 +25,15 @@ Examples:
 LLVM_DIR=/opt/llvm/lib/cmake/llvm Clang_DIR=/opt/llvm/lib/cmake/clang ./build.sh --generator Ninja
 ```
 
+### Repository documents
+
+- [CONTRIBUTING.md](CONTRIBUTING.md)
+- [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)
+- [AUTHORS.md](AUTHORS.md)
+- [CHANGELOG.md](CHANGELOG.md)
+- [LICENSE](LICENSE)
+- [SECURITY.md](SECURITY.md)
+
 ### CI/CD integration (GitHub Actions)
 
 For CI usage as a code analyzer, use a two-layer setup:
