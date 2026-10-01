@@ -1103,6 +1103,23 @@ static AppStatus analyzeWithSharedModuleLoading(const std::vector<std::string>& 
             buildCrossTUGlobalReadBeforeWriteSummaryIndex(loadedModules, cfg);
     }
 
+    {
+        // One call graph over all modules, for max stacks and recursion (#157). Each module first
+        // gets, here and only here, the passes its pipeline would run before computing stacks:
+        // the graph sees the IR every module is analyzed on, and its pointers and results stay
+        // valid. The summaries above read the IR before these passes, as they always have.
+        const analyzer::ScopedHotspot hotspot(cfg.timing, "app.shared_loading.call_graph");
+        std::vector<llvm::Module*> modules;
+        for (auto& loaded : loadedModules)
+        {
+            endPathsAtCallsThatNeverReturn(*loaded.module, *cfg.neverReturnFunctions);
+            runFunctionAttrsPass(*loaded.module);
+            modules.push_back(loaded.module.get());
+        }
+        cfg.globalStackFacts = std::make_shared<const analysis::GlobalStackFacts>(
+            analysis::computeGlobalStackFacts(modules, cfg));
+    }
+
     for (auto& loaded : loadedModules)
     {
         AnalysisResult result;

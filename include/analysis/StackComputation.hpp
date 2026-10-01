@@ -4,12 +4,15 @@
 #include <cstdint>
 #include <map>
 #include <set>
+#include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "StackUsageAnalyzer.hpp"
 
 namespace llvm
 {
+    class CallBase;
     class DataLayout;
     class Function;
     class Module;
@@ -45,10 +48,25 @@ namespace ctrace::stack::analysis
         std::set<const llvm::Function*> InfiniteRecursionFuncs; // recursive cycle with no base case
     };
 
+    // The definition a call reaches among the modules analyzed together (#157): the one its own
+    // module has, or, for a declaration, the only definition of the same linker symbol, when it
+    // is exact. A static function is never reached from another module. A call through a
+    // declaration without a prototype has another type than its callee, and still reaches it.
+    class CallResolver
+    {
+      public:
+        explicit CallResolver(const std::vector<llvm::Module*>& modules);
+        const llvm::Function* resolve(const llvm::CallBase& call) const;
+
+      private:
+        std::unordered_map<std::string, const llvm::Function*> definitions_;
+    };
+
     CallGraph buildCallGraph(llvm::Module& M);
 
+    // A call that the resolver resolves counts as a call to a definition of the same module.
     LocalStackInfo computeLocalStack(llvm::Function& F, const llvm::DataLayout& DL,
-                                     AnalysisMode mode);
+                                     AnalysisMode mode, const CallResolver* resolver = nullptr);
 
     // Unresolved calls make the max stack unknown unless
     // config.assumeExternalFrame is set, in which case each one is charged
@@ -68,8 +86,32 @@ namespace ctrace::stack::analysis
     bool detectInfiniteSelfRecursion(llvm::Function& F);
     bool detectInfiniteSelfRecursion(llvm::Function& F, const AnalysisConfig& config);
     bool detectInfiniteRecursionComponent(const std::vector<const llvm::Function*>& component);
+    // A call is recursive when it reaches a member of the component, through the resolver when
+    // set (#157).
     bool detectInfiniteRecursionComponent(const std::vector<const llvm::Function*>& component,
-                                          const AnalysisConfig& config);
+                                          const AnalysisConfig& config,
+                                          const CallResolver* resolver = nullptr);
+
+    // The max stack, the recursive functions and the infinite recursions of the functions of
+    // @p Order, on the call graph @p CG.
+    InternalAnalysisState
+    computeStackState(const CallGraph& CG,
+                      const std::map<const llvm::Function*, LocalStackInfo>& LocalStack,
+                      const std::vector<const llvm::Function*>& Order, const AnalysisConfig& config,
+                      const CallResolver* resolver = nullptr);
+
+    // One call graph over the modules analyzed together (#157): the calls within each module,
+    // and those that the resolver resolves into another one. The local stacks and the state of
+    // every defined function are computed on it, as for one module.
+    struct GlobalStackFacts
+    {
+        CallGraph graph;
+        std::map<const llvm::Function*, LocalStackInfo> localStack;
+        InternalAnalysisState state;
+    };
+
+    GlobalStackFacts computeGlobalStackFacts(const std::vector<llvm::Module*>& modules,
+                                             const AnalysisConfig& config);
 
     StackSize computeAllocaLargeThreshold(const AnalysisConfig& config);
 } // namespace ctrace::stack::analysis

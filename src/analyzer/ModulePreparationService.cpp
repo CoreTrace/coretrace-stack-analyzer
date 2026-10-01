@@ -159,19 +159,30 @@ namespace ctrace::stack::analyzer
             nodes.reserve(ctx.allDefinedFunctions.size());
             for (llvm::Function* F : ctx.allDefinedFunctions)
                 nodes.push_back(F);
+            return analysis::computeStackState(graph, localStack, nodes, ctx.config);
+        }
 
-            analysis::InternalAnalysisState state =
-                analysis::computeGlobalStackUsage(graph, localStack, nodes, ctx.config);
-
-            const auto recursiveComponents = analysis::computeRecursiveComponents(graph, nodes);
-            for (const auto& component : recursiveComponents)
+        // The part of the facts computed over all the modules analyzed together that concerns
+        // the functions of this module (#157). A callee in another module stays in the graph.
+        static void takeGlobalStackFacts(const ModuleAnalysisContext& ctx,
+                                         const analysis::GlobalStackFacts& facts,
+                                         LocalStackMap& localStack, analysis::CallGraph& graph,
+                                         analysis::InternalAnalysisState& state)
+        {
+            for (const llvm::Function* F : ctx.allDefinedFunctions)
             {
-                if (!analysis::detectInfiniteRecursionComponent(component, ctx.config))
-                    continue;
-                for (const llvm::Function* Fn : component)
-                    state.InfiniteRecursionFuncs.insert(Fn);
+                if (const auto it = facts.localStack.find(F); it != facts.localStack.end())
+                    localStack[F] = it->second;
+                if (const auto it = facts.graph.find(F); it != facts.graph.end())
+                    graph[F] = it->second;
+                if (const auto it = facts.state.TotalStack.find(F);
+                    it != facts.state.TotalStack.end())
+                    state.TotalStack[F] = it->second;
+                if (facts.state.RecursiveFuncs.count(F) != 0)
+                    state.RecursiveFuncs.insert(F);
+                if (facts.state.InfiniteRecursionFuncs.count(F) != 0)
+                    state.InfiniteRecursionFuncs.insert(F);
             }
-            return state;
         }
     } // namespace
 
@@ -202,6 +213,18 @@ namespace ctrace::stack::analyzer
             const ScopedHotspot hotspot(timingEnabled, "prepare.derived_artifacts");
             return buildDerivedArtifacts(ctx);
         }();
+
+        if (config.globalStackFacts)
+        {
+            LocalStackMap localStack;
+            analysis::CallGraph callGraph;
+            analysis::InternalAnalysisState recursionState;
+            takeGlobalStackFacts(ctx, *config.globalStackFacts, localStack, callGraph,
+                                 recursionState);
+            return PreparedModule{std::move(ctx), std::move(derivedArtifacts),
+                                  std::move(localStack), std::move(callGraph),
+                                  std::move(recursionState)};
+        }
 
         LocalStackMap localStack = [&]()
         {

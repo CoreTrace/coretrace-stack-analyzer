@@ -20,6 +20,7 @@
 #include <llvm/IR/Type.h>
 #include <llvm/Support/Alignment.h>
 
+#include "analysis/AnalyzerUtils.hpp"
 #include "analysis/IntRanges.hpp"
 #include "analysis/IRValueUtils.hpp"
 #include "analysis/smt/SmtEncoding.hpp"
@@ -36,7 +37,20 @@ namespace ctrace::stack::analysis
             return F && F->hasFnAttribute(llvm::Attribute::NoRecurse);
         }
 
-        static bool hasNonSelfCall(const llvm::Function& F)
+        // The definition a call or invoke reaches: in its module, or through the resolver.
+        static const llvm::Function* calledDefinition(const llvm::Instruction& I,
+                                                      const CallResolver* resolver)
+        {
+            if (!llvm::isa<llvm::CallInst>(I) && !llvm::isa<llvm::InvokeInst>(I))
+                return nullptr;
+            const auto& CB = llvm::cast<llvm::CallBase>(I);
+            if (resolver)
+                return resolver->resolve(CB);
+            const llvm::Function* callee = CB.getCalledFunction();
+            return callee && !callee->isDeclaration() ? callee : nullptr;
+        }
+
+        static bool hasNonSelfCall(const llvm::Function& F, const CallResolver* resolver)
         {
             const llvm::Function* Self = &F;
 
@@ -44,18 +58,8 @@ namespace ctrace::stack::analysis
             {
                 for (const llvm::Instruction& I : BB)
                 {
-                    const llvm::Function* Callee = nullptr;
-
-                    if (auto* CI = llvm::dyn_cast<llvm::CallInst>(&I))
-                    {
-                        Callee = CI->getCalledFunction();
-                    }
-                    else if (auto* II = llvm::dyn_cast<llvm::InvokeInst>(&I))
-                    {
-                        Callee = II->getCalledFunction();
-                    }
-
-                    if (Callee && !Callee->isDeclaration() && Callee != Self)
+                    const llvm::Function* Callee = calledDefinition(I, resolver);
+                    if (Callee && Callee != Self)
                     {
                         return true; // call to another function
                     }
@@ -64,22 +68,25 @@ namespace ctrace::stack::analysis
             return false;
         }
 
-        // A call site whose callee frame cannot be derived from this module:
-        // indirect call (function pointer, virtual) or direct call to a declaration.
-        // Intrinsics and inline asm are not real calls.
-        static bool isUnresolvedCall(const llvm::CallBase& CB)
+        // A call site whose callee frame cannot be derived from the modules analyzed: indirect
+        // call (function pointer, virtual) or direct call to a declaration the resolver does
+        // not resolve. Intrinsics and inline asm are not real calls.
+        static bool isUnresolvedCall(const llvm::CallBase& CB, const CallResolver* resolver)
         {
             if (CB.isInlineAsm())
                 return false;
             const llvm::Function* callee = CB.getCalledFunction();
+            if (callee && callee->isIntrinsic())
+                return false;
+            if (resolver && resolver->resolve(CB))
+                return false;
             if (!callee)
                 return true;
-            if (callee->isIntrinsic())
-                return false;
             return callee->isDeclaration();
         }
 
-        static LocalStackInfo computeLocalStackBase(llvm::Function& F, const llvm::DataLayout& DL)
+        static LocalStackInfo computeLocalStackBase(llvm::Function& F, const llvm::DataLayout& DL,
+                                                    const CallResolver* resolver)
         {
             LocalStackInfo info;
 
@@ -89,7 +96,7 @@ namespace ctrace::stack::analysis
                 {
                     if (const auto* CB = llvm::dyn_cast<llvm::CallBase>(&I))
                     {
-                        if (isUnresolvedCall(*CB))
+                        if (isUnresolvedCall(*CB, resolver))
                             ++info.unresolvedCallCount;
                         continue;
                     }
@@ -125,9 +132,10 @@ namespace ctrace::stack::analysis
             return info;
         }
 
-        static LocalStackInfo computeLocalStackIR(llvm::Function& F, const llvm::DataLayout& DL)
+        static LocalStackInfo computeLocalStackIR(llvm::Function& F, const llvm::DataLayout& DL,
+                                                  const CallResolver* resolver)
         {
-            LocalStackInfo info = computeLocalStackBase(F, DL);
+            LocalStackInfo info = computeLocalStackBase(F, DL, resolver);
 
             if (info.bytes == 0)
                 return info;
@@ -141,9 +149,10 @@ namespace ctrace::stack::analysis
             return info;
         }
 
-        static LocalStackInfo computeLocalStackABI(llvm::Function& F, const llvm::DataLayout& DL)
+        static LocalStackInfo computeLocalStackABI(llvm::Function& F, const llvm::DataLayout& DL,
+                                                   const CallResolver* resolver)
         {
-            LocalStackInfo info = computeLocalStackBase(F, DL);
+            LocalStackInfo info = computeLocalStackBase(F, DL, resolver);
 
             llvm::MaybeAlign MA = DL.getStackAlignment();
             unsigned stackAlign = MA ? MA->value() : 1u; // 16 on many targets
@@ -158,7 +167,7 @@ namespace ctrace::stack::analysis
                 frameSize = stackAlign;
             }
 
-            if (stackAlign > 1 && hasNonSelfCall(F))
+            if (stackAlign > 1 && hasNonSelfCall(F, resolver))
             {
                 frameSize = llvm::alignTo(frameSize + stackAlign, stackAlign);
             }
@@ -190,18 +199,20 @@ namespace ctrace::stack::analysis
         /// goes on.
         template <typename IsRecursiveCallee>
         static bool leavesThroughNoreturnCall(const llvm::Instruction& I,
-                                              const IsRecursiveCallee& isRecursiveCallee)
+                                              const IsRecursiveCallee& isRecursiveCallee,
+                                              const CallResolver* resolver)
         {
             const auto* call = llvm::dyn_cast<llvm::CallInst>(&I);
             if (!call || !call->doesNotReturn())
                 return false;
-            const llvm::Function* callee = call->getCalledFunction();
+            const llvm::Function* callee = calledDefinition(I, resolver);
             return !(callee && isRecursiveCallee(callee));
         }
 
         template <typename IsRecursiveCallee>
         static bool detectInfiniteRecursionByDominance(const llvm::Function& F,
-                                                       IsRecursiveCallee&& isRecursiveCallee)
+                                                       IsRecursiveCallee&& isRecursiveCallee,
+                                                       const CallResolver* resolver)
         {
             std::vector<const llvm::BasicBlock*> recursiveCallBlocks;
 
@@ -209,17 +220,7 @@ namespace ctrace::stack::analysis
             {
                 for (const llvm::Instruction& I : BB)
                 {
-                    const llvm::Function* Callee = nullptr;
-
-                    if (auto* CI = llvm::dyn_cast<llvm::CallInst>(&I))
-                    {
-                        Callee = CI->getCalledFunction();
-                    }
-                    else if (auto* II = llvm::dyn_cast<llvm::InvokeInst>(&I))
-                    {
-                        Callee = II->getCalledFunction();
-                    }
-
+                    const llvm::Function* Callee = calledDefinition(I, resolver);
                     if (Callee && isRecursiveCallee(Callee))
                     {
                         recursiveCallBlocks.push_back(&BB);
@@ -239,7 +240,7 @@ namespace ctrace::stack::analysis
                 for (const llvm::Instruction& I : BB)
                 {
                     if (!llvm::isa<llvm::ReturnInst>(&I) &&
-                        !leavesThroughNoreturnCall(I, isRecursiveCallee))
+                        !leavesThroughNoreturnCall(I, isRecursiveCallee, resolver))
                         continue;
 
                     hasReturn = true;
@@ -565,10 +566,9 @@ namespace ctrace::stack::analysis
         };
 
         template <typename IsRecursiveCallee>
-        static NonRecursiveReturnFeasibility
-        hasFeasibleNonRecursiveReturnPath(const llvm::Function& F,
-                                          IsRecursiveCallee&& isRecursiveCallee,
-                                          const RecursionConstraintEvaluator& evaluator)
+        static NonRecursiveReturnFeasibility hasFeasibleNonRecursiveReturnPath(
+            const llvm::Function& F, IsRecursiveCallee&& isRecursiveCallee,
+            const RecursionConstraintEvaluator& evaluator, const CallResolver* resolver)
         {
             using namespace llvm;
 
@@ -620,20 +620,12 @@ namespace ctrace::stack::analysis
 
                 for (const Instruction& I : *BB)
                 {
-                    const Function* callee = nullptr;
-                    if (const auto* CI = dyn_cast<CallInst>(&I))
-                    {
-                        callee = CI->getCalledFunction();
-                    }
-                    else if (const auto* II = dyn_cast<InvokeInst>(&I))
-                    {
-                        callee = II->getCalledFunction();
-                    }
-
+                    const Function* callee = calledDefinition(I, resolver);
                     if (callee && isRecursiveCallee(callee))
                         sawRecursiveCall = true;
 
-                    if (isa<ReturnInst>(&I) || leavesThroughNoreturnCall(I, isRecursiveCallee))
+                    if (isa<ReturnInst>(&I) ||
+                        leavesThroughNoreturnCall(I, isRecursiveCallee, resolver))
                     {
                         if (!sawRecursiveCall)
                             return NonRecursiveReturnFeasibility::Exists;
@@ -954,15 +946,47 @@ namespace ctrace::stack::analysis
         return CG;
     }
 
+    CallResolver::CallResolver(const std::vector<llvm::Module*>& modules)
+    {
+        // Only the symbols that a single definition of the run defines, exactly, are resolved.
+        std::unordered_map<std::string, std::size_t> definitionCount;
+        for (const llvm::Module* M : modules)
+        {
+            for (const llvm::Function& F : *M)
+            {
+                if (F.isDeclaration() || F.hasLocalLinkage())
+                    continue;
+                const std::string symbol = linkerSymbolName(F);
+                if (++definitionCount[symbol] == 1 && F.hasExactDefinition())
+                    definitions_[symbol] = &F;
+                else
+                    definitions_.erase(symbol);
+            }
+        }
+    }
+
+    const llvm::Function* CallResolver::resolve(const llvm::CallBase& call) const
+    {
+        if (const llvm::Function* callee = call.getCalledFunction();
+            callee && !callee->isDeclaration())
+            return callee;
+        const auto* declared =
+            llvm::dyn_cast<llvm::Function>(call.getCalledOperand()->stripPointerCasts());
+        if (!declared || !declared->isDeclaration() || declared->isIntrinsic())
+            return nullptr;
+        const auto it = definitions_.find(linkerSymbolName(*declared));
+        return it == definitions_.end() ? nullptr : it->second;
+    }
+
     LocalStackInfo computeLocalStack(llvm::Function& F, const llvm::DataLayout& DL,
-                                     AnalysisMode mode)
+                                     AnalysisMode mode, const CallResolver* resolver)
     {
         switch (mode)
         {
         case AnalysisMode::IR:
-            return computeLocalStackIR(F, DL);
+            return computeLocalStackIR(F, DL, resolver);
         case AnalysisMode::ABI:
-            return computeLocalStackABI(F, DL);
+            return computeLocalStackABI(F, DL, resolver);
         }
         return {};
     }
@@ -1033,14 +1057,14 @@ namespace ctrace::stack::analysis
         RecursionConstraintEvaluator evaluator(config);
 
         const llvm::Function* Self = &F;
-        if (detectInfiniteRecursionByDominance(F, [Self](const llvm::Function* Callee)
-                                               { return Callee == Self; }))
+        if (detectInfiniteRecursionByDominance(
+                F, [Self](const llvm::Function* Callee) { return Callee == Self; }, nullptr))
         {
             return true;
         }
 
         const NonRecursiveReturnFeasibility feasibility = hasFeasibleNonRecursiveReturnPath(
-            F, [Self](const llvm::Function* Callee) { return Callee == Self; }, evaluator);
+            F, [Self](const llvm::Function* Callee) { return Callee == Self; }, evaluator, nullptr);
         return feasibility == NonRecursiveReturnFeasibility::DoesNotExist;
     }
 
@@ -1051,7 +1075,8 @@ namespace ctrace::stack::analysis
     }
 
     bool detectInfiniteRecursionComponent(const std::vector<const llvm::Function*>& component,
-                                          const AnalysisConfig& config)
+                                          const AnalysisConfig& config,
+                                          const CallResolver* resolver)
     {
         if (component.empty())
             return false;
@@ -1068,14 +1093,14 @@ namespace ctrace::stack::analysis
 
             const bool hasNoBaseCaseByDom = detectInfiniteRecursionByDominance(
                 *CF, [&componentSet](const llvm::Function* Callee)
-                { return componentSet.count(Callee) != 0; });
+                { return componentSet.count(Callee) != 0; }, resolver);
 
             bool hasNoBaseCase = hasNoBaseCaseByDom;
             if (!hasNoBaseCaseByDom)
             {
                 const NonRecursiveReturnFeasibility feasibility = hasFeasibleNonRecursiveReturnPath(
                     *CF, [&componentSet](const llvm::Function* Callee)
-                    { return componentSet.count(Callee) != 0; }, evaluator);
+                    { return componentSet.count(Callee) != 0; }, evaluator, resolver);
                 hasNoBaseCase = (feasibility == NonRecursiveReturnFeasibility::DoesNotExist);
             }
 
@@ -1084,6 +1109,53 @@ namespace ctrace::stack::analysis
         }
 
         return true;
+    }
+
+    InternalAnalysisState
+    computeStackState(const CallGraph& CG,
+                      const std::map<const llvm::Function*, LocalStackInfo>& LocalStack,
+                      const std::vector<const llvm::Function*>& Order, const AnalysisConfig& config,
+                      const CallResolver* resolver)
+    {
+        InternalAnalysisState state = computeGlobalStackUsage(CG, LocalStack, Order, config);
+        for (const auto& component : computeRecursiveComponents(CG, Order))
+        {
+            if (!detectInfiniteRecursionComponent(component, config, resolver))
+                continue;
+            for (const llvm::Function* F : component)
+                state.InfiniteRecursionFuncs.insert(F);
+        }
+        return state;
+    }
+
+    GlobalStackFacts computeGlobalStackFacts(const std::vector<llvm::Module*>& modules,
+                                             const AnalysisConfig& config)
+    {
+        const CallResolver resolver(modules);
+        GlobalStackFacts facts;
+        std::vector<const llvm::Function*> order;
+        for (llvm::Module* M : modules)
+        {
+            for (llvm::Function& F : *M)
+            {
+                if (F.isDeclaration())
+                    continue;
+                order.push_back(&F);
+                facts.localStack[&F] =
+                    computeLocalStack(F, M->getDataLayout(), config.mode, &resolver);
+                auto& callees = facts.graph[&F];
+                for (const llvm::BasicBlock& BB : F)
+                {
+                    for (const llvm::Instruction& I : BB)
+                    {
+                        if (const llvm::Function* callee = calledDefinition(I, &resolver))
+                            callees.push_back(callee);
+                    }
+                }
+            }
+        }
+        facts.state = computeStackState(facts.graph, facts.localStack, order, config, &resolver);
+        return facts;
     }
 
     StackSize computeAllocaLargeThreshold(const AnalysisConfig& config)
