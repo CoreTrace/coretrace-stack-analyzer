@@ -320,6 +320,10 @@ namespace ctrace::stack::analyzer
         std::vector<PipelineStep> steps;
         steps.push_back({StepId::FunctionAttrsPass, [](const PipelineData& state)
                          {
+                             // Modules analyzed together were prepared once, before the call
+                             // graph over all of them, whose pointers and results stay valid.
+                             if (state.config.globalStackFacts)
+                                 return;
                              endPathsAtCallsThatNeverReturn(state.mod,
                                                             state.config.neverReturnFunctions
                                                                 ? *state.config.neverReturnFunctions

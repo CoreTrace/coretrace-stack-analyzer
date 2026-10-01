@@ -187,8 +187,13 @@ namespace ctrace::stack::analyzer
 
             if (!functionResult.isRecursive && totalInfo.bytes > localInfo.bytes)
             {
-                std::string path = analysis::buildMaxStackCallPath(fn, prepared.callGraph,
-                                                                   prepared.recursionState);
+                // A path may go on into the functions of another module analyzed together.
+                const analysis::GlobalStackFacts* global =
+                    prepared.ctx.config.globalStackFacts.get();
+                std::string path =
+                    global ? analysis::buildMaxStackCallPath(fn, global->graph, global->state)
+                           : analysis::buildMaxStackCallPath(fn, prepared.callGraph,
+                                                             prepared.recursionState);
                 if (!path.empty())
                     aux.callPaths[fn] = path;
             }
