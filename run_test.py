@@ -2766,6 +2766,219 @@ def check_size_minus_one_cross_tu() -> bool:
     )
 
 
+def check_cross_tu_call_graph() -> bool:
+    """
+    #157: a call to a declaration reaches the definition of its symbol in another file when that
+    definition is exact and unique, and the files then conclude as one file does. A cycle across
+    files is recursive, and never returns when no path leaves it. Its members and callers have an
+    unknown max stack with a lower bound. A caller counts the frame of a callee defined in another
+    file, in both modes and with --assume-external-frame. A static homonym, a symbol defined twice
+    or a weak definition is never reached, and a call through a declaration without a prototype
+    is. The sort order changes nothing.
+    """
+    print("=== Testing one call graph over the files analyzed together ===")
+    fixtures = RUN_CONFIG.test_dir / "recursion/c"
+    smt_args = [
+        "--smt=on",
+        "--smt-backend=z3",
+        "--smt-mode=single",
+        f"--smt-rules={','.join(_all_smt_rules())}",
+        f"--smt-timeout-ms={SMT_FIXTURE_TIMEOUT_MS}",
+    ]
+
+    def part(path: str) -> str:
+        return Path(path).name.split("cross-tu-", 1)[-1].removesuffix(".c")
+
+    def observed(files: list[str], extra: list[str]):
+        result = run_analyzer([*files, "--format=json", *extra])
+        try:
+            payload = json.loads(result.stdout or "")
+        except json.JSONDecodeError:
+            return None, None
+        functions = {}
+        for fn in payload.get("functions", []):
+            known = fn.get("maxStackUnknown") is False
+            functions[(part(str(fn.get("file", ""))), fn.get("name"))] = (
+                "known" if known else "unknown",
+                fn.get("maxStack") if known else fn.get("maxStackLowerBound"),
+                bool(fn.get("isRecursive")),
+            )
+        recursion = sorted(
+            (
+                str(d.get("ruleId", "")).split(".", 1)[-1],
+                part(str(d.get("location", {}).get("file", ""))),
+                d.get("location", {}).get("function"),
+            )
+            for d in payload.get("diagnostics", [])
+            if str(d.get("ruleId", "")).startswith("Recursion.")
+        )
+        return functions, recursion
+
+    U, K = "unknown", "known"
+    no_way_out = [
+        ("Detected", "cycle-noexit-a", "ping"),
+        ("Unconditional", "cycle-noexit-a", "ping"),
+    ]
+    exit_cycle = {
+        ("cycle-exit-a", "ping"): (U, 32, True),
+        ("cycle-exit-b", "pong"): (U, 32, True),
+        ("cycle-exit-b", "enter_cycle"): (U, 48, False),
+    }
+    exit_recursion = [("Detected", "cycle-exit-a", "ping"), ("Detected", "cycle-exit-b", "pong")]
+    static_pong = {
+        ("cycle-static", "local_pong"): (K, 32, False),
+        ("cycle-static", "pong"): (K, 16, False),
+    }
+    stack = {
+        ("stack-frame", "big_frame"): (K, 4112, False),
+        ("stack-caller", "big_caller"): (K, 4128, False),
+    }
+    unreached = {("stack-caller", "big_caller"): (U, 16, False)}
+
+    # (label, fixtures, extra arguments, expected functions, expected Recursion diagnostics)
+    cases = [
+        (
+            "caller alone",
+            ["stack-caller"],
+            [],
+            {**unreached, ("stack-caller", "calls_external"): (U, None, False)},
+            [],
+        ),
+        (
+            "cycle without a way out",
+            ["cycle-noexit-a", "cycle-noexit-b"],
+            [],
+            {
+                ("cycle-noexit-a", "ping"): (U, 32, True),
+                ("cycle-noexit-b", "pong"): (U, 32, True),
+            },
+            sorted(
+                no_way_out
+                + [
+                    ("Detected", "cycle-noexit-b", "pong"),
+                    ("Unconditional", "cycle-noexit-b", "pong"),
+                ]
+            ),
+        ),
+        (
+            "cycle without a way out, no prototype",
+            ["cycle-noexit-a", "cycle-noexit-noproto"],
+            [],
+            {
+                ("cycle-noexit-a", "ping"): (U, 32, True),
+                ("cycle-noexit-noproto", "pong"): (U, 32, True),
+            },
+            sorted(
+                no_way_out
+                + [
+                    ("Detected", "cycle-noexit-noproto", "pong"),
+                    ("Unconditional", "cycle-noexit-noproto", "pong"),
+                ]
+            ),
+        ),
+        ("cycle with a way out", ["cycle-exit-a", "cycle-exit-b"], [], exit_cycle, exit_recursion),
+        (
+            "static homonym alone",
+            ["cycle-exit-a", "cycle-static"],
+            [],
+            {("cycle-exit-a", "ping"): (U, 16, False), **static_pong},
+            [],
+        ),
+        (
+            "static homonym beside the cycle",
+            ["cycle-exit-a", "cycle-exit-b", "cycle-static"],
+            [],
+            {**exit_cycle, **static_pong},
+            exit_recursion,
+        ),
+        (
+            "stack",
+            ["stack-frame", "stack-caller"],
+            [],
+            {**stack, ("stack-caller", "calls_external"): (U, None, False)},
+            [],
+        ),
+        (
+            "stack, ABI mode",
+            ["stack-frame", "stack-caller"],
+            ["--mode=abi"],
+            {
+                ("stack-frame", "big_frame"): (K, 4112, False),
+                ("stack-caller", "big_caller"): (K, 4144, False),
+                ("stack-caller", "calls_external"): (U, 16, False),
+            },
+            [],
+        ),
+        (
+            "stack, external frame",
+            ["stack-frame", "stack-caller"],
+            ["--assume-external-frame=100"],
+            {**stack, ("stack-caller", "calls_external"): (K, 100, False)},
+            [],
+        ),
+        ("defined twice", ["stack-frame", "stack-frame-again", "stack-caller"], [], unreached, []),
+        ("weak definition", ["stack-frame-weak", "stack-caller"], [], unreached, []),
+        (
+            "no prototype",
+            ["stack-frame", "stack-noproto-caller"],
+            [],
+            {("stack-noproto-caller", "noproto_caller"): (K, 4128, False)},
+            [],
+        ),
+    ]
+    # The analyzer sorts its inputs: these run on copies named so that the files keep this order.
+    copied_cases = [
+        ("caller sorted first", ["stack-caller", "stack-frame"], [], stack, []),
+        (
+            "cycle sorted in reverse",
+            ["cycle-exit-b", "cycle-exit-a"],
+            [],
+            exit_cycle,
+            exit_recursion,
+        ),
+    ]
+
+    ok = True
+    with tempfile.TemporaryDirectory(prefix="ct_call_graph_") as tmp:
+        runs = []
+        for pass_name, pass_args in (("default", []), ("smt-z3", smt_args)):
+            for label, parts, extra, functions, recursion in cases:
+                files = [str(fixtures / f"cross-tu-{p}.c") for p in parts]
+                run = (f"{pass_name}, {label}", files, [*extra, *pass_args], functions, recursion)
+                runs.append(run)
+            for label, parts, extra, functions, recursion in copied_cases:
+                files = []
+                for rank, p in enumerate(parts):
+                    target = Path(tmp) / f"{rank}-cross-tu-{p}.c"
+                    shutil.copy(fixtures / f"cross-tu-{p}.c", target)
+                    files.append(str(target))
+                run = (f"{pass_name}, {label}", files, [*extra, *pass_args], functions, recursion)
+                runs.append(run)
+
+        for label, files, extra, functions, recursion in runs:
+            found_functions, found_recursion = observed(files, extra)
+            if found_functions is None:
+                print(f"  ❌ {label}: no JSON output")
+                ok = False
+                continue
+            wrong = {
+                key: (found_functions.get(key), value)
+                for key, value in functions.items()
+                if found_functions.get(key) != value
+            }
+            if not wrong and found_recursion == recursion:
+                print(f"  ✅ {label}")
+                continue
+            ok = False
+            print(f"  ❌ {label}")
+            for key, (got, expected) in wrong.items():
+                print(f"     {key}: {got}, expected {expected}")
+            if found_recursion != recursion:
+                print(f"     recursion: {found_recursion}, expected {recursion}")
+    print()
+    return ok
+
+
 def check_null_deref_nested_inter_tu() -> bool:
     """
     Regression: nested null-deref cases must still be reported when the analyzer
@@ -4575,6 +4788,7 @@ def main() -> int:
         check_const_param_cross_tu,
         check_duplicate_if_cross_tu,
         check_size_minus_one_cross_tu,
+        check_cross_tu_call_graph,
         check_null_deref_nested_inter_tu,
         check_integer_overflow_advanced_inter_tu,
         check_noreturn_cross_tu,
