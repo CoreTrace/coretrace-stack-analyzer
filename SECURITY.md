@@ -8,7 +8,7 @@ backporting to earlier `0.x` lines.
 
 | Version                    | Supported          |
 | -------------------------- | ------------------ |
-| Latest `0.x` minor (v0.19) | :white_check_mark: |
+| Latest `0.x` minor         | :white_check_mark: |
 | Older `0.x` minors         | :x:                |
 
 This applies to every distribution channel:
