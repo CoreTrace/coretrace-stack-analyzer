@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "analysis/StackPointerEscape.hpp"
+#include "analysis/AnalyzerUtils.hpp"
 #include "analysis/IRValueUtils.hpp"
 #include "StackPointerEscapeInternal.hpp"
 
@@ -26,6 +27,22 @@ namespace ctrace::stack::analysis
     {
         using FunctionArgHardEscapeMap =
             std::unordered_map<const llvm::Function*, std::vector<bool>>;
+
+        // Where a function sends the address it receives as one pointer parameter, by its own
+        // code or through the functions of this module it calls. Values it loads through that
+        // address are not followed.
+        struct ParamAddressRoutes
+        {
+            std::vector<bool> storedInto;    // the objects these parameters point to receive it
+            std::uint64_t keeps : 1 = false; // a global, unknown memory or an unknown callback
+            std::uint64_t returned : 1 = false;
+            std::uint64_t reservedFlags : 62 = 0;
+
+            bool operator==(const ParamAddressRoutes&) const = default;
+        };
+
+        using FunctionAddressRoutesMap =
+            std::unordered_map<const llvm::Function*, std::vector<ParamAddressRoutes>>;
 
         struct DeferredCallback
         {
@@ -646,9 +663,208 @@ namespace ctrace::stack::analysis
             return summaries;
         }
 
+        static ParamAddressRoutes
+        collectParamAddressRoutes(const llvm::Function& F, const llvm::Argument& arg,
+                                  const FunctionAddressRoutesMap& routesMap,
+                                  const std::function<bool(const llvm::Function&)>& shouldAnalyze,
+                                  const IndirectTargetResolver& targetResolver,
+                                  const ReturnedPointerArgAliasMap& returnedArgAliases,
+                                  const StackEscapeModel& model,
+                                  StackEscapeRuleMatcher& ruleMatcher)
+        {
+            using namespace llvm;
+
+            ParamAddressRoutes routes;
+            routes.storedInto.resize(F.arg_size());
+            SmallPtrSet<const Value*, 32> visited;
+            SmallVector<const Value*, 16> worklist;
+            SmallPtrSet<const AllocaInst*, 8> slotsHoldingAddress;
+            worklist.push_back(&arg);
+
+            const auto storeInto = [&](const Value* dst)
+            {
+                const Value* dstObj = getUnderlyingPointerObject(dst, returnedArgAliases);
+                if (const auto* slot = dyn_cast_or_null<AllocaInst>(dstObj);
+                    slot && slot->getFunction() == &F)
+                {
+                    slotsHoldingAddress.insert(slot);
+                    worklist.push_back(slot);
+                }
+                else if (const auto* param = dyn_cast_or_null<Argument>(dstObj))
+                {
+                    routes.storedInto[param->getArgNo()] = true;
+                }
+                else
+                {
+                    routes.keeps = true;
+                }
+            };
+
+            // The call behaves as if the callee's code ran here.
+            const auto applyCallee =
+                [&](const Function* callee, const CallBase& CB, unsigned argIndex)
+            {
+                if (!callee || callee->isDeclaration() || !shouldAnalyze(*callee) ||
+                    argIndex >= callee->arg_size() ||
+                    ruleMatcher.modelSaysNoEscapeArg(model, callee, argIndex) ||
+                    isStdLibCallee(callee))
+                {
+                    return;
+                }
+                const auto it = routesMap.find(callee);
+                if (it == routesMap.end())
+                    return;
+                const ParamAddressRoutes& calleeRoutes = it->second[argIndex];
+                routes.keeps |= calleeRoutes.keeps;
+                if (calleeRoutes.returned)
+                    worklist.push_back(&CB);
+                for (unsigned i = 0; i < calleeRoutes.storedInto.size() && i < CB.arg_size(); ++i)
+                {
+                    if (calleeRoutes.storedInto[i])
+                        storeInto(CB.getArgOperand(i));
+                }
+            };
+
+            while (!worklist.empty())
+            {
+                const Value* V = worklist.pop_back_val();
+                if (!visited.insert(V).second)
+                    continue;
+
+                for (const Use& U : V->uses())
+                {
+                    const User* Usr = U.getUser();
+
+                    if (isa<ReturnInst>(Usr))
+                    {
+                        routes.returned = true;
+                        continue;
+                    }
+
+                    if (const auto* SI = dyn_cast<StoreInst>(Usr))
+                    {
+                        if (SI->getValueOperand() == V)
+                            storeInto(SI->getPointerOperand());
+                        continue;
+                    }
+
+                    if (const auto* LI = dyn_cast<LoadInst>(Usr))
+                    {
+                        // Only a slot of this function that holds the address gives it back.
+                        const AllocaInst* slot =
+                            getUnderlyingAlloca(LI->getPointerOperand(), returnedArgAliases);
+                        if (slot && slotsHoldingAddress.contains(slot) &&
+                            LI->getType()->isPointerTy())
+                        {
+                            worklist.push_back(LI);
+                        }
+                        continue;
+                    }
+
+                    if (const auto* CB = dyn_cast<CallBase>(Usr))
+                    {
+                        for (unsigned argIndex = 0; argIndex < CB->arg_size(); ++argIndex)
+                        {
+                            if (CB->getArgOperand(argIndex) != V ||
+                                callParamHasNonCaptureLikeAttr(*CB, argIndex))
+                            {
+                                continue;
+                            }
+
+                            const Value* calledVal = CB->getCalledOperand();
+                            const Value* calledStripped =
+                                calledVal ? calledVal->stripPointerCasts() : nullptr;
+                            if (const auto* directCallee =
+                                    calledStripped ? dyn_cast<Function>(calledStripped) : nullptr)
+                            {
+                                applyCallee(directCallee, *CB, argIndex);
+                                continue;
+                            }
+
+                            if (!isLikelyVirtualDispatchCall(*CB))
+                            {
+                                routes.keeps = true;
+                                continue;
+                            }
+                            const std::vector<const Function*>& candidates =
+                                targetResolver.candidatesForCall(*CB);
+                            if (candidates.empty())
+                            {
+                                routes.keeps = true;
+                                continue;
+                            }
+                            for (const Function* candidate : candidates)
+                                applyCallee(candidate, *CB, argIndex);
+                        }
+                        continue;
+                    }
+
+                    if (isa<BitCastInst, GetElementPtrInst, PHINode, SelectInst>(Usr) &&
+                        Usr->getType()->isPointerTy())
+                    {
+                        worklist.push_back(Usr);
+                    }
+                }
+            }
+
+            return routes;
+        }
+
+        // Least fixed point over the functions of the module, which chains, permutations of
+        // arguments and recursive cycles all reach.
+        static FunctionAddressRoutesMap buildFunctionAddressRoutes(
+            llvm::Module& mod, const std::function<bool(const llvm::Function&)>& shouldAnalyze,
+            const IndirectTargetResolver& targetResolver,
+            const ReturnedPointerArgAliasMap& returnedArgAliases, const StackEscapeModel& model,
+            StackEscapeRuleMatcher& ruleMatcher)
+        {
+            FunctionAddressRoutesMap routesMap;
+            for (const llvm::Function& F : mod)
+            {
+                if (!F.isDeclaration() && shouldAnalyze(F))
+                    routesMap[&F].resize(F.arg_size());
+            }
+
+            constexpr unsigned kAddressRoutesMaxIterations = 64;
+            bool changed = true;
+            unsigned iterations = 0;
+            while (changed && iterations < kAddressRoutesMaxIterations)
+            {
+                changed = false;
+                ++iterations;
+                for (auto& [F, perArg] : routesMap)
+                {
+                    for (const llvm::Argument& arg : F->args())
+                    {
+                        if (!isPointerLikeArgument(arg))
+                            continue;
+                        ParamAddressRoutes next = collectParamAddressRoutes(
+                            *F, arg, routesMap, shouldAnalyze, targetResolver, returnedArgAliases,
+                            model, ruleMatcher);
+                        if (next != perArg[arg.getArgNo()])
+                        {
+                            perArg[arg.getArgNo()] = std::move(next);
+                            changed = true;
+                        }
+                    }
+                }
+            }
+
+            if (changed)
+            {
+                coretrace::log(coretrace::Level::Warn,
+                               "Stack escape address routes: reached fixed-point iteration cap "
+                               "({}); routes may be incomplete\n",
+                               kAddressRoutesMaxIterations);
+            }
+
+            return routesMap;
+        }
+
         static void analyzeStackPointerEscapesInFunction(
             llvm::Function& F, const FunctionEscapeSummaryMap& summaries,
             const FunctionArgHardEscapeMap& hardEscapesByArg,
+            const FunctionAddressRoutesMap& addressRoutes,
             const IndirectTargetResolver& targetResolver,
             const ReturnedPointerArgAliasMap& returnedArgAliases, const StackEscapeModel& model,
             StackEscapeRuleMatcher& ruleMatcher, std::vector<StackPointerEscapeIssue>& out)
@@ -892,14 +1108,44 @@ namespace ctrace::stack::analysis
                                     }
                                     else
                                     {
-#ifdef CT_DISABLE_CALL_ARG
+                                        // The call behaves as if the callee's code ran here.
+                                        const auto routesIt = addressRoutes.find(directCallee);
+                                        if (routesIt == addressRoutes.end() ||
+                                            argIndex >= routesIt->second.size())
+                                        {
+                                            continue;
+                                        }
+                                        const ParamAddressRoutes& routes =
+                                            routesIt->second[argIndex];
+                                        if (routes.returned)
+                                            worklist.push_back(CB);
+                                        bool keeps = routes.keeps;
+                                        for (unsigned i = 0;
+                                             i < routes.storedInto.size() && i < CB->arg_size();
+                                             ++i)
+                                        {
+                                            if (!routes.storedInto[i])
+                                                continue;
+                                            const AllocaInst* dstAI = getUnderlyingAlloca(
+                                                CB->getArgOperand(i), returnedArgAliases);
+                                            if (dstAI && dstAI->getFunction() == &F)
+                                            {
+                                                localSlotsContainingTrackedAddr.insert(dstAI);
+                                                worklist.push_back(dstAI);
+                                            }
+                                            else
+                                            {
+                                                keeps = true;
+                                            }
+                                        }
+                                        if (!keeps)
+                                            continue;
+
                                         issue.escapeKind = "call_arg";
-                                        issue.targetName = directCallee->hasName()
-                                                               ? directCallee->getName().str()
-                                                               : std::string{};
+                                        issue.targetName = formatFunctionNameForMessage(
+                                            directCallee->getName().str());
                                         out.push_back(std::move(issue));
                                         sawNonCallbackEscape = true;
-#endif
                                     }
                                 }
 
@@ -976,6 +1222,8 @@ namespace ctrace::stack::analysis
         const FunctionEscapeSummaryMap summaries =
             buildFunctionEscapeSummaries(mod, shouldAnalyze, targetResolver, returnedArgAliases,
                                          model, ruleMatcher, &hardEscapesByArg);
+        const FunctionAddressRoutesMap addressRoutes = buildFunctionAddressRoutes(
+            mod, shouldAnalyze, targetResolver, returnedArgAliases, model, ruleMatcher);
 
         for (llvm::Function& F : mod)
         {
@@ -983,8 +1231,9 @@ namespace ctrace::stack::analysis
                 continue;
             if (!shouldAnalyze(F))
                 continue;
-            analyzeStackPointerEscapesInFunction(F, summaries, hardEscapesByArg, targetResolver,
-                                                 returnedArgAliases, model, ruleMatcher, issues);
+            analyzeStackPointerEscapesInFunction(F, summaries, hardEscapesByArg, addressRoutes,
+                                                 targetResolver, returnedArgAliases, model,
+                                                 ruleMatcher, issues);
         }
         return issues;
     }
