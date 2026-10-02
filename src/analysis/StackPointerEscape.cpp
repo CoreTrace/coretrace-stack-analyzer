@@ -176,12 +176,6 @@ namespace ctrace::stack::analysis
             return perArg[argIndex];
         }
 
-        static bool summarySaysNoEscape(const FunctionEscapeSummaryMap& summaries,
-                                        const llvm::Function* callee, unsigned argIndex)
-        {
-            return summaryStateForArg(summaries, callee, argIndex) == EscapeSummaryState::NoEscape;
-        }
-
         static bool summaryHasLocalHardEscape(const FunctionArgHardEscapeMap& hardEscapes,
                                               const llvm::Function* callee, unsigned argIndex)
         {
@@ -1015,10 +1009,6 @@ namespace ctrace::stack::analysis
                                     }
                                     if (directCallee)
                                     {
-                                        if (summarySaysNoEscape(summaries, directCallee, argIndex))
-                                        {
-                                            continue;
-                                        }
                                         if (ruleMatcher.modelSaysNoEscapeArg(model, directCallee,
                                                                              argIndex))
                                         {
