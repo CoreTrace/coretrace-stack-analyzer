@@ -5,6 +5,7 @@
 // the same itself. interproc-escape.c stores it into a global directly.
 
 typedef void (*hook_fn)(char*);
+typedef const char* (*view_fn)(const char*);
 
 struct holder
 {
@@ -71,6 +72,33 @@ static const char* identity(const char* p)
     return p;
 }
 
+static void set_slot(char** slot, char* p)
+{
+    *slot = p;
+}
+
+struct view
+{
+    const char* p;
+};
+
+// Keeps p after passing it through the first field of a struct of its own.
+static void keep_through_own_struct(const char* p)
+{
+    struct view tmp;
+    tmp.p = p;
+    g_view = tmp.p;
+}
+
+// Only declared here: what it does with p is unknown.
+void external_sink(char* p);
+
+// Publishes what the function its caller gives returns for p.
+static void publish_view(view_fn view, const char* p)
+{
+    g_view = view(p);
+}
+
 void escape_via_callback(hook_fn hook)
 {
     char buf[10] = {0};
@@ -121,42 +149,99 @@ const char* return_after_return(void)
     return identity(buf);
 }
 
-// at line 51, column 9
+// call_hook calls with the address of buf the function given here, store_global.
+void escape_via_known_callback(void)
+{
+    char buf[10] = {0};
+    call_hook(buf, store_global);
+}
+
+void escape_through_callee_struct(void)
+{
+    char buf[10] = {0};
+    keep_through_own_struct(buf);
+}
+
+// set_slot stores the address of buf into slot, a local here, which the caller then stores into a
+// global.
+void escape_after_store_into_slot(void)
+{
+    char buf[10] = {0};
+    char* slot = 0;
+    set_slot(&slot, buf);
+    g_ptr = slot;
+}
+
+// call_hook calls with the address of buf a function only declared here.
+void escape_via_declared_callback(void)
+{
+    char buf[10] = {0};
+    call_hook(buf, external_sink);
+}
+
+// identity returns the address of buf to publish_view, which stores it into a global.
+void escape_via_returning_callback(void)
+{
+    char buf[10] = {0};
+    publish_view(identity, buf);
+}
+
+// at line 52, column 9
 // [ !Info! ] recursive or mutually recursive function detected
 
-// at line 59, column 10
+// at line 60, column 10
 // [ !Info! ] recursive or mutually recursive function detected
 
-// at line 77, column 5
+// at line 105, column 5
 // [ !!Warn ] stack pointer escape: address of variable 'buf' escapes this function
 //          ↳ address passed as argument to function 'call_hook' (callee may capture the pointer beyond this function)
 
-// at line 83, column 5
+// at line 111, column 5
 // [ !!Warn ] stack pointer escape: address of variable 'buf' escapes this function
 //          ↳ address passed as argument to function 'forward_to_store' (callee may capture the pointer beyond this function)
 
-// at line 89, column 5
+// at line 117, column 5
 // [ !!Warn ] stack pointer escape: address of variable 'buf' escapes this function
 //          ↳ address passed as argument to function 'forward_swapped' (callee may capture the pointer beyond this function)
 
-// at line 95, column 5
+// at line 123, column 5
 // [ !!Warn ] stack pointer escape: address of variable 'buf' escapes this function
 //          ↳ address passed as argument to function 'pong' (callee may capture the pointer beyond this function)
 
-// at line 101, column 5
+// at line 129, column 5
 // [ !!Warn ] stack pointer escape: address of variable 'buf' escapes this function
 //          ↳ address passed as argument to function 'attach' (callee may capture the pointer beyond this function)
 
-// at line 107, column 5
+// at line 135, column 5
 // [ !!Warn ] stack pointer escape: address of variable 'buf' escapes this function
 //          ↳ address passed as argument to function 'attach' (callee may capture the pointer beyond this function)
 
-// at line 114, column 12
+// at line 142, column 12
 // [ !!Warn ] stack pointer escape: address of variable 'buf' escapes this function
 //          ↳ stored into global variable 'g_view' (pointer may be used after the function returns)
 
-// at line 121, column 5
+// at line 149, column 5
 // [ !!Warn ] stack pointer escape: address of variable 'buf' escapes this function
 //          ↳ escape via return statement (pointer to stack returned to caller)
+
+// at line 156, column 5
+// [ !!Warn ] stack pointer escape: address of variable 'buf' escapes this function
+//          ↳ address passed as argument to function 'call_hook' (callee may capture the pointer beyond this function)
+
+// at line 162, column 5
+// [ !!Warn ] stack pointer escape: address of variable 'buf' escapes this function
+//          ↳ address passed as argument to function 'keep_through_own_struct' (callee may capture the pointer beyond this function)
+
+// at line 172, column 11
+// [ !!Warn ] stack pointer escape: address of variable 'buf' escapes this function
+//          ↳ stored into global variable 'g_ptr' (pointer may be used after the function returns)
+
+// at line 179, column 5
+// [ !!Warn ] stack pointer escape: address of variable 'buf' escapes this function
+//          ↳ address passed as argument to function 'call_hook' (callee may capture the pointer beyond this function)
+
+// at line 186, column 5
+// [ !!Warn ] stack pointer escape: address of variable 'buf' escapes this function
+//          ↳ address passed as argument to function 'publish_view' (callee may capture the pointer beyond this function)
 
 // strict-expectation-details: true

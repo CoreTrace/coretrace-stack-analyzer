@@ -81,6 +81,82 @@ int reads_through_cycle(void)
     return ping_read(buf, 3);
 }
 
+struct holder
+{
+    char* p;
+};
+
+typedef void (*reader_fn)(const char*);
+typedef const char* (*view_fn)(const char*);
+
+static char g_storage[4];
+static char* g_seen;
+static int g_first;
+
+// Stores into a global the pointer that the struct h points to holds, not the address of h.
+static void publish_held(const struct holder* h)
+{
+    g_seen = h->p;
+}
+
+static void read_only(const char* p)
+{
+    g_first = p[0];
+}
+
+// Calls with p the function its caller gives.
+static void run_reader(reader_fn reader, const char* p)
+{
+    reader(p);
+}
+
+static void forward_reader(reader_fn reader, const char* p)
+{
+    run_reader(reader, p);
+}
+
+// publish_held keeps the address of the static g_storage, which h holds, not the address of h.
+int publishes_what_it_holds(void)
+{
+    struct holder h = {g_storage};
+    publish_held(&h);
+    return g_seen == g_storage;
+}
+
+// forward_reader passes the address of buf on to run_reader, which calls with it the function
+// given here, read_only: it only reads through it.
+int reads_through_known_callback(void)
+{
+    char buf[4] = {0};
+    forward_reader(read_only, buf);
+    return g_first;
+}
+
+// Call the function their caller gives, then drop what it returns, or only read through it.
+static void drop_view(view_fn view, const char* p)
+{
+    view(p);
+}
+
+static int read_view(view_fn view, const char* p)
+{
+    return view(p)[0];
+}
+
+// identity returns the address of buf to drop_view, which drops it.
+void drops_returned_address(void)
+{
+    char buf[4] = {0};
+    drop_view(identity, buf);
+}
+
+// identity returns the address of buf to read_view, which only reads through it.
+int reads_returned_address(void)
+{
+    char buf[4] = {0};
+    return read_view(identity, buf);
+}
+
 // at line 39, column 12
 // [ !Info! ] recursive or mutually recursive function detected
 
