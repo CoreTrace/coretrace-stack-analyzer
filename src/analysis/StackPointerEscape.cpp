@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <deque>
+#include <map>
 #include <optional>
 #include <string>
 #include <vector>
@@ -682,10 +683,17 @@ namespace ctrace::stack::analysis
         // they no longer change. A walk of a function reads the routes of the functions it calls
         // and is recorded as their reader; only the readers of routes that grew are walked again.
         //
+        // A function is walked once per binding of its function pointer parameters to functions
+        // the analysis follows, as given at the calls: a call through a bound parameter is a
+        // direct call to that function, so what it does with the address, and with what it
+        // returns, follows from its own routes. A call through a parameter left unbound reaches
+        // a function the analysis does not know.
+        //
         // This ends without an iteration cap. The routes of a parameter are bits over the
-        // parameters of its function, so they can grow only finitely often, and merge() only adds
-        // facts. A walk is monotone in the routes it reads, so the result is their least fixed
-        // point, whatever the order of the walks, hence of the definitions.
+        // parameters of its function, so they can grow only finitely often; merge() only adds
+        // facts; and the bindings range over the finitely many functions of the module. A walk
+        // is monotone in the routes it reads, so the result is their least fixed point, whatever
+        // the order of the walks, hence of the definitions.
         class AddressRoutesSolver
         {
           public:
@@ -698,31 +706,40 @@ namespace ctrace::stack::analysis
             {
             }
 
-            // Where callee sends the address it receives as argument argIndex: nowhere when the
-            // analysis does not follow that callee.
-            ParamAddressRoutes routesAtCall(const llvm::Function& callee, unsigned argIndex)
+            // Where callee sends the address that CB passes as argument argIndex: nowhere when
+            // the analysis does not follow that callee.
+            ParamAddressRoutes routesAtCall(const llvm::CallBase& CB, const llvm::Function& callee,
+                                            unsigned argIndex)
             {
                 if (!follows(callee, argIndex))
                     return {};
-                const std::size_t entry = entryFor(callee);
+                const std::size_t entry = entryFor(callee, bindArguments(CB, callee, {}));
                 solve();
                 return entries[entry].perArg[argIndex];
             }
 
           private:
+            // Function pointer parameters bound to functions, by parameter index.
+            using Binding = std::vector<std::pair<unsigned, const llvm::Function*>>;
+
             struct Entry
             {
                 const llvm::Function* function = nullptr;
+                Binding binding;
                 std::vector<ParamAddressRoutes> perArg;
                 std::vector<std::size_t> readers;
                 std::uint64_t queued : 1 = false;
                 std::uint64_t reservedFlags : 63 = 0;
             };
 
+            bool isFollowed(const llvm::Function& function) const
+            {
+                return !function.isDeclaration() && shouldAnalyze(function);
+            }
+
             bool follows(const llvm::Function& callee, unsigned argIndex)
             {
-                return !callee.isDeclaration() && shouldAnalyze(callee) &&
-                       argIndex < callee.arg_size() &&
+                return isFollowed(callee) && argIndex < callee.arg_size() &&
                        !ruleMatcher.modelSaysNoEscapeArg(model, &callee, argIndex) &&
                        !isStdLibCallee(&callee);
             }
@@ -735,13 +752,49 @@ namespace ctrace::stack::analysis
                 queue.push_back(entry);
             }
 
-            std::size_t entryFor(const llvm::Function& F)
+            // The function the analysis follows that value designates when it is called, if any.
+            const llvm::Function* resolveCallee(const llvm::Value* value,
+                                                const Binding& binding) const
             {
-                const auto [it, inserted] = index.try_emplace(&F, entries.size());
+                const llvm::Value* target =
+                    peelPointerFromSingleStoreSlot(value->stripPointerCasts());
+                if (const auto* function = llvm::dyn_cast<llvm::Function>(target))
+                    return isFollowed(*function) ? function : nullptr;
+                if (const auto* param = llvm::dyn_cast<llvm::Argument>(target))
+                {
+                    for (const auto& [index, function] : binding)
+                    {
+                        if (index == param->getArgNo())
+                            return function;
+                    }
+                }
+                return nullptr;
+            }
+
+            // The arguments of CB that give callee a function the analysis follows.
+            Binding bindArguments(const llvm::CallBase& CB, const llvm::Function& callee,
+                                  const Binding& binding) const
+            {
+                Binding bound;
+                for (unsigned i = 0; i < CB.arg_size() && i < callee.arg_size(); ++i)
+                {
+                    if (const llvm::Function* function =
+                            resolveCallee(CB.getArgOperand(i), binding))
+                    {
+                        bound.emplace_back(i, function);
+                    }
+                }
+                return bound;
+            }
+
+            std::size_t entryFor(const llvm::Function& F, Binding binding)
+            {
+                const auto [it, inserted] = index.try_emplace({&F, binding}, entries.size());
                 if (inserted)
                 {
                     Entry entry;
                     entry.function = &F;
+                    entry.binding = std::move(binding);
                     entry.perArg.resize(F.arg_size());
                     for (ParamAddressRoutes& routes : entry.perArg)
                         routes.storedInto.resize(F.arg_size());
@@ -778,6 +831,7 @@ namespace ctrace::stack::analysis
                 using namespace llvm;
 
                 const Function& F = *entries[entry].function;
+                const Binding binding = entries[entry].binding;
                 ParamAddressRoutes routes;
                 routes.storedInto.resize(F.arg_size());
                 SmallPtrSet<const Value*, 32> visited;
@@ -810,7 +864,8 @@ namespace ctrace::stack::analysis
                 {
                     if (!follows(callee, argIndex))
                         return;
-                    const std::size_t calleeEntry = entryFor(callee);
+                    const std::size_t calleeEntry =
+                        entryFor(callee, bindArguments(CB, callee, binding));
                     std::vector<std::size_t>& readers = entries[calleeEntry].readers;
                     if (std::find(readers.begin(), readers.end(), entry) == readers.end())
                         readers.push_back(entry);
@@ -884,6 +939,13 @@ namespace ctrace::stack::analysis
                                     continue;
                                 }
 
+                                if (const Function* bound =
+                                        resolveCallee(CB->getCalledOperand(), binding))
+                                {
+                                    applyCallee(*bound, *CB, argIndex);
+                                    continue;
+                                }
+
                                 if (!isLikelyVirtualDispatchCall(*CB))
                                 {
                                     routes.keeps = true;
@@ -922,7 +984,7 @@ namespace ctrace::stack::analysis
             const StackEscapeModel& model;
             StackEscapeRuleMatcher& ruleMatcher;
             std::deque<Entry> entries;
-            std::unordered_map<const llvm::Function*, std::size_t> index;
+            std::map<std::pair<const llvm::Function*, Binding>, std::size_t> index;
             std::deque<std::size_t> queue;
         };
 
@@ -1170,7 +1232,8 @@ namespace ctrace::stack::analysis
                                     {
                                         // The call behaves as if the callee's code ran here.
                                         const ParamAddressRoutes routes =
-                                            addressRoutes.routesAtCall(*directCallee, argIndex);
+                                            addressRoutes.routesAtCall(*CB, *directCallee,
+                                                                       argIndex);
                                         if (routes.returned)
                                             worklist.push_back(CB);
                                         bool keeps = routes.keeps;
