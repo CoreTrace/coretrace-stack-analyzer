@@ -24,6 +24,12 @@ struct fstate
     struct lstate* ls;
 };
 
+struct pair
+{
+    char* first;
+    char* second;
+};
+
 union slot
 {
     char* text;
@@ -47,6 +53,11 @@ void* make_table(void);
 static void own(struct state* s, char* p)
 {
     s->owned = p;
+}
+
+static void set_slot(char** slot, char* p)
+{
+    *slot = p;
 }
 
 static void link_states(struct lstate* ls, struct fstate* fs)
@@ -143,33 +154,75 @@ void publish_after_unknown_store(void** out, long k)
     *out = s.table;
 }
 
-// at line 95, column 10
+// set_slot stores the address of shifted_buf into pr.second, eight bytes into pr.
+void publish_first_after_callee_into_second(char** out)
+{
+    char shifted_buf[16] = {0};
+    struct pair pr = {0, 0};
+    set_slot(&pr.second, shifted_buf);
+    *out = pr.first;
+}
+
+// The same, and *out receives pr.second, which holds the address of second_buf.
+void publish_second_after_callee_into_second(char** out)
+{
+    char second_buf[16] = {0};
+    struct pair pr = {0, 0};
+    set_slot(&pr.second, second_buf);
+    *out = pr.second;
+}
+
+// pr.second is read before, in the source, the copy that stores the address into it; from the
+// second iteration on, *out receives the address of loop_buf.
+void publish_second_in_loop(char** out, int n)
+{
+    char loop_buf[16] = {0};
+    struct pair pr = {0, 0};
+    pr.first = loop_buf;
+    for (int i = 0; i < n; ++i)
+    {
+        *out = pr.second;
+        pr.second = pr.first;
+    }
+}
+
+// at line 106, column 10
 // [ !!Warn ] stack pointer escape: address of variable 'owned_buf' escapes this function
 //          ↳ stored through a non-local pointer (e.g. via an out-parameter; pointer may outlive this function)
 //          ↳ destination pointer/value name: 'out'
 
-// at line 104, column 10
+// at line 115, column 10
 // [ !!Warn ] stack pointer escape: address of variable 'callee_owned_buf' escapes this function
 //          ↳ stored through a non-local pointer (e.g. via an out-parameter; pointer may outlive this function)
 //          ↳ destination pointer/value name: 'out'
 
-// at line 113, column 10
+// at line 124, column 10
 // [ !!Warn ] stack pointer escape: address of variable 'element_buf' escapes this function
 //          ↳ stored through a non-local pointer (e.g. via an out-parameter; pointer may outlive this function)
 //          ↳ destination pointer/value name: 'out'
 
-// at line 122, column 10
+// at line 133, column 10
 // [ !!Warn ] stack pointer escape: address of variable 'union_buf' escapes this function
 //          ↳ stored through a non-local pointer (e.g. via an out-parameter; pointer may outlive this function)
 //          ↳ destination pointer/value name: 'out'
 
-// at line 133, column 10
+// at line 144, column 10
 // [ !!Warn ] stack pointer escape: address of variable 'overlap_buf' escapes this function
 //          ↳ stored through a non-local pointer (e.g. via an out-parameter; pointer may outlive this function)
 //          ↳ destination pointer/value name: 'out'
 
-// at line 143, column 10
+// at line 154, column 10
 // [ !!Warn ] stack pointer escape: address of variable 'unknown_store_buf' escapes this function
+//          ↳ stored through a non-local pointer (e.g. via an out-parameter; pointer may outlive this function)
+//          ↳ destination pointer/value name: 'out'
+
+// at line 172, column 10
+// [ !!Warn ] stack pointer escape: address of variable 'second_buf' escapes this function
+//          ↳ stored through a non-local pointer (e.g. via an out-parameter; pointer may outlive this function)
+//          ↳ destination pointer/value name: 'out'
+
+// at line 184, column 14
+// [ !!Warn ] stack pointer escape: address of variable 'loop_buf' escapes this function
 //          ↳ stored through a non-local pointer (e.g. via an out-parameter; pointer may outlive this function)
 //          ↳ destination pointer/value name: 'out'
 
