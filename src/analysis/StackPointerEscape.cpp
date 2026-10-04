@@ -90,6 +90,20 @@ namespace ctrace::stack::analysis
                                    { return range.first < end && *offset < range.second; });
             }
 
+            // Whether size bytes at offset hold every byte of the address, which is addressSize
+            // bytes long: a value of another type than a pointer gives the address back only then.
+            bool wholeIn(std::optional<std::int64_t> offset, std::uint64_t size,
+                         std::uint64_t addressSize) const
+            {
+                if (empty())
+                    return false;
+                if (unknown || !offset)
+                    return size >= addressSize;
+                const std::int64_t end = *offset + static_cast<std::int64_t>(size);
+                return std::any_of(ranges.begin(), ranges.end(), [&](const auto& range)
+                                   { return *offset <= range.first && range.second <= end; });
+            }
+
             // Adds the bytes of other; true when one of them is new.
             bool merge(const HeldBytes& other)
             {
@@ -146,6 +160,27 @@ namespace ctrace::stack::analysis
         static std::uint64_t storeSize(const llvm::Type* type, const llvm::DataLayout& DL)
         {
             return DL.getTypeStoreSize(const_cast<llvm::Type*>(type)).getKnownMinValue();
+        }
+
+        // Whether a load of these bytes gives the address back: a pointer when it overlaps
+        // them, any other value only when it holds all of them, as a struct returned by value
+        // or an integer converted from the address does.
+        static bool loadGivesAddressBack(const llvm::LoadInst& LI, const llvm::AllocaInst& slot,
+                                         const HeldBytes& held, const llvm::DataLayout& DL)
+        {
+            const std::optional<std::int64_t> offset =
+                constantOffsetFrom(LI.getPointerOperand(), &slot, DL);
+            const std::uint64_t size = storeSize(LI.getType(), DL);
+            if (LI.getType()->isPointerTy())
+                return held.overlaps(offset, size);
+            return held.wholeIn(offset, size, DL.getPointerSize());
+        }
+
+        // Whether a conversion of the address to an integer keeps all its bits.
+        static bool keepsWholeAddress(const llvm::PtrToIntInst& P2I, const llvm::DataLayout& DL)
+        {
+            return DL.getTypeSizeInBits(P2I.getType()) >=
+                   DL.getTypeSizeInBits(P2I.getPointerOperand()->getType());
         }
 
         // Where a function sends the address it receives as one pointer parameter, by its own
@@ -1044,10 +1079,8 @@ namespace ctrace::stack::analysis
                                 const AllocaInst* slot = getUnderlyingAlloca(
                                     LI->getPointerOperand(), returnedArgAliases);
                                 const auto held = slot ? heldBySlot.find(slot) : heldBySlot.end();
-                                if (held != heldBySlot.end() && LI->getType()->isPointerTy() &&
-                                    held->second.overlaps(
-                                        constantOffsetFrom(LI->getPointerOperand(), slot, DL),
-                                        storeSize(LI->getType(), DL)))
+                                if (held != heldBySlot.end() &&
+                                    loadGivesAddressBack(*LI, *slot, held->second, DL))
                                 {
                                     worklist.push_back(LI);
                                 }
@@ -1100,6 +1133,18 @@ namespace ctrace::stack::analysis
                                             applyCallee(*candidate, *CB, argIndex);
                                     }
                                 }
+                                continue;
+                            }
+
+                            if (const auto* P2I = dyn_cast<PtrToIntInst>(Usr))
+                            {
+                                if (keepsWholeAddress(*P2I, DL))
+                                    worklist.push_back(P2I);
+                                continue;
+                            }
+                            if (isa<IntToPtrInst>(Usr))
+                            {
+                                worklist.push_back(Usr);
                                 continue;
                             }
 
@@ -1258,10 +1303,12 @@ namespace ctrace::stack::analysis
 
                                 if (auto* LI = dyn_cast<LoadInst>(Usr))
                                 {
-                                    if (LI->getPointerOperand() == V &&
-                                        LI->getType()->isPointerTy())
+                                    if (LI->getPointerOperand() == V)
                                     {
-                                        bool shouldPropagateLoadedPointer = true;
+                                        // A pointer loaded from memory that is not a local of F
+                                        // is followed; any other value is not.
+                                        bool shouldPropagateLoadedPointer =
+                                            LI->getType()->isPointerTy();
                                         if (const AllocaInst* srcAI = getUnderlyingAlloca(
                                                 LI->getPointerOperand(), returnedArgAliases))
                                         {
@@ -1270,10 +1317,8 @@ namespace ctrace::stack::analysis
                                                 const auto held = heldBySlot.find(srcAI);
                                                 shouldPropagateLoadedPointer =
                                                     held != heldBySlot.end() &&
-                                                    held->second.overlaps(
-                                                        constantOffsetFrom(LI->getPointerOperand(),
-                                                                           srcAI, DL),
-                                                        storeSize(LI->getType(), DL));
+                                                    loadGivesAddressBack(*LI, *srcAI, held->second,
+                                                                         DL);
                                             }
                                         }
 
@@ -1435,6 +1480,18 @@ namespace ctrace::stack::analysis
                                     continue;
                                 }
 
+                                if (auto* P2I = dyn_cast<PtrToIntInst>(Usr))
+                                {
+                                    // An integer that keeps every bit of the address carries it.
+                                    if (keepsWholeAddress(*P2I, DL))
+                                        worklist.push_back(P2I);
+                                    continue;
+                                }
+                                if (isa<IntToPtrInst>(Usr))
+                                {
+                                    worklist.push_back(Usr);
+                                    continue;
+                                }
                                 if (auto* BC = dyn_cast<BitCastInst>(Usr))
                                 {
                                     if (BC->getType()->isPointerTy())
