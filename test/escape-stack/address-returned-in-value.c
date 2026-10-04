@@ -80,6 +80,21 @@ unsigned return_truncated_address(void)
     return (unsigned)(uintptr)truncated_buf;
 }
 
+// Converted straight to an integer narrower than the address.
+unsigned return_narrow_conversion(void)
+{
+    char narrow_buf[8] = {0};
+    return (unsigned)narrow_buf;
+}
+
+// v holds the whole address; only its first four bytes are read back.
+unsigned return_low_bytes(void)
+{
+    char low_buf[8] = {0};
+    uintptr v = (uintptr)low_buf;
+    return *(unsigned*)&v;
+}
+
 // w.p holds the address; only w.n is returned.
 int return_other_field(void)
 {
