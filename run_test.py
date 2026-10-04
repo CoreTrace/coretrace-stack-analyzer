@@ -3925,6 +3925,45 @@ def check_const_param_abi_split_struct() -> bool:
     return ok
 
 
+def check_escape_through_returned_value() -> bool:
+    """
+    StackPointerEscape reports the address of a local returned inside a struct or an integer on
+    every target, whatever form the ABI gives the returned value: x86-64 returns a one-pointer
+    struct as a pointer and a two-field struct as an aggregate, AArch64 and Apple arm64 as a
+    converted integer and an array of integers.
+    """
+    print("=== Testing escapes through a returned value across targets ===")
+    source = RUN_CONFIG.test_dir / "escape-stack/address-returned-in-value.c"
+    expected = {
+        "return_one_pointer_struct",
+        "return_second_of_two_pointers",
+        "return_after_int_field",
+        "return_address_as_integer",
+        "return_after_integer_round_trip",
+    }
+    ok = True
+    for target in ("x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", "arm64-apple-macosx"):
+        result = run_analyzer([str(source), "--format=json", f"--compile-arg=--target={target}"])
+        try:
+            diagnostics = json.loads(result.stdout or "").get("diagnostics", [])
+        except json.JSONDecodeError:
+            print(f"  ❌ {target}: no JSON output")
+            ok = False
+            continue
+        found = {
+            d.get("location", {}).get("function")
+            for d in diagnostics
+            if d.get("ruleId") == "StackPointerEscape"
+        }
+        if found == expected:
+            print(f"  ✅ {target}: {sorted(found)}")
+        else:
+            print(f"  ❌ {target}: {sorted(found)}, expected {sorted(expected)}")
+            ok = False
+    print()
+    return ok
+
+
 def check_uninitialized_receiver_abi_split_struct() -> bool:
     """
     A method call marks its receiver as constructed whatever the ABI does with a struct taken by
@@ -4800,6 +4839,7 @@ def main() -> int:
         check_diagnostic_paths_follow_the_input,
         check_const_param_abi_split_struct,
         check_uninitialized_receiver_abi_split_struct,
+        check_escape_through_returned_value,
         check_sarif_rule_cwe_tags,
         check_sarif_security_severity,
         check_ci_script_sarif_merge,
