@@ -2073,6 +2073,166 @@ def check_unknown_alloca_virtual_callback_escape() -> bool:
     return True
 
 
+def check_resource_model_across_compile_directories() -> bool:
+    """
+    A resource model given by a relative path is loaded, and used, whatever the job count, while
+    the files compile from compile-command directories of their own. Each directory holds the one
+    header its file includes through a relative -I, so a file compiles only from its own
+    directory; the analyzer must come back to the directory it started from, where the model and
+    the relative cache directories are. Every run starts with empty caches, and a leak that only
+    the model defines must be reported in every file. The relative paths must be anchored to the
+    start directory, and parallel jobs must not change the working directory for files whose
+    compile commands need no directory of their own.
+    """
+    print("=== Testing the resource model across compile-command directories ===")
+    unit_count = 8
+    ok = True
+    with tempfile.TemporaryDirectory(prefix="ct_resource_model_cwd_") as tmp:
+        root = Path(tmp)
+        project = root / "project"
+        entries = []
+        for i in range(unit_count):
+            unit_dir = project / f"unit{i}"
+            (unit_dir / "include").mkdir(parents=True)
+            (unit_dir / "include" / f"unit{i}.h").write_text(
+                "void* ct_open_widget(void);\nvoid ct_close_widget(void* w);\n"
+            )
+            source = unit_dir / f"unit{i}.c"
+            source.write_text(
+                f'#include "unit{i}.h"\n\n'
+                f"int leak_widget_{i}(void)\n{{\n    void* w = ct_open_widget();\n"
+                "    return w != 0;\n}\n\n"
+                f"int keep_widget_{i}(void)\n{{\n    void* w = ct_open_widget();\n"
+                "    ct_close_widget(w);\n    return 0;\n}\n"
+            )
+            entries.append(
+                {
+                    "directory": str(unit_dir),
+                    "file": str(source),
+                    "arguments": ["cc", "-Iinclude", "-c", str(source), "-o", f"unit{i}.o"],
+                }
+            )
+        compdb = project / "compile_commands.json"
+        compdb.write_text(json.dumps(entries, indent=2))
+        run_dir = root / "run"
+        run_dir.mkdir()
+        (run_dir / "widget-model.txt").write_text(
+            "acquire_ret ct_open_widget Widget\nrelease_arg ct_close_widget 0 Widget\n"
+        )
+        sources = [entry["file"] for entry in entries]
+        expected = {f"leak_widget_{i}" for i in range(unit_count)}
+
+        analyzer = str(Path(RUN_CONFIG.analyzer).resolve())
+
+        def run_from_start_dir(args):
+            try:
+                return subprocess.run(
+                    [analyzer, *args],
+                    cwd=run_dir,
+                    capture_output=True,
+                    text=True,
+                    timeout=RUN_CONFIG.analyzer_timeout,
+                )
+            except subprocess.TimeoutExpired:
+                return None
+
+        start_dir = run_dir.resolve()
+        result = run_from_start_dir(
+            [
+                "--print-effective-config",
+                f"--compile-commands={compdb}",
+                "--resource-model=widget-model.txt",
+                "--compile-ir-cache-dir=caches-config/compile-ir",
+                sources[0],
+            ]
+        )
+        printed = (result.stdout + result.stderr) if result else ""
+        for line in (
+            f"resource-model: {start_dir / 'widget-model.txt'}",
+            f"compile-ir-cache-dir: {start_dir / 'caches-config' / 'compile-ir'}",
+        ):
+            if line in printed:
+                print(f"  ✅ effective configuration: {line.split(':')[0]} anchored to start")
+            else:
+                print(f"  ❌ effective configuration lacks '{line}'")
+                ok = False
+
+        absolute_compdb = project / "compile_commands_absolute.json"
+        absolute_compdb.write_text(
+            json.dumps(
+                [
+                    {**entry, "arguments": ["cc", f"-I{Path(entry['directory']) / 'include'}",
+                                            *entry["arguments"][2:]]}
+                    for entry in entries
+                ],
+                indent=2,
+            )
+        )
+        # Automatic jobs, the default, run in parallel too.
+        result = run_from_start_dir(
+            ["--timing", f"--compile-commands={absolute_compdb}",
+             "--compile-ir-cache-dir=caches-timing/compile-ir", *sources]
+        )
+        timing = (result.stdout + result.stderr) if result else ""
+        if result is None or result.returncode != 0:
+            print("  ❌ automatic jobs with absolute include paths: run failed")
+            ok = False
+        elif "input.compiler.invoke.cwd" in timing:
+            print("  ❌ automatic jobs changed the working directory for absolute commands")
+            ok = False
+        else:
+            print("  ✅ automatic jobs kept the working directory for absolute commands")
+
+        for mode in ([], ["--jobs=1"], ["--jobs=4"]):
+            label = mode[0] if mode else "default jobs"
+            for attempt in range(1, 4):
+                caches = f"caches-{label.replace('=', '').replace(' ', '-')}-{attempt}"
+                cmd = [
+                    analyzer,
+                    "--format=json",
+                    f"--compile-commands={compdb}",
+                    "--resource-model=widget-model.txt",
+                    f"--compile-ir-cache-dir={caches}/compile-ir",
+                    f"--resource-summary-cache-dir={caches}/resource",
+                    *mode,
+                    *sources,
+                ]
+                result = run_from_start_dir(cmd[1:])
+                if result is None:
+                    print(f"  ❌ {label}, run {attempt}: timed out")
+                    ok = False
+                    continue
+                problems = []
+                if "cannot open model file" in result.stderr:
+                    problems.append("the model failed to load")
+                try:
+                    diagnostics = json.loads(result.stdout or "").get("diagnostics", [])
+                except json.JSONDecodeError:
+                    diagnostics = None
+                    problems.append(f"no JSON output (exit {result.returncode})")
+                if diagnostics is not None:
+                    found = {
+                        d.get("location", {}).get("function")
+                        for d in diagnostics
+                        if d.get("ruleId") == "ResourceLifetime.MissingRelease"
+                    }
+                    if found != expected:
+                        problems.append(f"leaks reported in {sorted(found)}")
+                for cache in ("compile-ir", "resource"):
+                    if not (run_dir / caches / cache).is_dir():
+                        problems.append(f"no {cache} cache under the start directory")
+                strays = sorted(str(p.relative_to(root)) for p in project.rglob(caches))
+                if strays:
+                    problems.append(f"caches under the compile directories: {strays}")
+                if problems:
+                    print(f"  ❌ {label}, run {attempt}: {'; '.join(problems)}")
+                    ok = False
+                else:
+                    print(f"  ✅ {label}, run {attempt}: model used in {unit_count} files")
+    print()
+    return ok
+
+
 def check_resource_lifetime_cross_tu() -> bool:
     """
     Regression: cross-TU resource summaries must propagate acquire/release effects
@@ -5055,6 +5215,7 @@ def main() -> int:
         check_exclude_dir_filter,
         check_multi_tu_folder_analysis,
         check_resource_lifetime_cross_tu,
+        check_resource_model_across_compile_directories,
         check_ownership_cross_tu,
         check_ownership_wrapper_metadata,
         check_uninitialized_cross_tu,
