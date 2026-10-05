@@ -38,12 +38,14 @@ namespace ctrace::stack::analysis
 {
     namespace
     {
-        std::mutex gCompileWorkingDirMutex;
         // compilerlib drives an in-process clang CompilerInstance. clang/LLVM keep global
         // mutable state (target registry, cl options, timers); two worker threads compiling
         // at once hung intermittently on the first compile of a run. Compilation is
         // serialised here; module analysis stays parallel, and the IR cache makes the
-        // compile step cheap on repeated runs.
+        // compile step cheap on repeated runs. A compile that needs its compile command's
+        // directory changes the working directory of the whole process: it holds the same
+        // lock from before that change until it is undone, so no other compile runs in a
+        // directory that is not its own, and two changes never interleave.
         std::mutex gCompileInvokeMutex;
 
         std::string makeAbsolutePath(const std::string& path)
@@ -883,6 +885,7 @@ namespace ctrace::stack::analysis
                     return compilerlib::compile(compileArgs, outputMode);
                 }
 
+                std::lock_guard<std::mutex> compileLock(gCompileInvokeMutex);
                 std::string cwdError;
                 ScopedCurrentPath cwdGuard(workingDir, cwdError);
                 if (!cwdError.empty())
@@ -891,7 +894,6 @@ namespace ctrace::stack::analysis
                     return std::nullopt;
                 }
                 const ScopedHotspot hotspot(config.timing, "input.compiler.invoke.cwd");
-                std::lock_guard<std::mutex> compileLock(gCompileInvokeMutex);
                 return compilerlib::compile(compileArgs, outputMode);
             };
 
@@ -902,16 +904,14 @@ namespace ctrace::stack::analysis
                 retriedWithWorkingDir = false;
                 std::optional<compilerlib::CompileResult> res;
                 const bool hasWorkingDir = !workingDir.empty();
-                if (config.jobs > 1 && hasWorkingDir)
+                if (resolveConfiguredJobs(config) > 1 && hasWorkingDir)
                 {
                     // Optimistic fast path for multi-job runs: most compdb commands use absolute
                     // paths.
                     res = compileWithOptionalWorkingDir(compileArgs, outputMode, false);
                     if (!res || !res->success)
                     {
-                        // Fallback keeps correctness for relative include paths and avoids process
-                        // cwd races.
-                        std::lock_guard<std::mutex> lock(gCompileWorkingDirMutex);
+                        // Fallback keeps correctness for relative include paths.
                         res = compileWithOptionalWorkingDir(compileArgs, outputMode, true);
                         retriedWithWorkingDir = true;
                     }

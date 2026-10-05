@@ -97,15 +97,6 @@ struct NormalizedPathFilters
     std::vector<std::string> excludeDirs;
 };
 
-static unsigned resolveConfiguredJobs(const AnalysisConfig& cfg)
-{
-    if (!cfg.jobsAuto)
-        return std::max(1u, cfg.jobs);
-
-    const unsigned hw = std::thread::hardware_concurrency();
-    return hw == 0 ? 1u : hw;
-}
-
 #if defined(CTRACE_STACK_ANALYZER_HAS_PTHREAD)
 static std::size_t resolveParallelWorkerStackBytes()
 {

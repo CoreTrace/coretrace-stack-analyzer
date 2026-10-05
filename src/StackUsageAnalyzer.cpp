@@ -5,13 +5,23 @@
 #include "analyzer/HotspotProfiler.hpp"
 #include "analysis/InputPipeline.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <iostream>
+#include <thread>
 
 #include <llvm/IR/Module.h>
 
 namespace ctrace::stack
 {
+    unsigned resolveConfiguredJobs(const AnalysisConfig& config)
+    {
+        if (!config.jobsAuto)
+            return std::max(1u, config.jobs);
+
+        const unsigned hw = std::thread::hardware_concurrency();
+        return hw == 0 ? 1u : hw;
+    }
 
     AnalysisResult analyzeModule(llvm::Module& mod, const AnalysisConfig& config)
     {
