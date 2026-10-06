@@ -304,6 +304,7 @@ namespace ctrace::stack::analysis::ownership
             const std::uint32_t block = worklist.front();
             worklist.pop_front();
             queued[block] = false;
+            ++result.blockVisits;
 
             AbstractState state = result.in[block];
             for (const Event& e : facts.blocks[block].events)
@@ -476,9 +477,20 @@ namespace ctrace::stack::analysis::ownership
         }
     } // namespace
 
-    FunctionOwnershipSummary computeSummary(const OwnershipFacts& facts, unsigned iterationLimit)
+    FunctionOwnershipSummary computeSummary(const OwnershipFacts& facts, unsigned iterationLimit,
+                                            SummaryWork* work)
     {
         FunctionOwnershipSummary summary;
+        const auto solveCounted = [&](const AbstractState& entry)
+        {
+            OwnershipResult res = solve(facts, entry, iterationLimit);
+            if (work)
+            {
+                ++work->solves;
+                work->blockVisits += res.blockVisits;
+            }
+            return res;
+        };
 
         // Parameters (by value, then pointees) get their own resources, numbered after the
         // function's sites.
@@ -513,7 +525,7 @@ namespace ctrace::stack::analysis::ownership
             ParamTransformer exceptional{};
             for (const OwnState state : kAllStates)
             {
-                const OwnershipResult res = solve(facts, entryWith(p, state), iterationLimit);
+                const OwnershipResult res = solveCounted(entryWith(p, state));
                 if (res.incomplete)
                 {
                     summary.incomplete = true;
@@ -543,8 +555,7 @@ namespace ctrace::stack::analysis::ownership
         }
 
         // Fresh resources: one solve with every parameter Owned (or none).
-        const OwnershipResult res =
-            solve(facts, entryWith(paramTotal, OwnState::Owned), iterationLimit);
+        const OwnershipResult res = solveCounted(entryWith(paramTotal, OwnState::Owned));
         if (res.incomplete)
         {
             summary.incomplete = true;

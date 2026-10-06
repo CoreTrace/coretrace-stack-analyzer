@@ -29,6 +29,7 @@ namespace ctrace::stack::analysis::ownership
         std::vector<AbstractState> in;  // by block
         std::vector<AbstractState> out; // by block
         std::vector<ExitRecord> exits;  // in block/event order; empty when incomplete
+        std::uint64_t blockVisits = 0;  // blocks the worklist processed; observation only
         bool incomplete = false;        // budget exhausted: nothing below may be trusted
         std::uint8_t reservedPadding[7] = {};
     };
@@ -62,6 +63,15 @@ namespace ctrace::stack::analysis::ownership
     /// the exits of each kind. Fresh resources: `returns` is Guaranteed when every normal
     /// exit returns exactly a fresh resource, Conditional when some do, Unknown otherwise
     /// (likewise `outArgs` for ArgPointee locations).
+    /// The work of one computeSummary, for measurement only: it never changes the summary.
+    struct SummaryWork
+    {
+        std::uint64_t blockVisits = 0;
+        std::uint32_t solves = 0;
+        std::uint32_t reservedPadding = 0;
+    };
+
     FunctionOwnershipSummary computeSummary(const OwnershipFacts& facts,
-                                            unsigned iterationLimit = 0);
+                                            unsigned iterationLimit = 0,
+                                            SummaryWork* work = nullptr);
 } // namespace ctrace::stack::analysis::ownership
