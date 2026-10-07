@@ -6,6 +6,7 @@
 #include "analysis/ownership/OwnershipDomain.hpp"
 #include "analysis/ownership/OwnershipFacts.hpp"
 
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <vector>
@@ -74,4 +75,27 @@ namespace ctrace::stack::analysis::ownership
     FunctionOwnershipSummary computeSummary(const OwnershipFacts& facts,
                                             unsigned iterationLimit = 0,
                                             SummaryWork* work = nullptr);
+    /// Whether two summaries are the same, incompleteness included.
+    bool sameSummary(const FunctionOwnershipSummary& a, const FunctionOwnershipSummary& b);
+
+    /// The work of one computeSummaryFixpoint, for measurement only: it never changes a summary.
+    struct SummaryFixpointWork
+    {
+        std::uint64_t computations = 0; // summaries computed
+        std::uint64_t reused = 0;       // summaries kept: none of those they consulted changed
+        std::uint32_t rounds = 0;
+        std::uint32_t reservedPadding = 0;
+    };
+
+    using ConsultSummary = std::function<const FunctionOwnershipSummary&(std::size_t)>;
+
+    /// The summaries of count functions that may consult each other's. Round by round, in index
+    /// order, compute(i, consult) gives the summary of function i, reading the current summary of
+    /// function j through consult(j), until a round changes none; past maxRounds rounds, every
+    /// summary is incomplete. Every summary starts empty. compute must read the summaries of these
+    /// functions through consult only, and depend on nothing else that changes.
+    std::vector<FunctionOwnershipSummary> computeSummaryFixpoint(
+        std::size_t count,
+        const std::function<FunctionOwnershipSummary(std::size_t, const ConsultSummary&)>& compute,
+        unsigned maxRounds, SummaryFixpointWork* work = nullptr);
 } // namespace ctrace::stack::analysis::ownership

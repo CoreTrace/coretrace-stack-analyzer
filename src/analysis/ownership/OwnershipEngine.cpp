@@ -600,4 +600,48 @@ namespace ctrace::stack::analysis::ownership
         summary.exceptional.present = anyExceptional;
         return summary;
     }
+
+    bool sameSummary(const FunctionOwnershipSummary& a, const FunctionOwnershipSummary& b)
+    {
+        const auto sameExit = [](const ExitTransformer& x, const ExitTransformer& y)
+        {
+            return x.present == y.present && x.returns == y.returns && x.outArgs == y.outArgs &&
+                   x.params == y.params && x.pointeeParams == y.pointeeParams;
+        };
+        return a.incomplete == b.incomplete && sameExit(a.normal, b.normal) &&
+               sameExit(a.exceptional, b.exceptional);
+    }
+
+    std::vector<FunctionOwnershipSummary> computeSummaryFixpoint(
+        std::size_t count,
+        const std::function<FunctionOwnershipSummary(std::size_t, const ConsultSummary&)>& compute,
+        unsigned maxRounds, SummaryFixpointWork* work)
+    {
+        std::vector<FunctionOwnershipSummary> summaries(count);
+        const ConsultSummary consult = [&](std::size_t j) -> const FunctionOwnershipSummary&
+        { return summaries[j]; };
+        for (unsigned round = 0; round < maxRounds; ++round)
+        {
+            if (work)
+                ++work->rounds;
+            bool changed = false;
+            for (std::size_t i = 0; i < count; ++i)
+            {
+                FunctionOwnershipSummary next = compute(i, consult);
+                if (work)
+                    ++work->computations;
+                if (!sameSummary(summaries[i], next))
+                {
+                    summaries[i] = std::move(next);
+                    changed = true;
+                }
+            }
+            if (!changed)
+                return summaries;
+        }
+        // No fixpoint within budget: nothing computed here may be trusted.
+        for (FunctionOwnershipSummary& summary : summaries)
+            summary.incomplete = true;
+        return summaries;
+    }
 } // namespace ctrace::stack::analysis::ownership
