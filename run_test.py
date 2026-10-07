@@ -3501,6 +3501,43 @@ def check_escape_model_rejects_unsupported_brackets() -> bool:
     return True
 
 
+def check_unreadable_model_fails() -> bool:
+    """
+    A model the command line asks for, but that cannot be read, is a configuration error: the
+    analyzer must stop with a nonzero code naming the file, and run_code_analysis.py must fail,
+    instead of analyzing without the model and reporting success.
+    """
+    print("=== Testing that a requested model that cannot be read fails the run ===")
+    ok = True
+    with tempfile.TemporaryDirectory(prefix="ct_unreadable_model_") as tmp:
+        tmpdir = Path(tmp)
+        source = tmpdir / "leak.c"
+        source.write_text("void* acquire_handle(void);\nvoid leak(void) { (void)acquire_handle(); }\n")
+        missing = tmpdir / "missing-model.txt"
+        for option in ("--resource-model", "--escape-model", "--buffer-model"):
+            for path, what in ((missing, "missing file"), (tmpdir, "directory")):
+                result = run_analyzer_uncached([f"{option}={path}", str(source)])
+                output = (result.stdout or "") + (result.stderr or "")
+                if result.returncode != 0 and str(path) in output:
+                    print(f"  ✅ {option}, {what}: code {result.returncode}, file named")
+                else:
+                    print(f"  ❌ {option}, {what}: code {result.returncode}, file named: {str(path) in output}")
+                    ok = False
+        script = _run_ci_script(
+            ["--analyzer", str(RUN_CONFIG.analyzer), "--fail-on", "warning",
+             f"--analyzer-arg=--resource-model={missing}", str(source)],
+            jobs=1,
+        )
+        if script.returncode != 0:
+            print(f"  ✅ run_code_analysis.py with a missing model: code {script.returncode}")
+        else:
+            print("  ❌ run_code_analysis.py passed with a missing model")
+            print((script.stdout or "") + (script.stderr or ""))
+            ok = False
+    print()
+    return ok
+
+
 def check_docker_entrypoint_guardrails() -> bool:
     """
     Regression: docker wrapper should only create compatibility symlinks under
@@ -5207,6 +5244,7 @@ def main() -> int:
         check_noreturn_cross_tu,
         check_use_after_free_advanced_inter_tu,
         check_escape_model_rejects_unsupported_brackets,
+        check_unreadable_model_fails,
         check_human_vs_json_parity,
         check_diagnostic_rule_coverage_regression,
         check_diagnostic_cwe_coverage,
