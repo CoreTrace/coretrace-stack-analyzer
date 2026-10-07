@@ -249,6 +249,7 @@ Ready-to-adapt workflow examples:
 --escape-model=<path> loads external noescape rules for stack pointer escape analysis (`noescape_arg`)
 --buffer-model=<path> loads external buffer write rules for copy/string overflow checks (`bounded_write`/`unbounded_write`)
 --resource-model=<path> loads external acquire/release rules for generic resource lifetime checks
+A model path given to one of these three options that is not a readable file stops the run with an error (exit code 1). A model that can be read but holds malformed rules is reported on stderr, and the analysis runs without it.
 --resource-cross-tu enables cross-TU resource summaries for resource lifetime analysis (default: on)
 --no-resource-cross-tu disables cross-TU resource summaries
 --resource-summary-cache-dir=<path> sets cache directory for cross-TU resource summaries (default: .cache/resource-lifetime)
