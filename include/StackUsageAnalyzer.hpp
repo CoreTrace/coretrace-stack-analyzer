@@ -127,10 +127,6 @@ namespace ctrace::stack
         std::uint32_t reservedFlags : 17 = 0;
     };
 
-    // The number of jobs the analysis runs: the configured count, or the hardware concurrency when
-    // jobs are automatic (jobs is then 0).
-    unsigned resolveConfiguredJobs(const AnalysisConfig& config);
-
     // Per-function result
     struct FunctionResult
     {

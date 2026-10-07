@@ -874,18 +874,19 @@ namespace ctrace::stack::analysis
             const std::vector<std::string> bitcodeArgs =
                 buildBitcodeCompileArgs(args, tempBitcodePath);
 
-            auto compileWithOptionalWorkingDir =
-                [&](const std::vector<std::string>& compileArgs, compilerlib::OutputMode outputMode,
-                    bool useWorkingDir) -> std::optional<compilerlib::CompileResult>
+            // A compile command's relative paths are relative to its directory: compile there,
+            // even when the current directory also resolves them, to another header.
+            auto compileInWorkingDir =
+                [&](const std::vector<std::string>& compileArgs,
+                    compilerlib::OutputMode outputMode) -> std::optional<compilerlib::CompileResult>
             {
-                if (!useWorkingDir)
+                std::lock_guard<std::mutex> compileLock(gCompileInvokeMutex);
+                if (workingDir.empty())
                 {
                     const ScopedHotspot hotspot(config.timing, "input.compiler.invoke");
-                    std::lock_guard<std::mutex> compileLock(gCompileInvokeMutex);
                     return compilerlib::compile(compileArgs, outputMode);
                 }
 
-                std::lock_guard<std::mutex> compileLock(gCompileInvokeMutex);
                 std::string cwdError;
                 ScopedCurrentPath cwdGuard(workingDir, cwdError);
                 if (!cwdError.empty())
@@ -895,32 +896,6 @@ namespace ctrace::stack::analysis
                 }
                 const ScopedHotspot hotspot(config.timing, "input.compiler.invoke.cwd");
                 return compilerlib::compile(compileArgs, outputMode);
-            };
-
-            auto compileWithConfiguredWorkingDir =
-                [&](const std::vector<std::string>& compileArgs, compilerlib::OutputMode outputMode,
-                    bool& retriedWithWorkingDir) -> std::optional<compilerlib::CompileResult>
-            {
-                retriedWithWorkingDir = false;
-                std::optional<compilerlib::CompileResult> res;
-                const bool hasWorkingDir = !workingDir.empty();
-                if (resolveConfiguredJobs(config) > 1 && hasWorkingDir)
-                {
-                    // Optimistic fast path for multi-job runs: most compdb commands use absolute
-                    // paths.
-                    res = compileWithOptionalWorkingDir(compileArgs, outputMode, false);
-                    if (!res || !res->success)
-                    {
-                        // Fallback keeps correctness for relative include paths.
-                        res = compileWithOptionalWorkingDir(compileArgs, outputMode, true);
-                        retriedWithWorkingDir = true;
-                    }
-                }
-                else
-                {
-                    res = compileWithOptionalWorkingDir(compileArgs, outputMode, hasWorkingDir);
-                }
-                return res;
             };
 
             if (cachePaths.enabled)
@@ -1044,7 +1019,6 @@ namespace ctrace::stack::analysis
                 }
             }
 
-            bool retriedWithWorkingDir = false;
             bool compiledViaBitcode = false;
             std::optional<compilerlib::CompileResult> res;
             std::optional<FileSnapshot> sourceSnapshot;
@@ -1057,20 +1031,14 @@ namespace ctrace::stack::analysis
                     preferBitcodeCompile ? bitcodeArgs : args;
                 appendDependencyCaptureArgs(cacheCompileArgs, cachePaths.depFile);
 
-                bool retriedForDependencyCompile = false;
-                res = compileWithConfiguredWorkingDir(cacheCompileArgs,
-                                                      preferBitcodeCompile
-                                                          ? compilerlib::OutputMode::ToFile
-                                                          : compilerlib::OutputMode::ToMemory,
-                                                      retriedForDependencyCompile);
-                retriedWithWorkingDir = retriedForDependencyCompile;
+                res = compileInWorkingDir(cacheCompileArgs,
+                                          preferBitcodeCompile ? compilerlib::OutputMode::ToFile
+                                                               : compilerlib::OutputMode::ToMemory);
 
                 if (preferBitcodeCompile && (!res || !res->success))
                 {
-                    bool retriedForFallbackCompile = false;
-                    auto fallbackResult = compileWithConfiguredWorkingDir(
-                        args, compilerlib::OutputMode::ToMemory, retriedForFallbackCompile);
-                    retriedWithWorkingDir = retriedWithWorkingDir || retriedForFallbackCompile;
+                    auto fallbackResult =
+                        compileInWorkingDir(args, compilerlib::OutputMode::ToMemory);
                     if (fallbackResult)
                         res = std::move(fallbackResult);
                 }
@@ -1100,21 +1068,17 @@ namespace ctrace::stack::analysis
             }
             else
             {
-                res = compileWithConfiguredWorkingDir(preferBitcodeCompile ? bitcodeArgs : args,
-                                                      preferBitcodeCompile
-                                                          ? compilerlib::OutputMode::ToFile
-                                                          : compilerlib::OutputMode::ToMemory,
-                                                      retriedWithWorkingDir);
+                res = compileInWorkingDir(preferBitcodeCompile ? bitcodeArgs : args,
+                                          preferBitcodeCompile ? compilerlib::OutputMode::ToFile
+                                                               : compilerlib::OutputMode::ToMemory);
                 if (res && res->success)
                 {
                     compiledViaBitcode = preferBitcodeCompile;
                 }
                 else if (preferBitcodeCompile)
                 {
-                    bool retriedForFallbackCompile = false;
-                    auto fallbackResult = compileWithConfiguredWorkingDir(
-                        args, compilerlib::OutputMode::ToMemory, retriedForFallbackCompile);
-                    retriedWithWorkingDir = retriedWithWorkingDir || retriedForFallbackCompile;
+                    auto fallbackResult =
+                        compileInWorkingDir(args, compilerlib::OutputMode::ToMemory);
                     if (fallbackResult)
                         res = std::move(fallbackResult);
                 }
@@ -1140,8 +1104,7 @@ namespace ctrace::stack::analysis
                 auto ms =
                     std::chrono::duration_cast<std::chrono::milliseconds>(compileEnd - compileStart)
                         .count();
-                coretrace::log(coretrace::Level::Info, "Compilation done in {} ms{}\n", ms,
-                               retriedWithWorkingDir ? " (retry with working directory)" : "");
+                coretrace::log(coretrace::Level::Info, "Compilation done in {} ms\n", ms);
             }
 
             std::string llvmIRForCache;
@@ -1195,10 +1158,8 @@ namespace ctrace::stack::analysis
             {
                 if (compiledViaBitcode)
                 {
-                    bool retriedForTextFallback = false;
-                    auto textFallback = compileWithConfiguredWorkingDir(
-                        args, compilerlib::OutputMode::ToMemory, retriedForTextFallback);
-                    retriedWithWorkingDir = retriedWithWorkingDir || retriedForTextFallback;
+                    auto textFallback =
+                        compileInWorkingDir(args, compilerlib::OutputMode::ToMemory);
                     if (!textFallback)
                         return result;
                     res = std::move(textFallback);
