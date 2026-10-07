@@ -77,6 +77,10 @@ int main(void)
 // [ !!Warn ] stack pointer escape: address of variable 'x' escapes this function
 // ↳ escape via return statement (pointer to stack returned to caller)
 
+// at line 39, column 5
+// [ !!Warn ] stack pointer escape: address of variable 'tmp' escapes this function
+// ↳ escape via return statement (pointer to stack returned to caller)
+
 // at line 31, column 5
 // [ !!Warn ] potential stack buffer overflow in __strcpy_chk on variable 'tmp'
 // ↳ destination stack buffer size: 128 bytes
