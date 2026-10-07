@@ -4,7 +4,9 @@
 #include <algorithm>
 #include <array>
 #include <deque>
+#include <optional>
 #include <string>
+#include <utility>
 
 namespace ctrace::stack::analysis::ownership
 {
@@ -618,8 +620,12 @@ namespace ctrace::stack::analysis::ownership
         unsigned maxRounds, SummaryFixpointWork* work)
     {
         std::vector<FunctionOwnershipSummary> summaries(count);
-        const ConsultSummary consult = [&](std::size_t j) -> const FunctionOwnershipSummary&
-        { return summaries[j]; };
+        // A summary's version grows each time it changes. A computation records the version of
+        // every summary it consults; while none of them has changed since, computing again would
+        // give the same summary, so it is kept.
+        std::vector<std::uint64_t> version(count, 0);
+        std::vector<std::optional<std::vector<std::pair<std::size_t, std::uint64_t>>>> consulted(
+            count);
         for (unsigned round = 0; round < maxRounds; ++round)
         {
             if (work)
@@ -627,12 +633,28 @@ namespace ctrace::stack::analysis::ownership
             bool changed = false;
             for (std::size_t i = 0; i < count; ++i)
             {
+                if (consulted[i] &&
+                    std::all_of(consulted[i]->begin(), consulted[i]->end(), [&](const auto& input)
+                                { return version[input.first] == input.second; }))
+                {
+                    if (work)
+                        ++work->reused;
+                    continue;
+                }
+                std::vector<std::pair<std::size_t, std::uint64_t>> inputs;
+                const ConsultSummary consult = [&](std::size_t j) -> const FunctionOwnershipSummary&
+                {
+                    inputs.emplace_back(j, version[j]);
+                    return summaries[j];
+                };
                 FunctionOwnershipSummary next = compute(i, consult);
                 if (work)
                     ++work->computations;
+                consulted[i] = std::move(inputs);
                 if (!sameSummary(summaries[i], next))
                 {
                     summaries[i] = std::move(next);
+                    ++version[i];
                     changed = true;
                 }
             }
