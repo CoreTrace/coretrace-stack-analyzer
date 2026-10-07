@@ -5,7 +5,9 @@
 #include "analysis/ownership/OwnershipEngine.hpp"
 #include "analysis/ownership/OwnershipFacts.hpp"
 
+#include <algorithm>
 #include <cstdint>
+#include <functional>
 #include <iostream>
 #include <map>
 #include <string>
@@ -820,6 +822,165 @@ namespace
                                            std::to_string(noneWork.solves) + ")");
         return r.failures == 0;
     }
+    // ---- summaries of functions that consult each other's -------------------------------------
+
+    // A small integer carried by a summary, so that a synthetic computation can depend on the
+    // summaries it consults.
+    int valueOf(const FunctionOwnershipSummary& s)
+    {
+        return s.normal.returns.kind.empty() ? 0 : std::stoi(s.normal.returns.kind);
+    }
+    FunctionOwnershipSummary withValue(int value, bool incomplete = false)
+    {
+        FunctionOwnershipSummary s;
+        s.normal.returns.kind = std::to_string(value);
+        s.incomplete = incomplete;
+        return s;
+    }
+
+    using Compute = std::function<FunctionOwnershipSummary(std::size_t, const ConsultSummary&)>;
+
+    // The fixed point as computeOwnershipSummaries ran it before it reused summaries: every
+    // function recomputed in index order each round until a round changes none; past maxRounds
+    // rounds, every summary is incomplete.
+    std::vector<FunctionOwnershipSummary> referenceFixpoint(std::size_t count,
+                                                            const Compute& compute,
+                                                            unsigned maxRounds,
+                                                            std::uint64_t& computations)
+    {
+        std::vector<FunctionOwnershipSummary> summaries(count);
+        const ConsultSummary consult = [&](std::size_t j) -> const FunctionOwnershipSummary&
+        { return summaries[j]; };
+        for (unsigned round = 0; round < maxRounds; ++round)
+        {
+            bool changed = false;
+            for (std::size_t i = 0; i < count; ++i)
+            {
+                FunctionOwnershipSummary next = compute(i, consult);
+                ++computations;
+                if (!sameSummary(summaries[i], next))
+                {
+                    summaries[i] = std::move(next);
+                    changed = true;
+                }
+            }
+            if (!changed)
+                return summaries;
+        }
+        for (FunctionOwnershipSummary& s : summaries)
+            s.incomplete = true;
+        return summaries;
+    }
+
+    // computeSummaryFixpoint gives what the reference gives, with fewer computations or as many.
+    // Returns its work.
+    SummaryFixpointWork expectSameFixpoint(TestReport& r, std::size_t count, const Compute& compute,
+                                           unsigned maxRounds, const std::string& name)
+    {
+        std::uint64_t referenceComputations = 0;
+        const auto expected = referenceFixpoint(count, compute, maxRounds, referenceComputations);
+        SummaryFixpointWork work;
+        const auto got = computeSummaryFixpoint(count, compute, maxRounds, &work);
+        bool same = got.size() == expected.size();
+        for (std::size_t i = 0; same && i < got.size(); ++i)
+            same = sameSummary(got[i], expected[i]);
+        r.expect(same,
+                 "Summary fixpoint: " + name + ": the summaries of recomputing every function");
+        r.expect(work.computations <= referenceComputations,
+                 "Summary fixpoint: " + name + ": no more computations than recomputing all (" +
+                     std::to_string(work.computations) + " for " +
+                     std::to_string(referenceComputations) + ")");
+        return work;
+    }
+
+    bool testSummaryFixpoint(TestReport& r)
+    {
+        {
+            // Independent functions: one round computes them, the next changes nothing; none
+            // of them consulted a summary, so none is computed twice.
+            const Compute compute = [](std::size_t i, const ConsultSummary&)
+            { return withValue(static_cast<int>(i)); };
+            const SummaryFixpointWork work = expectSameFixpoint(r, 5, compute, 16, "independent");
+            r.expect(work.computations == 5 && work.rounds == 2,
+                     "Summary fixpoint: independent functions are computed once (" +
+                         std::to_string(work.computations) + " computations, " +
+                         std::to_string(work.rounds) + " rounds)");
+        }
+        {
+            // A chain against the index order: function i consults function i + 1, which a round
+            // only reaches after it, so the value moves one function per round. A function is
+            // computed again only once the one it consults has changed.
+            const Compute compute = [](std::size_t i, const ConsultSummary& consult)
+            { return withValue(i == 5 ? 1 : valueOf(consult(i + 1)) + 1); };
+            const SummaryFixpointWork work = expectSameFixpoint(r, 6, compute, 16, "chain");
+            r.expect(work.computations < 6 * work.rounds,
+                     "Summary fixpoint: a chain recomputes fewer than every function each round (" +
+                         std::to_string(work.computations) + " computations, " +
+                         std::to_string(work.rounds) + " rounds)");
+        }
+        {
+            // Recursion: a function that consults itself until it reaches 3, and one that copies it.
+            const Compute compute = [](std::size_t i, const ConsultSummary& consult)
+            {
+                return i == 0 ? withValue(std::min(valueOf(consult(0)) + 1, 3))
+                              : withValue(valueOf(consult(0)));
+            };
+            expectSameFixpoint(r, 2, compute, 16, "recursion");
+        }
+        {
+            // Mutual recursion: each consults the other.
+            const Compute compute = [](std::size_t i, const ConsultSummary& consult)
+            {
+                return i == 0 ? withValue(std::min(valueOf(consult(1)) + 1, 4))
+                              : withValue(valueOf(consult(0)));
+            };
+            expectSameFixpoint(r, 2, compute, 16, "mutual recursion");
+        }
+        {
+            // Only the incomplete status changes: function 1 becomes incomplete, its value kept,
+            // once function 2 reaches 2; function 0 copies the status of function 1.
+            const Compute compute = [](std::size_t i, const ConsultSummary& consult)
+            {
+                if (i == 2)
+                    return withValue(std::min(valueOf(consult(2)) + 1, 2));
+                if (i == 1)
+                    return withValue(7, valueOf(consult(2)) >= 2);
+                return withValue(0, consult(1).incomplete);
+            };
+            std::uint64_t ignored = 0;
+            const auto expected = referenceFixpoint(3, compute, 16, ignored);
+            r.expect(expected[0].incomplete,
+                     "Summary fixpoint: the incomplete case does reach function 0");
+            expectSameFixpoint(r, 3, compute, 16, "incomplete status");
+        }
+        {
+            // A summary consulted, then changed later in the same round: function 0 consults
+            // function 1, which a round reaches after it, and keeps its initial summary until
+            // function 1 reaches 2. Its computations leave its summary unchanged until then, and
+            // the change of function 1 comes after them in each round: function 0 must still be
+            // computed again.
+            const Compute compute = [](std::size_t i, const ConsultSummary& consult)
+            {
+                if (i == 1)
+                    return withValue(std::min(valueOf(consult(1)) + 1, 2));
+                return valueOf(consult(1)) >= 2 ? withValue(20) : FunctionOwnershipSummary{};
+            };
+            std::uint64_t ignored = 0;
+            r.expect(valueOf(referenceFixpoint(2, compute, 16, ignored)[0]) == 20,
+                     "Summary fixpoint: the changed-input case does reach function 0");
+            expectSameFixpoint(r, 2, compute, 16, "input changed later in the round");
+        }
+        {
+            // No fixed point within the budget: every summary ends incomplete, after as many
+            // rounds as the budget allows.
+            const Compute compute = [](std::size_t i, const ConsultSummary& consult)
+            { return i == 0 ? withValue(valueOf(consult(0)) + 1) : withValue(5); };
+            const SummaryFixpointWork work = expectSameFixpoint(r, 2, compute, 16, "budget");
+            r.expect(work.rounds == 16, "Summary fixpoint: the budget bounds the rounds (" +
+                                            std::to_string(work.rounds) + ")");
+        }
+        return r.failures == 0;
+    }
 } // namespace
 
 int main(int, char**)
@@ -834,6 +995,7 @@ int main(int, char**)
     (void)testSummaryMetadata(report);
     (void)testJointSummaries(report);
     (void)testJointSummaryWork(report);
+    (void)testSummaryFixpoint(report);
     if (report.failures == 0)
     {
         std::cout << "All ownership engine unit tests passed.\n";
