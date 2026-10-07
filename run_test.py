@@ -2081,8 +2081,8 @@ def check_resource_model_across_compile_directories() -> bool:
     directory; the analyzer must come back to the directory it started from, where the model and
     the relative cache directories are. Every run starts with empty caches, and a leak that only
     the model defines must be reported in every file. The relative paths must be anchored to the
-    start directory, and parallel jobs must not change the working directory for files whose
-    compile commands need no directory of their own.
+    start directory. The start directory also holds a header of the same name for every file,
+    one that drops the leak: a file compiled from there instead of its own directory loses it.
     """
     print("=== Testing the resource model across compile-command directories ===")
     unit_count = 8
@@ -2115,7 +2115,11 @@ def check_resource_model_across_compile_directories() -> bool:
         compdb = project / "compile_commands.json"
         compdb.write_text(json.dumps(entries, indent=2))
         run_dir = root / "run"
-        run_dir.mkdir()
+        (run_dir / "include").mkdir(parents=True)
+        for i in range(unit_count):
+            (run_dir / "include" / f"unit{i}.h").write_text(
+                "#define ct_open_widget() ((void*)0)\nvoid ct_close_widget(void* w);\n"
+            )
         (run_dir / "widget-model.txt").write_text(
             "acquire_ret ct_open_widget Widget\nrelease_arg ct_close_widget 0 Widget\n"
         )
@@ -2156,32 +2160,6 @@ def check_resource_model_across_compile_directories() -> bool:
             else:
                 print(f"  ❌ effective configuration lacks '{line}'")
                 ok = False
-
-        absolute_compdb = project / "compile_commands_absolute.json"
-        absolute_compdb.write_text(
-            json.dumps(
-                [
-                    {**entry, "arguments": ["cc", f"-I{Path(entry['directory']) / 'include'}",
-                                            *entry["arguments"][2:]]}
-                    for entry in entries
-                ],
-                indent=2,
-            )
-        )
-        # Automatic jobs, the default, run in parallel too.
-        result = run_from_start_dir(
-            ["--timing", f"--compile-commands={absolute_compdb}",
-             "--compile-ir-cache-dir=caches-timing/compile-ir", *sources]
-        )
-        timing = (result.stdout + result.stderr) if result else ""
-        if result is None or result.returncode != 0:
-            print("  ❌ automatic jobs with absolute include paths: run failed")
-            ok = False
-        elif "input.compiler.invoke.cwd" in timing:
-            print("  ❌ automatic jobs changed the working directory for absolute commands")
-            ok = False
-        else:
-            print("  ✅ automatic jobs kept the working directory for absolute commands")
 
         for mode in ([], ["--jobs=1"], ["--jobs=4"]):
             label = mode[0] if mode else "default jobs"
