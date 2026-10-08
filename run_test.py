@@ -4047,7 +4047,9 @@ def check_resource_cache_rebuilds_alias_summaries() -> bool:
     previous version of the analyzer, under the previous cache schema, must be rebuilt: the
     summaries a run with that cache writes must be those a run with an empty cache writes, the
     wrapper's acquisition included, not only the same diagnostics. Entries for intermediate
-    rounds of the fixed point that a run does not read again may stay as they were.
+    rounds of the fixed point that a run does not read again may stay as they were. The cache
+    keys hash the IR as printed, which differs between a fresh compile and the compile IR cache:
+    a first run fills that cache, so that both runs compared take their IR from it.
     """
     print("=== Testing that resource summaries cached by a previous schema are rebuilt ===")
     ok = True
@@ -4079,9 +4081,11 @@ def check_resource_cache_rebuilds_alias_summaries() -> bool:
                 return run_analyzer_uncached(
                     [str(root / "alias.c"), str(root / "caller.c"), "--format=json", "--jobs=1",
                      f"--compile-arg=--target={target}", f"--resource-model={model}",
+                     f"--compile-ir-cache-dir={root / f'ir-{target}'}",
                      f"--resource-summary-cache-dir={cache}"]
                 )
 
+            run(root / f"warm-up-{target}")
             first = run(cold)
             expected = {path.name: json.loads(path.read_text()) for path in cold.glob("*.json")}
             if first.returncode != 0 or not any(acquires(s) for s in expected.values()):
