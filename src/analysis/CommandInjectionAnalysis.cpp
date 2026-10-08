@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "analysis/CommandInjectionAnalysis.hpp"
+#include "analysis/IRValueUtils.hpp"
 
 #include "analysis/AnalyzerUtils.hpp"
 
@@ -16,15 +17,6 @@ namespace ctrace::stack::analysis
 {
     namespace
     {
-        static const llvm::Function* getDirectCallee(const llvm::CallBase& call)
-        {
-            if (const llvm::Function* direct = call.getCalledFunction())
-                return direct;
-            const llvm::Value* called = call.getCalledOperand();
-            if (!called)
-                return nullptr;
-            return llvm::dyn_cast<llvm::Function>(called->stripPointerCasts());
-        }
 
         static llvm::StringRef canonicalCalleeName(llvm::StringRef name)
         {
@@ -106,7 +98,7 @@ namespace ctrace::stack::analysis
                     if (!call)
                         continue;
 
-                    const llvm::Function* callee = getDirectCallee(*call);
+                    const llvm::Function* callee = directCallee(*call);
                     if (!callee)
                         continue;
 
@@ -142,7 +134,7 @@ namespace ctrace::stack::analysis
         {
             for (const CallBaseT* call : callBases)
             {
-                const llvm::Function* callee = getDirectCallee(*call);
+                const llvm::Function* callee = directCallee(*call);
                 if (!callee)
                     continue;
 

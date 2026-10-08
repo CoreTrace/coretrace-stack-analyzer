@@ -113,16 +113,6 @@ namespace ctrace::stack::analysis
             }
         };
 
-        static const llvm::Function* getDirectCallee(const llvm::CallBase& call)
-        {
-            if (const llvm::Function* direct = call.getCalledFunction())
-                return direct;
-            const llvm::Value* called = call.getCalledOperand();
-            if (!called)
-                return nullptr;
-            return llvm::dyn_cast<llvm::Function>(called->stripPointerCasts());
-        }
-
         static llvm::StringRef canonicalCalleeName(llvm::StringRef name)
         {
             if (!name.empty() && name.front() == '\1')
@@ -855,7 +845,7 @@ namespace ctrace::stack::analysis
 
             std::optional<SizeSink> lookup(const llvm::CallBase& call)
             {
-                const llvm::Function* callee = getDirectCallee(call);
+                const llvm::Function* callee = directCallee(call);
                 if (!callee)
                     return std::nullopt;
                 if (auto sink = resolveLengthOnlySink(canonicalCalleeName(callee->getName())))
@@ -886,7 +876,7 @@ namespace ctrace::stack::analysis
                     std::optional<SizeSink> sink = resolveIntrinsicSizeSink(*call);
                     if (!sink)
                     {
-                        if (const llvm::Function* callee = getDirectCallee(*call))
+                        if (const llvm::Function* callee = directCallee(*call))
                             sink = resolveSizeSink(canonicalCalleeName(callee->getName()));
                     }
                     if (!sink)
@@ -984,7 +974,7 @@ namespace ctrace::stack::analysis
                     llvm::StringRef sinkName;
                     if (!sink)
                     {
-                        const llvm::Function* callee = getDirectCallee(*call);
+                        const llvm::Function* callee = directCallee(*call);
                         if (!callee)
                             continue;
                         sinkName = canonicalCalleeName(callee->getName());

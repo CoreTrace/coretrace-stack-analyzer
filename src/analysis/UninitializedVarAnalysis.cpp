@@ -3140,7 +3140,7 @@ namespace ctrace::stack::analysis
             if (!CB)
                 return;
 
-            const llvm::Function* callee = CB->getCalledFunction();
+            const llvm::Function* callee = directCallee(*CB);
             const FunctionSummary* calleeSummary = nullptr;
             bool imported = false;
             if (callee)
@@ -3256,7 +3256,7 @@ namespace ctrace::stack::analysis
                     const auto* CB = llvm::dyn_cast<llvm::CallBase>(&I);
                     if (!CB)
                         continue;
-                    const llvm::Function* callee = CB->getCalledFunction();
+                    const llvm::Function* callee = directCallee(*CB);
                     if (!callee)
                         continue;
                     if (summaries.find(callee) != summaries.end())
@@ -3496,7 +3496,7 @@ namespace ctrace::stack::analysis
                         const auto* CB = llvm::dyn_cast<llvm::CallBase>(&I);
                         if (!CB)
                             continue;
-                        const llvm::Function* callee = CB->getCalledFunction();
+                        const llvm::Function* callee = directCallee(*CB);
                         if (callee && summaries.find(callee) != summaries.end())
                             callerOf[callee].push_back(func);
                     }
@@ -3575,7 +3575,7 @@ namespace ctrace::stack::analysis
                         const auto* CB = llvm::dyn_cast<llvm::CallBase>(&I);
                         if (!CB)
                             continue;
-                        const llvm::Function* callee = CB->getCalledFunction();
+                        const llvm::Function* callee = directCallee(*CB);
                         if (!callee || callee->isDeclaration())
                             continue;
                         if (!shouldIncludeInSummaryScope(*callee, shouldAnalyze))
@@ -3606,7 +3606,7 @@ namespace ctrace::stack::analysis
                         const auto* CB = llvm::dyn_cast<llvm::CallBase>(&I);
                         if (!CB)
                             continue;
-                        const llvm::Function* callee = CB->getCalledFunction();
+                        const llvm::Function* callee = directCallee(*CB);
                         if (!callee)
                             continue;
                         if (!callee->hasName() || callee->getName().empty())

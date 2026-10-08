@@ -54,16 +54,6 @@ namespace ctrace::stack::analysis
             std::string displayName;
         };
 
-        static const llvm::Function* getDirectCallee(const llvm::CallBase& call)
-        {
-            if (const llvm::Function* direct = call.getCalledFunction())
-                return direct;
-            const llvm::Value* called = call.getCalledOperand();
-            if (!called)
-                return nullptr;
-            return llvm::dyn_cast<llvm::Function>(called->stripPointerCasts());
-        }
-
         static llvm::StringRef canonicalCalleeName(llvm::StringRef name)
         {
             if (!name.empty() && name.front() == '\1')
@@ -301,7 +291,7 @@ namespace ctrace::stack::analysis
                 {
                     if (const auto* call = llvm::dyn_cast<llvm::CallBase>(&inst))
                     {
-                        const llvm::Function* callee = getDirectCallee(*call);
+                        const llvm::Function* callee = directCallee(*call);
                         llvm::StringRef calleeName;
                         if (const auto* intrinsic = llvm::dyn_cast<llvm::IntrinsicInst>(call))
                         {

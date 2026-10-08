@@ -24,6 +24,12 @@ namespace ctrace::stack::analysis
         return name.split('$').first;
     }
 
+    llvm::Function* directCallee(const llvm::CallBase& call)
+    {
+        return llvm::dyn_cast<llvm::Function>(
+            call.getCalledOperand()->stripPointerCastsAndAliases());
+    }
+
     const llvm::StoreInst* findUniqueStoreToSlot(const llvm::AllocaInst& slot)
     {
         const llvm::StoreInst* uniqueStore = nullptr;

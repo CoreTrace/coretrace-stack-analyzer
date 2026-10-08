@@ -105,7 +105,7 @@ namespace ctrace::stack::analysis
             if (!call)
                 return false;
 
-            const llvm::Function* callee = call->getCalledFunction();
+            const llvm::Function* callee = directCallee(*call);
             if (!callee || !callee->isDeclaration())
                 return false;
 

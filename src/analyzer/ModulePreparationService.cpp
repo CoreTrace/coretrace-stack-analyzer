@@ -3,6 +3,7 @@
 
 #include "analyzer/HotspotProfiler.hpp"
 #include "analysis/FunctionFilter.hpp"
+#include "analysis/IRValueUtils.hpp"
 
 #include <llvm/IR/CFG.h>
 #include <llvm/IR/DebugInfoMetadata.h>
@@ -138,10 +139,8 @@ namespace ctrace::stack::analyzer
                     for (llvm::Instruction& I : BB)
                     {
                         const llvm::Function* callee = nullptr;
-                        if (auto* CI = llvm::dyn_cast<llvm::CallInst>(&I))
-                            callee = CI->getCalledFunction();
-                        else if (auto* II = llvm::dyn_cast<llvm::InvokeInst>(&I))
-                            callee = II->getCalledFunction();
+                        if (llvm::isa<llvm::CallInst>(I) || llvm::isa<llvm::InvokeInst>(I))
+                            callee = analysis::directCallee(llvm::cast<llvm::CallBase>(I));
 
                         if (callee && !callee->isDeclaration() && ctx.isDefined(*callee))
                             callees.push_back(callee);

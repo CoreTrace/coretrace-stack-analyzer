@@ -313,7 +313,7 @@ namespace ctrace::stack::analysis::ownership
                     const auto* call = llvm::dyn_cast<llvm::CallBase>(user);
                     if (!call)
                         return false;
-                    const llvm::Function* callee = lifetime_detail::resolveDirectCallee(*call);
+                    const llvm::Function* callee = directCallee(*call);
                     if (!callee)
                         return false;
                     bool modelledOut = false;
@@ -734,7 +734,7 @@ namespace ctrace::stack::analysis::ownership
             {
                 if (llvm::isa<llvm::IntrinsicInst>(&call) || call.isInlineAsm())
                     return;
-                const llvm::Function* callee = lifetime_detail::resolveDirectCallee(call);
+                const llvm::Function* callee = directCallee(call);
 
                 // A plain call that may throw is an exceptional exit taken before any of
                 // its effects; the absence of an invoke proves nothing. Whether a call that

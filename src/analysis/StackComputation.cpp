@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "analysis/StackComputation.hpp"
+#include "analysis/IRValueUtils.hpp"
 
 #include <algorithm>
 #include <cstdint>
@@ -46,7 +47,7 @@ namespace ctrace::stack::analysis
             const auto& CB = llvm::cast<llvm::CallBase>(I);
             if (resolver)
                 return resolver->resolve(CB);
-            const llvm::Function* callee = CB.getCalledFunction();
+            const llvm::Function* callee = directCallee(CB);
             return callee && !callee->isDeclaration() ? callee : nullptr;
         }
 
@@ -75,7 +76,7 @@ namespace ctrace::stack::analysis
         {
             if (CB.isInlineAsm())
                 return false;
-            const llvm::Function* callee = CB.getCalledFunction();
+            const llvm::Function* callee = directCallee(CB);
             if (callee && callee->isIntrinsic())
                 return false;
             if (resolver && resolver->resolve(CB))
@@ -925,15 +926,8 @@ namespace ctrace::stack::analysis
                 for (llvm::Instruction& I : BB)
                 {
                     const llvm::Function* Callee = nullptr;
-
-                    if (auto* CI = llvm::dyn_cast<llvm::CallInst>(&I))
-                    {
-                        Callee = CI->getCalledFunction();
-                    }
-                    else if (auto* II = llvm::dyn_cast<llvm::InvokeInst>(&I))
-                    {
-                        Callee = II->getCalledFunction();
-                    }
+                    if (llvm::isa<llvm::CallInst>(I) || llvm::isa<llvm::InvokeInst>(I))
+                        Callee = directCallee(llvm::cast<llvm::CallBase>(I));
 
                     if (Callee && !Callee->isDeclaration())
                     {
@@ -950,28 +944,37 @@ namespace ctrace::stack::analysis
     {
         // Only the symbols that a single definition of the run defines, exactly, are resolved.
         std::unordered_map<std::string, std::size_t> definitionCount;
+        const auto define = [&](const llvm::GlobalValue& symbolValue, const llvm::Function& F)
+        {
+            const std::string symbol = linkerSymbolName(symbolValue);
+            if (++definitionCount[symbol] == 1 && symbolValue.hasExactDefinition())
+                definitions_[symbol] = &F;
+            else
+                definitions_.erase(symbol);
+        };
         for (const llvm::Module* M : modules)
         {
             for (const llvm::Function& F : *M)
             {
-                if (F.isDeclaration() || F.hasLocalLinkage())
-                    continue;
-                const std::string symbol = linkerSymbolName(F);
-                if (++definitionCount[symbol] == 1 && F.hasExactDefinition())
-                    definitions_[symbol] = &F;
-                else
-                    definitions_.erase(symbol);
+                if (!F.isDeclaration() && !F.hasLocalLinkage())
+                    define(F, F);
+            }
+            // A symbol defined as an alias of a function, such as a complete-object constructor
+            // on ELF targets, defines that function for the other modules.
+            for (const llvm::GlobalAlias& alias : M->aliases())
+            {
+                const auto* F = llvm::dyn_cast<llvm::Function>(alias.getAliaseeObject());
+                if (F && !F->isDeclaration() && !alias.hasLocalLinkage())
+                    define(alias, *F);
             }
         }
     }
 
     const llvm::Function* CallResolver::resolve(const llvm::CallBase& call) const
     {
-        if (const llvm::Function* callee = call.getCalledFunction();
-            callee && !callee->isDeclaration())
-            return callee;
-        const auto* declared =
-            llvm::dyn_cast<llvm::Function>(call.getCalledOperand()->stripPointerCasts());
+        const llvm::Function* declared = directCallee(call);
+        if (declared && !declared->isDeclaration())
+            return declared;
         if (!declared || !declared->isDeclaration() || declared->isIntrinsic())
             return nullptr;
         const auto it = definitions_.find(linkerSymbolName(*declared));

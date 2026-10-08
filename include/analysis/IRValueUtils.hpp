@@ -7,6 +7,7 @@
 namespace llvm
 {
     class AllocaInst;
+    class CallBase;
     class ConstantInt;
     class Function;
     class StoreInst;
@@ -34,6 +35,11 @@ namespace ctrace::stack::analysis
         CompilerGenerated,
         Unknown
     };
+
+    /// The function a call reaches directly, through pointer casts and aliases: on ELF targets,
+    /// clang emits a complete-object constructor or destructor defined out of its class as an
+    /// alias of the base-object one, and calls the alias. Null for an indirect call.
+    llvm::Function* directCallee(const llvm::CallBase& call);
 
     std::string deriveAllocaName(const llvm::AllocaInst* AI);
 

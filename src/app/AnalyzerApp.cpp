@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "app/AnalyzerApp.hpp"
+#include "analysis/IRValueUtils.hpp"
 #include "CrossTUSummaryDriver.hpp"
 
 #include "StackUsageAnalyzer.hpp"
@@ -2159,7 +2160,7 @@ buildCrossTUSummaryIndex(const std::vector<LoadedInputModule>& loadedModules,
                     const auto* CB = llvm::dyn_cast<llvm::CallBase>(&I);
                     if (!CB)
                         continue;
-                    const llvm::Function* callee = CB->getCalledFunction();
+                    const llvm::Function* callee = analysis::directCallee(*CB);
                     if (!callee || !callee->hasName() || callee->getName().empty())
                         continue;
                     const std::string canon =
