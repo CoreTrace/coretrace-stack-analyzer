@@ -9,6 +9,7 @@
 #include <map>
 #include <sstream>
 #include <string_view>
+#include <unordered_map>
 
 #include <llvm/IR/DebugInfoMetadata.h>
 #include <llvm/IR/Function.h>
@@ -1402,6 +1403,25 @@ namespace ctrace::stack::analyzer
 
             builder.message(body.str());
             result.diagnostics.push_back(builder.build());
+        }
+    }
+
+    void assignFunctionFilesToDiagnostics(AnalysisResult& result)
+    {
+        // Names are LLVM symbols, unique in a module: overloads and template instances differ.
+        std::unordered_map<std::string_view, std::string_view> fileOfFunction;
+        for (const FunctionResult& function : result.functions)
+            fileOfFunction.emplace(function.name, function.filePath);
+
+        for (Diagnostic& diagnostic : result.diagnostics)
+        {
+            if (!diagnostic.filePath.empty())
+                continue;
+            if (const auto it = fileOfFunction.find(diagnostic.funcName);
+                it != fileOfFunction.end())
+            {
+                diagnostic.filePath = it->second;
+            }
         }
     }
 
