@@ -192,7 +192,7 @@ namespace ctrace::stack::analysis
             }
         }
 
-        constexpr llvm::StringLiteral kCompileIRCacheSchema = "compile-ir-cache-v2";
+        constexpr llvm::StringLiteral kCompileIRCacheSchema = "compile-ir-cache-v3";
 
         struct FileSnapshot
         {
