@@ -1897,9 +1897,9 @@ namespace ctrace::stack::analysis
         };
 
         static std::optional<ExternalReadSinkSignature>
-        resolveExternalReadSinkSignature(const llvm::Function* callee)
+        resolveExternalReadSinkSignature(const llvm::Function* callee, bool asDeclaration)
         {
-            if (!callee || !callee->isDeclaration() || callee->isIntrinsic())
+            if (!callee || !asDeclaration || callee->isIntrinsic())
                 return std::nullopt;
 
             const llvm::StringRef calleeName = canonicalExternalCalleeName(callee->getName());
@@ -1921,10 +1921,11 @@ namespace ctrace::stack::analysis
         };
 
         static std::optional<ExternalReadSinkSpec>
-        resolveExternalReadSinkSpec(const llvm::CallBase& CB, const llvm::Function* callee)
+        resolveExternalReadSinkSpec(const llvm::CallBase& CB, const llvm::Function* callee,
+                                    bool asDeclaration)
         {
             const std::optional<ExternalReadSinkSignature> signature =
-                resolveExternalReadSinkSignature(callee);
+                resolveExternalReadSinkSignature(callee, asDeclaration);
             if (!signature)
                 return std::nullopt;
 
@@ -2098,9 +2099,10 @@ namespace ctrace::stack::analysis
         }
 
         static bool declarationCallArgMayWriteThrough(const llvm::CallBase& CB,
-                                                      const llvm::Function* callee, unsigned argIdx)
+                                                      const llvm::Function* callee, unsigned argIdx,
+                                                      bool asDeclaration)
         {
-            if (!callee || !callee->isDeclaration() || callee->isIntrinsic())
+            if (!callee || !asDeclaration || callee->isIntrinsic())
                 return false;
             if (argIdx >= CB.arg_size())
                 return false;
@@ -2113,7 +2115,7 @@ namespace ctrace::stack::analysis
 
             // Known output sinks (write/send/fwrite families) consume this pointer as read-only.
             if (const std::optional<ExternalReadSinkSignature> sink =
-                    resolveExternalReadSinkSignature(callee))
+                    resolveExternalReadSinkSignature(callee, asDeclaration))
             {
                 if (argIdx == sink->pointerArgIndex)
                     return false;
@@ -2176,9 +2178,9 @@ namespace ctrace::stack::analysis
             const llvm::CallBase& CB, const llvm::Function* callee,
             const TrackedObjectContext& tracked, const llvm::DataLayout& DL,
             InitRangeState& initialized, llvm::BitVector* writeSeen,
-            FunctionSummary* currentSummary)
+            FunctionSummary* currentSummary, bool asDeclaration)
         {
-            if (!callee || !callee->isDeclaration())
+            if (!callee || !asDeclaration)
                 return false;
 
             const llvm::StringRef calleeName = normalizeDeclarationCalleeName(callee->getName());
@@ -2220,26 +2222,24 @@ namespace ctrace::stack::analysis
             return true;
         }
 
-        static void applyExternalDeclarationCallWriteEffects(const llvm::CallBase& CB,
-                                                             const llvm::Function* callee,
-                                                             const TrackedObjectContext& tracked,
-                                                             const llvm::DataLayout& DL,
-                                                             InitRangeState& initialized,
-                                                             llvm::BitVector* writeSeen,
-                                                             FunctionSummary* currentSummary)
+        static void applyExternalDeclarationCallWriteEffects(
+            const llvm::CallBase& CB, const llvm::Function* callee,
+            const TrackedObjectContext& tracked, const llvm::DataLayout& DL,
+            InitRangeState& initialized, llvm::BitVector* writeSeen,
+            FunctionSummary* currentSummary, bool asDeclaration)
         {
-            if (!callee || !callee->isDeclaration())
+            if (!callee || !asDeclaration)
                 return;
 
             if (tryApplyBoundedMemTransferDeclarationWriteEffects(
-                    CB, callee, tracked, DL, initialized, writeSeen, currentSummary))
+                    CB, callee, tracked, DL, initialized, writeSeen, currentSummary, asDeclaration))
             {
                 return;
             }
 
             for (unsigned argIdx = 0; argIdx < CB.arg_size(); ++argIdx)
             {
-                if (!declarationCallArgMayWriteThrough(CB, callee, argIdx))
+                if (!declarationCallArgMayWriteThrough(CB, callee, argIdx, asDeclaration))
                     continue;
 
                 const llvm::Value* ptrOperand = CB.getArgOperand(argIdx);
@@ -2254,10 +2254,10 @@ namespace ctrace::stack::analysis
             const TrackedObjectContext& tracked, const llvm::DataLayout& DL,
             const InitRangeState& initialized, llvm::BitVector* readBeforeInitSeen,
             FunctionSummary* currentSummary,
-            std::vector<UninitializedLocalReadIssue>* emittedIssues)
+            std::vector<UninitializedLocalReadIssue>* emittedIssues, bool asDeclaration)
         {
             const std::optional<ExternalReadSinkSpec> sink =
-                resolveExternalReadSinkSpec(CB, callee);
+                resolveExternalReadSinkSpec(CB, callee, asDeclaration);
             if (!sink)
                 return;
             if (sink->pointerArgIndex >= CB.arg_size())
@@ -3142,7 +3142,6 @@ namespace ctrace::stack::analysis
 
             const llvm::Function* callee = directCallee(*CB);
             const FunctionSummary* calleeSummary = nullptr;
-            bool imported = false;
             if (callee)
             {
                 auto itSummary = summaries.find(callee);
@@ -3163,21 +3162,19 @@ namespace ctrace::stack::analysis
                         symbolName ? externalSummariesByName->find(*symbolName)
                                    : externalSummariesByName->find(linkerSymbolName(*callee));
                     if (itExternal != externalSummariesByName->end())
-                    {
                         calleeSummary = &itExternal->second;
-                        imported = true;
-                    }
                 }
             }
+            bool asDeclaration = callee && callee->isDeclaration();
             if (calleeSummary && !calleeSummary->complete)
             {
-                // The caller is no more complete than what it used. Imported, an incomplete
-                // summary counts as absent for its effects: the call gets the presumption for
-                // declarations, exactly as an unknown function (#157).
+                // The caller is no more complete than what it used. Imported or defined in this
+                // module, an incomplete summary counts as absent for its effects: the call gets
+                // the presumption for declarations, exactly as an unknown function (#157, #168).
                 if (currentSummary)
                     currentSummary->complete = false;
-                if (imported)
-                    calleeSummary = nullptr;
+                calleeSummary = nullptr;
+                asDeclaration = true;
             }
             const bool hasSummary = (calleeSummary != nullptr);
             if (!hasSummary)
@@ -3186,11 +3183,14 @@ namespace ctrace::stack::analysis
                                            constructedSeen, defaultCtorSeen, currentSummary);
                 applyExternalDeclarationCallReadEffects(*CB, callee, tracked, DL, initialized,
                                                         readBeforeInitSeen, currentSummary,
-                                                        emittedIssues);
+                                                        emittedIssues, asDeclaration);
                 applyExternalDeclarationCallWriteEffects(*CB, callee, tracked, DL, initialized,
-                                                         writeSeen, currentSummary);
-                applyUnsummarizedDefinedCallWriteEffects(*CB, callee, tracked, DL, initialized,
-                                                         writeSeen, currentSummary);
+                                                         writeSeen, currentSummary, asDeclaration);
+                if (!asDeclaration)
+                {
+                    applyUnsummarizedDefinedCallWriteEffects(*CB, callee, tracked, DL, initialized,
+                                                             writeSeen, currentSummary);
+                }
             }
             if (!callee)
                 return;
