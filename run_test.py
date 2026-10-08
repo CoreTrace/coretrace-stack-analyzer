@@ -2347,7 +2347,7 @@ def check_ownership_wrapper_metadata() -> bool:
 
         # Old summaries have no uncertainty metadata and must be rebuilt, not reused.
         for path, summary in zip(cache_files, summaries):
-            summary["schema"] = "resource-summary-cache-v3"
+            summary["schema"] = "resource-summary-cache-v4"
             for fn in summary["functions"]:
                 for kind in ("normal", "exceptional"):
                     exit_summary = fn["ownership"][kind]
@@ -2357,7 +2357,7 @@ def check_ownership_wrapper_metadata() -> bool:
         if checked_output(inputs) != first:
             return fail_check("obsolete summaries changed the wrapper diagnostics")
         # Intermediate fixpoint keys need not be reused; active keys must be rewritten.
-        if not any(json.loads(path.read_text())["schema"] == "resource-summary-cache-v4" for path in cache_files):
+        if not any(json.loads(path.read_text())["schema"] == "resource-summary-cache-v5" for path in cache_files):
             return fail_check("obsolete ownership summaries were not rebuilt")
     print("  ✅ ownership wrapper metadata preserved locally, across TUs and in the cache\n")
     return True
@@ -4001,6 +4001,117 @@ def check_calls_through_aliases() -> bool:
                         print(f"     {problem}")
                 else:
                     print(f"  ✅ {label}: {runs[targets[0]][1]}")
+
+    # Aliases the source declares, which clang supports on ELF targets only. An alias the link
+    # may replace (weak) does not designate its aliasee for sure: the caller's max stack stays
+    # unknown, whether or not the definition that replaces it is analyzed too. A plain alias does.
+    with tempfile.TemporaryDirectory(prefix="ct_alias_attribute_") as tmp:
+        root = Path(tmp)
+        (root / "weak-alias.c").write_text(
+            "int fallback(int n) { return n; }\n"
+            'int replaceable(int n) __attribute__((weak, alias("fallback")));\n'
+            "int caller(int n) { return replaceable(n); }\n"
+        )
+        (root / "plain-alias.c").write_text(
+            "int fallback(int n) { return n; }\n"
+            'int replaceable(int n) __attribute__((alias("fallback")));\n'
+            "int caller(int n) { return replaceable(n); }\n"
+        )
+        (root / "override.c").write_text(
+            "int replaceable(int n)\n{\n    volatile unsigned char buffer[256];\n"
+            "    buffer[0] = (unsigned char)n;\n    return buffer[0];\n}\n"
+        )
+        alias_cases = [
+            ("weak alias and the definition that replaces it", ["weak-alias.c", "override.c"], "unknown"),
+            ("weak alias alone", ["weak-alias.c"], "unknown"),
+            ("plain alias", ["plain-alias.c"], "known"),
+        ]
+        for pass_name, pass_args in (("default", []), ("smt-z3", smt_args)):
+            for name, files, status in alias_cases:
+                for target in targets[:2]:
+                    run = observed([root / f for f in files], target, pass_args)
+                    got = run[0].get("caller") if run else "no JSON output"
+                    if got == status:
+                        print(f"  ✅ {pass_name}, {name}, {target}: caller max stack {got}")
+                    else:
+                        ok = False
+                        print(f"  ❌ {pass_name}, {name}, {target}: caller max stack {got}, expected {status}")
+    print()
+    return ok
+
+
+def check_resource_cache_rebuilds_alias_summaries() -> bool:
+    """
+    Following a call through an alias changes the resource summaries (#179): a wrapper that
+    returns what an alias of an acquiring function returns now acquires. Summaries cached by a
+    previous version of the analyzer, under the previous cache schema, must be rebuilt: a run
+    with that cache must leave the same summaries as a run with an empty one, the wrapper's
+    acquisition included, not only the same diagnostics.
+    """
+    print("=== Testing that resource summaries cached by a previous schema are rebuilt ===")
+    ok = True
+    with tempfile.TemporaryDirectory(prefix="ct_alias_resource_cache_") as tmp:
+        root = Path(tmp)
+        (root / "alias.c").write_text(
+            "static int storage;\n"
+            "void *create_impl(void) { return &storage; }\n"
+            'void *alias_create(void) __attribute__((alias("create_impl")));\n'
+            "void *wrapper(void) { return alias_create(); }\n"
+        )
+        (root / "caller.c").write_text(
+            "void *wrapper(void);\nvoid release_handle(void *);\n"
+            "void consumer(void) { release_handle(wrapper()); }\n"
+        )
+        model = root / "model.txt"
+        model.write_text("acquire_ret create_impl Handle\nrelease_arg release_handle 0 Handle\n")
+
+        def summaries(cache: Path) -> dict:
+            out = {}
+            for path in sorted(cache.glob("*.json")):
+                for fn in json.loads(path.read_text())["functions"]:
+                    out.setdefault(fn["name"], []).append(fn)
+            return out
+
+        for target in ("x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"):
+            cold, stale = root / f"cold-{target}", root / f"stale-{target}"
+
+            def run(cache: Path):
+                return run_analyzer_uncached(
+                    [str(root / "alias.c"), str(root / "caller.c"), "--format=json", "--jobs=1",
+                     f"--compile-arg=--target={target}", f"--resource-model={model}",
+                     f"--resource-summary-cache-dir={cache}"]
+                )
+
+            first = run(cold)
+            expected = summaries(cold)
+            acquires = any(
+                e.get("action") == "acquire_ret" for fn in expected.get("wrapper", []) for e in fn["effects"]
+            )
+            if first.returncode != 0 or not acquires:
+                ok = False
+                print(f"  ❌ {target}: the wrapper's summary does not acquire with an empty cache")
+                continue
+            # The cache a previous version left: the previous schema, and a wrapper that does
+            # not acquire, as it was summarized without following the alias.
+            stale.mkdir()
+            for path in cold.glob("*.json"):
+                summary = json.loads(path.read_text())
+                summary["schema"] = "resource-summary-cache-v4"
+                for fn in summary["functions"]:
+                    if fn["name"] == "wrapper":
+                        fn["effects"] = []
+                        fn["ownership"]["normal"]["returns"] = "unknown"
+                        fn["ownership"]["normal"]["returnsKind"] = ""
+                (stale / path.name).write_text(json.dumps(summary))
+            second = run(stale)
+            if second.returncode != 0 or second.stdout != first.stdout:
+                ok = False
+                print(f"  ❌ {target}: the output with the previous cache differs from the one with an empty cache")
+            elif summaries(stale) != expected:
+                ok = False
+                print(f"  ❌ {target}: the previous cache's summaries were kept: {summaries(stale).get('wrapper')}")
+            else:
+                print(f"  ✅ {target}: the previous cache is rebuilt to the summaries of an empty one")
     print()
     return ok
 
@@ -4954,6 +5065,7 @@ def main() -> int:
         check_diagnostic_paths_follow_the_input,
         check_const_param_abi_split_struct,
         check_calls_through_aliases,
+        check_resource_cache_rebuilds_alias_summaries,
         check_uninitialized_receiver_abi_split_struct,
         check_escape_through_returned_value,
         check_sarif_rule_cwe_tags,
