@@ -116,4 +116,9 @@ namespace ctrace::stack::analyzer
     appendResourceLifetimeDiagnostics(AnalysisResult& result,
                                       const std::vector<analysis::ResourceLifetimeIssue>& issues);
 
+    // Gives each diagnostic whose rule named no file the file of its function, so that a
+    // function defined in a header is reported there, not in the file that includes it. A file
+    // a rule already named is kept.
+    void assignFunctionFilesToDiagnostics(AnalysisResult& result);
+
 } // namespace ctrace::stack::analyzer

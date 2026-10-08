@@ -852,6 +852,7 @@ namespace ctrace::stack::analyzer
                       << ", independent=" << independentInstructionVisits << "\n";
         }
 
+        assignFunctionFilesToDiagnostics(data.result);
         return data.result;
     }
 
