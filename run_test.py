@@ -4158,6 +4158,68 @@ def check_diagnostic_paths_follow_the_input() -> bool:
     return ok
 
 
+def check_header_function_diagnostics_name_the_header() -> bool:
+    """
+    #174: a diagnostic in a function defined in a header names that header, at the line it has
+    there, whether its rule sets a file itself (signed overflow) or not (const parameter,
+    duplicate if). The including file used to be reported, at the header's line.
+    """
+    print("=== Testing diagnostics of header functions name the header ===")
+    sources = {
+        "reader.hpp": "#pragma once\n\ntemplate <typename T>\nT first(T* values)\n{\n"
+        "    return values[0];\n}\n",
+        "main.cpp": '#include "reader.hpp"\n\nint use(int* values)\n{\n'
+        "    return first(values);\n}\n",
+        "pick.hpp": "#pragma once\n\ninline int pick(int x)\n{\n    if (x > 3)\n    {\n"
+        "        return 1;\n    }\n    else if (x > 3)\n    {\n        return 2;\n    }\n"
+        "    return 0;\n}\n",
+        "pick.cpp": '#include "pick.hpp"\n\nint callPick(int x)\n{\n    return pick(x);\n}\n',
+        "sum.h": "#pragma once\n\nstatic int sum(int* values)\n{\n"
+        "    return values[0] + values[1];\n}\n",
+        "sum.c": '#include "sum.h"\n\nint callSum(int* values)\n{\n    return sum(values);\n}\n',
+    }
+    # (label, analyzed source, expected (rule, file, line) of every diagnostic).
+    cases = [
+        ("template", "main.cpp", {("ConstParameterNotModified.Pointer", "reader.hpp", 4)}),
+        ("inline function", "pick.cpp", {("DuplicateIfCondition", "pick.hpp", 9)}),
+        (
+            "static C function",
+            "sum.c",
+            {
+                ("IntegerOverflow.SignedArithmetic", "sum.h", 5),
+                ("ConstParameterNotModified.Pointer", "sum.h", 3),
+            },
+        ),
+    ]
+    ok = True
+    with tempfile.TemporaryDirectory(prefix="ct_header_diagnostics_") as tmp:
+        root = Path(tmp).resolve()
+        for name, text in sources.items():
+            (root / name).write_text(text)
+        for label, source, expected in cases:
+            result = run_analyzer([str(root / source), "--format=json"])
+            try:
+                payload = json.loads(result.stdout or "")
+            except json.JSONDecodeError:
+                ok = fail_check(f"{label}: no JSON output", (result.stdout or "") + (result.stderr or ""))
+                continue
+            observed = {
+                (
+                    d.get("ruleId"),
+                    str(Path(d.get("location", {}).get("file", "")).resolve()),
+                    d.get("location", {}).get("startLine"),
+                )
+                for d in payload.get("diagnostics", [])
+            }
+            wanted = {(rule, str(root / file), line) for rule, file, line in expected}
+            if observed != wanted:
+                ok = fail_check(f"{label}: expected {sorted(wanted)}, got {sorted(observed)}")
+                continue
+            print(f"  ✅ {label}: {', '.join(f'{file}:{line}' for _, file, line in sorted(expected))}")
+    print()
+    return ok
+
+
 def check_calls_through_aliases() -> bool:
     """
     #179: on ELF targets, clang calls a constructor or a destructor defined out of its class
@@ -5343,6 +5405,7 @@ def main() -> int:
         check_diagnostic_rule_coverage_regression,
         check_diagnostic_cwe_coverage,
         check_diagnostic_paths_follow_the_input,
+        check_header_function_diagnostics_name_the_header,
         check_const_param_abi_split_struct,
         check_calls_through_aliases,
         check_resource_cache_rebuilds_alias_summaries,
