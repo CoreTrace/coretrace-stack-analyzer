@@ -168,14 +168,18 @@ jobs:
     # Self-analysis (Linux only)
 
     # Resource summary cache — stale entries are harmless (cache key includes
-    # schema + model + IR hash, so mismatches simply trigger a rebuild).
+    # schema + model + IR hash, so mismatches simply trigger a rebuild). As for
+    # the test caches, restore/save are split and the key carries a per-run
+    # suffix: a stable key would keep the first summaries saved forever.
     - name: Restore resource summary cache
+      id: resource-cache
       if: runner.os == 'Linux'
-      uses: actions/cache@v4
+      uses: actions/cache/restore@v4
       with:
         path: .cache/resource-lifetime
-        key: resource-cache-${{ runner.os }}-${{ hashFiles('models/resource-lifetime/**') }}
+        key: resource-cache-${{ runner.os }}-${{ hashFiles('models/resource-lifetime/**') }}-${{ github.run_id }}
         restore-keys: |
+          resource-cache-${{ runner.os }}-${{ hashFiles('models/resource-lifetime/**') }}-
           resource-cache-${{ runner.os }}-
 
     - name: Self-analysis (analyze own source code)
@@ -193,6 +197,14 @@ jobs:
           --fail-on error \
           --analyzer-arg=--analysis-profile=fast \
           --analyzer-arg=--resource-model=models/resource-lifetime/generic.txt
+
+    # Saved even when the self-analysis fails, like the test caches.
+    - name: Save resource summary cache
+      if: always() && runner.os == 'Linux'
+      uses: actions/cache/save@v4
+      with:
+        path: .cache/resource-lifetime
+        key: ${{ steps.resource-cache.outputs.cache-primary-key }}
 
     - name: Upload SARIF to Code Scanning
       if: runner.os == 'Linux' && always() && hashFiles('artifacts/self-analysis.sarif') != ''
