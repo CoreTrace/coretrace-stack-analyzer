@@ -3890,6 +3890,121 @@ def check_diagnostic_paths_follow_the_input() -> bool:
     return ok
 
 
+def check_calls_through_aliases() -> bool:
+    """
+    #179: on ELF targets, clang calls a constructor or a destructor defined out of its class
+    through an alias (C1 -> C2, D1 -> D2), a direct call that Mach-O makes without one. The
+    findings, and whether each max stack is known, must be the same for x86-64 and AArch64 Linux
+    as for macOS: an object that only reaches its constructor does not escape, the call does not
+    hide that the constructor initializes it, and a constructor that keeps this is reported. A
+    constructor defined in another file must resolve through its alias too. The max stacks
+    themselves may differ: Mach-O keeps C1 as a function that calls C2, a frame that ELF folds
+    into the alias.
+    """
+    print("=== Testing calls through constructor and destructor aliases, per target ===")
+    targets = ("x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", "arm64-apple-macosx")
+    smt_args = [
+        "--smt=on",
+        "--smt-backend=z3",
+        "--smt-mode=single",
+        f"--smt-rules={','.join(_all_smt_rules())}",
+        f"--smt-timeout-ms={SMT_FIXTURE_TIMEOUT_MS}",
+    ]
+
+    def observed(sources: list[Path], target: str, extra: list[str]):
+        result = run_analyzer(
+            [*map(str, sources), "--format=json", f"--compile-arg=--target={target}", *extra]
+        )
+        try:
+            payload = json.loads(result.stdout or "")
+        except json.JSONDecodeError:
+            return None
+        # Constructors and destructors are left out: Mach-O lists C1 and D1, ELF only aliases.
+        stacks = {
+            fn.get("name"): "known" if fn.get("maxStackUnknown") is False else "unknown"
+            for fn in payload.get("functions", [])
+            if not str(fn.get("name", "")).startswith("_ZN")
+        }
+        findings = sorted(
+            {
+                (str(d.get("ruleId", "")).split(".", 1)[0], d.get("location", {}).get("function"))
+                for d in payload.get("diagnostics", [])
+            }
+        )
+        return stacks, findings
+
+    with tempfile.TemporaryDirectory(prefix="ct_alias_cross_file_") as tmp:
+        cross = Path(tmp)
+        (cross / "resolver.hpp").write_text(
+            "struct Resolver\n{\n    explicit Resolver(int value);\n    int seed;\n};\n"
+        )
+        (cross / "resolver.cpp").write_text(
+            '#include "resolver.hpp"\n\nResolver::Resolver(int value) : seed(value) {}\n'
+        )
+        (cross / "run.cpp").write_text(
+            '#include "resolver.hpp"\n\nint run(int value)\n{\n'
+            "    const Resolver resolver(value);\n    return resolver.seed;\n}\n"
+        )
+        escape = "StackPointerEscape"
+        # (label, sources, extra arguments, functions whose max stack must be known, findings
+        # expected on every target).
+        cases = [
+            ("escape-stack/ctor-alias-no-escape.cpp", None, [], ["_Z3runi"], []),
+            (
+                "false-positive-repro/ctor-dtor-alias.cpp",
+                None,
+                [],
+                ["_Z3usev", "_Z5framev"],
+                [("UninitializedLocalRead", "_Z3usev")],
+            ),
+            ("escape-stack/ctor-alias-stores-this.cpp", None, [], ["_Z3runi"], [(escape, "_Z3runi")]),
+            (
+                "escape-stack/ctor-alias-passes-this.cpp",
+                None,
+                [],
+                [],
+                [(escape, "_Z3runiPFvP8ResolverE")],
+            ),
+            (
+                "constructor defined in another file",
+                [cross / "resolver.cpp", cross / "run.cpp"],
+                [f"--compile-arg=-I{cross}"],
+                ["_Z3runi"],
+                [],
+            ),
+        ]
+        ok = True
+        for pass_name, pass_args in (("default", []), ("smt-z3", smt_args)):
+            for name, sources, case_args, known_stacks, expected in cases:
+                label = f"{pass_name}, {name}"
+                files = sources or [RUN_CONFIG.test_dir / name]
+                runs = {t: observed(files, t, [*case_args, *pass_args]) for t in targets}
+                problems = []
+                if any(run is None for run in runs.values()):
+                    missing = sorted(t for t, r in runs.items() if r is None)
+                    problems.append(f"no JSON output: {missing}")
+                else:
+                    first = runs[targets[0]]
+                    for target in targets[1:]:
+                        if runs[target] != first:
+                            problems.append(f"{target}: {runs[target]}, {targets[0]}: {first}")
+                    for target, (stacks, findings) in runs.items():
+                        unknown = [f for f in known_stacks if stacks.get(f) != "known"]
+                        if unknown:
+                            problems.append(f"{target}: max stack not known for {unknown}")
+                        if findings != expected:
+                            problems.append(f"{target}: findings {findings}, expected {expected}")
+                if problems:
+                    ok = False
+                    print(f"  ❌ {label}")
+                    for problem in problems:
+                        print(f"     {problem}")
+                else:
+                    print(f"  ✅ {label}: {runs[targets[0]][1]}")
+    print()
+    return ok
+
+
 def check_const_param_abi_split_struct() -> bool:
     """
     ConstParameterNotModified names the same source parameters whatever the ABI does with a
@@ -4838,6 +4953,7 @@ def main() -> int:
         check_diagnostic_cwe_coverage,
         check_diagnostic_paths_follow_the_input,
         check_const_param_abi_split_struct,
+        check_calls_through_aliases,
         check_uninitialized_receiver_abi_split_struct,
         check_escape_through_returned_value,
         check_sarif_rule_cwe_tags,
