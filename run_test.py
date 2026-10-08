@@ -2874,6 +2874,74 @@ def check_duplicate_if_cross_tu() -> bool:
     )
 
 
+def check_global_read_before_write_identity_across_files() -> bool:
+    """
+    #166: across files, a global is identified as the linker sees it. A static global is its
+    own module's: a write to a same-named global of another file, static or external, is not a
+    write to it, while a write in another function of its own file still is. An external global
+    is shared by the files that define and declare it.
+    """
+    print("=== Testing GlobalReadBeforeWrite global identity across files ===")
+    sources = {
+        "a.c": "static int table[4];\nint read_table(int i) { return table[i & 3]; }\n",
+        "b.c": "static int table[4];\nvoid write_table(int i) { table[i & 3] = 1; }\n"
+        "int read_b(int i) { return table[i & 3]; }\n",
+        "ext_table.c": "int table[4];\nvoid write_ext_table(int i) { table[i & 3] = 1; }\n",
+        "ext_def.c": "int shared[4];\nint read_shared(int i) { return shared[i & 3]; }\n",
+        "ext_use.c": "extern int shared[4];\nvoid write_shared(int i) { shared[i & 3] = 1; }\n",
+        "same_file.c": "static int cache[4];\nint read_cache(int i) { return cache[i & 3]; }\n"
+        "void fill_cache(int i) { cache[i & 3] = i; }\n",
+        "other.c": "int other(int i) { return i; }\n",
+    }
+    # (label, analyzed files, expected (function, confidence, write seen elsewhere) of every
+    # GlobalReadBeforeWrite diagnostic).
+    cases = [
+        (
+            "two static globals with the same name",
+            ["a.c", "b.c"],
+            {("read_table", 0.55, False), ("read_b", 0.5, True)},
+        ),
+        (
+            "a static and an external global with the same name",
+            ["a.c", "ext_table.c"],
+            {("read_table", 0.55, False)},
+        ),
+        ("an external global written in another file", ["ext_def.c", "ext_use.c"], {("read_shared", 0.5, True)}),
+        (
+            "a static global written in another function of its file",
+            ["same_file.c", "other.c"],
+            {("read_cache", 0.5, True)},
+        ),
+    ]
+    ok = True
+    with tempfile.TemporaryDirectory(prefix="ct_global_identity_") as tmp:
+        root = Path(tmp)
+        for name, text in sources.items():
+            (root / name).write_text(text)
+        for label, files, expected in cases:
+            result = run_analyzer([*(str(root / f) for f in files), "--format=json"])
+            try:
+                payload = json.loads(result.stdout or "")
+            except json.JSONDecodeError:
+                ok = fail_check(f"{label}: no JSON output", (result.stdout or "") + (result.stderr or ""))
+                continue
+            observed = {
+                (
+                    d.get("location", {}).get("function"),
+                    round(float(d.get("confidence", -1)), 2),
+                    "another analyzed function/TU" in d.get("details", {}).get("message", ""),
+                )
+                for d in payload.get("diagnostics", [])
+                if d.get("ruleId") == "GlobalReadBeforeWrite"
+            }
+            if observed != expected:
+                ok = fail_check(f"{label}: expected {sorted(expected)}, got {sorted(observed)}")
+                continue
+            print(f"  ✅ {label}")
+    print()
+    return ok
+
+
 def check_size_minus_one_cross_tu() -> bool:
     """
     #157: the length that a function defined in another file passes to a bounded write reaches
@@ -5392,6 +5460,7 @@ def main() -> int:
         check_uninitialized_cross_tu_no_effect,
         check_const_param_cross_tu,
         check_duplicate_if_cross_tu,
+        check_global_read_before_write_identity_across_files,
         check_size_minus_one_cross_tu,
         check_cross_tu_call_graph,
         check_null_deref_nested_inter_tu,
