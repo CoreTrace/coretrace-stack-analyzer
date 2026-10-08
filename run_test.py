@@ -3517,6 +3517,83 @@ def check_escape_model_rejects_unsupported_brackets() -> bool:
     return True
 
 
+def check_compile_ir_cache_rebuilds_previous_schema() -> bool:
+    """
+    A file used to be compiled from the current directory, and from its compile command's only
+    when that failed: with a header of the same name in both, the compile IR cache kept the IR
+    built with the wrong one. Compiling from the command's directory changes the IR of an
+    unchanged command, so the cache schema changed.
+
+    The schema is in two places: the cache key, and the metadata of each entry. An entry stored
+    under a previous key is never looked up again; this check covers the other one. It rewrites
+    the entry of the current key as the previous pipeline left it: the previous schema, and the
+    IR built with the start directory's header (7, where the command's header gives 42), with
+    the sources and dependencies left valid. The next run must compile again and give 42, and
+    rewrite the entry; the run after it must reuse that entry and give 42 again.
+    """
+    print("=== Testing that compile IR cached under a previous schema is rebuilt ===")
+    ok = True
+    with tempfile.TemporaryDirectory(prefix="ct_compile_ir_schema_") as tmp:
+        root = Path(tmp)
+        (root / "start" / "include").mkdir(parents=True)
+        (root / "start" / "include" / "config.h").write_text("#define VALUE 7\n")
+        (root / "project" / "build" / "include").mkdir(parents=True)
+        (root / "project" / "build" / "include" / "config.h").write_text("#define VALUE 42\n")
+        source = root / "project" / "value.c"
+        source.write_text("#include <config.h>\nint value(void) { return VALUE; }\n")
+        compdb = root / "project" / "compile_commands.json"
+        compdb.write_text(json.dumps([{
+            "directory": str(root / "project" / "build"),
+            "file": str(source),
+            "arguments": ["cc", "-Iinclude", "-c", str(source)],
+        }]))
+        cache = root / "compile-ir"
+        analyzer = str(Path(RUN_CONFIG.analyzer).resolve())
+
+        def run(name):
+            dump = root / f"ir-{name}"
+            try:
+                result = subprocess.run(
+                    [analyzer, "--timing", f"--compile-commands={compdb}",
+                     "--compile-ir-format=ll", f"--compile-ir-cache-dir={cache}",
+                     f"--dump-ir={dump}/", str(source)],
+                    cwd=root / "start", capture_output=True, text=True,
+                    timeout=RUN_CONFIG.analyzer_timeout,
+                )
+            except subprocess.TimeoutExpired:
+                return None, False
+            returned = re.findall(r"ret i32 (\d+)", "".join(p.read_text() for p in dump.glob("*.ll")))
+            return (returned[0] if returned else None), "Compilation cache hit" in result.stderr
+
+        value, _ = run("empty")
+        entries = sorted(cache.glob("*.json"))
+        if value != "42" or len(entries) != 1:
+            print(f"  ❌ with an empty cache: returns {value}, {len(entries)} cache entries")
+            return False
+        metadata = json.loads(entries[0].read_text())
+        current = metadata["schema"]
+        ir_file = entries[0].with_suffix(".ll")
+        metadata["schema"] = "compile-ir-cache-v2"
+        entries[0].write_text(json.dumps(metadata))
+        ir_file.write_text(ir_file.read_text().replace("ret i32 42", "ret i32 7"))
+
+        value, hit = run("previous")
+        rewritten = json.loads(entries[0].read_text())["schema"]
+        if value == "42" and not hit and rewritten == current:
+            print("  ✅ an entry of the previous schema is compiled again and rewritten")
+        else:
+            ok = False
+            print(f"  ❌ with the previous schema: returns {value}, cache hit {hit}, entry schema {rewritten}")
+        value, hit = run("rebuilt")
+        if value == "42" and hit:
+            print("  ✅ the rewritten entry is reused")
+        else:
+            ok = False
+            print(f"  ❌ after the rebuild: returns {value}, cache hit {hit}")
+    print()
+    return ok
+
+
 def check_unreadable_model_fails() -> bool:
     """
     A model the command line asks for, but that cannot be read, is a configuration error: the
@@ -5260,6 +5337,7 @@ def main() -> int:
         check_noreturn_cross_tu,
         check_use_after_free_advanced_inter_tu,
         check_escape_model_rejects_unsupported_brackets,
+        check_compile_ir_cache_rebuilds_previous_schema,
         check_unreadable_model_fails,
         check_human_vs_json_parity,
         check_diagnostic_rule_coverage_regression,
