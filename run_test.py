@@ -2083,6 +2083,9 @@ def check_resource_model_across_compile_directories() -> bool:
     the model defines must be reported in every file. The relative paths must be anchored to the
     start directory. The start directory also holds a header of the same name for every file,
     one that drops the leak: a file compiled from there instead of its own directory loses it.
+    The files are given by absolute paths, then by paths relative to the start directory, which
+    must resolve there whatever directory another file is compiling from at the time; the
+    results name each file as it was given.
     """
     print("=== Testing the resource model across compile-command directories ===")
     unit_count = 8
@@ -2161,10 +2164,16 @@ def check_resource_model_across_compile_directories() -> bool:
                 print(f"  ❌ effective configuration lacks '{line}'")
                 ok = False
 
-        for mode in ([], ["--jobs=1"], ["--jobs=4"]):
-            label = mode[0] if mode else "default jobs"
+        relative_sources = [os.path.relpath(source, run_dir) for source in sources]
+        runs = [
+            (paths, given, mode)
+            for paths, given in (("absolute paths", sources), ("relative paths", relative_sources))
+            for mode in ([], ["--jobs=1"], ["--jobs=4"])
+        ]
+        for paths, given, mode in runs:
+            label = f"{paths}, {mode[0] if mode else 'default jobs'}"
             for attempt in range(1, 4):
-                caches = f"caches-{label.replace('=', '').replace(' ', '-')}-{attempt}"
+                caches = f"caches-{label.replace('=', '').replace(', ', '-').replace(' ', '-')}-{attempt}"
                 cmd = [
                     analyzer,
                     "--format=json",
@@ -2173,7 +2182,7 @@ def check_resource_model_across_compile_directories() -> bool:
                     f"--compile-ir-cache-dir={caches}/compile-ir",
                     f"--resource-summary-cache-dir={caches}/resource",
                     *mode,
-                    *sources,
+                    *given,
                 ]
                 result = run_from_start_dir(cmd[1:])
                 if result is None:
@@ -2196,6 +2205,13 @@ def check_resource_model_across_compile_directories() -> bool:
                     }
                     if found != expected:
                         problems.append(f"leaks reported in {sorted(found)}")
+                    files = {
+                        d.get("location", {}).get("file")
+                        for d in diagnostics
+                        if d.get("ruleId") == "ResourceLifetime.MissingRelease"
+                    }
+                    if found == expected and files != set(given):
+                        problems.append(f"leaks not named as given: {sorted(files)}")
                 for cache in ("compile-ir", "resource"):
                     if not (run_dir / caches / cache).is_dir():
                         problems.append(f"no {cache} cache under the start directory")
