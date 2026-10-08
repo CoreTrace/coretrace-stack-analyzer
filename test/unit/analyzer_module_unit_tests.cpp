@@ -847,6 +847,86 @@ namespace
         return report.failures == 0;
     }
 
+    // #168: in one file too, the summary of a dataflow stopped before its fixpoint is absent
+    // for its effects (spec §4.1): a call to it reports what a call to a declaration reports.
+    bool testUninitializedIncompleteSummariesInOneFile(const std::filesystem::path& repoRoot,
+                                                       TestReport& report)
+    {
+        using namespace ctrace::stack::analysis;
+        const ctrace::stack::AnalysisConfig config;
+        LoadedModule loaded;
+        std::string loadError;
+        const std::filesystem::path source = repoRoot / "test/unit/uninit_incomplete_same_file.c";
+        if (!loadModuleFromSource(source, config, loaded, loadError))
+        {
+            report.expect(false,
+                          "UninitIncompleteOneFile setup: failed to load module: " + loadError);
+            return false;
+        }
+
+        auto analyzeAll = [](const llvm::Function&) { return true; };
+        using Kind = UninitializedLocalIssueKind;
+        // The issues of one function, as (kind, variable) pairs.
+        const auto issuesOf =
+            [](const std::vector<UninitializedLocalReadIssue>& issues, const char* func)
+        {
+            std::multiset<std::pair<Kind, std::string>> out;
+            for (const UninitializedLocalReadIssue& issue : issues)
+                if (issue.funcName == func)
+                    out.emplace(issue.kind, issue.varName);
+            return out;
+        };
+        const auto has = [](const std::multiset<std::pair<Kind, std::string>>& issues, Kind kind)
+        {
+            return std::any_of(issues.begin(), issues.end(),
+                               [kind](const auto& issue) { return issue.first == kind; });
+        };
+
+        // Automatic budget: both callees converge, and their summaries are exact.
+        const std::vector<UninitializedLocalReadIssue> converged =
+            analyzeUninitializedLocalReads(*loaded.module, analyzeAll, nullptr);
+        report.expect(issuesOf(converged, "write_then_read").empty(),
+                      "UninitIncompleteOneFile: converged produce initializes x");
+        report.expect(issuesOf(converged, "pass_to_reader")
+                              .count({Kind::ReadBeforeDefiniteInitViaCall, "x"}) == 1,
+                      "UninitIncompleteOneFile: converged consume reads x");
+
+        // Budget of two iterations: the callees stop before their fixpoint, their callers do not.
+        const std::vector<UninitializedLocalReadIssue> stopped =
+            analyzeUninitializedLocalReads(*loaded.module, analyzeAll, nullptr,
+                                           /*fixpointIterationLimit=*/2);
+        report.expect(has(issuesOf(stopped, "produce"), Kind::AnalysisIncomplete) &&
+                          has(issuesOf(stopped, "consume"), Kind::AnalysisIncomplete),
+                      "UninitIncompleteOneFile: the budget stops produce and consume");
+        report.expect(issuesOf(stopped, "write_then_read") ==
+                          issuesOf(stopped, "write_then_read_decl"),
+                      "UninitIncompleteOneFile: a call to stopped produce reports as a call to a "
+                      "declaration");
+        report.expect(issuesOf(stopped, "pass_to_reader") ==
+                          issuesOf(stopped, "pass_to_reader_decl"),
+                      "UninitIncompleteOneFile: a call to stopped consume reports as a call to a "
+                      "declaration");
+
+        // Looked up by linker symbol, which is portable: "f" on Linux, "_f" on macOS.
+        const UninitializedSummaryIndex index = buildUninitializedSummaryIndex(
+            *loaded.module, analyzeAll, static_cast<const UninitializedSummaryIndex*>(nullptr),
+            /*fixpointIterationLimit=*/2);
+        const auto complete = [&](const char* name) -> std::optional<bool>
+        {
+            const auto it =
+                index.functions.find(linkerSymbolName(*loaded.module->getFunction(name)));
+            if (it == index.functions.end())
+                return std::nullopt;
+            return static_cast<bool>(it->second.complete);
+        };
+        report.expect(complete("write_then_read") == false && complete("pass_to_reader") == false,
+                      "UninitIncompleteOneFile: a caller of a stopped callee is incomplete");
+        report.expect(complete("write_then_read_decl") == true &&
+                          complete("pass_to_reader_decl") == true,
+                      "UninitIncompleteOneFile: a caller of a declaration stays complete");
+        return report.failures == 0;
+    }
+
     // A cyclic group stopped at its iteration cap (#157): the driver must mark its summaries
     // incomplete, and must not when the group converges.
     bool testCrossTUDriverMarksUnconvergedCycles(TestReport& report)
@@ -2284,6 +2364,7 @@ int main(int argc, char** argv)
     (void)testLinkerSymbolName(report);
     (void)testUninitializedSummaryKeysAreLinkerSymbols(repoRoot, report);
     (void)testUninitializedIncompleteSummaries(repoRoot, report);
+    (void)testUninitializedIncompleteSummariesInOneFile(repoRoot, report);
     (void)testCrossTUDriverMarksUnconvergedCycles(report);
     (void)testProgramPointRanges(repoRoot, report);
     (void)testProgramPointRangesUnsignedReadings(repoRoot, report);
