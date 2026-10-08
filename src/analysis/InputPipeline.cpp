@@ -38,22 +38,15 @@ namespace ctrace::stack::analysis
 {
     namespace
     {
-        std::mutex gCompileWorkingDirMutex;
         // compilerlib drives an in-process clang CompilerInstance. clang/LLVM keep global
         // mutable state (target registry, cl options, timers); two worker threads compiling
         // at once hung intermittently on the first compile of a run. Compilation is
         // serialised here; module analysis stays parallel, and the IR cache makes the
-        // compile step cheap on repeated runs.
+        // compile step cheap on repeated runs. A compile that needs its compile command's
+        // directory changes the working directory of the whole process: it holds the same
+        // lock from before that change until it is undone, so no other compile runs in a
+        // directory that is not its own, and two changes never interleave.
         std::mutex gCompileInvokeMutex;
-
-        std::string makeAbsolutePath(const std::string& path)
-        {
-            std::error_code ec;
-            std::filesystem::path absPath = std::filesystem::absolute(path, ec);
-            if (ec)
-                return path;
-            return absPath.lexically_normal().generic_string();
-        }
 
         void appendIfMissing(std::vector<std::string>& args, const std::string& flag)
         {
@@ -199,7 +192,7 @@ namespace ctrace::stack::analysis
             }
         }
 
-        constexpr llvm::StringLiteral kCompileIRCacheSchema = "compile-ir-cache-v2";
+        constexpr llvm::StringLiteral kCompileIRCacheSchema = "compile-ir-cache-v3";
 
         struct FileSnapshot
         {
@@ -659,14 +652,15 @@ namespace ctrace::stack::analysis
             return true;
         }
 
-        bool buildCompileArgs(const std::string& filename, LanguageType language,
-                              const AnalysisConfig& config, std::vector<std::string>& args,
-                              std::string& workingDir, std::string& error)
+        bool buildCompileArgs(const std::string& filename, const std::string& inputPath,
+                              LanguageType language, const AnalysisConfig& config,
+                              std::vector<std::string>& args, std::string& workingDir,
+                              std::string& error)
         {
             const CompileCommand* command = nullptr;
             if (config.compilationDatabase)
             {
-                command = config.compilationDatabase->findCommandForFile(filename);
+                command = config.compilationDatabase->findCommandForFile(inputPath);
             }
 
             if (command)
@@ -711,7 +705,7 @@ namespace ctrace::stack::analysis
                 args.push_back("-g");
             appendIfMissing(args, "-fno-discard-value-names");
             const bool useAbsolutePath = (command != nullptr);
-            args.push_back(useAbsolutePath ? makeAbsolutePath(filename) : filename);
+            args.push_back(useAbsolutePath ? inputPath : filename);
             return true;
         }
 
@@ -820,13 +814,19 @@ namespace ctrace::stack::analysis
         using ctrace::stack::analyzer::ScopedHotspot;
         ModuleLoadResult result;
         const ScopedHotspot totalHotspot(config.timing, "input.load_module.total");
+        // A relative input resolves from the directory the analysis started in, not from the
+        // current one: another thread may be compiling from its compile command's directory,
+        // which the whole process shares meanwhile.
         std::error_code cwdErr;
-        std::filesystem::path baseDir = std::filesystem::current_path(cwdErr);
+        const std::filesystem::path baseDir = config.inputBaseDir.empty()
+                                                  ? std::filesystem::current_path(cwdErr)
+                                                  : std::filesystem::path(config.inputBaseDir);
+        const std::string inputPath = makeAbsolutePathFrom(filename, baseDir.string());
         using Clock = std::chrono::steady_clock;
         auto compileStart = Clock::now();
         {
             const ScopedHotspot hotspot(config.timing, "input.detect_language");
-            result.language = detectLanguageFromFile(filename, ctx);
+            result.language = detectLanguageFromFile(inputPath, ctx);
         }
 
         if (result.language == LanguageType::Unknown)
@@ -844,8 +844,8 @@ namespace ctrace::stack::analysis
             bool compileArgsReady = false;
             {
                 const ScopedHotspot hotspot(config.timing, "input.build_compile_args");
-                compileArgsReady = buildCompileArgs(filename, result.language, config, args,
-                                                    workingDir, compileError);
+                compileArgsReady = buildCompileArgs(filename, inputPath, result.language, config,
+                                                    args, workingDir, compileError);
             }
             if (!compileArgsReady)
             {
@@ -857,7 +857,7 @@ namespace ctrace::stack::analysis
                 coretrace::log(coretrace::Level::Info, "Compiling {}...\n", filename);
             const bool preferBitcodeCompile = (config.compileIRFormat == CompileIRFormat::BC);
             const CompileIRCachePaths cachePaths =
-                buildCompileIRCachePaths(config, filename, result.language, args, workingDir);
+                buildCompileIRCachePaths(config, inputPath, result.language, args, workingDir);
 
             std::error_code tempDirErr;
             std::filesystem::path tempDir = std::filesystem::temp_directory_path(tempDirErr);
@@ -872,14 +872,16 @@ namespace ctrace::stack::analysis
             const std::vector<std::string> bitcodeArgs =
                 buildBitcodeCompileArgs(args, tempBitcodePath);
 
-            auto compileWithOptionalWorkingDir =
-                [&](const std::vector<std::string>& compileArgs, compilerlib::OutputMode outputMode,
-                    bool useWorkingDir) -> std::optional<compilerlib::CompileResult>
+            // A compile command's relative paths are relative to its directory: compile there,
+            // even when the current directory also resolves them, to another header.
+            auto compileInWorkingDir =
+                [&](const std::vector<std::string>& compileArgs,
+                    compilerlib::OutputMode outputMode) -> std::optional<compilerlib::CompileResult>
             {
-                if (!useWorkingDir)
+                std::lock_guard<std::mutex> compileLock(gCompileInvokeMutex);
+                if (workingDir.empty())
                 {
                     const ScopedHotspot hotspot(config.timing, "input.compiler.invoke");
-                    std::lock_guard<std::mutex> compileLock(gCompileInvokeMutex);
                     return compilerlib::compile(compileArgs, outputMode);
                 }
 
@@ -891,36 +893,7 @@ namespace ctrace::stack::analysis
                     return std::nullopt;
                 }
                 const ScopedHotspot hotspot(config.timing, "input.compiler.invoke.cwd");
-                std::lock_guard<std::mutex> compileLock(gCompileInvokeMutex);
                 return compilerlib::compile(compileArgs, outputMode);
-            };
-
-            auto compileWithConfiguredWorkingDir =
-                [&](const std::vector<std::string>& compileArgs, compilerlib::OutputMode outputMode,
-                    bool& retriedWithWorkingDir) -> std::optional<compilerlib::CompileResult>
-            {
-                retriedWithWorkingDir = false;
-                std::optional<compilerlib::CompileResult> res;
-                const bool hasWorkingDir = !workingDir.empty();
-                if (config.jobs > 1 && hasWorkingDir)
-                {
-                    // Optimistic fast path for multi-job runs: most compdb commands use absolute
-                    // paths.
-                    res = compileWithOptionalWorkingDir(compileArgs, outputMode, false);
-                    if (!res || !res->success)
-                    {
-                        // Fallback keeps correctness for relative include paths and avoids process
-                        // cwd races.
-                        std::lock_guard<std::mutex> lock(gCompileWorkingDirMutex);
-                        res = compileWithOptionalWorkingDir(compileArgs, outputMode, true);
-                        retriedWithWorkingDir = true;
-                    }
-                }
-                else
-                {
-                    res = compileWithOptionalWorkingDir(compileArgs, outputMode, hasWorkingDir);
-                }
-                return res;
             };
 
             if (cachePaths.enabled)
@@ -1044,7 +1017,6 @@ namespace ctrace::stack::analysis
                 }
             }
 
-            bool retriedWithWorkingDir = false;
             bool compiledViaBitcode = false;
             std::optional<compilerlib::CompileResult> res;
             std::optional<FileSnapshot> sourceSnapshot;
@@ -1057,20 +1029,14 @@ namespace ctrace::stack::analysis
                     preferBitcodeCompile ? bitcodeArgs : args;
                 appendDependencyCaptureArgs(cacheCompileArgs, cachePaths.depFile);
 
-                bool retriedForDependencyCompile = false;
-                res = compileWithConfiguredWorkingDir(cacheCompileArgs,
-                                                      preferBitcodeCompile
-                                                          ? compilerlib::OutputMode::ToFile
-                                                          : compilerlib::OutputMode::ToMemory,
-                                                      retriedForDependencyCompile);
-                retriedWithWorkingDir = retriedForDependencyCompile;
+                res = compileInWorkingDir(cacheCompileArgs,
+                                          preferBitcodeCompile ? compilerlib::OutputMode::ToFile
+                                                               : compilerlib::OutputMode::ToMemory);
 
                 if (preferBitcodeCompile && (!res || !res->success))
                 {
-                    bool retriedForFallbackCompile = false;
-                    auto fallbackResult = compileWithConfiguredWorkingDir(
-                        args, compilerlib::OutputMode::ToMemory, retriedForFallbackCompile);
-                    retriedWithWorkingDir = retriedWithWorkingDir || retriedForFallbackCompile;
+                    auto fallbackResult =
+                        compileInWorkingDir(args, compilerlib::OutputMode::ToMemory);
                     if (fallbackResult)
                         res = std::move(fallbackResult);
                 }
@@ -1083,7 +1049,7 @@ namespace ctrace::stack::analysis
                                                     "input.cache.parse_dependencies");
                         return parseDepfileDependencies(cachePaths.depFile, workingDir);
                     }();
-                    const std::string sourcePath = makeAbsolutePathFrom(filename, workingDir);
+                    const std::string& sourcePath = inputPath;
                     sourceSnapshot = [&]() -> std::optional<FileSnapshot>
                     {
                         const ScopedHotspot hotspot(config.timing,
@@ -1100,21 +1066,17 @@ namespace ctrace::stack::analysis
             }
             else
             {
-                res = compileWithConfiguredWorkingDir(preferBitcodeCompile ? bitcodeArgs : args,
-                                                      preferBitcodeCompile
-                                                          ? compilerlib::OutputMode::ToFile
-                                                          : compilerlib::OutputMode::ToMemory,
-                                                      retriedWithWorkingDir);
+                res = compileInWorkingDir(preferBitcodeCompile ? bitcodeArgs : args,
+                                          preferBitcodeCompile ? compilerlib::OutputMode::ToFile
+                                                               : compilerlib::OutputMode::ToMemory);
                 if (res && res->success)
                 {
                     compiledViaBitcode = preferBitcodeCompile;
                 }
                 else if (preferBitcodeCompile)
                 {
-                    bool retriedForFallbackCompile = false;
-                    auto fallbackResult = compileWithConfiguredWorkingDir(
-                        args, compilerlib::OutputMode::ToMemory, retriedForFallbackCompile);
-                    retriedWithWorkingDir = retriedWithWorkingDir || retriedForFallbackCompile;
+                    auto fallbackResult =
+                        compileInWorkingDir(args, compilerlib::OutputMode::ToMemory);
                     if (fallbackResult)
                         res = std::move(fallbackResult);
                 }
@@ -1140,8 +1102,7 @@ namespace ctrace::stack::analysis
                 auto ms =
                     std::chrono::duration_cast<std::chrono::milliseconds>(compileEnd - compileStart)
                         .count();
-                coretrace::log(coretrace::Level::Info, "Compilation done in {} ms{}\n", ms,
-                               retriedWithWorkingDir ? " (retry with working directory)" : "");
+                coretrace::log(coretrace::Level::Info, "Compilation done in {} ms\n", ms);
             }
 
             std::string llvmIRForCache;
@@ -1195,10 +1156,8 @@ namespace ctrace::stack::analysis
             {
                 if (compiledViaBitcode)
                 {
-                    bool retriedForTextFallback = false;
-                    auto textFallback = compileWithConfiguredWorkingDir(
-                        args, compilerlib::OutputMode::ToMemory, retriedForTextFallback);
-                    retriedWithWorkingDir = retriedWithWorkingDir || retriedForTextFallback;
+                    auto textFallback =
+                        compileInWorkingDir(args, compilerlib::OutputMode::ToMemory);
                     if (!textFallback)
                         return result;
                     res = std::move(textFallback);
@@ -1296,7 +1255,7 @@ namespace ctrace::stack::analysis
             cwdErr ? std::string() : baseDir.lexically_normal().generic_string();
         const CompileIRCachePaths cachePaths =
             isTextIRInput
-                ? buildCompileIRCachePaths(config, filename, result.language, {}, cacheWorkingDir)
+                ? buildCompileIRCachePaths(config, inputPath, result.language, {}, cacheWorkingDir)
                 : CompileIRCachePaths{};
 
         if (isTextIRInput && cachePaths.enabled)
@@ -1398,7 +1357,7 @@ namespace ctrace::stack::analysis
         const auto parseStart = Clock::now();
         {
             const ScopedHotspot hotspot(config.timing, "input.parse_ir_file");
-            result.module = llvm::parseIRFile(filename, err, ctx);
+            result.module = llvm::parseIRFile(inputPath, err, ctx);
         }
         if (config.timing)
         {
@@ -1412,10 +1371,10 @@ namespace ctrace::stack::analysis
         {
             if (isTextIRInput && cachePaths.enabled)
             {
-                if (const auto sourceSnapshot = captureFileSnapshot(filename))
+                if (const auto sourceSnapshot = captureFileSnapshot(inputPath))
                 {
                     std::string sourceIR;
-                    (void)readTextFile(filename, sourceIR);
+                    (void)readTextFile(inputPath, sourceIR);
 
                     std::string llvmBitcode;
                     llvm::raw_string_ostream bitcodeStream(llvmBitcode);

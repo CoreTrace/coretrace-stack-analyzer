@@ -2116,18 +2116,10 @@ namespace ctrace::stack::analysis
         return true;
     }
 
-    static bool exitTransformerEquals(const ownership::ExitTransformer& a,
-                                      const ownership::ExitTransformer& b)
-    {
-        return a.present == b.present && a.returns == b.returns && a.outArgs == b.outArgs &&
-               a.params == b.params && a.pointeeParams == b.pointeeParams;
-    }
-
     bool ownershipSummaryEquals(const ownership::FunctionOwnershipSummary& lhs,
                                 const ownership::FunctionOwnershipSummary& rhs)
     {
-        return lhs.incomplete == rhs.incomplete && exitTransformerEquals(lhs.normal, rhs.normal) &&
-               exitTransformerEquals(lhs.exceptional, rhs.exceptional);
+        return ownership::sameSummary(lhs, rhs);
     }
 
     /// Transformer summaries of every analysed definition, iterated to a fixpoint so that
@@ -2153,43 +2145,36 @@ namespace ctrace::stack::analysis
             if (!F.isDeclaration() && shouldAnalyze(F))
                 functions.push_back(&F);
         }
-        // Start from "no effect" transformers so a recursive callee is optimistic first
-        // and widens monotonically.
-        for (llvm::Function* F : functions)
-            summaries[F] = FunctionOwnershipSummary{};
+        std::unordered_map<const llvm::Function*, std::size_t> indexOf;
+        for (std::size_t i = 0; i < functions.size(); ++i)
+            indexOf.emplace(functions[i], i);
 
-        const ownership::SummaryLookup lookup{
-            [&](const llvm::Function& callee) -> const FunctionOwnershipSummary*
-            {
-                if (const auto it = summaries.find(&callee); it != summaries.end())
-                    return &it->second;
-                const auto ext = externalByName.find(
-                    ctrace_tools::canonicalizeMangledName(callee.getName().str()));
-                return ext == externalByName.end() ? nullptr : ext->second;
-            }};
-
+        // Every summary starts as "no effect", so a recursive callee is optimistic first and
+        // widens monotonically. The summaries of this module are read through consult, which
+        // lets the fixed point know what each computation consulted; those of other modules do
+        // not change here.
         const llvm::DataLayout& DL = mod.getDataLayout();
         constexpr unsigned kMaxRounds = 16;
-        for (unsigned round = 0; round < kMaxRounds; ++round)
-        {
-            bool changed = false;
-            for (llvm::Function* F : functions)
+        const std::vector<FunctionOwnershipSummary> computed = ownership::computeSummaryFixpoint(
+            functions.size(),
+            [&](std::size_t i, const ownership::ConsultSummary& consult)
             {
+                const ownership::SummaryLookup lookup{
+                    [&](const llvm::Function& callee) -> const FunctionOwnershipSummary*
+                    {
+                        if (const auto it = indexOf.find(&callee); it != indexOf.end())
+                            return &consult(it->second);
+                        const auto ext = externalByName.find(
+                            ctrace_tools::canonicalizeMangledName(callee.getName().str()));
+                        return ext == externalByName.end() ? nullptr : ext->second;
+                    }};
                 const ownership::CollectedFunction collected =
-                    ownership::collectOwnershipFacts(*F, model, lookup, DL);
-                FunctionOwnershipSummary next = ownership::computeSummary(collected.facts);
-                if (!ownershipSummaryEquals(summaries[F], next))
-                {
-                    summaries[F] = std::move(next);
-                    changed = true;
-                }
-            }
-            if (!changed)
-                return summaries;
-        }
-        // No fixpoint within budget: nothing computed here may be trusted.
-        for (auto& [F, summary] : summaries)
-            summary.incomplete = true;
+                    ownership::collectOwnershipFacts(*functions[i], model, lookup, DL);
+                return ownership::computeSummary(collected.facts);
+            },
+            kMaxRounds);
+        for (std::size_t i = 0; i < functions.size(); ++i)
+            summaries[functions[i]] = computed[i];
         return summaries;
     }
 

@@ -13,6 +13,7 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -1656,6 +1657,22 @@ namespace ctrace::stack::cli
                 return makeError(unknownOptionErrorWithSuggestion(argStr));
 
             parsed.inputFilenames.emplace_back(std::move(argStr));
+        }
+
+        // The analysis opens these while other threads may be compiling from the directory of
+        // their compile command: they are anchored to the directory the analyzer starts from.
+        std::error_code startDirError;
+        const std::filesystem::path startDir = std::filesystem::current_path(startDirError);
+        if (!startDirError)
+        {
+            for (std::string* path :
+                 {&cfg.escapeModelPath, &cfg.bufferModelPath, &cfg.resourceModelPath,
+                  &cfg.resourceSummaryCacheDir, &cfg.compileIRCacheDir, &cfg.dumpIRPath,
+                  &parsed.compileCommandsPath})
+            {
+                *path = resolveConfigRelativePath(*path, startDir);
+            }
+            cfg.inputBaseDir = startDir.string();
         }
 
         return result;

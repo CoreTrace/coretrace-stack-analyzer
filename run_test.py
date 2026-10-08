@@ -2073,6 +2073,160 @@ def check_unknown_alloca_virtual_callback_escape() -> bool:
     return True
 
 
+def check_resource_model_across_compile_directories() -> bool:
+    """
+    A resource model given by a relative path is loaded, and used, whatever the job count, while
+    the files compile from compile-command directories of their own. Each directory holds the one
+    header its file includes through a relative -I, so a file compiles only from its own
+    directory; the analyzer must come back to the directory it started from, where the model and
+    the relative cache directories are. Every run starts with empty caches, and a leak that only
+    the model defines must be reported in every file. The relative paths must be anchored to the
+    start directory. The start directory also holds a header of the same name for every file,
+    one that drops the leak: a file compiled from there instead of its own directory loses it.
+    The files are given by absolute paths, then by paths relative to the start directory, which
+    must resolve there whatever directory another file is compiling from at the time; the
+    results name each file as it was given.
+    """
+    print("=== Testing the resource model across compile-command directories ===")
+    unit_count = 8
+    ok = True
+    with tempfile.TemporaryDirectory(prefix="ct_resource_model_cwd_") as tmp:
+        root = Path(tmp)
+        project = root / "project"
+        entries = []
+        for i in range(unit_count):
+            unit_dir = project / f"unit{i}"
+            (unit_dir / "include").mkdir(parents=True)
+            (unit_dir / "include" / f"unit{i}.h").write_text(
+                "void* ct_open_widget(void);\nvoid ct_close_widget(void* w);\n"
+            )
+            source = unit_dir / f"unit{i}.c"
+            source.write_text(
+                f'#include "unit{i}.h"\n\n'
+                f"int leak_widget_{i}(void)\n{{\n    void* w = ct_open_widget();\n"
+                "    return w != 0;\n}\n\n"
+                f"int keep_widget_{i}(void)\n{{\n    void* w = ct_open_widget();\n"
+                "    ct_close_widget(w);\n    return 0;\n}\n"
+            )
+            entries.append(
+                {
+                    "directory": str(unit_dir),
+                    "file": str(source),
+                    "arguments": ["cc", "-Iinclude", "-c", str(source), "-o", f"unit{i}.o"],
+                }
+            )
+        compdb = project / "compile_commands.json"
+        compdb.write_text(json.dumps(entries, indent=2))
+        run_dir = root / "run"
+        (run_dir / "include").mkdir(parents=True)
+        for i in range(unit_count):
+            (run_dir / "include" / f"unit{i}.h").write_text(
+                "#define ct_open_widget() ((void*)0)\nvoid ct_close_widget(void* w);\n"
+            )
+        (run_dir / "widget-model.txt").write_text(
+            "acquire_ret ct_open_widget Widget\nrelease_arg ct_close_widget 0 Widget\n"
+        )
+        sources = [entry["file"] for entry in entries]
+        expected = {f"leak_widget_{i}" for i in range(unit_count)}
+
+        analyzer = str(Path(RUN_CONFIG.analyzer).resolve())
+
+        def run_from_start_dir(args):
+            try:
+                return subprocess.run(
+                    [analyzer, *args],
+                    cwd=run_dir,
+                    capture_output=True,
+                    text=True,
+                    timeout=RUN_CONFIG.analyzer_timeout,
+                )
+            except subprocess.TimeoutExpired:
+                return None
+
+        start_dir = run_dir.resolve()
+        result = run_from_start_dir(
+            [
+                "--print-effective-config",
+                f"--compile-commands={compdb}",
+                "--resource-model=widget-model.txt",
+                "--compile-ir-cache-dir=caches-config/compile-ir",
+                sources[0],
+            ]
+        )
+        printed = (result.stdout + result.stderr) if result else ""
+        for line in (
+            f"resource-model: {start_dir / 'widget-model.txt'}",
+            f"compile-ir-cache-dir: {start_dir / 'caches-config' / 'compile-ir'}",
+        ):
+            if line in printed:
+                print(f"  ✅ effective configuration: {line.split(':')[0]} anchored to start")
+            else:
+                print(f"  ❌ effective configuration lacks '{line}'")
+                ok = False
+
+        relative_sources = [os.path.relpath(source, run_dir) for source in sources]
+        runs = [
+            (paths, given, mode)
+            for paths, given in (("absolute paths", sources), ("relative paths", relative_sources))
+            for mode in ([], ["--jobs=1"], ["--jobs=4"])
+        ]
+        for paths, given, mode in runs:
+            label = f"{paths}, {mode[0] if mode else 'default jobs'}"
+            for attempt in range(1, 4):
+                caches = f"caches-{label.replace('=', '').replace(', ', '-').replace(' ', '-')}-{attempt}"
+                cmd = [
+                    analyzer,
+                    "--format=json",
+                    f"--compile-commands={compdb}",
+                    "--resource-model=widget-model.txt",
+                    f"--compile-ir-cache-dir={caches}/compile-ir",
+                    f"--resource-summary-cache-dir={caches}/resource",
+                    *mode,
+                    *given,
+                ]
+                result = run_from_start_dir(cmd[1:])
+                if result is None:
+                    print(f"  ❌ {label}, run {attempt}: timed out")
+                    ok = False
+                    continue
+                problems = []
+                if "cannot open model file" in result.stderr:
+                    problems.append("the model failed to load")
+                try:
+                    diagnostics = json.loads(result.stdout or "").get("diagnostics", [])
+                except json.JSONDecodeError:
+                    diagnostics = None
+                    problems.append(f"no JSON output (exit {result.returncode})")
+                if diagnostics is not None:
+                    found = {
+                        d.get("location", {}).get("function")
+                        for d in diagnostics
+                        if d.get("ruleId") == "ResourceLifetime.MissingRelease"
+                    }
+                    if found != expected:
+                        problems.append(f"leaks reported in {sorted(found)}")
+                    files = {
+                        d.get("location", {}).get("file")
+                        for d in diagnostics
+                        if d.get("ruleId") == "ResourceLifetime.MissingRelease"
+                    }
+                    if found == expected and files != set(given):
+                        problems.append(f"leaks not named as given: {sorted(files)}")
+                for cache in ("compile-ir", "resource"):
+                    if not (run_dir / caches / cache).is_dir():
+                        problems.append(f"no {cache} cache under the start directory")
+                strays = sorted(str(p.relative_to(root)) for p in project.rglob(caches))
+                if strays:
+                    problems.append(f"caches under the compile directories: {strays}")
+                if problems:
+                    print(f"  ❌ {label}, run {attempt}: {'; '.join(problems)}")
+                    ok = False
+                else:
+                    print(f"  ✅ {label}, run {attempt}: model used in {unit_count} files")
+    print()
+    return ok
+
+
 def check_resource_lifetime_cross_tu() -> bool:
     """
     Regression: cross-TU resource summaries must propagate acquire/release effects
@@ -3361,6 +3515,120 @@ def check_escape_model_rejects_unsupported_brackets() -> bool:
 
     print("  ✅ stack escape model bracket-class rejection OK\n")
     return True
+
+
+def check_compile_ir_cache_rebuilds_previous_schema() -> bool:
+    """
+    A file used to be compiled from the current directory, and from its compile command's only
+    when that failed: with a header of the same name in both, the compile IR cache kept the IR
+    built with the wrong one. Compiling from the command's directory changes the IR of an
+    unchanged command, so the cache schema changed.
+
+    The schema is in two places: the cache key, and the metadata of each entry. An entry stored
+    under a previous key is never looked up again; this check covers the other one. It rewrites
+    the entry of the current key as the previous pipeline left it: the previous schema, and the
+    IR built with the start directory's header (7, where the command's header gives 42), with
+    the sources and dependencies left valid. The next run must compile again and give 42, and
+    rewrite the entry; the run after it must reuse that entry and give 42 again.
+    """
+    print("=== Testing that compile IR cached under a previous schema is rebuilt ===")
+    ok = True
+    with tempfile.TemporaryDirectory(prefix="ct_compile_ir_schema_") as tmp:
+        root = Path(tmp)
+        (root / "start" / "include").mkdir(parents=True)
+        (root / "start" / "include" / "config.h").write_text("#define VALUE 7\n")
+        (root / "project" / "build" / "include").mkdir(parents=True)
+        (root / "project" / "build" / "include" / "config.h").write_text("#define VALUE 42\n")
+        source = root / "project" / "value.c"
+        source.write_text("#include <config.h>\nint value(void) { return VALUE; }\n")
+        compdb = root / "project" / "compile_commands.json"
+        compdb.write_text(json.dumps([{
+            "directory": str(root / "project" / "build"),
+            "file": str(source),
+            "arguments": ["cc", "-Iinclude", "-c", str(source)],
+        }]))
+        cache = root / "compile-ir"
+        analyzer = str(Path(RUN_CONFIG.analyzer).resolve())
+
+        def run(name):
+            dump = root / f"ir-{name}"
+            try:
+                result = subprocess.run(
+                    [analyzer, "--timing", f"--compile-commands={compdb}",
+                     "--compile-ir-format=ll", f"--compile-ir-cache-dir={cache}",
+                     f"--dump-ir={dump}/", str(source)],
+                    cwd=root / "start", capture_output=True, text=True,
+                    timeout=RUN_CONFIG.analyzer_timeout,
+                )
+            except subprocess.TimeoutExpired:
+                return None, False
+            returned = re.findall(r"ret i32 (\d+)", "".join(p.read_text() for p in dump.glob("*.ll")))
+            return (returned[0] if returned else None), "Compilation cache hit" in result.stderr
+
+        value, _ = run("empty")
+        entries = sorted(cache.glob("*.json"))
+        if value != "42" or len(entries) != 1:
+            print(f"  ❌ with an empty cache: returns {value}, {len(entries)} cache entries")
+            return False
+        metadata = json.loads(entries[0].read_text())
+        current = metadata["schema"]
+        ir_file = entries[0].with_suffix(".ll")
+        metadata["schema"] = "compile-ir-cache-v2"
+        entries[0].write_text(json.dumps(metadata))
+        ir_file.write_text(ir_file.read_text().replace("ret i32 42", "ret i32 7"))
+
+        value, hit = run("previous")
+        rewritten = json.loads(entries[0].read_text())["schema"]
+        if value == "42" and not hit and rewritten == current:
+            print("  ✅ an entry of the previous schema is compiled again and rewritten")
+        else:
+            ok = False
+            print(f"  ❌ with the previous schema: returns {value}, cache hit {hit}, entry schema {rewritten}")
+        value, hit = run("rebuilt")
+        if value == "42" and hit:
+            print("  ✅ the rewritten entry is reused")
+        else:
+            ok = False
+            print(f"  ❌ after the rebuild: returns {value}, cache hit {hit}")
+    print()
+    return ok
+
+
+def check_unreadable_model_fails() -> bool:
+    """
+    A model the command line asks for, but that cannot be read, is a configuration error: the
+    analyzer must stop with a nonzero code naming the file, and run_code_analysis.py must fail,
+    instead of analyzing without the model and reporting success.
+    """
+    print("=== Testing that a requested model that cannot be read fails the run ===")
+    ok = True
+    with tempfile.TemporaryDirectory(prefix="ct_unreadable_model_") as tmp:
+        tmpdir = Path(tmp)
+        source = tmpdir / "leak.c"
+        source.write_text("void* acquire_handle(void);\nvoid leak(void) { (void)acquire_handle(); }\n")
+        missing = tmpdir / "missing-model.txt"
+        for option in ("--resource-model", "--escape-model", "--buffer-model"):
+            for path, what in ((missing, "missing file"), (tmpdir, "directory")):
+                result = run_analyzer_uncached([f"{option}={path}", str(source)])
+                output = (result.stdout or "") + (result.stderr or "")
+                if result.returncode != 0 and str(path) in output:
+                    print(f"  ✅ {option}, {what}: code {result.returncode}, file named")
+                else:
+                    print(f"  ❌ {option}, {what}: code {result.returncode}, file named: {str(path) in output}")
+                    ok = False
+        script = _run_ci_script(
+            ["--analyzer", str(RUN_CONFIG.analyzer), "--fail-on", "warning",
+             f"--analyzer-arg=--resource-model={missing}", str(source)],
+            jobs=1,
+        )
+        if script.returncode != 0:
+            print(f"  ✅ run_code_analysis.py with a missing model: code {script.returncode}")
+        else:
+            print("  ❌ run_code_analysis.py passed with a missing model")
+            print((script.stdout or "") + (script.stderr or ""))
+            ok = False
+    print()
+    return ok
 
 
 def check_docker_entrypoint_guardrails() -> bool:
@@ -5055,6 +5323,7 @@ def main() -> int:
         check_exclude_dir_filter,
         check_multi_tu_folder_analysis,
         check_resource_lifetime_cross_tu,
+        check_resource_model_across_compile_directories,
         check_ownership_cross_tu,
         check_ownership_wrapper_metadata,
         check_uninitialized_cross_tu,
@@ -5068,6 +5337,8 @@ def main() -> int:
         check_noreturn_cross_tu,
         check_use_after_free_advanced_inter_tu,
         check_escape_model_rejects_unsupported_brackets,
+        check_compile_ir_cache_rebuilds_previous_schema,
+        check_unreadable_model_fails,
         check_human_vs_json_parity,
         check_diagnostic_rule_coverage_regression,
         check_diagnostic_cwe_coverage,

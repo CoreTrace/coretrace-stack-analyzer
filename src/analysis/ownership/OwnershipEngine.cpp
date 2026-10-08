@@ -4,7 +4,9 @@
 #include <algorithm>
 #include <array>
 #include <deque>
+#include <optional>
 #include <string>
+#include <utility>
 
 namespace ctrace::stack::analysis::ownership
 {
@@ -304,6 +306,7 @@ namespace ctrace::stack::analysis::ownership
             const std::uint32_t block = worklist.front();
             worklist.pop_front();
             queued[block] = false;
+            ++result.blockVisits;
 
             AbstractState state = result.in[block];
             for (const Event& e : facts.blocks[block].events)
@@ -476,9 +479,20 @@ namespace ctrace::stack::analysis::ownership
         }
     } // namespace
 
-    FunctionOwnershipSummary computeSummary(const OwnershipFacts& facts, unsigned iterationLimit)
+    FunctionOwnershipSummary computeSummary(const OwnershipFacts& facts, unsigned iterationLimit,
+                                            SummaryWork* work)
     {
         FunctionOwnershipSummary summary;
+        const auto solveCounted = [&](const AbstractState& entry)
+        {
+            OwnershipResult res = solve(facts, entry, iterationLimit);
+            if (work)
+            {
+                ++work->solves;
+                work->blockVisits += res.blockVisits;
+            }
+            return res;
+        };
 
         // Parameters (by value, then pointees) get their own resources, numbered after the
         // function's sites.
@@ -492,66 +506,72 @@ namespace ctrace::stack::analysis::ownership
                        : facts.pointeeLocations[p - facts.paramLocations.size()].second;
         };
 
-        const auto entryWith = [&](std::size_t paramIndex, OwnState state)
+        // Every parameter gets a resource of its own, in the given entry state.
+        const auto entryWith = [&](OwnState state)
         {
             AbstractState entry = AbstractState::entry(resourceCount, facts.locations.size());
             for (std::size_t p = 0; p < paramTotal; ++p)
             {
                 const ResourceId r = newInstanceOf(paramSiteBase + static_cast<std::uint32_t>(p));
                 entry.locations[paramLocationAt(p)].add(r);
-                entry.resources[r] = StateSet::of(p == paramIndex ? state : OwnState::Owned);
+                entry.resources[r] = StateSet::of(state);
             }
             return entry;
         };
 
+        // One solve per entry state, every parameter in that state. An event acts on a resource
+        // from that resource's own state, and what a location holds never depends on any state;
+        // paths join resource by resource. So each parameter ends as it would in a solve where
+        // only it starts in that state and the others start Owned. The solve with every
+        // parameter Owned also gives the fresh resources; without parameters it is the only one.
         bool anyNormal = false;
         bool anyExceptional = false;
-        for (std::size_t p = 0; p < paramTotal; ++p)
+        std::vector<ParamTransformer> normal(paramTotal);
+        std::vector<ParamTransformer> exceptional(paramTotal);
+        OwnershipResult res;
+        for (const OwnState state : kAllStates)
         {
-            const ResourceId r = newInstanceOf(paramSiteBase + static_cast<std::uint32_t>(p));
-            ParamTransformer normal{};
-            ParamTransformer exceptional{};
-            for (const OwnState state : kAllStates)
+            if (paramTotal == 0 && state != OwnState::Owned)
+                continue;
+            OwnershipResult solved = solveCounted(entryWith(state));
+            if (solved.incomplete)
             {
-                const OwnershipResult res = solve(facts, entryWith(p, state), iterationLimit);
-                if (res.incomplete)
+                summary.incomplete = true;
+                return summary;
+            }
+            for (const ExitRecord& exit : solved.exits)
+            {
+                (exit.exceptional ? anyExceptional : anyNormal) = true;
+                for (std::size_t p = 0; p < paramTotal; ++p)
                 {
-                    summary.incomplete = true;
-                    return summary;
-                }
-                for (const ExitRecord& exit : res.exits)
-                {
-                    ParamTransformer& t = exit.exceptional ? exceptional : normal;
+                    const ResourceId r =
+                        newInstanceOf(paramSiteBase + static_cast<std::uint32_t>(p));
+                    ParamTransformer& t = exit.exceptional ? exceptional[p] : normal[p];
                     t[static_cast<std::size_t>(state)] |= exit.state.resources[r];
                     if (exit.state.uncertain[r])
                         t.uncertainInputs |= StateSet::of(state);
-                    (exit.exceptional ? anyExceptional : anyNormal) = true;
                 }
             }
+            if (state == OwnState::Owned)
+                res = std::move(solved);
+        }
+        for (std::size_t p = 0; p < paramTotal; ++p)
+        {
             if (p < facts.paramLocations.size())
             {
                 const unsigned argIndex = facts.paramLocations[p].first;
-                summary.normal.params[argIndex] = normal;
-                summary.exceptional.params[argIndex] = exceptional;
+                summary.normal.params[argIndex] = normal[p];
+                summary.exceptional.params[argIndex] = exceptional[p];
             }
             else
             {
                 const ArgPath& path = facts.pointeeLocations[p - facts.paramLocations.size()].first;
-                summary.normal.pointeeParams[path] = normal;
-                summary.exceptional.pointeeParams[path] = exceptional;
+                summary.normal.pointeeParams[path] = normal[p];
+                summary.exceptional.pointeeParams[path] = exceptional[p];
             }
         }
 
-        // Fresh resources: one solve with every parameter Owned (or none).
-        const OwnershipResult res =
-            solve(facts, entryWith(paramTotal, OwnState::Owned), iterationLimit);
-        if (res.incomplete)
-        {
-            summary.incomplete = true;
-            return summary;
-        }
-        for (const ExitRecord& exit : res.exits)
-            (exit.exceptional ? anyExceptional : anyNormal) = true;
+        // Fresh resources: read off the solve with every parameter Owned.
         const ResourceId paramResourceLowerBound = newInstanceOf(paramSiteBase);
         summary.normal.returns.certainty = freshResourceCertainty(
             facts, res, false, LocationKind::Return, ArgPath{}, paramResourceLowerBound);
@@ -581,5 +601,69 @@ namespace ctrace::stack::analysis::ownership
         summary.normal.present = anyNormal;
         summary.exceptional.present = anyExceptional;
         return summary;
+    }
+
+    bool sameSummary(const FunctionOwnershipSummary& a, const FunctionOwnershipSummary& b)
+    {
+        const auto sameExit = [](const ExitTransformer& x, const ExitTransformer& y)
+        {
+            return x.present == y.present && x.returns == y.returns && x.outArgs == y.outArgs &&
+                   x.params == y.params && x.pointeeParams == y.pointeeParams;
+        };
+        return a.incomplete == b.incomplete && sameExit(a.normal, b.normal) &&
+               sameExit(a.exceptional, b.exceptional);
+    }
+
+    std::vector<FunctionOwnershipSummary> computeSummaryFixpoint(
+        std::size_t count,
+        const std::function<FunctionOwnershipSummary(std::size_t, const ConsultSummary&)>& compute,
+        unsigned maxRounds, SummaryFixpointWork* work)
+    {
+        std::vector<FunctionOwnershipSummary> summaries(count);
+        // A summary's version grows each time it changes. A computation records the version of
+        // every summary it consults; while none of them has changed since, computing again would
+        // give the same summary, so it is kept.
+        std::vector<std::uint64_t> version(count, 0);
+        std::vector<std::optional<std::vector<std::pair<std::size_t, std::uint64_t>>>> consulted(
+            count);
+        for (unsigned round = 0; round < maxRounds; ++round)
+        {
+            if (work)
+                ++work->rounds;
+            bool changed = false;
+            for (std::size_t i = 0; i < count; ++i)
+            {
+                if (consulted[i] &&
+                    std::all_of(consulted[i]->begin(), consulted[i]->end(), [&](const auto& input)
+                                { return version[input.first] == input.second; }))
+                {
+                    if (work)
+                        ++work->reused;
+                    continue;
+                }
+                std::vector<std::pair<std::size_t, std::uint64_t>> inputs;
+                const ConsultSummary consult = [&](std::size_t j) -> const FunctionOwnershipSummary&
+                {
+                    inputs.emplace_back(j, version[j]);
+                    return summaries[j];
+                };
+                FunctionOwnershipSummary next = compute(i, consult);
+                if (work)
+                    ++work->computations;
+                consulted[i] = std::move(inputs);
+                if (!sameSummary(summaries[i], next))
+                {
+                    summaries[i] = std::move(next);
+                    ++version[i];
+                    changed = true;
+                }
+            }
+            if (!changed)
+                return summaries;
+        }
+        // No fixpoint within budget: nothing computed here may be trusted.
+        for (FunctionOwnershipSummary& summary : summaries)
+            summary.incomplete = true;
+        return summaries;
     }
 } // namespace ctrace::stack::analysis::ownership

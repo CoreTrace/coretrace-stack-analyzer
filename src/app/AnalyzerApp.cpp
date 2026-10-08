@@ -835,6 +835,26 @@ static AppStatus configureDumpIRPath(const std::vector<std::string>& inputFilena
     return AppStatus::success();
 }
 
+// A model the command line asks for is read by the analyses that use it, which only log a
+// failure and run without it: an unreadable model would pass for a run that found nothing.
+static AppStatus checkRequestedModelsReadable(const AnalysisConfig& cfg)
+{
+    const std::pair<const char*, const std::string*> models[] = {
+        {"resource", &cfg.resourceModelPath},
+        {"stack escape", &cfg.escapeModelPath},
+        {"buffer", &cfg.bufferModelPath},
+    };
+    for (const auto& [kind, path] : models)
+    {
+        if (path->empty())
+            continue;
+        std::error_code fsErr;
+        if (!std::filesystem::is_regular_file(*path, fsErr) || !std::ifstream(*path))
+            return AppStatus::failure(std::string("Cannot read ") + kind + " model file: " + *path);
+    }
+    return AppStatus::success();
+}
+
 static void printInterprocStatus(const AnalysisConfig& cfg, std::size_t inputCount,
                                  bool needsCrossTUResourceSummaries,
                                  bool needsCrossTUUninitializedSummaries,
@@ -2615,6 +2635,10 @@ class RunPlanBuilder
         plan.outputFormat = parsedArgs_.outputFormat;
         plan.sarifBaseDir = std::move(parsedArgs_.sarifBaseDir);
         plan.sarifOutPath = std::move(parsedArgs_.sarifOutPath);
+
+        AppStatus modelStatus = checkRequestedModelsReadable(plan.cfg);
+        if (!modelStatus.isOk())
+            return AppResult<RunPlan>::failure(std::move(modelStatus.error));
 
         if (parsedArgs_.compileCommandsExplicit)
         {
