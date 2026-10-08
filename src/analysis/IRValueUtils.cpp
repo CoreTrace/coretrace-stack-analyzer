@@ -7,6 +7,7 @@
 #include <llvm/IR/DebugInfo.h>
 #include <llvm/IR/DebugInfoMetadata.h>
 #include <llvm/IR/Function.h>
+#include <llvm/IR/GlobalAlias.h>
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/IntrinsicInst.h>
 #include <llvm/IR/Value.h>
@@ -26,8 +27,15 @@ namespace ctrace::stack::analysis
 
     llvm::Function* directCallee(const llvm::CallBase& call)
     {
-        return llvm::dyn_cast<llvm::Function>(
-            call.getCalledOperand()->stripPointerCastsAndAliases());
+        llvm::Value* callee = call.getCalledOperand()->stripPointerCasts();
+        while (auto* alias = llvm::dyn_cast<llvm::GlobalAlias>(callee))
+        {
+            // The link may replace an interposable alias, a weak one, by another definition.
+            if (alias->isInterposable())
+                return nullptr;
+            callee = alias->getAliasee()->stripPointerCasts();
+        }
+        return llvm::dyn_cast<llvm::Function>(callee);
     }
 
     const llvm::StoreInst* findUniqueStoreToSlot(const llvm::AllocaInst& slot)

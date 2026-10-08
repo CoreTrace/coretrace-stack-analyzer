@@ -38,7 +38,8 @@ namespace ctrace::stack::analysis
 
     /// The function a call reaches directly, through pointer casts and aliases: on ELF targets,
     /// clang emits a complete-object constructor or destructor defined out of its class as an
-    /// alias of the base-object one, and calls the alias. Null for an indirect call.
+    /// alias of the base-object one, and calls the alias. Null for an indirect call, and for a
+    /// call through an alias that the link may replace (weak): its target is not known.
     llvm::Function* directCallee(const llvm::CallBase& call);
 
     std::string deriveAllocaName(const llvm::AllocaInst* AI);
