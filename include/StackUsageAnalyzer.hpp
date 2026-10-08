@@ -93,6 +93,8 @@ namespace ctrace::stack
         std::string smtSecondaryBackend;
         std::string smtBackend = "interval";
         std::string dumpIRPath;
+        // The directory relative input paths resolve from; empty: the current one at load.
+        std::string inputBaseDir;
         std::string escapeModelPath;
         std::string bufferModelPath;
         std::string resourceModelPath;

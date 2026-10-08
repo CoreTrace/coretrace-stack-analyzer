@@ -1672,6 +1672,7 @@ namespace ctrace::stack::cli
             {
                 *path = resolveConfigRelativePath(*path, startDir);
             }
+            cfg.inputBaseDir = startDir.string();
         }
 
         return result;

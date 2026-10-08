@@ -48,15 +48,6 @@ namespace ctrace::stack::analysis
         // directory that is not its own, and two changes never interleave.
         std::mutex gCompileInvokeMutex;
 
-        std::string makeAbsolutePath(const std::string& path)
-        {
-            std::error_code ec;
-            std::filesystem::path absPath = std::filesystem::absolute(path, ec);
-            if (ec)
-                return path;
-            return absPath.lexically_normal().generic_string();
-        }
-
         void appendIfMissing(std::vector<std::string>& args, const std::string& flag)
         {
             if (std::find(args.begin(), args.end(), flag) == args.end())
@@ -661,14 +652,15 @@ namespace ctrace::stack::analysis
             return true;
         }
 
-        bool buildCompileArgs(const std::string& filename, LanguageType language,
-                              const AnalysisConfig& config, std::vector<std::string>& args,
-                              std::string& workingDir, std::string& error)
+        bool buildCompileArgs(const std::string& filename, const std::string& inputPath,
+                              LanguageType language, const AnalysisConfig& config,
+                              std::vector<std::string>& args, std::string& workingDir,
+                              std::string& error)
         {
             const CompileCommand* command = nullptr;
             if (config.compilationDatabase)
             {
-                command = config.compilationDatabase->findCommandForFile(filename);
+                command = config.compilationDatabase->findCommandForFile(inputPath);
             }
 
             if (command)
@@ -713,7 +705,7 @@ namespace ctrace::stack::analysis
                 args.push_back("-g");
             appendIfMissing(args, "-fno-discard-value-names");
             const bool useAbsolutePath = (command != nullptr);
-            args.push_back(useAbsolutePath ? makeAbsolutePath(filename) : filename);
+            args.push_back(useAbsolutePath ? inputPath : filename);
             return true;
         }
 
@@ -822,13 +814,19 @@ namespace ctrace::stack::analysis
         using ctrace::stack::analyzer::ScopedHotspot;
         ModuleLoadResult result;
         const ScopedHotspot totalHotspot(config.timing, "input.load_module.total");
+        // A relative input resolves from the directory the analysis started in, not from the
+        // current one: another thread may be compiling from its compile command's directory,
+        // which the whole process shares meanwhile.
         std::error_code cwdErr;
-        std::filesystem::path baseDir = std::filesystem::current_path(cwdErr);
+        const std::filesystem::path baseDir = config.inputBaseDir.empty()
+                                                  ? std::filesystem::current_path(cwdErr)
+                                                  : std::filesystem::path(config.inputBaseDir);
+        const std::string inputPath = makeAbsolutePathFrom(filename, baseDir.string());
         using Clock = std::chrono::steady_clock;
         auto compileStart = Clock::now();
         {
             const ScopedHotspot hotspot(config.timing, "input.detect_language");
-            result.language = detectLanguageFromFile(filename, ctx);
+            result.language = detectLanguageFromFile(inputPath, ctx);
         }
 
         if (result.language == LanguageType::Unknown)
@@ -846,8 +844,8 @@ namespace ctrace::stack::analysis
             bool compileArgsReady = false;
             {
                 const ScopedHotspot hotspot(config.timing, "input.build_compile_args");
-                compileArgsReady = buildCompileArgs(filename, result.language, config, args,
-                                                    workingDir, compileError);
+                compileArgsReady = buildCompileArgs(filename, inputPath, result.language, config,
+                                                    args, workingDir, compileError);
             }
             if (!compileArgsReady)
             {
@@ -859,7 +857,7 @@ namespace ctrace::stack::analysis
                 coretrace::log(coretrace::Level::Info, "Compiling {}...\n", filename);
             const bool preferBitcodeCompile = (config.compileIRFormat == CompileIRFormat::BC);
             const CompileIRCachePaths cachePaths =
-                buildCompileIRCachePaths(config, filename, result.language, args, workingDir);
+                buildCompileIRCachePaths(config, inputPath, result.language, args, workingDir);
 
             std::error_code tempDirErr;
             std::filesystem::path tempDir = std::filesystem::temp_directory_path(tempDirErr);
@@ -1051,7 +1049,7 @@ namespace ctrace::stack::analysis
                                                     "input.cache.parse_dependencies");
                         return parseDepfileDependencies(cachePaths.depFile, workingDir);
                     }();
-                    const std::string sourcePath = makeAbsolutePathFrom(filename, workingDir);
+                    const std::string& sourcePath = inputPath;
                     sourceSnapshot = [&]() -> std::optional<FileSnapshot>
                     {
                         const ScopedHotspot hotspot(config.timing,
@@ -1257,7 +1255,7 @@ namespace ctrace::stack::analysis
             cwdErr ? std::string() : baseDir.lexically_normal().generic_string();
         const CompileIRCachePaths cachePaths =
             isTextIRInput
-                ? buildCompileIRCachePaths(config, filename, result.language, {}, cacheWorkingDir)
+                ? buildCompileIRCachePaths(config, inputPath, result.language, {}, cacheWorkingDir)
                 : CompileIRCachePaths{};
 
         if (isTextIRInput && cachePaths.enabled)
@@ -1359,7 +1357,7 @@ namespace ctrace::stack::analysis
         const auto parseStart = Clock::now();
         {
             const ScopedHotspot hotspot(config.timing, "input.parse_ir_file");
-            result.module = llvm::parseIRFile(filename, err, ctx);
+            result.module = llvm::parseIRFile(inputPath, err, ctx);
         }
         if (config.timing)
         {
@@ -1373,10 +1371,10 @@ namespace ctrace::stack::analysis
         {
             if (isTextIRInput && cachePaths.enabled)
             {
-                if (const auto sourceSnapshot = captureFileSnapshot(filename))
+                if (const auto sourceSnapshot = captureFileSnapshot(inputPath))
                 {
                     std::string sourceIR;
-                    (void)readTextFile(filename, sourceIR);
+                    (void)readTextFile(inputPath, sourceIR);
 
                     std::string llvmBitcode;
                     llvm::raw_string_ostream bitcodeStream(llvmBitcode);
