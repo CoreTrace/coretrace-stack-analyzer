@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "analysis/MemIntrinsicOverflow.hpp"
+#include "analysis/IRValueUtils.hpp"
 #include "analysis/BufferWriteModel.hpp"
 
 #include <iostream>
@@ -51,19 +52,6 @@ namespace ctrace::stack::analysis
             return std::nullopt;
         }
 
-        static const llvm::Function* resolveDirectCallee(const llvm::CallBase* CB)
-        {
-            using namespace llvm;
-            if (!CB)
-                return nullptr;
-            if (const Function* direct = CB->getCalledFunction())
-                return direct;
-            const Value* callee = CB->getCalledOperand();
-            if (!callee)
-                return nullptr;
-            return dyn_cast<Function>(callee->stripPointerCasts());
-        }
-
         static ResolvedSink resolveBuiltInSink(llvm::CallBase* CB)
         {
             using namespace llvm;
@@ -101,7 +89,7 @@ namespace ctrace::stack::analysis
                 }
             }
 
-            const Function* callee = resolveDirectCallee(CB);
+            const Function* callee = directCallee(*CB);
             if (!callee)
                 return sink;
 
@@ -145,7 +133,7 @@ namespace ctrace::stack::analysis
             if (!CB || !model || !matcher)
                 return sink;
 
-            const llvm::Function* callee = resolveDirectCallee(CB);
+            const llvm::Function* callee = directCallee(*CB);
             if (!callee)
                 return sink;
 

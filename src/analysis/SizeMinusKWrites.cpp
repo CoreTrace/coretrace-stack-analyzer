@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "analysis/SizeMinusKWrites.hpp"
+#include "analysis/IRValueUtils.hpp"
 
 #include "analysis/AnalyzerUtils.hpp"
 #include "analysis/IntRanges.hpp"
@@ -272,45 +273,40 @@ namespace ctrace::stack::analysis
             bool matched = false;
             StringRef name;
 
-            Value* callee = CB->getCalledOperand();
-            if (callee)
+            if (Function* fn = directCallee(*CB))
             {
-                callee = callee->stripPointerCasts();
-                if (auto* fn = dyn_cast<Function>(callee))
+                LibFunc lf;
+                if (TLI.getLibFunc(*fn, lf))
                 {
-                    LibFunc lf;
-                    if (TLI.getLibFunc(*fn, lf))
+                    switch (lf)
                     {
-                        switch (lf)
-                        {
-                        case LibFunc_memcpy:
-                        case LibFunc_memmove:
-                        case LibFunc_memset:
-                        case LibFunc_strncpy:
-                        case LibFunc_strncat:
-                        case LibFunc_stpncpy:
-                            dst = 0;
-                            len = 2;
-                            name = fn->getName();
-                            matched = true;
-                            break;
-                        default:
-                            break;
-                        }
+                    case LibFunc_memcpy:
+                    case LibFunc_memmove:
+                    case LibFunc_memset:
+                    case LibFunc_strncpy:
+                    case LibFunc_strncat:
+                    case LibFunc_stpncpy:
+                        dst = 0;
+                        len = 2;
+                        name = fn->getName();
+                        matched = true;
+                        break;
+                    default:
+                        break;
                     }
+                }
 
-                    if (!matched)
+                if (!matched)
+                {
+                    StringRef fnName = fn->getName();
+                    if (fnName.contains("memcpy") || fnName.contains("memmove") ||
+                        fnName.contains("memset") || fnName.contains("strncpy") ||
+                        fnName.contains("strncat") || fnName.contains("stpncpy"))
                     {
-                        StringRef fnName = fn->getName();
-                        if (fnName.contains("memcpy") || fnName.contains("memmove") ||
-                            fnName.contains("memset") || fnName.contains("strncpy") ||
-                            fnName.contains("strncat") || fnName.contains("stpncpy"))
-                        {
-                            dst = 0;
-                            len = 2;
-                            name = fnName;
-                            matched = true;
-                        }
+                        dst = 0;
+                        len = 2;
+                        name = fnName;
+                        matched = true;
                     }
                 }
             }
@@ -354,15 +350,13 @@ namespace ctrace::stack::analysis
                                                        const SizeMinusKSummaryMap& summaries,
                                                        const SizeMinusKWrapperIndex* elsewhere)
         {
-            if (const llvm::Function* callee = CB.getCalledFunction();
-                callee && !callee->isDeclaration())
+            const llvm::Function* declared = directCallee(CB);
+            if (declared && !declared->isDeclaration())
             {
-                const auto it = summaries.find(callee);
+                const auto it = summaries.find(declared);
                 return it == summaries.end() ? std::vector<SizeMinusKSink>{} : it->second;
             }
-            const auto* declared =
-                llvm::dyn_cast<llvm::Function>(CB.getCalledOperand()->stripPointerCasts());
-            if (!elsewhere || !declared || !declared->isDeclaration())
+            if (!elsewhere || !declared)
                 return {};
             const auto it = elsewhere->functions.find(linkerSymbolName(*declared));
             if (it == elsewhere->functions.end() || it->second.params != CB.arg_size())

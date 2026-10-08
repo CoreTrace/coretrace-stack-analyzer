@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "passes/ModulePasses.hpp"
+#include "analysis/IRValueUtils.hpp"
 
 #include <llvm/ADT/DenseMap.h>
 #include <llvm/ADT/DenseSet.h>
@@ -7,6 +8,7 @@
 #include <llvm/ADT/SmallVector.h>
 #include <llvm/Analysis/TargetLibraryInfo.h>
 #include <llvm/IR/CFG.h>
+#include <llvm/IR/InstIterator.h>
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/PassManager.h>
 #include <llvm/Passes/PassBuilder.h>
@@ -39,7 +41,7 @@ namespace ctrace::stack
 
         bool neverReturnsFrom(const llvm::CallBase& call, const FunctionSet& neverReturn)
         {
-            const llvm::Function* callee = call.getCalledFunction();
+            const llvm::Function* callee = analysis::directCallee(call);
             return call.doesNotReturn() || (callee && neverReturn.contains(callee));
         }
 
@@ -99,13 +101,16 @@ namespace ctrace::stack
             }
 
             llvm::DenseMap<const llvm::Function*, llvm::SmallVector<llvm::Function*, 4>> callers;
-            for (llvm::Function* F : worklist)
+            // A call through an alias is a user of the alias, not of the function: every call
+            // of the module is looked at.
+            for (llvm::Function& caller : mod)
             {
-                for (llvm::User* user : F->users())
+                for (llvm::Instruction& I : llvm::instructions(caller))
                 {
-                    auto* call = llvm::dyn_cast<llvm::CallBase>(user);
-                    if (call && call->getCalledFunction() == F)
-                        callers[F].push_back(call->getFunction());
+                    const auto* call = llvm::dyn_cast<llvm::CallBase>(&I);
+                    const llvm::Function* callee = call ? analysis::directCallee(*call) : nullptr;
+                    if (callee && neverReturn.contains(callee))
+                        callers[callee].push_back(&caller);
                 }
             }
 

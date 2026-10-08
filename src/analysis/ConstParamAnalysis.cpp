@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "analysis/ConstParamAnalysis.hpp"
+#include "analysis/IRValueUtils.hpp"
 #include "analysis/AnalyzerUtils.hpp"
 
 #include <cctype>
@@ -328,14 +329,7 @@ namespace ctrace::stack::analysis
         {
             using namespace llvm;
 
-            const Function* callee = CB.getCalledFunction();
-            if (!callee)
-            {
-                const Value* called = CB.getCalledOperand();
-                if (called)
-                    called = called->stripPointerCasts();
-                callee = dyn_cast<Function>(called);
-            }
+            const Function* callee = directCallee(CB);
 
             if (!callee)
                 return ParamWriteState::Unknown;
@@ -578,7 +572,7 @@ namespace ctrace::stack::analysis
                     continue;
                 if (CB->isCallee(&use))
                     return true;
-                const llvm::Function* callee = CB->getCalledFunction();
+                const llvm::Function* callee = directCallee(*CB);
                 if (!callee)
                     continue;
                 if (const llvm::DISubprogram* SP = callee->getSubprogram())

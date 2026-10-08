@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "app/AnalyzerApp.hpp"
+#include "analysis/IRValueUtils.hpp"
 #include "CrossTUSummaryDriver.hpp"
 
 #include "StackUsageAnalyzer.hpp"
@@ -1802,7 +1803,7 @@ static bool writeSummaryCacheFile(const std::filesystem::path& cacheFile,
     }
 
     llvm::json::Object root;
-    root["schema"] = "resource-summary-cache-v4";
+    root["schema"] = "resource-summary-cache-v5";
     root["functions"] = std::move(functionArray);
 
     std::ofstream out(cacheFile, std::ios::out | std::ios::trunc | std::ios::binary);
@@ -1833,7 +1834,7 @@ readSummaryCacheFile(const std::filesystem::path& cacheFile)
     if (!obj)
         return std::nullopt;
     auto schema = obj->getString("schema");
-    if (!schema || *schema != "resource-summary-cache-v4")
+    if (!schema || *schema != "resource-summary-cache-v5")
         return std::nullopt;
 
     const auto* functions = obj->getArray("functions");
@@ -1950,7 +1951,7 @@ struct ResourceSummaryOperations
     std::string cacheKey(std::size_t module, const std::string& externalHash) const
     {
         // Keep the schema and key components identical: this refactor changes no summaries.
-        return md5Hex("cross-tu-resource-summary-v4|" + modelHash + "|" + externalHash + "|" +
+        return md5Hex("cross-tu-resource-summary-v5|" + modelHash + "|" + externalHash + "|" +
                       filterHash + "|" + compileArgsHashes[module] + "|" + irHashes[module]);
     }
     bool usesDiskCache() const
@@ -2159,7 +2160,7 @@ buildCrossTUSummaryIndex(const std::vector<LoadedInputModule>& loadedModules,
                     const auto* CB = llvm::dyn_cast<llvm::CallBase>(&I);
                     if (!CB)
                         continue;
-                    const llvm::Function* callee = CB->getCalledFunction();
+                    const llvm::Function* callee = analysis::directCallee(*CB);
                     if (!callee || !callee->hasName() || callee->getName().empty())
                         continue;
                     const std::string canon =

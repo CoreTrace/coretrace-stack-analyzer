@@ -551,8 +551,6 @@ namespace ctrace::stack::analysis
             return resolvePointerStorageWithExtraOffset(ptr, 0, F, DL, methodInfo);
         }
 
-        const llvm::Function* resolveDirectCallee(const llvm::CallBase& CB);
-
         static void collectThisFieldOriginsFromValue(
             const llvm::Value* value, const llvm::Function& F, const llvm::DataLayout& DL,
             const MethodClassInfo& methodInfo, unsigned depth,
@@ -668,7 +666,7 @@ namespace ctrace::stack::analysis
 
             if (const auto* CB = llvm::dyn_cast<llvm::CallBase>(stripped))
             {
-                const llvm::Function* callee = resolveDirectCallee(*CB);
+                const llvm::Function* callee = directCallee(*CB);
                 if (!callee || callee->isDeclaration())
                 {
                     sawUnknownOrigin = true;
@@ -861,7 +859,6 @@ namespace ctrace::stack::analysis
             return false;
         }
 
-        const llvm::Function* resolveDirectCallee(const llvm::CallBase& CB);
         static const llvm::Instruction* firstInstructionAnchor(const llvm::Function& F);
 
         static bool summaryStorageScopeAllowed(const StorageKey& storage)
@@ -1126,7 +1123,7 @@ namespace ctrace::stack::analysis
 
                 if (const auto* CB = llvm::dyn_cast<llvm::CallBase>(user))
                 {
-                    const llvm::Function* callee = resolveDirectCallee(*CB);
+                    const llvm::Function* callee = directCallee(*CB);
                     if (!callee)
                         return false;
 
@@ -1334,7 +1331,7 @@ namespace ctrace::stack::analysis
                     if (llvm::isa<llvm::IntrinsicInst>(CB))
                         continue;
 
-                    const llvm::Function* callee = resolveDirectCallee(*CB);
+                    const llvm::Function* callee = directCallee(*CB);
                     bool modeledCall = false;
                     if (callee)
                     {
@@ -1681,7 +1678,7 @@ namespace ctrace::stack::analysis
                     if (!CB)
                         continue;
 
-                    const llvm::Function* callee = resolveDirectCallee(*CB);
+                    const llvm::Function* callee = directCallee(*CB);
                     if (!callee)
                         continue;
 
@@ -1895,17 +1892,6 @@ namespace ctrace::stack::analysis
                       [](const ParamLifetimeEffect& lhs, const ParamLifetimeEffect& rhs)
                       { return encodeSummaryEffectKey(lhs) < encodeSummaryEffectKey(rhs); });
             return out;
-        }
-
-        const llvm::Function* resolveDirectCallee(const llvm::CallBase& CB)
-        {
-            if (const llvm::Function* callee = CB.getCalledFunction())
-                return callee;
-            const llvm::Value* called = CB.getCalledOperand();
-            if (!called)
-                return nullptr;
-            called = called->stripPointerCasts();
-            return llvm::dyn_cast<llvm::Function>(called);
         }
 
         static const llvm::Instruction* firstInstructionAnchor(const llvm::Function& F)
@@ -2940,7 +2926,7 @@ namespace ctrace::stack::analysis
                     if (!CB)
                         continue;
 
-                    const llvm::Function* callee = resolveDirectCallee(*CB);
+                    const llvm::Function* callee = directCallee(*CB);
                     if (!callee)
                         continue;
 

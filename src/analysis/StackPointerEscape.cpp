@@ -270,11 +270,7 @@ namespace ctrace::stack::analysis
 
             if (const auto* CB = llvm::dyn_cast<llvm::CallBase>(stripped))
             {
-                const llvm::Value* calledVal = CB->getCalledOperand();
-                const llvm::Value* calledStripped =
-                    calledVal ? calledVal->stripPointerCasts() : nullptr;
-                const llvm::Function* directCallee =
-                    calledStripped ? llvm::dyn_cast<llvm::Function>(calledStripped) : nullptr;
+                const llvm::Function* directCallee = analysis::directCallee(*CB);
 
                 std::optional<unsigned> returnedArg =
                     getReturnedArgIndexFromCall(*CB, directCallee, returnedArgAliases);
@@ -534,11 +530,7 @@ namespace ctrace::stack::analysis
                             if (CB->getArgOperand(argIndex) != V)
                                 continue;
 
-                            const Value* calledVal = CB->getCalledOperand();
-                            const Value* calledStripped =
-                                calledVal ? calledVal->stripPointerCasts() : nullptr;
-                            const Function* directCallee =
-                                calledStripped ? dyn_cast<Function>(calledStripped) : nullptr;
+                            const Function* directCallee = analysis::directCallee(*CB);
 
                             if (callParamHasNonCaptureLikeAttr(*CB, argIndex))
                                 continue;
@@ -1097,12 +1089,7 @@ namespace ctrace::stack::analysis
                                         continue;
                                     }
 
-                                    const Value* calledVal = CB->getCalledOperand();
-                                    const Value* calledStripped =
-                                        calledVal ? calledVal->stripPointerCasts() : nullptr;
-                                    if (const auto* directCallee =
-                                            calledStripped ? dyn_cast<Function>(calledStripped)
-                                                           : nullptr)
+                                    if (const auto* directCallee = analysis::directCallee(*CB))
                                     {
                                         applyCallee(*directCallee, *CB, argIndex);
                                         continue;
@@ -1336,12 +1323,7 @@ namespace ctrace::stack::analysis
                                         if (CB->getArgOperand(argIndex) != V)
                                             continue;
 
-                                        const Value* calledVal = CB->getCalledOperand();
-                                        const Value* calledStripped =
-                                            calledVal ? calledVal->stripPointerCasts() : nullptr;
-                                        const Function* directCallee =
-                                            calledStripped ? dyn_cast<Function>(calledStripped)
-                                                           : nullptr;
+                                        const Function* directCallee = analysis::directCallee(*CB);
                                         if (callParamHasNonCaptureLikeAttr(*CB, argIndex))
                                         {
                                             continue;

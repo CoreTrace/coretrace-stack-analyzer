@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "analysis/DuplicateIfCondition.hpp"
+#include "analysis/IRValueUtils.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -338,11 +339,10 @@ namespace ctrace::stack::analysis
         // counts when the other modules make it deterministic.
         static const llvm::Function* calledFunction(const llvm::CallBase& call)
         {
-            if (const llvm::Function* callee = call.getCalledFunction())
+            const llvm::Function* callee = directCallee(call);
+            if (!callee || callee->getFunctionType() == call.getFunctionType())
                 return callee;
-            const auto* declared =
-                llvm::dyn_cast<llvm::Function>(call.getCalledOperand()->stripPointerCasts());
-            return declared && isDeterministicElsewhere(*declared) ? declared : nullptr;
+            return isDeterministicElsewhere(*callee) ? callee : nullptr;
         }
 
         static llvm::Value* stripCasts(llvm::Value* v)
