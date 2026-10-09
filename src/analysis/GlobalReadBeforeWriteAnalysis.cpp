@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "analysis/GlobalReadBeforeWriteAnalysis.hpp"
 
+#include "analysis/AnalyzerUtils.hpp"
+
+#include <cstdint>
 #include <queue>
 #include <string>
 #include <vector>
@@ -49,6 +52,20 @@ namespace ctrace::stack::analysis
             return global;
         }
 
+        // A global as the linker sees it (#166). An external global is keyed by its linker symbol,
+        // shared by the files that define and declare it. A static global is its module's own:
+        // its key also carries the module, which lives as long as the index built from it.
+        std::string summaryKey(const llvm::GlobalVariable& global)
+        {
+            if (!global.hasLocalLinkage())
+                return linkerSymbolName(global);
+            std::string key(1, '\0');
+            key += std::to_string(reinterpret_cast<std::uintptr_t>(global.getParent()));
+            key += '\0';
+            key += global.getName().str();
+            return key;
+        }
+
         const GlobalReadBeforeWriteGlobalSummary*
         lookupExternalSummary(const GlobalReadBeforeWriteSummaryIndex* externalSummaries,
                               const llvm::GlobalVariable& global)
@@ -56,7 +73,7 @@ namespace ctrace::stack::analysis
             if (!externalSummaries || !global.hasName() || global.getName().empty())
                 return nullptr;
 
-            const auto it = externalSummaries->globals.find(global.getName().str());
+            const auto it = externalSummaries->globals.find(summaryKey(global));
             if (it == externalSummaries->globals.end())
                 return nullptr;
             return &it->second;
@@ -213,7 +230,7 @@ namespace ctrace::stack::analysis
             if (!global || !global->hasName() || global->getName().empty())
                 return;
 
-            auto& summary = out.globals[global->getName().str()];
+            auto& summary = out.globals[summaryKey(*global)];
             summary.hasAnyWrite = true;
             summary.zeroInitializedArray =
                 summary.zeroInitializedArray || isTrackedDefinitionGlobal(*global);
@@ -229,7 +246,7 @@ namespace ctrace::stack::analysis
         {
             if (!isTrackedDefinitionGlobal(global) || !global.hasName() || global.getName().empty())
                 continue;
-            out.globals[global.getName().str()].zeroInitializedArray = true;
+            out.globals[summaryKey(global)].zeroInitializedArray = true;
         }
 
         for (const llvm::Function& function : mod)

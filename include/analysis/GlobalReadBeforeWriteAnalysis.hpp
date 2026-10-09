@@ -24,6 +24,8 @@ namespace ctrace::stack::analysis
 
     struct GlobalReadBeforeWriteSummaryIndex
     {
+        // Keyed by the linker symbol of an external global; a static global's key also names its
+        // module, so it is only found from that module, while the module is loaded (#166).
         std::unordered_map<std::string, GlobalReadBeforeWriteGlobalSummary> globals;
     };
 
