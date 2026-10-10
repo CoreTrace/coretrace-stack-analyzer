@@ -20,7 +20,7 @@ void consume_mut(int* p)
 }
 
 // at line 25, column 0
-// [ !Info! ] ConstParameterNotModified.Pointer: parameter 'p' in function 'caller_const' is never used to modify the pointed object
+// [ !Info! ] ConstParameterNotModified.Pointer: parameter 'p' in function 'caller_const' is only read, or passed where a pointer to const is expected
 //          ↳ current type: int *p
 //          ↳ suggested type: const int *p
 void caller_const(int* p)
