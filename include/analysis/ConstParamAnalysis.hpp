@@ -28,7 +28,10 @@ namespace ctrace::stack::analysis
         std::uint64_t pointerConstOnly : 1 = false; // ex: T * const param
         std::uint64_t isReference : 1 = false;
         std::uint64_t isRvalueRef : 1 = false;
-        std::uint64_t reservedFlags : 61 = 0;
+        // The parameter is only passed to callees whose parameter is declared to point to const:
+        // their bodies are not read, so the object is not known to be unmodified (#167).
+        std::uint64_t reliesOnCalleeConst : 1 = false;
+        std::uint64_t reservedFlags : 60 = 0;
     };
 
     // For the functions defined in the modules analyzed together, keyed by linker symbol: whether

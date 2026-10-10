@@ -2821,6 +2821,43 @@ def _check_cross_tu_rule(
     return ok
 
 
+def check_const_param_contract_message_across_files() -> bool:
+    """
+    #167: a pointer passed only to a function defined in another file, whose parameter points to
+    const, is reported for that contract alone. The message must say so: the callee's body is not
+    checked, and this one casts the qualifier away.
+    """
+    print("=== Testing the const parameter message when a callee's contract is the evidence ===")
+    sources = {
+        "def.c": "int bump(const int* p)\n{\n    *(int*)p += 1;\n    return *p;\n}\n",
+        "use.c": "int bump(const int* p);\n\nint use(int* p)\n{\n    return bump(p);\n}\n",
+    }
+    headline = (
+        "ConstParameterNotModified.Pointer: parameter 'p' in function 'use' is only read, "
+        "or passed where a pointer to const is expected"
+    )
+    caveat = "the callee's body is not checked: it may still modify the pointed object through a cast"
+    old = "is never used to modify the pointed object"
+    with tempfile.TemporaryDirectory(prefix="ct_const_contract_") as tmp:
+        root = Path(tmp)
+        for name, text in sources.items():
+            (root / name).write_text(text)
+        result = run_analyzer([str(root / "def.c"), str(root / "use.c"), "--format=json"])
+    try:
+        payload = json.loads(result.stdout or "")
+    except json.JSONDecodeError:
+        return fail_check("no JSON output", (result.stdout or "") + (result.stderr or ""))
+    messages = [
+        d.get("details", {}).get("message", "")
+        for d in payload.get("diagnostics", [])
+        if str(d.get("ruleId", "")).startswith("ConstParameterNotModified")
+    ]
+    if len(messages) != 1 or headline not in messages[0] or caveat not in messages[0] or old in messages[0]:
+        return fail_check(f"expected one contract message for use, got {messages}")
+    print("  ✅ use: reported for the contract of bump, and says so")
+    print()
+    return True
+
 def check_duplicate_if_cross_tu() -> bool:
     """
     #157: a function defined in another file is deterministic when every definition of it is, as
@@ -5459,6 +5496,7 @@ def main() -> int:
         check_uninitialized_cross_tu,
         check_uninitialized_cross_tu_no_effect,
         check_const_param_cross_tu,
+        check_const_param_contract_message_across_files,
         check_duplicate_if_cross_tu,
         check_global_read_before_write_identity_across_files,
         check_size_minus_one_cross_tu,

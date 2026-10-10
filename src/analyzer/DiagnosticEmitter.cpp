@@ -1019,38 +1019,57 @@ namespace ctrace::stack::analyzer
             else if (issue.isReference)
                 subLabel = issue.isRvalueRef ? "ReferenceRvaluePreferValue" : "Reference";
 
+            // Resting on a callee's declared const parameter, the rule only knows how the
+            // parameter is used, not that the object is unmodified (#167).
+            const char* object = issue.isReference ? "referred" : "pointed";
+            const std::string contractUse = std::string("only read, or passed where a ") +
+                                            (issue.isReference ? "reference" : "pointer") +
+                                            " to const is expected";
+            body << "\t" << prefixForSeverity(DiagnosticSeverity::Info)
+                 << " ConstParameterNotModified." << subLabel << ": parameter '" << paramName
+                 << "' in function '" << displayFuncName << "' ";
             if (issue.isRvalueRef)
             {
-                body << "\t" << prefixForSeverity(DiagnosticSeverity::Info)
-                     << " ConstParameterNotModified." << subLabel << ": parameter '" << paramName
-                     << "' in function '" << displayFuncName
-                     << "' is an rvalue reference and is never used to modify the referred "
-                        "object\n";
+                body << "is an rvalue reference and is "
+                     << (issue.reliesOnCalleeConst ? contractUse
+                                                   : "never used to modify the referred object");
+            }
+            else if (issue.pointerConstOnly)
+            {
+                body << "is declared '" << issue.currentType << "' but the pointed object is "
+                     << (issue.reliesOnCalleeConst ? contractUse : "never modified");
+            }
+            else if (issue.reliesOnCalleeConst)
+            {
+                body << "is " << contractUse;
+            }
+            else
+            {
+                body << "is never used to modify the " << object << " object";
+            }
+            body << "\n";
+
+            if (issue.isRvalueRef)
+            {
                 body << kDiagIndentArrow << "consider passing by value (" << issue.suggestedType
                      << ") or const reference (" << issue.suggestedTypeAlt << ")\n";
                 body << kDiagIndentArrow << "current type: " << issue.currentType << "\n";
             }
             else if (issue.pointerConstOnly)
             {
-                body << "\t" << prefixForSeverity(DiagnosticSeverity::Info)
-                     << " ConstParameterNotModified." << subLabel << ": parameter '" << paramName
-                     << "' in function '" << displayFuncName << "' is declared '"
-                     << issue.currentType << "' but the pointed object is never modified\n";
                 body << kDiagIndentArrow << "consider '" << issue.suggestedType
                      << "' for API const-correctness\n";
-            }
-            else
-            {
-                body << "\t" << prefixForSeverity(DiagnosticSeverity::Info)
-                     << " ConstParameterNotModified." << subLabel << ": parameter '" << paramName
-                     << "' in function '" << displayFuncName << "' is never used to modify the "
-                     << (issue.isReference ? "referred" : "pointed") << " object\n";
             }
 
             if (!issue.isRvalueRef)
             {
                 body << kDiagIndentArrow << "current type: " << issue.currentType << "\n";
                 body << kDiagIndentArrow << "suggested type: " << issue.suggestedType << "\n";
+            }
+            if (issue.reliesOnCalleeConst)
+            {
+                body << kDiagIndentArrow << "the callee's body is not checked: it may still modify "
+                     << "the " << object << " object through a cast\n";
             }
 
             DiagnosticBuilder builder;

@@ -12,7 +12,7 @@ void consume_ref_mut(int& v)
 }
 
 // at line 17, column 0
-// [ !Info! ] ConstParameterNotModified.Reference: parameter 'v' in function 'caller_ref(int&)' is never used to modify the referred object
+// [ !Info! ] ConstParameterNotModified.Reference: parameter 'v' in function 'caller_ref(int&)' is only read, or passed where a reference to const is expected
 //          ↳ current type: int &v
 //          ↳ suggested type: const int &v
 void caller_ref(int& v)

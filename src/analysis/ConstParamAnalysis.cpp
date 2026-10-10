@@ -3,6 +3,7 @@
 #include "analysis/IRValueUtils.hpp"
 #include "analysis/AnalyzerUtils.hpp"
 
+#include <algorithm>
 #include <cctype>
 
 #include <llvm/ADT/SmallPtrSet.h>
@@ -288,17 +289,22 @@ namespace ctrace::stack::analysis
         enum class ParamWriteState : std::uint8_t
         {
             NoWrite = 0,
-            Unknown = 1,
-            MayWrite = 2
+            // No write, as far as the callees' declared const parameters say: their bodies are
+            // not read, and one may cast the qualifier away (#167).
+            NoWriteByContract = 1,
+            Unknown = 2,
+            MayWrite = 3
         };
 
+        static bool writesNothing(ParamWriteState state)
+        {
+            return state == ParamWriteState::NoWrite || state == ParamWriteState::NoWriteByContract;
+        }
+
+        // The least certain of both.
         static ParamWriteState mergeParamWriteState(ParamWriteState lhs, ParamWriteState rhs)
         {
-            if (lhs == ParamWriteState::MayWrite || rhs == ParamWriteState::MayWrite)
-                return ParamWriteState::MayWrite;
-            if (lhs == ParamWriteState::Unknown || rhs == ParamWriteState::Unknown)
-                return ParamWriteState::Unknown;
-            return ParamWriteState::NoWrite;
+            return std::max(lhs, rhs);
         }
 
         static bool calleeParamIsReadOnly(const llvm::Function* callee, unsigned argIndex)
@@ -374,7 +380,7 @@ namespace ctrace::stack::analysis
                 if (it != otherModules->functions.end() && it->second.size() == CB.arg_size() &&
                     it->second[argIndex])
                 {
-                    return ParamWriteState::NoWrite;
+                    return ParamWriteState::NoWriteByContract;
                 }
             }
 
@@ -397,7 +403,7 @@ namespace ctrace::stack::analysis
             }
 
             if (calleeParamIsReadOnly(callee, argIndex))
-                return ParamWriteState::NoWrite;
+                return ParamWriteState::NoWriteByContract;
 
             return ParamWriteState::Unknown;
         }
@@ -700,7 +706,7 @@ namespace ctrace::stack::analysis
                 const ParamWriteState writeState = readOnlyByMetadata
                                                        ? ParamWriteState::NoWrite
                                                        : valueWriteState(&Arg, F, otherModules);
-                if (writeState != ParamWriteState::NoWrite)
+                if (!writesNothing(writeState))
                     continue;
 
                 const std::string paramName =
@@ -719,6 +725,7 @@ namespace ctrace::stack::analysis
                     typeInfo.isPointer && typeInfo.pointerConst && !typeInfo.pointeeConst;
                 issue.isReference = typeInfo.isReference;
                 issue.isRvalueRef = typeInfo.isRvalueReference;
+                issue.reliesOnCalleeConst = writeState == ParamWriteState::NoWriteByContract;
 
                 issue.currentType = buildTypeString(typeInfo, baseName, false, true, paramName);
                 if (typeInfo.isRvalueReference)
