@@ -628,6 +628,53 @@ Example run:
 For test files, `run_test.py` also supports per-file model selection with:
 `// resource-model: <path>`.
 
+### Const parameter suggestions checked with Clang
+
+`ConstParameterNotModified` finds, in the LLVM IR, the pointer and reference parameters through
+which nothing is written. Before reporting one, the analyzer checks the suggested type with Clang:
+
+1. Every declaration of the function that the defining file sees, in that file and its headers,
+   is rewritten in memory with the suggested type:
+   - a type written in a macro argument is rewritten where it is written;
+   - a type written by a macro that writes only the parameter gets `const` before the invocation.
+
+   A macro definition is never rewritten.
+2. Every analyzed file that reads a rewritten file, or whose code references the function, is
+   compiled again with its own compile command, at `-O0`.
+3. The suggestion is removed when one of these files:
+   - no longer compiles;
+   - gains one of these warnings: `incompatible-pointer-types-discards-qualifiers`,
+     `incompatible-pointer-types`, `incompatible-function-pointer-types`, `int-conversion`,
+     `overloaded-virtual`;
+   - declares the function, outside the rewritten files, with another parameter type;
+   - converts the function's address with an explicit cast;
+   - changes what the methods of that name override;
+   - generates different code.
+
+Generated code is compared function by function and global by global, after these
+normalizations:
+- debug information is removed;
+- metadata are compared by the places that use them, not by their numbers or contents;
+- attribute groups are compared by contents, not by numbers;
+- comments of the printed IR are ignored;
+- the symbols the rewrite renames are paired: the function, and what is named or instantiated
+  inside it. A symbol the file only declares is paired only if it is the function itself.
+
+Two differences that a program can observe are accepted, each only once verified, and the message
+lists them:
+- the name that `typeid` gives a type named after the function: it holds the function's mangled
+  name;
+- a string constant whose only change is the signature that `__PRETTY_FUNCTION__` prints.
+
+The check covers only the analyzed files, with their compile commands, and the code these
+configurations compile. The message says how the suggestion was checked:
+- `checked in the analyzed files only, with their compile commands: ...`;
+- `difference: ...`, for each accepted difference;
+- `ABI: ...`, for a C++ function with external linkage: its symbol changes, so code compiled
+  separately must use the updated declaration and be recompiled;
+- `not checked with Clang: ...`, when the check could not run, for example on an LLVM IR input
+  (`.ll`, `.bc`), which has no source. The suggestion then rests on the IR analysis alone.
+
 ### Example
 
 Given this code:

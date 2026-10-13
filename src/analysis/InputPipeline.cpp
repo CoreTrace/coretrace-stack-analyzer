@@ -807,6 +807,29 @@ namespace ctrace::stack::analysis
         return detectFromExtension(path);
     }
 
+    bool buildSourceCompileCommand(const std::string& filename, LanguageType language,
+                                   const AnalysisConfig& config, std::vector<std::string>& args,
+                                   std::string& workingDir, std::string& error)
+    {
+        std::error_code cwdErr;
+        const std::filesystem::path baseDir = config.inputBaseDir.empty()
+                                                  ? std::filesystem::current_path(cwdErr)
+                                                  : std::filesystem::path(config.inputBaseDir);
+        const std::string inputPath = makeAbsolutePathFrom(filename, baseDir.string());
+        return buildCompileArgs(filename, inputPath, language, config, args, workingDir, error);
+    }
+
+    bool runSerializedCompile(const std::string& workingDir, const std::function<void()>& compile,
+                              std::string& error)
+    {
+        std::lock_guard<std::mutex> compileLock(gCompileInvokeMutex);
+        ScopedCurrentPath cwdGuard(workingDir, error);
+        if (!error.empty())
+            return false;
+        compile();
+        return true;
+    }
+
     ModuleLoadResult loadModuleForAnalysis(const std::string& filename,
                                            const AnalysisConfig& config, llvm::LLVMContext& ctx,
                                            llvm::SMDiagnostic& err)

@@ -1,0 +1,1057 @@
+// SPDX-License-Identifier: Apache-2.0
+// Checks the const suggestions of ConstParameterNotModified with Clang (#217): the analysis of the
+// IR decides whether an execution writes the pointee; Clang decides whether the suggested type
+// compiles in every analyzed file and leaves the generated code as it is.
+#include "analysis/ConstSuggestionCheck.hpp"
+
+#include "ConstSuggestionInternal.hpp"
+#include "analysis/InputPipeline.hpp"
+
+#include <algorithm>
+#include <map>
+#include <memory>
+#include <mutex>
+#include <set>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <clang/AST/ASTConsumer.h>
+#include <clang/AST/ASTContext.h>
+#include <clang/AST/Decl.h>
+#include <clang/AST/DeclCXX.h>
+#include <clang/AST/Expr.h>
+#include <clang/AST/Mangle.h>
+#include <clang/AST/RecursiveASTVisitor.h>
+#include <clang/AST/TypeLoc.h>
+#include <clang/Basic/Diagnostic.h>
+#include <clang/Basic/DiagnosticIDs.h>
+#include <clang/Basic/SourceManager.h>
+#include <clang/CodeGen/CodeGenAction.h>
+#include <clang/CodeGen/ModuleBuilder.h>
+#include <clang/Frontend/CompilerInstance.h>
+#include <clang/Frontend/CompilerInvocation.h>
+#include <clang/Frontend/FrontendActions.h>
+#include <clang/Frontend/MultiplexConsumer.h>
+#include <clang/Frontend/Utils.h>
+#include <clang/Lex/Lexer.h>
+#include <clang/Lex/PreprocessorOptions.h>
+#include <compilerlib/toolchain.hpp>
+#include <coretrace/logger.hpp>
+#include <llvm/ADT/StringExtras.h>
+#include <llvm/IR/DataLayout.h>
+#include <llvm/IR/LLVMContext.h>
+#include <llvm/IR/Module.h>
+#include <llvm/Support/FileSystem.h>
+#include <llvm/Support/MemoryBuffer.h>
+#include <llvm/Support/Path.h>
+#include <llvm/Support/TargetSelect.h>
+#include <llvm/Support/VirtualFileSystem.h>
+#include <llvm/Transforms/Utils/Cloning.h>
+
+namespace ctrace::stack::analysis
+{
+    namespace
+    {
+        using const_suggestion::variantOf;
+        using const_suggestion::withoutConst;
+
+        constexpr const char* kChecked =
+            "checked in the analyzed files only, with their compile commands: they compile with "
+            "the suggested type, and their generated code matches once debug information, "
+            "metadata numbering and renamed symbols are normalized";
+        constexpr const char* kNotChecked = "not checked with Clang: ";
+
+        // Warnings that the C and C++ standards make constraint violations, or that a rewrite
+        // turns on silently: the rewritten code must not add any.
+        constexpr const char* kCheckedWarnings[] = {
+            "incompatible-pointer-types-discards-qualifiers", "incompatible-pointer-types",
+            "incompatible-function-pointer-types", "int-conversion", "overloaded-virtual"};
+
+        // `length` bytes at `offset` replaced with `text`.
+        struct Edit
+        {
+            std::size_t offset = 0;
+            std::size_t length = 0;
+            std::string text;
+        };
+
+        // What one compilation found about the function a suggestion names.
+        struct FunctionFacts
+        {
+            // Before the rewrite, in the unit that defines it: the rewrite, and what it must give.
+            std::map<std::string, std::vector<Edit>> edits; // by real path
+            std::string notRewritten;
+            std::string expectedType;
+            // In every compilation.
+            std::string printedSignature;
+            std::string problem;
+            std::multiset<std::string> overrides;
+            unsigned paramIndex = 0;
+            std::uint32_t reservedPadding = 0;
+        };
+
+        // What to look for in one compilation.
+        struct Target
+        {
+            std::string symbol;  // the function's symbol before the rewrite
+            std::string renamed; // and after, once known
+            std::string name;    // its identifier
+            std::string expectedType;
+            std::set<std::string> rewrittenFiles;
+            const std::set<std::string>* symbolsBefore = nullptr; // to find the renamed function
+            unsigned debugArgNo = 0;
+            unsigned paramIndex = 0;
+            bool plan = false; // before the rewrite, in the defining unit
+            std::uint8_t reservedPadding[7] = {};
+        };
+
+        struct Compilation
+        {
+            std::string failure; // the compilation could not run
+            std::multiset<std::string> diagnostics;
+            std::string firstDiagnostic;
+            std::unique_ptr<llvm::LLVMContext> context;
+            std::unique_ptr<llvm::Module> module;
+            std::vector<FunctionFacts> facts;
+        };
+
+        std::string realPath(llvm::StringRef path)
+        {
+            llvm::SmallString<256> out;
+            if (llvm::sys::fs::real_path(path, out))
+                return path.str();
+            return out.str().str();
+        }
+
+        // Errors, and the checked warnings, by place and kind: their texts name types that the
+        // rewrite changes.
+        class DiagnosticCollector : public clang::DiagnosticConsumer
+        {
+          public:
+            explicit DiagnosticCollector(Compilation& out) : out_(out) {}
+
+            void HandleDiagnostic(clang::DiagnosticsEngine::Level level,
+                                  const clang::Diagnostic& info) override
+            {
+                clang::DiagnosticConsumer::HandleDiagnostic(level, info);
+                bool kept = level >= clang::DiagnosticsEngine::Error;
+                if (level == clang::DiagnosticsEngine::Warning)
+                {
+                    const llvm::StringRef group =
+                        info.getDiags()->getDiagnosticIDs()->getWarningOptionForDiag(info.getID());
+                    kept = std::find(std::begin(kCheckedWarnings), std::end(kCheckedWarnings),
+                                     group) != std::end(kCheckedWarnings);
+                }
+                if (!kept)
+                    return;
+                std::string place = "?";
+                if (info.hasSourceManager() && info.getLocation().isValid())
+                {
+                    const clang::SourceManager& sm = info.getSourceManager();
+                    const clang::PresumedLoc presumed =
+                        sm.getPresumedLoc(sm.getExpansionLoc(info.getLocation()));
+                    if (presumed.isValid())
+                    {
+                        place = std::string(presumed.getFilename()) + ":" +
+                                std::to_string(presumed.getLine());
+                    }
+                }
+                out_.diagnostics.insert(place + " #" + std::to_string(info.getID()));
+                if (out_.firstDiagnostic.empty())
+                {
+                    llvm::SmallString<160> text;
+                    info.FormatDiagnostic(text);
+                    out_.firstDiagnostic = place + ": " + text.str().str();
+                }
+            }
+
+          private:
+            Compilation& out_;
+        };
+
+        // Whether `offset` of `buffer` lies on a #define line, continuations included.
+        bool inMacroDefinition(llvm::StringRef buffer, std::size_t offset)
+        {
+            std::size_t start = buffer.rfind('\n', offset);
+            start = start == llvm::StringRef::npos ? 0 : start + 1;
+            while (start >= 2 && buffer[start - 2] == '\\')
+            {
+                const std::size_t previous = buffer.rfind('\n', start - 2);
+                start = previous == llvm::StringRef::npos ? 0 : previous + 1;
+            }
+            const llvm::StringRef line = buffer.substr(start, offset - start).ltrim();
+            return line.starts_with("#") && line.drop_front().ltrim().starts_with("define");
+        }
+
+        class Planner
+        {
+          public:
+            Planner(clang::ASTContext& context, FunctionFacts& facts)
+                : context_(context), sm_(context.getSourceManager()), facts_(facts)
+            {
+            }
+
+            // Writes the suggested type where `param` writes its type.
+            bool plan(const clang::FunctionDecl& function, const clang::ParmVarDecl& param)
+            {
+                const clang::TypeSourceInfo* written = param.getTypeSourceInfo();
+                if (!written)
+                    return fail("the parameter's type is not written in the source");
+                clang::TypeLoc loc = written->getTypeLoc();
+                for (;;)
+                {
+                    loc = loc.getUnqualifiedLoc();
+                    if (auto attributed = loc.getAs<clang::AttributedTypeLoc>())
+                        loc = attributed.getModifiedLoc();
+                    else if (auto paren = loc.getAs<clang::ParenTypeLoc>())
+                        loc = paren.getInnerLoc();
+                    else if (auto macro = loc.getAs<clang::MacroQualifiedTypeLoc>())
+                        loc = macro.getInnerLoc();
+                    else if (auto decayed = loc.getAs<clang::DecayedTypeLoc>())
+                        loc = decayed.getOriginalLoc();
+                    else
+                        break;
+                }
+                if (auto pointer = loc.getAs<clang::PointerTypeLoc>())
+                    return insertConst(function, pointer.getPointeeLoc().getBeginLoc());
+                if (auto reference = loc.getAs<clang::LValueReferenceTypeLoc>())
+                    return insertConst(function, reference.getPointeeLoc().getBeginLoc());
+                if (auto reference = loc.getAs<clang::RValueReferenceTypeLoc>())
+                {
+                    // The suggestion names the const lvalue reference.
+                    return insertConst(function, reference.getPointeeLoc().getBeginLoc()) &&
+                           replace(function, reference.getAmpAmpLoc(), 2, "&");
+                }
+                if (auto array = loc.getAs<clang::ArrayTypeLoc>())
+                    return insertConst(function, array.getElementLoc().getBeginLoc());
+                // A typedef of a pointer: its desugared type, qualified.
+                clang::TypeLoc named = loc;
+                if (auto elaborated = loc.getAs<clang::ElaboratedTypeLoc>())
+                    named = elaborated.getNamedTypeLoc();
+                if (named.getAs<clang::TypedefTypeLoc>() || named.getAs<clang::UsingTypeLoc>())
+                {
+                    const auto* pointer = loc.getType()->getAs<clang::PointerType>();
+                    if (!pointer || pointer->getPointeeType()->isFunctionType() ||
+                        pointer->getPointeeType()->isArrayType())
+                    {
+                        return fail("the parameter's type is a typedef of no plain pointer");
+                    }
+                    clang::PrintingPolicy policy(context_.getLangOpts());
+                    const std::string text =
+                        pointer->getPointeeType().withConst().getAsString(policy) + " *";
+                    if (text.find("(unnamed") != std::string::npos ||
+                        text.find("(anonymous") != std::string::npos ||
+                        text.find("(lambda") != std::string::npos)
+                    {
+                        return fail("the pointed type has no name to write");
+                    }
+                    const clang::SourceLocation begin = loc.getBeginLoc();
+                    const clang::SourceLocation end = loc.getEndLoc();
+                    if (begin.isMacroID() || end.isMacroID())
+                        return fail("the parameter's typedef is written by a macro");
+                    const unsigned length = sm_.getFileOffset(clang::Lexer::getLocForEndOfToken(
+                                                end, 0, sm_, context_.getLangOpts())) -
+                                            sm_.getFileOffset(begin);
+                    return replace(function, begin, length, text);
+                }
+                return fail("the parameter's type has no form this check rewrites");
+            }
+
+          private:
+            bool fail(std::string why)
+            {
+                if (facts_.notRewritten.empty())
+                    facts_.notRewritten = std::move(why);
+                return false;
+            }
+
+            bool insertConst(const clang::FunctionDecl& function, clang::SourceLocation at)
+            {
+                return replace(function, at, 0, "const ");
+            }
+
+            bool replace(const clang::FunctionDecl& function, clang::SourceLocation at,
+                         unsigned length, const std::string& text)
+            {
+                if (at.isInvalid())
+                    return fail("the parameter's type has no position");
+                if (at.isMacroID())
+                {
+                    if (sm_.isMacroArgExpansion(at))
+                    {
+                        // Written in a macro argument: rewritten where it is written.
+                        at = sm_.getSpellingLoc(at);
+                    }
+                    else
+                    {
+                        // Written by a macro: a macro is text, `const` goes before its
+                        // invocation, unless that invocation writes the declaration too.
+                        const clang::CharSourceRange invocation = sm_.getExpansionRange(at);
+                        const clang::SourceLocation name =
+                            sm_.getExpansionLoc(function.getLocation());
+                        const bool writesDeclaration =
+                            !sm_.isBeforeInTranslationUnit(name, invocation.getBegin()) &&
+                            !sm_.isBeforeInTranslationUnit(invocation.getEnd(), name);
+                        if (length != 0 || writesDeclaration)
+                            return fail("the declaration is written by a macro definition");
+                        at = invocation.getBegin();
+                    }
+                    if (at.isMacroID())
+                        return fail("the declaration is written by a macro definition");
+                }
+                const auto [file, offset] = sm_.getDecomposedLoc(at);
+                const clang::OptionalFileEntryRef entry = sm_.getFileEntryRefForID(file);
+                if (!entry)
+                    return fail("the parameter's type is not written in a file");
+                if (inMacroDefinition(sm_.getBufferData(file), offset))
+                    return fail("the declaration is written by a macro definition");
+                std::vector<Edit>& edits = facts_.edits[realPath(entry->getName())];
+                const bool seen = std::any_of(edits.begin(), edits.end(), [&](const Edit& edit)
+                                              { return edit.offset == offset; });
+                if (!seen)
+                    edits.push_back({offset, length, text});
+                return true;
+            }
+
+            clang::ASTContext& context_;
+            const clang::SourceManager& sm_;
+            FunctionFacts& facts_;
+        };
+
+        // The type the parameter must have once rewritten, written canonically.
+        std::string expectedType(clang::ASTContext& context, clang::QualType type)
+        {
+            clang::QualType out;
+            if (const auto* pointer = type->getAs<clang::PointerType>())
+            {
+                out = context.getQualifiedType(
+                    context.getPointerType(pointer->getPointeeType().withConst()),
+                    type.getQualifiers());
+            }
+            else if (type->isReferenceType())
+            {
+                out = context.getLValueReferenceType(type.getNonReferenceType().withConst());
+            }
+            else
+            {
+                return "";
+            }
+            return out.getCanonicalType().getAsString(clang::PrintingPolicy(context.getLangOpts()));
+        }
+
+        std::string writtenType(clang::ASTContext& context, clang::QualType type)
+        {
+            return type.getCanonicalType().getAsString(
+                clang::PrintingPolicy(context.getLangOpts()));
+        }
+
+        // Declarations of the function, explicit casts of its address, and what each method of
+        // its name overrides.
+        class Inspector : public clang::ASTConsumer, public clang::RecursiveASTVisitor<Inspector>
+        {
+          public:
+            Inspector(clang::CodeGenAction& action, std::vector<Target>& targets, Compilation& out)
+                : action_(action), targets_(targets), out_(out)
+            {
+            }
+
+            bool shouldVisitTemplateInstantiations() const
+            {
+                return true;
+            }
+
+            void HandleTranslationUnit(clang::ASTContext& context) override
+            {
+                context_ = &context;
+                names_ = std::make_unique<clang::ASTNameGenerator>(context);
+                prefix_ = llvm::DataLayout(context.getTargetInfo().getDataLayoutString())
+                              .getGlobalPrefix();
+                out_.facts.resize(targets_.size());
+                located_.assign(targets_.size(), nullptr);
+                clang::CodeGenerator* generator = action_.getCodeGenerator();
+                for (std::size_t i = 0; i < targets_.size(); ++i)
+                    locate(i, generator);
+                TraverseDecl(context.getTranslationUnitDecl());
+            }
+
+            bool VisitFunctionDecl(clang::FunctionDecl* function)
+            {
+                for (std::size_t i = 0; i < targets_.size(); ++i)
+                {
+                    if (!isTarget(i, *function))
+                        continue;
+                    const Target& target = targets_[i];
+                    FunctionFacts& facts = out_.facts[i];
+                    if (!target.expectedType.empty() && facts.problem.empty() &&
+                        !function->isDependentContext() &&
+                        target.paramIndex < function->getNumParams())
+                    {
+                        const std::string type = writtenType(
+                            *context_, function->getParamDecl(target.paramIndex)->getType());
+                        if (type != target.expectedType)
+                        {
+                            const clang::SourceManager& sm = context_->getSourceManager();
+                            const clang::SourceLocation at =
+                                sm.getExpansionLoc(function->getLocation());
+                            const clang::OptionalFileEntryRef entry =
+                                sm.getFileEntryRefForID(sm.getFileID(at));
+                            const std::string file = entry ? realPath(entry->getName()) : "";
+                            facts.problem =
+                                target.rewrittenFiles.count(file)
+                                    ? "rewritten:" + type
+                                    : "declared in " + llvm::sys::path::filename(file).str() + ":" +
+                                          std::to_string(sm.getExpansionLineNumber(at)) +
+                                          " with type " + type;
+                        }
+                    }
+                    if (const auto* method = llvm::dyn_cast<clang::CXXMethodDecl>(function))
+                        recordOverrides(facts, *method);
+                }
+                if (const auto* method = llvm::dyn_cast<clang::CXXMethodDecl>(function))
+                {
+                    for (std::size_t i = 0; i < targets_.size(); ++i)
+                    {
+                        if (method->getIdentifier() &&
+                            method->getIdentifier()->getName() == targets_[i].name &&
+                            !isTarget(i, *function))
+                        {
+                            recordOverrides(out_.facts[i], *method);
+                        }
+                    }
+                }
+                return true;
+            }
+
+            bool VisitExplicitCastExpr(clang::ExplicitCastExpr* cast)
+            {
+                const clang::Expr* operand = cast->getSubExpr()->IgnoreParenImpCasts();
+                if (const auto* address = llvm::dyn_cast<clang::UnaryOperator>(operand))
+                {
+                    if (address->getOpcode() == clang::UO_AddrOf)
+                        operand = address->getSubExpr()->IgnoreParenImpCasts();
+                }
+                const auto* reference = llvm::dyn_cast<clang::DeclRefExpr>(operand);
+                const auto* function =
+                    reference ? llvm::dyn_cast<clang::FunctionDecl>(reference->getDecl()) : nullptr;
+                if (!function)
+                    return true;
+                for (std::size_t i = 0; i < targets_.size(); ++i)
+                {
+                    if (out_.facts[i].problem.empty() && isTarget(i, *function))
+                        out_.facts[i].problem = "its address is converted by an explicit cast";
+                }
+                return true;
+            }
+
+          private:
+            void recordOverrides(FunctionFacts& facts, const clang::CXXMethodDecl& method)
+            {
+                std::vector<std::string> overridden;
+                for (const clang::CXXMethodDecl* base : method.overridden_methods())
+                    overridden.push_back(base->getQualifiedNameAsString());
+                std::sort(overridden.begin(), overridden.end());
+                facts.overrides.insert(method.getQualifiedNameAsString() + " -> " +
+                                       llvm::join(overridden, ", "));
+            }
+
+            std::string symbolOf(const clang::FunctionDecl& function)
+            {
+                if (function.isDependentContext() ||
+                    llvm::isa<clang::CXXConstructorDecl>(function) ||
+                    llvm::isa<clang::CXXDestructorDecl>(function))
+                {
+                    return "";
+                }
+                std::string name = names_->getName(&function);
+                if (prefix_ && !name.empty() && name.front() == prefix_)
+                    name.erase(0, 1);
+                return name;
+            }
+
+            // Whether `function` is a declaration of the function target i names, in this
+            // compilation: the one CodeGen emitted under its symbol, a redeclaration of it, or a
+            // declaration with its symbol before or after the rewrite.
+            bool isTarget(std::size_t i, const clang::FunctionDecl& function)
+            {
+                const clang::FunctionDecl* found = located_[i];
+                if (found && function.getCanonicalDecl() == found->getCanonicalDecl())
+                    return true;
+                const Target& target = targets_[i];
+                if (!function.getIdentifier() || function.getIdentifier()->getName() != target.name)
+                    return false;
+                const std::string symbol = symbolOf(function);
+                return !symbol.empty() && (symbol == target.symbol || symbol == target.renamed);
+            }
+
+            void locate(std::size_t i, clang::CodeGenerator* generator)
+            {
+                Target& target = targets_[i];
+                FunctionFacts& facts = out_.facts[i];
+                if (!generator)
+                    return;
+                std::string symbol = target.symbol;
+                if (!target.plan && target.symbolsBefore && generator->GetModule())
+                {
+                    // After the rewrite, the function may carry a new symbol: the one this
+                    // compilation defines that it did not before, with the same name once const
+                    // is left out.
+                    const std::string key = withoutConst(target.symbol);
+                    const std::string variant = variantOf(target.symbol);
+                    for (const llvm::Function& emitted : *generator->GetModule())
+                    {
+                        const std::string name = emitted.getName().str();
+                        if (!emitted.isDeclaration() && !target.symbolsBefore->count(name) &&
+                            withoutConst(name) == key && variantOf(name) == variant)
+                        {
+                            symbol = name;
+                        }
+                    }
+                    if (target.renamed.empty())
+                        target.renamed = symbol;
+                }
+                const auto* function = llvm::dyn_cast_or_null<clang::FunctionDecl>(
+                    generator->GetDeclForMangledName(symbol));
+                located_[i] = function;
+                if (!function)
+                    return;
+                facts.printedSignature = clang::PredefinedExpr::ComputeName(
+                    clang::PredefinedIdentKind::PrettyFunction, function);
+                if (target.name.empty() && function->getIdentifier())
+                    target.name = function->getIdentifier()->getName().str();
+                if (target.plan)
+                    plan(target, facts, *function);
+            }
+
+            void plan(Target& target, FunctionFacts& facts, const clang::FunctionDecl& function)
+            {
+                const auto* method = llvm::dyn_cast<clang::CXXMethodDecl>(&function);
+                const unsigned implicitThis = method && method->isInstance() ? 1 : 0;
+                if (target.debugArgNo <= implicitThis)
+                {
+                    facts.notRewritten = "the parameter is not found in the source";
+                    return;
+                }
+                facts.paramIndex = target.debugArgNo - 1 - implicitThis;
+                if (facts.paramIndex >= function.getNumParams())
+                {
+                    facts.notRewritten = "the parameter is not found in the source";
+                    return;
+                }
+                facts.expectedType =
+                    expectedType(*context_, function.getParamDecl(facts.paramIndex)->getType());
+                if (facts.expectedType.empty())
+                {
+                    facts.notRewritten = "the parameter is no pointer or reference";
+                    return;
+                }
+                const clang::FunctionDecl* pattern = function.getTemplateInstantiationPattern();
+                if (!pattern)
+                    pattern = &function;
+                Planner planner(*context_, facts);
+                for (const clang::FunctionDecl* declaration : pattern->redecls())
+                {
+                    if (declaration->isImplicit())
+                        continue;
+                    if (facts.paramIndex >= declaration->getNumParams())
+                    {
+                        facts.notRewritten = "the declarations disagree on the parameters";
+                        return;
+                    }
+                    if (!planner.plan(*declaration, *declaration->getParamDecl(facts.paramIndex)))
+                        return;
+                }
+            }
+
+            char prefix_ = 0;
+            std::uint8_t reservedPadding_[6] = {};
+            clang::CodeGenAction& action_;
+            std::vector<Target>& targets_;
+            Compilation& out_;
+            clang::ASTContext* context_ = nullptr;
+            std::unique_ptr<clang::ASTNameGenerator> names_;
+            std::vector<const clang::FunctionDecl*> located_;
+        };
+
+        class InspectAction : public clang::EmitLLVMOnlyAction
+        {
+          public:
+            InspectAction(llvm::LLVMContext* context, std::vector<Target>& targets,
+                          Compilation& out)
+                : clang::EmitLLVMOnlyAction(context), targets_(targets), out_(out)
+            {
+            }
+
+          protected:
+            std::unique_ptr<clang::ASTConsumer> CreateASTConsumer(clang::CompilerInstance& ci,
+                                                                  llvm::StringRef file) override
+            {
+                std::unique_ptr<clang::ASTConsumer> generator =
+                    clang::EmitLLVMOnlyAction::CreateASTConsumer(ci, file);
+                if (!generator)
+                    return nullptr;
+                std::vector<std::unique_ptr<clang::ASTConsumer>> consumers;
+                consumers.push_back(std::move(generator));
+                consumers.push_back(std::make_unique<Inspector>(*this, targets_, out_));
+                return std::make_unique<clang::MultiplexConsumer>(std::move(consumers));
+            }
+
+          private:
+            std::vector<Target>& targets_;
+            Compilation& out_;
+        };
+
+        struct UnitCommand
+        {
+            std::vector<std::string> args; // the driver's, as compilerlib builds them
+            std::string workingDir;
+        };
+
+        bool commandFor(const AnalyzedUnit& unit, const AnalysisConfig& config, UnitCommand& out,
+                        std::string& error)
+        {
+            std::vector<std::string> args;
+            if (!buildSourceCompileCommand(unit.filename, unit.language, config, args,
+                                           out.workingDir, error))
+            {
+                return false;
+            }
+            // Options only compilerlib understands.
+            std::erase_if(args, [](const std::string& arg) { return arg.starts_with("--ct-"); });
+            compilerlib::DriverConfig driver;
+            if (!compilerlib::resolveDriverConfig(args, driver, error))
+                return false;
+            out.args = {driver.clang_path};
+            if (driver.force_cxx_driver)
+                out.args.push_back("--driver-mode=g++");
+            if (driver.add_resource_dir)
+            {
+                out.args.push_back("-resource-dir");
+                out.args.push_back(driver.resource_dir);
+            }
+            if (driver.add_sysroot)
+            {
+                out.args.push_back("-isysroot");
+                out.args.push_back(driver.sysroot);
+            }
+            out.args.insert(out.args.end(), args.begin(), args.end());
+            return true;
+        }
+
+        Compilation compile(const UnitCommand& command,
+                            const std::map<std::string, std::string>& rewritten,
+                            std::vector<Target>& targets)
+        {
+            static std::once_flag targetsReady;
+            std::call_once(targetsReady,
+                           []
+                           {
+                               llvm::InitializeAllTargetInfos();
+                               llvm::InitializeAllTargets();
+                               llvm::InitializeAllTargetMCs();
+                           });
+            Compilation out;
+            std::string error;
+            const bool ran = runSerializedCompile(
+                command.workingDir,
+                [&]
+                {
+                    llvm::IntrusiveRefCntPtr<llvm::vfs::FileSystem> files =
+                        llvm::vfs::getRealFileSystem();
+                    DiagnosticCollector collector(out);
+                    std::vector<const char*> argv;
+                    for (const std::string& arg : command.args)
+                        argv.push_back(arg.c_str());
+                    clang::CreateInvocationOptions options;
+                    options.Diags = clang::CompilerInstance::createDiagnostics(
+                        *files, new clang::DiagnosticOptions(), &collector, false);
+                    options.VFS = files;
+                    options.ProbePrecompiled = false;
+                    std::unique_ptr<clang::CompilerInvocation> invocation =
+                        clang::createInvocation(argv, options);
+                    if (!invocation)
+                    {
+                        out.failure =
+                            "the compile command is not understood: " + out.firstDiagnostic;
+                        return;
+                    }
+                    // Nothing is written: no dependency file, no output.
+                    invocation->getDependencyOutputOpts() = clang::DependencyOutputOptions();
+                    // The inspection reads the AST after CodeGen: keep it for the backend.
+                    invocation->getCodeGenOpts().ClearASTBeforeBackend = false;
+                    // Values and blocks numbered, not named: a block that inlining names after
+                    // the inlined function carries the rewritten function's symbol.
+                    invocation->getCodeGenOpts().DiscardValueNames = true;
+                    clang::DiagnosticOptions& diagnostics = invocation->getDiagnosticOpts();
+                    // No "N warnings generated" on the analyzer's output.
+                    diagnostics.ShowCarets = false;
+                    diagnostics.IgnoreWarnings = false;
+                    for (const char* warning : kCheckedWarnings)
+                        diagnostics.Warnings.push_back(warning);
+                    out.diagnostics.clear();
+                    out.firstDiagnostic.clear();
+
+                    clang::CompilerInstance instance;
+                    instance.setInvocation(std::move(invocation));
+                    instance.createDiagnostics(*files, &collector, false);
+                    instance.createFileManager(files);
+                    for (const auto& [path, text] : rewritten)
+                    {
+                        instance.getPreprocessorOpts().addRemappedFile(
+                            path, llvm::MemoryBuffer::getMemBufferCopy(text, path).release());
+                    }
+                    instance.getPreprocessorOpts().RetainRemappedFileBuffers = false;
+                    instance.getFrontendOpts().DisableFree = false;
+                    instance.getCodeGenOpts().DisableFree = false;
+                    out.context = std::make_unique<llvm::LLVMContext>();
+                    InspectAction action(out.context.get(), targets, out);
+                    instance.ExecuteAction(action);
+                    out.module = action.takeModule();
+                },
+                error);
+            if (!ran)
+                out.failure = error;
+            return out;
+        }
+
+        // The files a unit reads, from its preprocessing.
+        std::set<std::string> filesRead(const UnitCommand& command)
+        {
+            std::set<std::string> out;
+            std::string error;
+            runSerializedCompile(
+                command.workingDir,
+                [&]
+                {
+                    llvm::IntrusiveRefCntPtr<llvm::vfs::FileSystem> files =
+                        llvm::vfs::getRealFileSystem();
+                    clang::IgnoringDiagConsumer ignore;
+                    std::vector<const char*> argv;
+                    for (const std::string& arg : command.args)
+                        argv.push_back(arg.c_str());
+                    clang::CreateInvocationOptions options;
+                    options.Diags = clang::CompilerInstance::createDiagnostics(
+                        *files, new clang::DiagnosticOptions(), &ignore, false);
+                    options.VFS = files;
+                    options.ProbePrecompiled = false;
+                    std::unique_ptr<clang::CompilerInvocation> invocation =
+                        clang::createInvocation(argv, options);
+                    if (!invocation)
+                        return;
+                    invocation->getDependencyOutputOpts() = clang::DependencyOutputOptions();
+                    invocation->getDiagnosticOpts().ShowCarets = false;
+                    clang::CompilerInstance instance;
+                    instance.setInvocation(std::move(invocation));
+                    instance.createDiagnostics(*files, &ignore, false);
+                    instance.createFileManager(files);
+                    clang::PreprocessOnlyAction action;
+                    instance.ExecuteAction(action);
+                    if (!instance.hasSourceManager())
+                        return;
+                    const clang::SourceManager& sm = instance.getSourceManager();
+                    for (auto it = sm.fileinfo_begin(); it != sm.fileinfo_end(); ++it)
+                        out.insert(realPath(it->first.getName()));
+                },
+                error);
+            return out;
+        }
+
+        bool references(const llvm::Module& module, llvm::StringRef symbol)
+        {
+            const llvm::GlobalValue* value = module.getNamedValue(symbol);
+            return value && !value->hasLocalLinkage();
+        }
+
+        std::map<std::string, std::string> rewrite(const FunctionFacts& facts)
+        {
+            std::map<std::string, std::string> out;
+            for (const auto& [path, edits] : facts.edits)
+            {
+                llvm::ErrorOr<std::unique_ptr<llvm::MemoryBuffer>> buffer =
+                    llvm::MemoryBuffer::getFile(path);
+                if (!buffer)
+                    continue;
+                std::string text = (*buffer)->getBuffer().str();
+                std::vector<Edit> sorted = edits;
+                std::sort(sorted.begin(), sorted.end(),
+                          [](const Edit& a, const Edit& b) { return a.offset > b.offset; });
+                for (const Edit& edit : sorted)
+                    text.replace(edit.offset, edit.length, edit.text);
+                out[path] = std::move(text);
+            }
+            return out;
+        }
+
+        // Checks one suggestion in one unit: compiled before and after the rewrite.
+        bool checkUnit(const UnitCommand& command, Compilation* before, const Target& planned,
+                       const std::map<std::string, std::string>& rewritten,
+                       const std::set<std::string>& symbolsBefore, const FunctionFacts& plan,
+                       PrintedSignature& signature, std::vector<std::string>& accepted,
+                       std::string& renamed, std::string& removed, std::string& notChecked)
+        {
+            Compilation own;
+            if (!before)
+            {
+                std::vector<Target> targets{planned};
+                targets[0].plan = false;
+                targets[0].expectedType.clear();
+                own = compile(command, {}, targets);
+                before = &own;
+            }
+            if (!before->failure.empty() || !before->module)
+            {
+                notChecked = "a file does not compile with Clang as it is";
+                return false;
+            }
+            std::vector<Target> targets{planned};
+            targets[0].plan = false;
+            targets[0].renamed = renamed;
+            targets[0].expectedType = plan.expectedType;
+            targets[0].paramIndex = plan.paramIndex;
+            targets[0].symbolsBefore = &symbolsBefore;
+            for (const auto& [path, edits] : plan.edits)
+                targets[0].rewrittenFiles.insert(path);
+            Compilation after = compile(command, rewritten, targets);
+            if (!after.failure.empty())
+            {
+                notChecked = after.failure;
+                return false;
+            }
+            for (const std::string& diagnostic : after.diagnostics)
+            {
+                if (after.diagnostics.count(diagnostic) > before->diagnostics.count(diagnostic))
+                {
+                    removed = "does not compile: " + after.firstDiagnostic;
+                    return true;
+                }
+            }
+            if (!after.module)
+            {
+                removed = "does not compile: " + after.firstDiagnostic;
+                return true;
+            }
+            if (renamed.empty())
+                renamed = targets[0].renamed;
+            const FunctionFacts& facts = after.facts.empty() ? FunctionFacts() : after.facts[0];
+            if (facts.problem.starts_with("rewritten:"))
+            {
+                notChecked = "the rewritten declaration does not get the suggested type";
+                return false;
+            }
+            if (!facts.problem.empty())
+            {
+                removed = facts.problem;
+                return true;
+            }
+            const FunctionFacts& old = before->facts.empty() ? FunctionFacts() : before->facts[0];
+            if (old.overrides != facts.overrides)
+            {
+                removed = "the methods it overrides change";
+                return true;
+            }
+            if (signature.after.empty() && !facts.printedSignature.empty())
+                signature.after = facts.printedSignature;
+            std::string renamedTo;
+            std::unique_ptr<llvm::Module> was = llvm::CloneModule(*before->module);
+            const std::optional<std::string> difference = rewrittenCodeDifference(
+                *was, *after.module, planned.symbol, &signature, &accepted, &renamedTo);
+            if (difference)
+            {
+                removed = "the generated code changes: " + *difference;
+                return true;
+            }
+            if (renamed.empty() || renamed == planned.symbol)
+                renamed = renamedTo;
+            return true;
+        }
+    } // namespace
+
+    std::shared_ptr<const AnalyzedUnits> analyzedUnitOf(const std::string& filename,
+                                                        const llvm::Module& module)
+    {
+        auto units = std::make_shared<AnalyzedUnits>();
+        units->units.push_back({filename, &module, detectFromExtension(filename)});
+        return units;
+    }
+
+    void checkConstSuggestions(const llvm::Module& mod, std::vector<ConstParamIssue>& issues,
+                               const AnalysisConfig& config)
+    {
+        if (issues.empty() || config.warningsOnly)
+            return;
+        const AnalyzedUnits* units = config.analyzedUnits.get();
+        const AnalyzedUnit* self = nullptr;
+        for (std::size_t i = 0; units && i < units->units.size(); ++i)
+        {
+            if (units->units[i].module == &mod)
+                self = &units->units[i];
+        }
+        const auto trace = [](const ConstParamIssue& issue, const std::string& outcome)
+        {
+            coretrace::log(coretrace::Level::Debug, "[const-suggestion] {} parameter {}: {}\n",
+                           issue.funcName, issue.binding.name, outcome);
+        };
+        const auto notChecked = [&](const std::string& why)
+        {
+            for (ConstParamIssue& issue : issues)
+            {
+                issue.checkLines.push_back(kNotChecked + why);
+                trace(issue, "not checked, " + why);
+            }
+        };
+        if (!self || (self->language != LanguageType::C && self->language != LanguageType::CXX))
+        {
+            notChecked("no source file, so whether the suggested type compiles was not verified");
+            return;
+        }
+        UnitCommand command;
+        std::string error;
+        if (!commandFor(*self, config, command, error))
+        {
+            notChecked("no compile command (" + error + ")");
+            return;
+        }
+
+        // Before the rewrite, the defining unit: one compilation plans every suggestion.
+        std::vector<Target> targets(issues.size());
+        for (std::size_t i = 0; i < issues.size(); ++i)
+        {
+            targets[i].symbol = issues[i].funcName;
+            targets[i].debugArgNo = issues[i].debugArgNo;
+            targets[i].plan = true;
+        }
+        Compilation before = compile(command, {}, targets);
+        if (!before.failure.empty() || !before.module || before.facts.size() != issues.size())
+        {
+            notChecked("the file does not compile with Clang as it is");
+            return;
+        }
+        std::set<std::string> symbolsBefore;
+        for (const llvm::Function& function : *before.module)
+            symbolsBefore.insert(function.getName().str());
+
+        std::vector<ConstParamIssue> kept;
+        for (std::size_t i = 0; i < issues.size(); ++i)
+        {
+            ConstParamIssue& issue = issues[i];
+            const FunctionFacts& plan = before.facts[i];
+            if (plan.printedSignature.empty() && plan.notRewritten.empty())
+            {
+                issue.checkLines.push_back(kNotChecked +
+                                           std::string("the function is not found in the source"));
+                trace(issue, "not checked, the function is not found in the source");
+                kept.push_back(std::move(issue));
+                continue;
+            }
+            if (!plan.notRewritten.empty())
+            {
+                issue.checkLines.push_back(kNotChecked + plan.notRewritten);
+                trace(issue, "not checked, " + plan.notRewritten);
+                kept.push_back(std::move(issue));
+                continue;
+            }
+            const std::map<std::string, std::string> rewritten = rewrite(plan);
+            std::set<std::string> rewrittenFiles;
+            for (const auto& [path, text] : rewritten)
+                rewrittenFiles.insert(path);
+
+            // The defining unit first: it gives the function's symbol after the rewrite.
+            Target planned = targets[i];
+            planned.plan = false;
+            PrintedSignature signature{plan.printedSignature, ""};
+            std::vector<std::string> accepted;
+            std::string renamed;
+            std::string removed;
+            std::string unchecked;
+            Compilation selfBefore;
+            selfBefore.module = llvm::CloneModule(*before.module);
+            selfBefore.diagnostics = before.diagnostics;
+            selfBefore.facts = {plan};
+            std::size_t checkedUnits = 1;
+            bool done = checkUnit(command, &selfBefore, planned, rewritten, symbolsBefore, plan,
+                                  signature, accepted, renamed, removed, unchecked);
+            // Then every other analyzed unit that sees a rewritten file or references the
+            // function.
+            for (const AnalyzedUnit& unit : units->units)
+            {
+                if (!done || !removed.empty() || &unit == self)
+                    continue;
+                const bool referencing = unit.module && references(*unit.module, issue.funcName);
+                if (unit.language != LanguageType::C && unit.language != LanguageType::CXX)
+                {
+                    if (referencing)
+                    {
+                        done = false;
+                        unchecked = unit.filename + " uses the function but has no source";
+                    }
+                    continue;
+                }
+                UnitCommand other;
+                if (!commandFor(unit, config, other, error))
+                {
+                    done = false;
+                    unchecked = "no compile command for " + unit.filename;
+                    continue;
+                }
+                bool sees = referencing;
+                if (!sees)
+                {
+                    std::set<std::string> read;
+                    {
+                        std::lock_guard<std::mutex> lock(units->filesReadMutex);
+                        const auto cached = units->filesRead.find(unit.filename);
+                        if (cached != units->filesRead.end())
+                            read = cached->second;
+                    }
+                    if (read.empty())
+                    {
+                        read = filesRead(other);
+                        std::lock_guard<std::mutex> lock(units->filesReadMutex);
+                        units->filesRead[unit.filename] = read;
+                    }
+                    sees = std::any_of(rewrittenFiles.begin(), rewrittenFiles.end(),
+                                       [&](const std::string& path) { return read.count(path); });
+                }
+                if (!sees)
+                    continue;
+                std::vector<std::string> otherAccepted;
+                ++checkedUnits;
+                done = checkUnit(other, nullptr, planned, rewritten, symbolsBefore, plan, signature,
+                                 otherAccepted, renamed, removed, unchecked);
+                for (const std::string& line : otherAccepted)
+                {
+                    if (std::find(accepted.begin(), accepted.end(), line) == accepted.end())
+                        accepted.push_back(line);
+                }
+            }
+            if (!done)
+            {
+                issue.checkLines.push_back(kNotChecked + unchecked);
+                trace(issue, "not checked, " + unchecked);
+                kept.push_back(std::move(issue));
+                continue;
+            }
+            if (!removed.empty())
+            {
+                trace(issue, "removed, " + removed);
+                continue;
+            }
+            trace(issue, "checked in " + std::to_string(checkedUnits) + " file(s)");
+            issue.checkLines.push_back(accepted.empty() ? std::string(kChecked)
+                                                        : std::string(kChecked) +
+                                                              ", except for the differences below");
+            issue.checkLines.insert(issue.checkLines.end(), accepted.begin(), accepted.end());
+            const llvm::Function* function = mod.getFunction(issue.funcName);
+            if (function && function->hasExternalLinkage() && !renamed.empty() &&
+                renamed != issue.funcName)
+            {
+                issue.checkLines.push_back("ABI: the suggested type changes the symbol (" +
+                                           issue.funcName + " -> " + renamed +
+                                           "): code compiled separately must use the updated "
+                                           "declaration and be recompiled");
+            }
+            kept.push_back(std::move(issue));
+        }
+        issues = std::move(kept);
+    }
+} // namespace ctrace::stack::analysis
