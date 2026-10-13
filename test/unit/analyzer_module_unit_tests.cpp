@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "StackUsageAnalyzer.hpp"
 #include "analysis/AnalyzerUtils.hpp"
+#include "analysis/ConstSuggestionCheck.hpp"
 #include "app/CrossTUSummaryDriver.hpp"
 #include "app/AnalyzerApp.hpp"
 #include "cli/ArgParser.hpp"
@@ -740,6 +741,66 @@ namespace
         report.expect(linkerSymbolName(*elf->getFunction("_ZN5probe4peekEPNSt3__13tagE")) !=
                           linkerSymbolName(*elf->getFunction("_ZN5probe4peekEPNSt7__cxx113tagE")),
                       "LinkerSymbolName: std::__1 and std::__cxx11 symbols stay distinct");
+        return report.failures == 0;
+    }
+
+    /// #217: the code generated before and after a const rewrite is compared once the symbols
+    /// the rewrite renames are paired. A symbol the unit only declares has no code to compare: it
+    /// is paired only if it is the rewritten function itself.
+    bool testConstSuggestionCodeComparison(TestReport& report)
+    {
+        using ctrace::stack::analysis::rewrittenCodeDifference;
+        llvm::LLVMContext context;
+        llvm::SMDiagnostic error;
+        const auto parse =
+            [&](std::string text, const std::string& function, const std::string& typeInfo)
+        {
+            for (const auto& [from, to] : {std::pair{std::string("@F"), "@" + function},
+                                           std::pair{std::string("@TI"), "@" + typeInfo}})
+            {
+                for (std::size_t at = text.find(from); at != std::string::npos;
+                     at = text.find(from, at + to.size()))
+                {
+                    text.replace(at, from.size(), to);
+                }
+            }
+            return llvm::parseAssemblyString(text, error, context);
+        };
+        // The rewritten function and its caller.
+        const std::string called = "define i32 @F(ptr %p) {\n"
+                                   "  %v = load i32, ptr %p\n"
+                                   "  ret i32 %v\n"
+                                   "}\n"
+                                   "define i32 @_Z3usePi(ptr %p) {\n"
+                                   "  %r = call i32 @F(ptr %p)\n"
+                                   "  ret i32 %r\n"
+                                   "}\n";
+        // The rewritten function throws its parameter: the thrown type changes with it, and a
+        // handler `catch (int*)` elsewhere no longer catches it.
+        const std::string thrown = "@TI = external constant ptr\n"
+                                   "declare ptr @__cxa_allocate_exception(i64)\n"
+                                   "declare void @__cxa_throw(ptr, ptr, ptr)\n"
+                                   "define void @F(ptr %p) {\n"
+                                   "  %e = call ptr @__cxa_allocate_exception(i64 8)\n"
+                                   "  store ptr %p, ptr %e\n"
+                                   "  call void @__cxa_throw(ptr %e, ptr @TI, ptr null)\n"
+                                   "  unreachable\n"
+                                   "}\n";
+        const std::unique_ptr<llvm::Module> calledBefore = parse(called, "_Z1fPi", "");
+        const std::unique_ptr<llvm::Module> calledAfter = parse(called, "_Z1fPKi", "");
+        const std::unique_ptr<llvm::Module> thrownBefore = parse(thrown, "_Z1fPi", "_ZTIPi");
+        const std::unique_ptr<llvm::Module> thrownAfter = parse(thrown, "_Z1fPKi", "_ZTIPKi");
+        if (!calledBefore || !calledAfter || !thrownBefore || !thrownAfter)
+        {
+            report.expect(false, "ConstSuggestionCode setup: the IR does not parse");
+            return false;
+        }
+        report.expect(!rewrittenCodeDifference(*calledBefore, *calledAfter, "_Z1fPi"),
+                      "ConstSuggestionCode: the rewritten function and its caller are renamed "
+                      "together");
+        report.expect(rewrittenCodeDifference(*thrownBefore, *thrownAfter, "_Z1fPi").has_value(),
+                      "ConstSuggestionCode: typeinfo for int* and for int const*, only declared, "
+                      "are not paired");
         return report.failures == 0;
     }
 
@@ -2358,6 +2419,7 @@ int main(int argc, char** argv)
     (void)testSarifRuleCweTags(report);
     (void)testSarifSecuritySeverity(report);
     (void)testAnalysisIncompleteNotesHaveTheirOwnRules(report);
+    (void)testConstSuggestionCodeComparison(report);
     (void)testUnresolvedCallsMarkStackUnknown(repoRoot, report);
     (void)testAssumeExternalFrameReplacesUnknown(repoRoot, report);
     (void)testUninitializedFixpointBudgetIsExplicit(repoRoot, report);

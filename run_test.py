@@ -2858,6 +2858,83 @@ def check_const_param_contract_message_across_files() -> bool:
     print()
     return True
 
+
+def check_const_suggestion_cross_tu() -> bool:
+    """
+    #217: a suggested const type is reported only if every analyzed file still compiles with it,
+    once every declaration the defining file sees is rewritten. Another analyzed file that stores
+    the function where a non-const parameter is expected, declares it itself, or converts its
+    address with an explicit cast, removes the suggestion. A file that is not analyzed is not
+    checked. The callback and cast files sort before the definition, the redeclaration after it.
+    """
+    return _check_cross_tu_rule(
+        "suggested const types checked in every analyzed file",
+        "pointer_reference-const_correctness",
+        "cross-tu-const-suggestion-",
+        "ConstParameterNotModified.Pointer",
+        [
+            ("def alone", ["def.c"], ["read_value"]),
+            ("def and a caller", ["def.c", "caller.c"], ["read_value"]),
+            ("def and a callback of the old type", ["def.c", "callback.c"], []),
+            ("def and a redeclaration", ["def.c", "redecl.c"], []),
+            ("def and an explicit cast", ["def.c", "cast.c"], []),
+        ],
+        [],
+    )
+
+
+def check_const_suggestion_without_source() -> bool:
+    """
+    #217: a suggestion made on LLVM IR, with no source to rewrite, is kept and says that the
+    suggested type was not checked with Clang. So is a suggestion for a function that an analyzed
+    IR input uses: that input cannot be recompiled. Neither claims the Clang check.
+    """
+    print("=== Testing const suggestions without source ===")
+    fixtures = RUN_CONFIG.test_dir / "pointer_reference-const_correctness"
+    checked = "checked in the analyzed files only"
+
+    def message(files: list[Path], function: str) -> Optional[str]:
+        result = run_analyzer([*map(str, files), "--format=json"])
+        try:
+            diagnostics = json.loads(result.stdout or "").get("diagnostics", [])
+        except json.JSONDecodeError:
+            return None
+        for d in diagnostics:
+            if str(d.get("ruleId", "")).startswith("ConstParameterNotModified") and str(
+                d.get("location", {}).get("function", "")
+            ) == function:
+                return str(d.get("details", {}).get("message", ""))
+        return None
+
+    ok = True
+    for label, files, function, expected in (
+        (
+            "IR input alone",
+            [fixtures / "const-suggestion-ir-input.ll"],
+            "read_value_ir",
+            "not checked with Clang: no source file, so whether the suggested type compiles "
+            "was not verified",
+        ),
+        (
+            "source function used by an IR input",
+            [
+                fixtures / "cross-tu-const-suggestion-def.c",
+                fixtures / "cross-tu-const-suggestion-ir-caller.ll",
+            ],
+            "read_value",
+            "cross-tu-const-suggestion-ir-caller.ll uses the function but has no source",
+        ),
+    ):
+        text = message(files, function)
+        if text is not None and expected in text and checked not in text:
+            print(f"  ✅ {label}")
+        else:
+            print(f"  ❌ {label}: {text!r}")
+            ok = False
+    print()
+    return ok
+
+
 def check_duplicate_if_cross_tu() -> bool:
     """
     #157: a function defined in another file is deterministic when every definition of it is, as
@@ -5497,6 +5574,8 @@ def main() -> int:
         check_uninitialized_cross_tu_no_effect,
         check_const_param_cross_tu,
         check_const_param_contract_message_across_files,
+        check_const_suggestion_cross_tu,
+        check_const_suggestion_without_source,
         check_duplicate_if_cross_tu,
         check_global_read_before_write_identity_across_files,
         check_size_minus_one_cross_tu,
