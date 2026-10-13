@@ -670,6 +670,10 @@ normalizations:
 - values are numbered, not named, and comments of the printed IR are ignored;
 - the symbols the rewrite renames are paired: the function, and what is named or instantiated
   inside it. A symbol the file only declares is paired only if it is the function itself.
+- rewritten as `const T&`, a forwarding reference `T&&` deduces `G` instead of `G&` or `const G&`
+  for an lvalue argument: a specialization of the rewritten template that changes this way, and
+  what is named inside it, is paired when its name without `const` and references is carried by
+  exactly one symbol before the rewrite and one after. Its code is then compared like any other.
 
 Two differences that a program can observe are accepted, each only once verified, and the message
 lists them:

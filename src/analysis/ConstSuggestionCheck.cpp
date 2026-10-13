@@ -24,7 +24,7 @@
 #include <clang/AST/Decl.h>
 #include <clang/AST/DeclCXX.h>
 #include <clang/AST/Expr.h>
-#include <clang/AST/Mangle.h>
+#include <clang/AST/GlobalDecl.h>
 #include <clang/AST/RecursiveASTVisitor.h>
 #include <clang/AST/TypeLoc.h>
 #include <clang/Basic/Diagnostic.h>
@@ -42,7 +42,6 @@
 #include <compilerlib/toolchain.hpp>
 #include <coretrace/logger.hpp>
 #include <llvm/ADT/StringExtras.h>
-#include <llvm/IR/DataLayout.h>
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
 #include <llvm/Support/FileSystem.h>
@@ -344,6 +343,16 @@ namespace ctrace::stack::analysis
             FunctionFacts& facts_;
         };
 
+        // A type written canonically. An anonymous type, such as a lambda's, is written without
+        // its location: the path of that location depends on how the file was named, relative
+        // before the rewrite and absolute once the rewritten file is remapped.
+        std::string writtenType(clang::ASTContext& context, clang::QualType type)
+        {
+            clang::PrintingPolicy policy(context.getLangOpts());
+            policy.AnonymousTagLocations = false;
+            return type.getCanonicalType().getAsString(policy);
+        }
+
         // The type the parameter must have once rewritten, written canonically.
         std::string expectedType(clang::ASTContext& context, clang::QualType type)
         {
@@ -362,13 +371,7 @@ namespace ctrace::stack::analysis
             {
                 return "";
             }
-            return out.getCanonicalType().getAsString(clang::PrintingPolicy(context.getLangOpts()));
-        }
-
-        std::string writtenType(clang::ASTContext& context, clang::QualType type)
-        {
-            return type.getCanonicalType().getAsString(
-                clang::PrintingPolicy(context.getLangOpts()));
+            return writtenType(context, out);
         }
 
         // Declarations of the function, explicit casts of its address, and what each method of
@@ -389,9 +392,6 @@ namespace ctrace::stack::analysis
             void HandleTranslationUnit(clang::ASTContext& context) override
             {
                 context_ = &context;
-                names_ = std::make_unique<clang::ASTNameGenerator>(context);
-                prefix_ = llvm::DataLayout(context.getTargetInfo().getDataLayoutString())
-                              .getGlobalPrefix();
                 out_.facts.resize(targets_.size());
                 located_.assign(targets_.size(), nullptr);
                 clang::CodeGenerator* generator = action_.getCodeGenerator();
@@ -481,18 +481,18 @@ namespace ctrace::stack::analysis
                                        llvm::join(overridden, ", "));
             }
 
+            // The symbol CodeGen gives the function: it numbers unnamed types, such as a lambda
+            // ($_0, $_1), in the order it mangles them, as the IR names them.
             std::string symbolOf(const clang::FunctionDecl& function)
             {
-                if (function.isDependentContext() ||
+                clang::CodeGenerator* generator = action_.getCodeGenerator();
+                if (!generator || function.isDependentContext() ||
                     llvm::isa<clang::CXXConstructorDecl>(function) ||
                     llvm::isa<clang::CXXDestructorDecl>(function))
                 {
                     return "";
                 }
-                std::string name = names_->getName(&function);
-                if (prefix_ && !name.empty() && name.front() == prefix_)
-                    name.erase(0, 1);
-                return name;
+                return generator->GetMangledName(clang::GlobalDecl(&function)).str();
             }
 
             // Whether `function` is a declaration of the function target i names, in this
@@ -590,13 +590,11 @@ namespace ctrace::stack::analysis
                 }
             }
 
-            char prefix_ = 0;
-            std::uint8_t reservedPadding_[6] = {};
+            std::uint8_t reservedPadding_[7] = {};
             clang::CodeGenAction& action_;
             std::vector<Target>& targets_;
             Compilation& out_;
             clang::ASTContext* context_ = nullptr;
-            std::unique_ptr<clang::ASTNameGenerator> names_;
             std::vector<const clang::FunctionDecl*> located_;
         };
 

@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdlib>
 #include <functional>
 #include <map>
 #include <set>
@@ -374,6 +375,45 @@ namespace ctrace::stack::analysis
             const std::string now = i < b.size() ? b[i].trim().str() : "(end)";
             return "'" + was.substr(0, 160) + "' became '" + now.substr(0, 160) + "'";
         }
+
+        // The function template `symbol` is a specialization of, as demangled names write it
+        // ("ns::f<"), or "" for a symbol that is no function template specialization.
+        std::string templateOf(const std::string& symbol)
+        {
+            llvm::ItaniumPartialDemangler demangler;
+            if (demangler.partialDemangle(symbol.c_str()) || !demangler.isFunction())
+                return "";
+            const auto text = [](char* buffer)
+            {
+                std::string out = buffer ? buffer : "";
+                std::free(buffer);
+                return out;
+            };
+            std::size_t size = 0;
+            const std::string base = text(demangler.getFunctionBaseName(nullptr, &size));
+            const std::string scope = text(demangler.getFunctionDeclContextName(nullptr, &size));
+            const std::string name = text(demangler.getFunctionName(nullptr, &size));
+            const std::string qualified = scope.empty() ? base : scope + "::" + base;
+            if (base.empty() || !llvm::StringRef(name).starts_with(qualified + "<"))
+                return "";
+            return qualified + "<";
+        }
+
+        // Whether the demangled `symbol` names `templateName` ("ns::f<") as a whole name.
+        bool namesTemplate(const std::string& symbol, const std::string& templateName)
+        {
+            const std::string text = llvm::demangle(symbol);
+            for (std::size_t at = text.find(templateName); at != std::string::npos;
+                 at = text.find(templateName, at + 1))
+            {
+                if (at == 0 || (!std::isalnum(static_cast<unsigned char>(text[at - 1])) &&
+                                text[at - 1] != '_'))
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
     } // namespace
 
     std::string const_suggestion::withoutConst(const std::string& symbol)
@@ -551,6 +591,47 @@ namespace ctrace::stack::analysis
             if (!paired)
                 unpaired.push_back(name);
         }
+
+        // Rewritten as const T&, a forwarding reference T&& deduces G instead of G& or const G&
+        // for an lvalue argument: the specializations of the rewritten template that change this
+        // way, and what is named inside them, change their names beyond const. One is paired
+        // when its demangled name without const and references is carried by exactly one symbol
+        // before the rewrite and one after, both with code to compare.
+        const std::string templateName = templateOf(function);
+        if (!templateName.empty())
+        {
+            const auto loose = [](const std::string& name)
+            {
+                std::string key = withoutConst(name);
+                std::erase(key, '&');
+                return key + "|" + variantOf(name);
+            };
+            std::map<std::string, std::vector<std::string>> before;
+            std::map<std::string, std::vector<std::string>> after;
+            for (const std::string& name : unpaired)
+            {
+                if (namesTemplate(name, templateName))
+                    before[loose(name)].push_back(name);
+            }
+            for (const std::string& name : added)
+            {
+                if (!taken.count(name) && namesTemplate(name, templateName))
+                    after[loose(name)].push_back(name);
+            }
+            for (const auto& [key, names] : before)
+            {
+                const auto other = after.find(key);
+                if (names.size() != 1 || other == after.end() || other->second.size() != 1 ||
+                    !was.defined.count(names[0]) || !now.defined.count(other->second[0]))
+                {
+                    continue;
+                }
+                rename[names[0]] = other->second[0];
+                taken.insert(other->second[0]);
+                std::erase(unpaired, names[0]);
+            }
+        }
+
         std::vector<std::string> unexpected;
         for (const std::string& name : added)
         {
