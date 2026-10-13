@@ -639,8 +639,11 @@ which nothing is written. Before reporting one, the analyzer checks the suggeste
    - a type written by a macro that writes only the parameter gets `const` before the invocation.
 
    A macro definition is never rewritten.
-2. Every analyzed file that reads a rewritten file, or whose code references the function, is
-   compiled again with its own compile command, at `-O0`.
+2. Every file that sees the change is compiled again with its own compile command, at `-O0`.
+   The files considered are the analyzed ones and, with `--compile-commands`, every C or C++ file
+   of the compilation database, analyzed or not. A file sees the change when it reads a rewritten
+   file, when its analyzed code references the function, or, for a function outside any class,
+   when it names the function after preprocessing.
 3. The suggestion is removed when one of these files:
    - no longer compiles;
    - gains one of these warnings: `incompatible-pointer-types-discards-qualifiers`,
@@ -651,12 +654,20 @@ which nothing is written. Before reporting one, the analyzer checks the suggeste
    - changes what the methods of that name override;
    - generates different code.
 
+   A file that cannot be preprocessed, or does not compile as it is, cannot be checked: the
+   suggestion is then kept as not checked, unless another file refutes it.
+
 Generated code is compared function by function and global by global, after these
 normalizations:
-- debug information is removed;
-- metadata are compared by the places that use them, not by their numbers or contents;
+- debug information is not generated;
+- two kinds of metadata that do not change what the program does are removed: the source position
+  of inline assembly (`!srcloc`), used only to report errors, and annotations (`!annotation`),
+  which the LLVM Language Reference defines as without effect on the program;
+- alias scopes and their domains lose their descriptive names, which identify nothing: each one
+  stays a distinct scope;
+- every other metadata, module flags included, is compared by contents, not by number;
 - attribute groups are compared by contents, not by numbers;
-- comments of the printed IR are ignored;
+- values are numbered, not named, and comments of the printed IR are ignored;
 - the symbols the rewrite renames are paired: the function, and what is named or instantiated
   inside it. A symbol the file only declares is paired only if it is the function itself.
 
@@ -666,14 +677,18 @@ lists them:
   name;
 - a string constant whose only change is the signature that `__PRETTY_FUNCTION__` prints.
 
-The check covers only the analyzed files, with their compile commands, and the code these
+The check covers only these files, with their compile commands, and the code these
 configurations compile. The message says how the suggestion was checked:
-- `checked in the analyzed files only, with their compile commands: ...`;
+- `checked in the analyzed files only, with their compile commands: ...`, without a compilation
+  database;
+- `checked in every file of the compilation database that sees the change, with its compile
+  command: ...`, with one;
 - `difference: ...`, for each accepted difference;
 - `ABI: ...`, for a C++ function with external linkage: its symbol changes, so code compiled
   separately must use the updated declaration and be recompiled;
 - `not checked with Clang: ...`, when the check could not run, for example on an LLVM IR input
-  (`.ll`, `.bc`), which has no source. The suggestion then rests on the IR analysis alone.
+  (`.ll`, `.bc`), which has no source, or for a file of the compilation database that cannot be
+  preprocessed. The suggestion then rests on the IR analysis alone.
 
 ### Example
 

@@ -5,7 +5,9 @@
 #include "analysis/ConstSuggestionCheck.hpp"
 
 #include "ConstSuggestionInternal.hpp"
+#include "analysis/CompileCommands.hpp"
 #include "analysis/InputPipeline.hpp"
+#include "analyzer/HotspotProfiler.hpp"
 
 #include <algorithm>
 #include <map>
@@ -13,6 +15,7 @@
 #include <mutex>
 #include <set>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -47,7 +50,7 @@
 #include <llvm/Support/Path.h>
 #include <llvm/Support/TargetSelect.h>
 #include <llvm/Support/VirtualFileSystem.h>
-#include <llvm/Transforms/Utils/Cloning.h>
+#include <llvm/Support/xxhash.h>
 
 namespace ctrace::stack::analysis
 {
@@ -56,11 +59,19 @@ namespace ctrace::stack::analysis
         using const_suggestion::variantOf;
         using const_suggestion::withoutConst;
 
-        constexpr const char* kChecked =
-            "checked in the analyzed files only, with their compile commands: they compile with "
-            "the suggested type, and their generated code matches once debug information, "
-            "metadata numbering and renamed symbols are normalized";
+        // What the check covers: the analyzed files, or every file of the compilation database.
+        constexpr const char* kCheckedAnalyzed =
+            "checked in the analyzed files only, with their compile commands: ";
+        constexpr const char* kCheckedDatabase =
+            "checked in every file of the compilation database that sees the change, with its "
+            "compile command: ";
+        // What it verifies (README, "Const parameter suggestions checked with Clang").
+        constexpr const char* kCheckedResult =
+            "they compile with the suggested type, and their generated code matches, metadata "
+            "included, once debug information, diagnostic metadata, descriptive names and "
+            "renamed symbols are set aside";
         constexpr const char* kNotChecked = "not checked with Clang: ";
+        constexpr const char* kDoesNotCompileAsItIs = "a file does not compile with Clang as it is";
 
         // Warnings that the C and C++ standards make constraint violations, or that a rewrite
         // turns on silently: the rewritten code must not add any.
@@ -88,7 +99,10 @@ namespace ctrace::stack::analysis
             std::string problem;
             std::multiset<std::string> overrides;
             unsigned paramIndex = 0;
-            std::uint32_t reservedPadding = 0;
+            // A free function can be declared by a file that reads none of the rewritten
+            // files; a method only where its class is defined.
+            bool freeFunction = false;
+            std::uint8_t reservedPadding[3] = {};
         };
 
         // What to look for in one compilation.
@@ -108,12 +122,23 @@ namespace ctrace::stack::analysis
 
         struct Compilation
         {
+            bool timing = false;
+            std::uint8_t reservedPadding[7] = {};
             std::string failure; // the compilation could not run
             std::multiset<std::string> diagnostics;
             std::string firstDiagnostic;
             std::unique_ptr<llvm::LLVMContext> context;
             std::unique_ptr<llvm::Module> module;
             std::vector<FunctionFacts> facts;
+        };
+
+        // A unit before the rewrite, prepared once: its diagnostics, what the methods of the
+        // function's name override, and its generated code ready to compare.
+        struct Original
+        {
+            std::multiset<std::string> diagnostics;
+            std::multiset<std::string> overrides;
+            std::shared_ptr<const const_suggestion::ModuleText> code;
         };
 
         std::string realPath(llvm::StringRef path)
@@ -372,6 +397,7 @@ namespace ctrace::stack::analysis
                 clang::CodeGenerator* generator = action_.getCodeGenerator();
                 for (std::size_t i = 0; i < targets_.size(); ++i)
                     locate(i, generator);
+                const analyzer::ScopedHotspot hotspot(out_.timing, "const_suggestion.inspect");
                 TraverseDecl(context.getTranslationUnitDecl());
             }
 
@@ -526,6 +552,7 @@ namespace ctrace::stack::analysis
             void plan(Target& target, FunctionFacts& facts, const clang::FunctionDecl& function)
             {
                 const auto* method = llvm::dyn_cast<clang::CXXMethodDecl>(&function);
+                facts.freeFunction = method == nullptr;
                 const unsigned implicitThis = method && method->isInstance() ? 1 : 0;
                 if (target.debugArgNo <= implicitThis)
                 {
@@ -640,8 +667,9 @@ namespace ctrace::stack::analysis
 
         Compilation compile(const UnitCommand& command,
                             const std::map<std::string, std::string>& rewritten,
-                            std::vector<Target>& targets)
+                            std::vector<Target>& targets, std::string_view step, bool timing)
         {
+            const analyzer::ScopedHotspot hotspot(timing, step);
             static std::once_flag targetsReady;
             std::call_once(targetsReady,
                            []
@@ -651,6 +679,7 @@ namespace ctrace::stack::analysis
                                llvm::InitializeAllTargetMCs();
                            });
             Compilation out;
+            out.timing = timing;
             std::string error;
             const bool ran = runSerializedCompile(
                 command.workingDir,
@@ -682,6 +711,8 @@ namespace ctrace::stack::analysis
                     // Values and blocks numbered, not named: a block that inlining names after
                     // the inlined function carries the rewritten function's symbol.
                     invocation->getCodeGenOpts().DiscardValueNames = true;
+                    // The comparison removes debug information: do not generate it.
+                    invocation->getCodeGenOpts().setDebugInfo(llvm::codegenoptions::NoDebugInfo);
                     clang::DiagnosticOptions& diagnostics = invocation->getDiagnosticOpts();
                     // No "N warnings generated" on the analyzer's output.
                     diagnostics.ShowCarets = false;
@@ -714,10 +745,40 @@ namespace ctrace::stack::analysis
             return out;
         }
 
-        // The files a unit reads, from its preprocessing.
-        std::set<std::string> filesRead(const UnitCommand& command)
+        // Preprocesses a unit and records every identifier, after macro expansion.
+        class ScanAction : public clang::PreprocessorFrontendAction
         {
-            std::set<std::string> out;
+          public:
+            explicit ScanAction(std::unordered_set<std::uint64_t>& identifiers)
+                : identifiers_(identifiers)
+            {
+            }
+
+          protected:
+            void ExecuteAction() override
+            {
+                clang::Preprocessor& preprocessor = getCompilerInstance().getPreprocessor();
+                preprocessor.EnterMainSourceFile();
+                clang::Token token;
+                do
+                {
+                    preprocessor.Lex(token);
+                    if (token.is(clang::tok::identifier))
+                        identifiers_.insert(
+                            llvm::xxh3_64bits(token.getIdentifierInfo()->getName()));
+                } while (token.isNot(clang::tok::eof));
+            }
+
+          private:
+            std::unordered_set<std::uint64_t>& identifiers_;
+        };
+
+        // The files a unit reads and its identifiers, from its preprocessing. Empty when the
+        // unit cannot be preprocessed without error: what it reads is then unknown.
+        UnitScan scan(const UnitCommand& command, bool timing)
+        {
+            const analyzer::ScopedHotspot hotspot(timing, "const_suggestion.preprocess");
+            UnitScan out;
             std::string error;
             runSerializedCompile(
                 command.workingDir,
@@ -744,16 +805,32 @@ namespace ctrace::stack::analysis
                     instance.setInvocation(std::move(invocation));
                     instance.createDiagnostics(*files, &ignore, false);
                     instance.createFileManager(files);
-                    clang::PreprocessOnlyAction action;
+                    ScanAction action(out.identifiers);
                     instance.ExecuteAction(action);
-                    if (!instance.hasSourceManager())
+                    if (!instance.hasSourceManager() ||
+                        instance.getDiagnostics().hasErrorOccurred())
                         return;
                     const clang::SourceManager& sm = instance.getSourceManager();
                     for (auto it = sm.fileinfo_begin(); it != sm.fileinfo_end(); ++it)
-                        out.insert(realPath(it->first.getName()));
+                        out.files.insert(realPath(it->first.getName()));
                 },
                 error);
             return out;
+        }
+
+        // An input as a real absolute path: relative inputs resolve from the input directory.
+        std::string canonicalPath(const std::string& filename, const AnalysisConfig& config)
+        {
+            llvm::SmallString<256> path(filename);
+            if (!llvm::sys::path::is_absolute(path))
+            {
+                llvm::SmallString<256> base(config.inputBaseDir);
+                if (base.empty())
+                    llvm::sys::fs::current_path(base);
+                llvm::sys::path::append(base, filename);
+                path = base;
+            }
+            return realPath(path);
         }
 
         bool references(const llvm::Module& module, llvm::StringRef symbol)
@@ -782,25 +859,44 @@ namespace ctrace::stack::analysis
             return out;
         }
 
-        // Checks one suggestion in one unit: compiled before and after the rewrite.
-        bool checkUnit(const UnitCommand& command, Compilation* before, const Target& planned,
-                       const std::map<std::string, std::string>& rewritten,
+        // A unit before the rewrite, for the function a target names: compiled once per call.
+        using OriginalCache =
+            std::map<std::pair<std::string, std::string>, std::optional<Original>>;
+
+        const std::optional<Original>& originalOf(const UnitCommand& command,
+                                                  const std::string& key, const Target& planned,
+                                                  OriginalCache& cache, bool timing)
+        {
+            std::optional<Original>& out = cache[{key, planned.name}];
+            if (out)
+                return out;
+            std::vector<Target> targets{planned};
+            targets[0].plan = false;
+            targets[0].expectedType.clear();
+            Compilation before =
+                compile(command, {}, targets, "const_suggestion.compile.other_before", timing);
+            if (!before.failure.empty() || !before.module)
+                return out;
+            const analyzer::ScopedHotspot hotspot(timing, "const_suggestion.prepare");
+            out = Original{before.diagnostics,
+                           before.facts.empty() ? std::multiset<std::string>()
+                                                : before.facts[0].overrides,
+                           std::make_shared<const_suggestion::ModuleText>(
+                               const_suggestion::prepare(*before.module))};
+            return out;
+        }
+
+        // Checks one suggestion in one unit, against the unit before the rewrite.
+        bool checkUnit(const UnitCommand& command, const std::optional<Original>& before,
+                       const Target& planned, const std::map<std::string, std::string>& rewritten,
                        const std::set<std::string>& symbolsBefore, const FunctionFacts& plan,
                        PrintedSignature& signature, std::vector<std::string>& accepted,
-                       std::string& renamed, std::string& removed, std::string& notChecked)
+                       std::string& renamed, std::string& removed, std::string& notChecked,
+                       bool timing)
         {
-            Compilation own;
             if (!before)
             {
-                std::vector<Target> targets{planned};
-                targets[0].plan = false;
-                targets[0].expectedType.clear();
-                own = compile(command, {}, targets);
-                before = &own;
-            }
-            if (!before->failure.empty() || !before->module)
-            {
-                notChecked = "a file does not compile with Clang as it is";
+                notChecked = kDoesNotCompileAsItIs;
                 return false;
             }
             std::vector<Target> targets{planned};
@@ -811,7 +907,8 @@ namespace ctrace::stack::analysis
             targets[0].symbolsBefore = &symbolsBefore;
             for (const auto& [path, edits] : plan.edits)
                 targets[0].rewrittenFiles.insert(path);
-            Compilation after = compile(command, rewritten, targets);
+            Compilation after =
+                compile(command, rewritten, targets, "const_suggestion.compile.after", timing);
             if (!after.failure.empty())
             {
                 notChecked = after.failure;
@@ -843,8 +940,7 @@ namespace ctrace::stack::analysis
                 removed = facts.problem;
                 return true;
             }
-            const FunctionFacts& old = before->facts.empty() ? FunctionFacts() : before->facts[0];
-            if (old.overrides != facts.overrides)
+            if (before->overrides != facts.overrides)
             {
                 removed = "the methods it overrides change";
                 return true;
@@ -852,9 +948,13 @@ namespace ctrace::stack::analysis
             if (signature.after.empty() && !facts.printedSignature.empty())
                 signature.after = facts.printedSignature;
             std::string renamedTo;
-            std::unique_ptr<llvm::Module> was = llvm::CloneModule(*before->module);
-            const std::optional<std::string> difference = rewrittenCodeDifference(
-                *was, *after.module, planned.symbol, &signature, &accepted, &renamedTo);
+            std::optional<std::string> difference;
+            {
+                const analyzer::ScopedHotspot hotspot(timing, "const_suggestion.compare");
+                const const_suggestion::ModuleText now = const_suggestion::prepare(*after.module);
+                difference = const_suggestion::codeDifference(*before->code, now, planned.symbol,
+                                                              &signature, &accepted, &renamedTo);
+            }
             if (difference)
             {
                 removed = "the generated code changes: " + *difference;
@@ -879,6 +979,8 @@ namespace ctrace::stack::analysis
     {
         if (issues.empty() || config.warningsOnly)
             return;
+        const bool timing = config.timing;
+        const analyzer::ScopedHotspot total(timing, "const_suggestion.total");
         const AnalyzedUnits* units = config.analyzedUnits.get();
         const AnalyzedUnit* self = nullptr;
         for (std::size_t i = 0; units && i < units->units.size(); ++i)
@@ -920,7 +1022,8 @@ namespace ctrace::stack::analysis
             targets[i].debugArgNo = issues[i].debugArgNo;
             targets[i].plan = true;
         }
-        Compilation before = compile(command, {}, targets);
+        Compilation before =
+            compile(command, {}, targets, "const_suggestion.compile.defining_before", timing);
         if (!before.failure.empty() || !before.module || before.facts.size() != issues.size())
         {
             notChecked("the file does not compile with Clang as it is");
@@ -929,6 +1032,36 @@ namespace ctrace::stack::analysis
         std::set<std::string> symbolsBefore;
         for (const llvm::Function& function : *before.module)
             symbolsBefore.insert(function.getName().str());
+        std::shared_ptr<const const_suggestion::ModuleText> definingCode;
+        {
+            const analyzer::ScopedHotspot hotspot(timing, "const_suggestion.prepare");
+            definingCode = std::make_shared<const_suggestion::ModuleText>(
+                const_suggestion::prepare(*before.module));
+        }
+        OriginalCache originals;
+
+        // The other units a rewrite may reach: the analyzed ones and, with a compilation
+        // database, every C or C++ file it lists.
+        std::vector<AnalyzedUnit> candidates;
+        std::set<std::string> analyzed;
+        for (const AnalyzedUnit& unit : units->units)
+        {
+            analyzed.insert(canonicalPath(unit.filename, config));
+            if (&unit != self)
+                candidates.push_back(unit);
+        }
+        if (config.compilationDatabase)
+        {
+            for (const std::string& file : config.compilationDatabase->listSourceFiles())
+            {
+                const LanguageType language = detectFromExtension(file);
+                if ((language == LanguageType::C || language == LanguageType::CXX) &&
+                    !analyzed.count(canonicalPath(file, config)))
+                {
+                    candidates.push_back({file, nullptr, language});
+                }
+            }
+        }
 
         std::vector<ConstParamIssue> kept;
         for (std::size_t i = 0; i < issues.size(); ++i)
@@ -963,83 +1096,104 @@ namespace ctrace::stack::analysis
             std::string renamed;
             std::string removed;
             std::string unchecked;
-            Compilation selfBefore;
-            selfBefore.module = llvm::CloneModule(*before.module);
-            selfBefore.diagnostics = before.diagnostics;
-            selfBefore.facts = {plan};
+            const std::optional<Original> selfBefore =
+                Original{before.diagnostics, plan.overrides, definingCode};
             std::size_t checkedUnits = 1;
-            bool done = checkUnit(command, &selfBefore, planned, rewritten, symbolsBefore, plan,
-                                  signature, accepted, renamed, removed, unchecked);
-            // Then every other analyzed unit that sees a rewritten file or references the
-            // function.
-            for (const AnalyzedUnit& unit : units->units)
+            const bool definingDone =
+                checkUnit(command, selfBefore, planned, rewritten, symbolsBefore, plan, signature,
+                          accepted, renamed, removed, unchecked, timing);
+            // Then every other unit that sees a rewritten file or references the function: the
+            // analyzed ones and, with a compilation database, every file it lists, analyzed or
+            // not. One that cannot be checked leaves the suggestion unchecked, unless another
+            // one refutes it.
+            const auto cannotCheck = [&](const std::string& why)
             {
-                if (!done || !removed.empty() || &unit == self)
-                    continue;
+                if (unchecked.empty())
+                    unchecked = why;
+            };
+            for (const AnalyzedUnit& unit : candidates)
+            {
+                if (!definingDone || !removed.empty())
+                    break;
                 const bool referencing = unit.module && references(*unit.module, issue.funcName);
                 if (unit.language != LanguageType::C && unit.language != LanguageType::CXX)
                 {
                     if (referencing)
-                    {
-                        done = false;
-                        unchecked = unit.filename + " uses the function but has no source";
-                    }
+                        cannotCheck(unit.filename + " uses the function but has no source");
                     continue;
                 }
                 UnitCommand other;
                 if (!commandFor(unit, config, other, error))
                 {
-                    done = false;
-                    unchecked = "no compile command for " + unit.filename;
+                    cannotCheck("no compile command for " + unit.filename);
                     continue;
                 }
-                bool sees = referencing;
-                if (!sees)
+                const std::string key = canonicalPath(unit.filename, config);
+                UnitScan seen;
+                bool cached = false;
                 {
-                    std::set<std::string> read;
+                    std::lock_guard<std::mutex> lock(units->scansMutex);
+                    const auto found = units->scans.find(key);
+                    if (found != units->scans.end())
                     {
-                        std::lock_guard<std::mutex> lock(units->filesReadMutex);
-                        const auto cached = units->filesRead.find(unit.filename);
-                        if (cached != units->filesRead.end())
-                            read = cached->second;
+                        seen = found->second;
+                        cached = true;
                     }
-                    if (read.empty())
-                    {
-                        read = filesRead(other);
-                        std::lock_guard<std::mutex> lock(units->filesReadMutex);
-                        units->filesRead[unit.filename] = read;
-                    }
-                    sees = std::any_of(rewrittenFiles.begin(), rewrittenFiles.end(),
-                                       [&](const std::string& path) { return read.count(path); });
                 }
+                if (!cached)
+                {
+                    seen = scan(other, timing);
+                    std::lock_guard<std::mutex> lock(units->scansMutex);
+                    units->scans[key] = seen;
+                }
+                if (seen.files.empty())
+                {
+                    cannotCheck(unit.filename + " cannot be preprocessed with Clang");
+                    continue;
+                }
+                const bool sees =
+                    referencing ||
+                    std::any_of(rewrittenFiles.begin(), rewrittenFiles.end(),
+                                [&](const std::string& path) { return seen.files.count(path); }) ||
+                    (plan.freeFunction &&
+                     seen.identifiers.count(llvm::xxh3_64bits(planned.name)) != 0);
                 if (!sees)
                     continue;
                 std::vector<std::string> otherAccepted;
+                std::string why;
                 ++checkedUnits;
-                done = checkUnit(other, nullptr, planned, rewritten, symbolsBefore, plan, signature,
-                                 otherAccepted, renamed, removed, unchecked);
+                if (!checkUnit(other, originalOf(other, key, planned, originals, timing), planned,
+                               rewritten, symbolsBefore, plan, signature, otherAccepted, renamed,
+                               removed, why, timing))
+                {
+                    cannotCheck(why == kDoesNotCompileAsItIs
+                                    ? unit.filename + " does not compile with Clang as it is"
+                                    : why);
+                }
                 for (const std::string& line : otherAccepted)
                 {
                     if (std::find(accepted.begin(), accepted.end(), line) == accepted.end())
                         accepted.push_back(line);
                 }
             }
-            if (!done)
+            if (!removed.empty())
+            {
+                trace(issue, "removed, " + removed);
+                continue;
+            }
+            if (!unchecked.empty())
             {
                 issue.checkLines.push_back(kNotChecked + unchecked);
                 trace(issue, "not checked, " + unchecked);
                 kept.push_back(std::move(issue));
                 continue;
             }
-            if (!removed.empty())
-            {
-                trace(issue, "removed, " + removed);
-                continue;
-            }
             trace(issue, "checked in " + std::to_string(checkedUnits) + " file(s)");
-            issue.checkLines.push_back(accepted.empty() ? std::string(kChecked)
-                                                        : std::string(kChecked) +
-                                                              ", except for the differences below");
+            const std::string checked =
+                std::string(config.compilationDatabase ? kCheckedDatabase : kCheckedAnalyzed) +
+                kCheckedResult;
+            issue.checkLines.push_back(
+                accepted.empty() ? checked : checked + ", except for the differences below");
             issue.checkLines.insert(issue.checkLines.end(), accepted.begin(), accepted.end());
             const llvm::Function* function = mod.getFunction(issue.funcName);
             if (function && function->hasExternalLinkage() && !renamed.empty() &&

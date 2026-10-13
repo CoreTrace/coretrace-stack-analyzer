@@ -6,6 +6,7 @@
 #include <mutex>
 #include <optional>
 #include <set>
+#include <unordered_set>
 #include <string>
 #include <vector>
 
@@ -30,13 +31,21 @@ namespace ctrace::stack::analysis
         std::uint32_t reservedLanguagePadding = 0;
     };
 
+    // What the preprocessing of one unit shows: the files it reads, and its identifiers (as
+    // 64-bit hashes: a collision only adds a recheck).
+    struct UnitScan
+    {
+        std::set<std::string> files;
+        std::unordered_set<std::uint64_t> identifiers;
+    };
+
     // The inputs analyzed together.
     struct AnalyzedUnits
     {
         std::vector<AnalyzedUnit> units;
-        // The files each unit reads, by unit filename, found when first needed.
-        mutable std::mutex filesReadMutex;
-        mutable std::map<std::string, std::set<std::string>> filesRead;
+        // The scan of each unit, by path, found when first needed.
+        mutable std::mutex scansMutex;
+        mutable std::map<std::string, UnitScan> scans;
     };
 
     // The one input of an analysis that loads it alone.
