@@ -2,7 +2,9 @@
 // #217: specializations of the rewritten template whose deduced type changes are paired only when
 // the correspondence is unique, and their code is still compared.
 // - call: g passes G& and h passes const G&; after the rewrite both deduce G, so two
-//   specializations become one. No unique correspondence: both suggestions are removed.
+//   specializations become one. No unique correspondence: both suggestions are removed. The
+//   lambdas are noexcept, so that all three specializations get the same attributes: only the
+//   correspondence tells them apart.
 // - pick: the lvalue's specialization is paired, but its code changes with what F deduces.
 
 // not contains: in function 'int call<
@@ -16,12 +18,12 @@ int call(F&& f)
 
 int from_temporary()
 {
-    return call([](int x) { return x & 1; });
+    return call([](int x) noexcept { return x & 1; });
 }
 
 int from_lvalues()
 {
-    auto g = [](int x) { return x | 2; };
+    auto g = [](int x) noexcept { return x | 2; };
     const auto& h = g;
     return call(g) | call(h);
 }
