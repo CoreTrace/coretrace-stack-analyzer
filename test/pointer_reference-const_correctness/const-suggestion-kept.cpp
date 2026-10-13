@@ -9,7 +9,7 @@
 // [ !Info! ] ConstParameterNotModified.Pointer: parameter 'p' in function 'read_or_throw(int*)' is never used to modify the pointed object
 // ↳ current type: int *p
 // ↳ suggested type: const int *p
-// ↳ checked in the analyzed files only, with their compile commands: they compile with the suggested type, and their generated code matches once debug information, metadata numbering and renamed symbols are normalized, except for the differences below
+// ↳ checked in the analyzed files only, with their compile commands: they compile with the suggested type, and their generated code matches, metadata included, once debug information, diagnostic metadata, descriptive names and renamed symbols are set aside, except for the differences below
 // ↳ difference: the name typeid gives a type named after the function changes, from "Z13read_or_throwPiE7Missing" to "Z13read_or_throwPKiE7Missing"
 // ↳ ABI: the suggested type changes the symbol (_Z13read_or_throwPi -> _Z13read_or_throwPKi): code compiled separately must use the updated declaration and be recompiled
 int read_or_throw(int* p)

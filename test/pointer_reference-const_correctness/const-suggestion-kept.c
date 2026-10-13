@@ -15,7 +15,7 @@ static inline __attribute__((always_inline)) int load(const int* __restrict q)
 // ↳ current type: int *p
 // ↳ suggested type: const int *p
 // ↳ the callee's body is not checked: it may still modify the pointed object through a cast
-// ↳ checked in the analyzed files only, with their compile commands: they compile with the suggested type, and their generated code matches once debug information, metadata numbering and renamed symbols are normalized
+// ↳ checked in the analyzed files only, with their compile commands: they compile with the suggested type, and their generated code matches, metadata included, once debug information, diagnostic metadata, descriptive names and renamed symbols are set aside
 int read_restricted(int* p)
 {
     return load(p);

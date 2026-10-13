@@ -19,7 +19,7 @@ typedef unsigned char* byte_pointer;
 // [ !Info! ] ConstParameterNotModified.Pointer: parameter 'buffer' in function 'object_macro' is never used to modify the pointed object
 // ↳ current type: unsigned char *buffer
 // ↳ suggested type: const unsigned char *buffer
-// ↳ checked in the analyzed files only, with their compile commands: they compile with the suggested type, and their generated code matches once debug information, metadata numbering and renamed symbols are normalized
+// ↳ checked in the analyzed files only, with their compile commands: they compile with the suggested type, and their generated code matches, metadata included, once debug information, diagnostic metadata, descriptive names and renamed symbols are set aside
 int object_macro(BYTE* buffer)
 {
     return buffer[0];
@@ -29,7 +29,7 @@ int object_macro(BYTE* buffer)
 // [ !Info! ] ConstParameterNotModified.Pointer: parameter 'buffer' in function 'pointer_macro' is never used to modify the pointed object
 // ↳ current type: unsigned char *buffer
 // ↳ suggested type: const unsigned char *buffer
-// ↳ checked in the analyzed files only, with their compile commands: they compile with the suggested type, and their generated code matches once debug information, metadata numbering and renamed symbols are normalized
+// ↳ checked in the analyzed files only, with their compile commands: they compile with the suggested type, and their generated code matches, metadata included, once debug information, diagnostic metadata, descriptive names and renamed symbols are set aside
 int pointer_macro(BYTE_POINTER buffer)
 {
     return buffer[0];
@@ -39,7 +39,7 @@ int pointer_macro(BYTE_POINTER buffer)
 // [ !Info! ] ConstParameterNotModified.Pointer: parameter 'buffer' in function 'declarator_macro' is never used to modify the pointed object
 // ↳ current type: unsigned char *buffer
 // ↳ suggested type: const unsigned char *buffer
-// ↳ checked in the analyzed files only, with their compile commands: they compile with the suggested type, and their generated code matches once debug information, metadata numbering and renamed symbols are normalized
+// ↳ checked in the analyzed files only, with their compile commands: they compile with the suggested type, and their generated code matches, metadata included, once debug information, diagnostic metadata, descriptive names and renamed symbols are set aside
 int declarator_macro(BUFFER_PARAM(buffer))
 {
     return buffer[0];
@@ -49,7 +49,7 @@ int declarator_macro(BUFFER_PARAM(buffer))
 // [ !Info! ] ConstParameterNotModified.Pointer: parameter 'buffer' in function 'argument_macro' is never used to modify the pointed object
 // ↳ current type: unsigned char *buffer
 // ↳ suggested type: const unsigned char *buffer
-// ↳ checked in the analyzed files only, with their compile commands: they compile with the suggested type, and their generated code matches once debug information, metadata numbering and renamed symbols are normalized
+// ↳ checked in the analyzed files only, with their compile commands: they compile with the suggested type, and their generated code matches, metadata included, once debug information, diagnostic metadata, descriptive names and renamed symbols are set aside
 DECLARE_READER(argument_macro, unsigned char*)
 {
     return buffer[0];

@@ -131,7 +131,7 @@ int self_typed(int* p)
 // [ !Info! ] ConstParameterNotModified.Pointer: parameter 'p' in function 'called_directly(int*)' is never used to modify the pointed object
 // ↳ current type: int *p
 // ↳ suggested type: const int *p
-// ↳ checked in the analyzed files only, with their compile commands: they compile with the suggested type, and their generated code matches once debug information, metadata numbering and renamed symbols are normalized
+// ↳ checked in the analyzed files only, with their compile commands: they compile with the suggested type, and their generated code matches, metadata included, once debug information, diagnostic metadata, descriptive names and renamed symbols are set aside
 // ↳ ABI: the suggested type changes the symbol (_Z15called_directlyPi -> _Z15called_directlyPKi): code compiled separately must use the updated declaration and be recompiled
 int called_directly(int* p)
 {
@@ -147,7 +147,7 @@ int call_directly(int* p)
 // [ !Info! ] ConstParameterNotModified.Pointer: parameter 'p' in function 'twice_target(int*)' is never used to modify the pointed object
 // ↳ current type: int *p
 // ↳ suggested type: const int *p
-// ↳ checked in the analyzed files only, with their compile commands: they compile with the suggested type, and their generated code matches once debug information, metadata numbering and renamed symbols are normalized
+// ↳ checked in the analyzed files only, with their compile commands: they compile with the suggested type, and their generated code matches, metadata included, once debug information, diagnostic metadata, descriptive names and renamed symbols are set aside
 // ↳ ABI: the suggested type changes the symbol (_Z12twice_targetPi -> _Z12twice_targetPKi): code compiled separately must use the updated declaration and be recompiled
 int twice_target(int* p)
 {

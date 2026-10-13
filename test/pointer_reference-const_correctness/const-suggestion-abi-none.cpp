@@ -8,7 +8,7 @@
 // [ !Info! ] ConstParameterNotModified.Pointer: parameter 'p' in function 'internal_read(int*)' is never used to modify the pointed object
 // ↳ current type: int *p
 // ↳ suggested type: const int *p
-// ↳ checked in the analyzed files only, with their compile commands: they compile with the suggested type, and their generated code matches once debug information, metadata numbering and renamed symbols are normalized
+// ↳ checked in the analyzed files only, with their compile commands: they compile with the suggested type, and their generated code matches, metadata included, once debug information, diagnostic metadata, descriptive names and renamed symbols are set aside
 static int internal_read(int* p)
 {
     return *p;
@@ -20,7 +20,7 @@ namespace
     // [ !Info! ] ConstParameterNotModified.Pointer: parameter 'p' in function '(anonymous namespace)::anonymous_read(int*)' is never used to modify the pointed object
     // ↳ current type: int *p
     // ↳ suggested type: const int *p
-    // ↳ checked in the analyzed files only, with their compile commands: they compile with the suggested type, and their generated code matches once debug information, metadata numbering and renamed symbols are normalized
+    // ↳ checked in the analyzed files only, with their compile commands: they compile with the suggested type, and their generated code matches, metadata included, once debug information, diagnostic metadata, descriptive names and renamed symbols are set aside
     int anonymous_read(int* p)
     {
         return *p;
@@ -31,7 +31,7 @@ namespace
 // [ !Info! ] ConstParameterNotModified.Pointer: parameter 'p' in function 'c_read' is never used to modify the pointed object
 // ↳ current type: int *p
 // ↳ suggested type: const int *p
-// ↳ checked in the analyzed files only, with their compile commands: they compile with the suggested type, and their generated code matches once debug information, metadata numbering and renamed symbols are normalized
+// ↳ checked in the analyzed files only, with their compile commands: they compile with the suggested type, and their generated code matches, metadata included, once debug information, diagnostic metadata, descriptive names and renamed symbols are set aside
 extern "C" int c_read(int* p)
 {
     return *p;

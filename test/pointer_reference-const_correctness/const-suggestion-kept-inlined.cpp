@@ -15,7 +15,7 @@ template <class Read> __attribute__((always_inline)) inline int read_once(Read r
 // [ !Info! ] ConstParameterNotModified.Pointer: parameter 'p' in function 'read_with_lambda(int*)' is never used to modify the pointed object
 // ↳ current type: int *p
 // ↳ suggested type: const int *p
-// ↳ checked in the analyzed files only, with their compile commands: they compile with the suggested type, and their generated code matches once debug information, metadata numbering and renamed symbols are normalized
+// ↳ checked in the analyzed files only, with their compile commands: they compile with the suggested type, and their generated code matches, metadata included, once debug information, diagnostic metadata, descriptive names and renamed symbols are set aside
 // ↳ ABI: the suggested type changes the symbol (_Z16read_with_lambdaPi -> _Z16read_with_lambdaPKi): code compiled separately must use the updated declaration and be recompiled
 int read_with_lambda(int* p)
 {

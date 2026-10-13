@@ -26,7 +26,7 @@ static void log_text(const std::string& text)
 // [ !Info! ] ConstParameterNotModified.Pointer: parameter 'p' in function 'read_and_log(int*)' is never used to modify the pointed object
 // ↳ current type: int *p
 // ↳ suggested type: const int *p
-// ↳ checked in the analyzed files only, with their compile commands: they compile with the suggested type, and their generated code matches once debug information, metadata numbering and renamed symbols are normalized
+// ↳ checked in the analyzed files only, with their compile commands: they compile with the suggested type, and their generated code matches, metadata included, once debug information, diagnostic metadata, descriptive names and renamed symbols are set aside
 // ↳ ABI: the suggested type changes the symbol (_Z12read_and_logPi -> _Z12read_and_logPKi): code compiled separately must use the updated declaration and be recompiled
 int read_and_log(int* p)
 {

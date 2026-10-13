@@ -12,7 +12,7 @@
 // [ !Info! ] ConstParameterNotModified.Pointer: parameter 'p' in function 'print_and_read' is never used to modify the pointed object
 // ↳ current type: int *p
 // ↳ suggested type: const int *p
-// ↳ checked in the analyzed files only, with their compile commands: they compile with the suggested type, and their generated code matches once debug information, metadata numbering and renamed symbols are normalized, except for the differences below
+// ↳ checked in the analyzed files only, with their compile commands: they compile with the suggested type, and their generated code matches, metadata included, once debug information, diagnostic metadata, descriptive names and renamed symbols are set aside, except for the differences below
 // ↳ difference: the signature printed by __PRETTY_FUNCTION__ changes, from "int print_and_read(int *)" to "int print_and_read(const int *)"
 int print_and_read(int* p)
 {

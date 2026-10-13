@@ -2935,6 +2935,141 @@ def check_const_suggestion_without_source() -> bool:
     return ok
 
 
+def check_const_suggestion_compilation_database() -> bool:
+    """
+    #217: with a compilation database, a suggested const type is checked in every file the
+    database lists that sees the change, analyzed or not, with its own compile command. A file
+    that is not analyzed and stores the function where a non-const parameter is expected, declares
+    it itself without the header, or converts its address with an explicit cast, removes the
+    suggestion, even listed after a file that cannot be checked. So does a file that takes the
+    address of a method with the old type: it sees the change through the header alone. A file
+    that sees the change but does not compile as it is, or cannot be preprocessed, keeps the
+    suggestion as not checked, without the claim of the check. A file that does not see the change
+    is not compiled.
+    """
+    print("=== Testing const suggestions checked in the compilation database ===")
+    # Absolute: a compilation database names absolute directories.
+    fixtures = (RUN_CONFIG.test_dir / "pointer_reference-const_correctness").resolve()
+    prefix = "cross-tu-const-suggestion-"
+    checked = "checked in every file of the compilation database that sees the change"
+    method = "_ZNK6Reader4readEPi"
+    generated = {
+        "broken.c": f'#include "{prefix}api.h"\nint broken(void) {{ return read_value(0) }}\n',
+        "missing.c": '#include "no-such-header.h"\n',
+        "unrelated.c": "int unrelated(void) { return 0 }\n",
+        # The database lists its files sorted: this callback comes after broken.c.
+        "stores-reader.c": f'#include "{prefix}api.h"\n'
+        "int (*const stored_reader)(int*) = read_value;\n",
+        "method.hpp": "struct Reader\n{\n    int read(int* p) const;\n};\n",
+        "method.cpp": '#include "method.hpp"\n'
+        "int Reader::read(int* p) const\n{\n    return *p;\n}\n",
+        "member-pointer.cpp": '#include "method.hpp"\n'
+        "int (Reader::*const stored)(int*) const = &Reader::read;\n",
+    }
+    ok = True
+    with tempfile.TemporaryDirectory(prefix="ct_const_suggestion_database_") as tmp:
+        # Resolved: the analyzer names files by their real path.
+        root = Path(tmp).resolve()
+        for name, text in generated.items():
+            (root / name).write_text(text)
+
+        def message(label: str, listed: list[str], function: str) -> tuple[bool, Optional[str]]:
+            """Whether the analysis ran, and the message of the suggestion, if it is reported."""
+            files = [root / f if f in generated else fixtures / f"{prefix}{f}" for f in listed]
+            database = root / label.replace(" ", "-").replace("'", "") / "compile_commands.json"
+            database.parent.mkdir()
+            database.write_text(
+                json.dumps(
+                    [
+                        {
+                            "directory": str(fixtures),
+                            "file": str(f),
+                            "arguments": (
+                                ["clang++", "-std=c++17"] if f.suffix == ".cpp" else ["clang"]
+                            )
+                            + ["-I", str(fixtures), "-c", str(f)],
+                        }
+                        for f in files
+                    ]
+                )
+            )
+            # The database is an input the cache key does not cover.
+            result = run_analyzer_uncached(
+                [str(files[0]), f"--compile-commands={database}", "--format=json"]
+            )
+            try:
+                diagnostics = json.loads(result.stdout or "").get("diagnostics", [])
+            except json.JSONDecodeError:
+                return False, None
+            ran = result.returncode == 0
+            for d in diagnostics:
+                if str(d.get("ruleId", "")).startswith("ConstParameterNotModified") and str(
+                    d.get("location", {}).get("function", "")
+                ) == function:
+                    return ran, str(d.get("details", {}).get("message", ""))
+            return ran, None
+
+        for label, listed, function, expected in (
+            ("a caller", ["def.c", "caller.c"], "read_value", checked),
+            (
+                "a callback of the old type, not analyzed",
+                ["def.c", "callback.c"],
+                "read_value",
+                None,
+            ),
+            # Without the header: only the name of the function shows that it sees the change.
+            ("a redeclaration, not analyzed", ["def.c", "redecl.c"], "read_value", None),
+            ("an explicit cast, not analyzed", ["def.c", "cast.c"], "read_value", None),
+            ("a method alone", ["method.cpp"], method, checked),
+            (
+                "a method's address of the old type, not analyzed",
+                ["method.cpp", "member-pointer.cpp"],
+                method,
+                None,
+            ),
+            (
+                "a file that does not compile as it is",
+                ["def.c", "broken.c"],
+                "read_value",
+                "not checked with Clang: " + str(root / "broken.c")
+                + " does not compile with Clang as it is",
+            ),
+            (
+                "a file that cannot be preprocessed",
+                ["def.c", "missing.c"],
+                "read_value",
+                "not checked with Clang: " + str(root / "missing.c")
+                + " cannot be preprocessed with Clang",
+            ),
+            (
+                "a file that cannot be checked, then a callback",
+                ["def.c", "broken.c", "stores-reader.c"],
+                "read_value",
+                None,
+            ),
+            (
+                "a file that does not see the change",
+                ["def.c", "unrelated.c"],
+                "read_value",
+                checked,
+            ),
+        ):
+            ran, text = message(label, listed, function)
+            if not ran:
+                good = False
+            elif expected is None:
+                good = text is None
+            else:
+                good = text is not None and expected in text
+                if expected != checked:
+                    good = good and checked not in text
+            detail = f": {text!r}" if ran else ": the analysis did not run"
+            print(f"  {'✅' if good else '❌'} {label}" + ("" if good else detail))
+            ok = ok and good
+    print()
+    return ok
+
+
 def check_duplicate_if_cross_tu() -> bool:
     """
     #157: a function defined in another file is deterministic when every definition of it is, as
@@ -5576,6 +5711,7 @@ def main() -> int:
         check_const_param_contract_message_across_files,
         check_const_suggestion_cross_tu,
         check_const_suggestion_without_source,
+        check_const_suggestion_compilation_database,
         check_duplicate_if_cross_tu,
         check_global_read_before_write_identity_across_files,
         check_size_minus_one_cross_tu,
