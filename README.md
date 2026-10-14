@@ -716,13 +716,12 @@ The check covers only:
 A CI job that enables the option checks the projects and configurations it analyzes, and nothing
 else: an analysis run without the option, by a user or by another job, is not checked.
 
-In this repository, `ci.yml` runs the whole `run_test.py` suite: the default behavior, and the
-check's tests among the others. The workflow `experimental-const-suggestion-check.yml` runs only
-the check's tests, with the option, on Linux and macOS (`scripts/ci/run_const_suggestion_check.py`):
-the const-suggestion fixtures and checks of `run_test.py`, which expect suggestions kept once
-checked, suggestions removed, and suggestions kept as not checked. It covers these fixtures, with
-their compile commands and the LLVM 20 of each runner; it does not check this repository's sources,
-other projects or other configurations.
+In this repository, `ci.yml` runs the whole `run_test.py` suite on Linux and macOS. It checks the
+default behavior, and the check's tests with the option: the const-suggestion fixtures declare it
+(`// analyzer-arg:`), and the checks pass it. These tests expect suggestions kept once checked,
+suggestions removed, and suggestions kept as not checked, and analyze the same inputs without the
+option too. They cover these fixtures, with their compile commands and the LLVM 20 of each runner;
+they do not check this repository's sources, other projects or other configurations.
 
 The message says how the suggestion was checked:
 - `checked in the analyzed files only, with their compile commands: ...`, without a compilation
