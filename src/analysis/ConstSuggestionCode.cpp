@@ -110,7 +110,7 @@ namespace ctrace::stack::analysis
                     out = builder.createAnonymousAliasScope(domain(parent));
                 return out;
             };
-            const auto list = [&](llvm::MDNode* node)
+            const auto list = [&](const llvm::MDNode* node)
             {
                 llvm::SmallVector<llvm::Metadata*> scopes;
                 for (const llvm::MDOperand& operand : node->operands())

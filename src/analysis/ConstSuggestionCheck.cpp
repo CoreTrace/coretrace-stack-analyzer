@@ -380,7 +380,7 @@ namespace ctrace::stack::analysis
         // A type written canonically. An anonymous type, such as a lambda's, is written without
         // its location: the path of that location depends on how the file was named, relative
         // before the rewrite and absolute once the rewritten file is remapped.
-        std::string writtenType(clang::ASTContext& context, clang::QualType type)
+        std::string writtenType(const clang::ASTContext& context, clang::QualType type)
         {
             clang::PrintingPolicy policy(context.getLangOpts());
             policy.AnonymousTagLocations = false;
@@ -586,7 +586,8 @@ namespace ctrace::stack::analysis
                     plan(target, facts, *function);
             }
 
-            void plan(Target& target, FunctionFacts& facts, const clang::FunctionDecl& function)
+            void plan(const Target& target, FunctionFacts& facts,
+                      const clang::FunctionDecl& function)
             {
                 const auto* method = llvm::dyn_cast<clang::CXXMethodDecl>(&function);
                 facts.declarableElsewhere = method == nullptr && function.isExternallyVisible();
