@@ -10,7 +10,6 @@
 #include "analyzer/HotspotProfiler.hpp"
 
 #include <algorithm>
-#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -37,7 +36,6 @@
 #include <clang/Frontend/CompilerInvocation.h>
 #include <clang/Frontend/FrontendActions.h>
 #include <clang/Frontend/MultiplexConsumer.h>
-#include <clang/Frontend/PrecompiledPreamble.h>
 #include <clang/Frontend/Utils.h>
 #include <clang/Lex/Lexer.h>
 #include <clang/Lex/PreprocessorOptions.h>
@@ -124,8 +122,7 @@ namespace ctrace::stack::analysis
         struct Compilation
         {
             bool timing = false;
-            bool preamble = false; // the compilation reused the unit's preamble
-            std::uint8_t reservedPadding[6] = {};
+            std::uint8_t reservedPadding[7] = {};
             std::string failure; // the compilation could not run
             std::multiset<std::string> diagnostics;
             std::string firstDiagnostic;
@@ -666,48 +663,9 @@ namespace ctrace::stack::analysis
             return true;
         }
 
-        // The compiler invocation of a unit, with the options of every compilation of the check:
-        // nothing written, the AST kept for the inspection, values numbered, no debug
-        // information, the checked warnings enabled.
-        std::unique_ptr<clang::CompilerInvocation>
-        invocationFor(const UnitCommand& command,
-                      const llvm::IntrusiveRefCntPtr<llvm::vfs::FileSystem>& files,
-                      clang::DiagnosticConsumer& consumer)
-        {
-            std::vector<const char*> argv;
-            for (const std::string& arg : command.args)
-                argv.push_back(arg.c_str());
-            clang::CreateInvocationOptions options;
-            options.Diags = clang::CompilerInstance::createDiagnostics(
-                *files, new clang::DiagnosticOptions(), &consumer, false);
-            options.VFS = files;
-            options.ProbePrecompiled = false;
-            std::unique_ptr<clang::CompilerInvocation> invocation =
-                clang::createInvocation(argv, options);
-            if (!invocation || invocation->getFrontendOpts().Inputs.empty())
-                return nullptr;
-            // Nothing is written: no dependency file, no output.
-            invocation->getDependencyOutputOpts() = clang::DependencyOutputOptions();
-            // The inspection reads the AST after CodeGen: keep it for the backend.
-            invocation->getCodeGenOpts().ClearASTBeforeBackend = false;
-            // Values and blocks numbered, not named: a block that inlining names after the
-            // inlined function carries the rewritten function's symbol.
-            invocation->getCodeGenOpts().DiscardValueNames = true;
-            // The comparison removes debug information: do not generate it.
-            invocation->getCodeGenOpts().setDebugInfo(llvm::codegenoptions::NoDebugInfo);
-            clang::DiagnosticOptions& diagnostics = invocation->getDiagnosticOpts();
-            // No "N warnings generated" on the analyzer's output.
-            diagnostics.ShowCarets = false;
-            diagnostics.IgnoreWarnings = false;
-            for (const char* warning : kCheckedWarnings)
-                diagnostics.Warnings.push_back(warning);
-            return invocation;
-        }
-
         Compilation compile(const UnitCommand& command,
                             const std::map<std::string, std::string>& rewritten,
-                            std::vector<Target>& targets, std::string_view step, bool timing,
-                            const clang::PrecompiledPreamble* preamble = nullptr)
+                            std::vector<Target>& targets, std::string_view step, bool timing)
         {
             const analyzer::ScopedHotspot hotspot(timing, step);
             static std::once_flag targetsReady;
@@ -728,57 +686,50 @@ namespace ctrace::stack::analysis
                     llvm::IntrusiveRefCntPtr<llvm::vfs::FileSystem> files =
                         llvm::vfs::getRealFileSystem();
                     DiagnosticCollector collector(out);
+                    std::vector<const char*> argv;
+                    for (const std::string& arg : command.args)
+                        argv.push_back(arg.c_str());
+                    clang::CreateInvocationOptions options;
+                    options.Diags = clang::CompilerInstance::createDiagnostics(
+                        *files, new clang::DiagnosticOptions(), &collector, false);
+                    options.VFS = files;
+                    options.ProbePrecompiled = false;
                     std::unique_ptr<clang::CompilerInvocation> invocation =
-                        invocationFor(command, files, collector);
+                        clang::createInvocation(argv, options);
                     if (!invocation)
                     {
                         out.failure =
                             "the compile command is not understood: " + out.firstDiagnostic;
                         return;
                     }
+                    // Nothing is written: no dependency file, no output.
+                    invocation->getDependencyOutputOpts() = clang::DependencyOutputOptions();
+                    // The inspection reads the AST after CodeGen: keep it for the backend.
+                    invocation->getCodeGenOpts().ClearASTBeforeBackend = false;
+                    // Values and blocks numbered, not named: a block that inlining names after
+                    // the inlined function carries the rewritten function's symbol.
+                    invocation->getCodeGenOpts().DiscardValueNames = true;
+                    // The comparison removes debug information: do not generate it.
+                    invocation->getCodeGenOpts().setDebugInfo(llvm::codegenoptions::NoDebugInfo);
+                    clang::DiagnosticOptions& diagnostics = invocation->getDiagnosticOpts();
+                    // No "N warnings generated" on the analyzer's output.
+                    diagnostics.ShowCarets = false;
+                    diagnostics.IgnoreWarnings = false;
+                    for (const char* warning : kCheckedWarnings)
+                        diagnostics.Warnings.push_back(warning);
                     out.diagnostics.clear();
                     out.firstDiagnostic.clear();
-
-                    // The rewritten files, in memory. With a preamble, the main file is given
-                    // apart: the preamble is reused only if Clang finds the main file's preamble
-                    // bytes and every file the preamble read unchanged.
-                    clang::PreprocessorOptions& remapped = invocation->getPreprocessorOpts();
-                    remapped.RetainRemappedFileBuffers = false;
-                    const std::string mainFile =
-                        invocation->getFrontendOpts().Inputs[0].getFile().str();
-                    const std::string mainPath = realPath(mainFile);
-                    std::unique_ptr<llvm::MemoryBuffer> main;
-                    for (const auto& [path, text] : rewritten)
-                    {
-                        if (preamble && path == mainPath)
-                            main = llvm::MemoryBuffer::getMemBufferCopy(text, mainFile);
-                        else
-                            remapped.addRemappedFile(
-                                path, llvm::MemoryBuffer::getMemBufferCopy(text, path).release());
-                    }
-                    if (preamble)
-                    {
-                        if (!main)
-                        {
-                            if (auto disk = files->getBufferForFile(mainFile))
-                                main = std::move(*disk);
-                        }
-                        out.preamble =
-                            main && preamble->CanReuse(
-                                        *invocation, main->getMemBufferRef(),
-                                        clang::ComputePreambleBounds(invocation->getLangOpts(),
-                                                                     main->getMemBufferRef(), 0),
-                                        *files);
-                        if (out.preamble)
-                            preamble->AddImplicitPreamble(*invocation, files, main.release());
-                        else if (main && rewritten.count(mainPath))
-                            remapped.addRemappedFile(mainPath, main.release());
-                    }
 
                     clang::CompilerInstance instance;
                     instance.setInvocation(std::move(invocation));
                     instance.createDiagnostics(*files, &collector, false);
                     instance.createFileManager(files);
+                    for (const auto& [path, text] : rewritten)
+                    {
+                        instance.getPreprocessorOpts().addRemappedFile(
+                            path, llvm::MemoryBuffer::getMemBufferCopy(text, path).release());
+                    }
+                    instance.getPreprocessorOpts().RetainRemappedFileBuffers = false;
                     instance.getFrontendOpts().DisableFree = false;
                     instance.getCodeGenOpts().DisableFree = false;
                     out.context = std::make_unique<llvm::LLVMContext>();
@@ -789,49 +740,6 @@ namespace ctrace::stack::analysis
                 error);
             if (!ran)
                 out.failure = error;
-            return out;
-        }
-
-        // A unit's preamble, its leading directives, parsed once and kept in memory for the
-        // compilations of the unit with the same compile command. None when it is empty or does
-        // not parse without error: the compilations then parse the unit whole.
-        std::optional<clang::PrecompiledPreamble> buildPreamble(const UnitCommand& command,
-                                                                bool timing)
-        {
-            const analyzer::ScopedHotspot hotspot(timing, "const_suggestion.preamble");
-            std::optional<clang::PrecompiledPreamble> out;
-            std::string error;
-            runSerializedCompile(
-                command.workingDir,
-                [&]
-                {
-                    llvm::IntrusiveRefCntPtr<llvm::vfs::FileSystem> files =
-                        llvm::vfs::getRealFileSystem();
-                    clang::IgnoringDiagConsumer ignore;
-                    std::unique_ptr<clang::CompilerInvocation> invocation =
-                        invocationFor(command, files, ignore);
-                    if (!invocation)
-                        return;
-                    auto main =
-                        files->getBufferForFile(invocation->getFrontendOpts().Inputs[0].getFile());
-                    if (!main)
-                        return;
-                    const clang::PreambleBounds bounds = clang::ComputePreambleBounds(
-                        invocation->getLangOpts(), (*main)->getMemBufferRef(), 0);
-                    if (bounds.Size == 0)
-                        return;
-                    llvm::IntrusiveRefCntPtr<clang::DiagnosticsEngine> diagnostics =
-                        clang::CompilerInstance::createDiagnostics(
-                            *files, new clang::DiagnosticOptions(), &ignore, false);
-                    clang::PreambleCallbacks callbacks;
-                    llvm::ErrorOr<clang::PrecompiledPreamble> built =
-                        clang::PrecompiledPreamble::Build(
-                            *invocation, main->get(), bounds, *diagnostics, files,
-                            std::make_shared<clang::PCHContainerOperations>(), true, "", callbacks);
-                    if (built && !diagnostics->hasErrorOccurred())
-                        out.emplace(std::move(*built));
-                },
-                error);
             return out;
         }
 
@@ -977,18 +885,14 @@ namespace ctrace::stack::analysis
         }
 
         // Checks one suggestion in one unit, against the unit before the rewrite.
-        // `beforeFor` gives the unit before the rewrite, compiled with its preamble or whole as
-        // the compilation after it: both are compared in the same mode.
-        bool checkUnit(const UnitCommand& command,
-                       const std::function<const std::optional<Original>&(bool)>& beforeFor,
-                       const clang::PrecompiledPreamble* preamble, const Target& planned,
-                       const std::map<std::string, std::string>& rewritten,
+        bool checkUnit(const UnitCommand& command, const std::optional<Original>& before,
+                       const Target& planned, const std::map<std::string, std::string>& rewritten,
                        const std::set<std::string>& symbolsBefore, const FunctionFacts& plan,
                        PrintedSignature& signature, std::vector<std::string>& accepted,
                        std::string& renamed, std::string& removed, std::string& notChecked,
                        bool timing)
         {
-            if (!preamble && !beforeFor(false))
+            if (!before)
             {
                 notChecked = kDoesNotCompileAsItIs;
                 return false;
@@ -1001,17 +905,11 @@ namespace ctrace::stack::analysis
             targets[0].symbolsBefore = &symbolsBefore;
             for (const auto& [path, edits] : plan.edits)
                 targets[0].rewrittenFiles.insert(path);
-            Compilation after = compile(command, rewritten, targets,
-                                        "const_suggestion.compile.after", timing, preamble);
+            Compilation after =
+                compile(command, rewritten, targets, "const_suggestion.compile.after", timing);
             if (!after.failure.empty())
             {
                 notChecked = after.failure;
-                return false;
-            }
-            const std::optional<Original>& before = beforeFor(after.preamble);
-            if (!before)
-            {
-                notChecked = kDoesNotCompileAsItIs;
                 return false;
             }
             for (const std::string& diagnostic : after.diagnostics)
@@ -1122,14 +1020,8 @@ namespace ctrace::stack::analysis
             targets[i].debugArgNo = issues[i].debugArgNo;
             targets[i].plan = true;
         }
-        // The defining unit is compiled again for each suggestion: with several, its preamble is
-        // parsed once, and reused by each compilation whose rewrite leaves it untouched.
-        std::optional<clang::PrecompiledPreamble> preamble;
-        if (issues.size() > 1)
-            preamble = buildPreamble(command, timing);
         Compilation before =
-            compile(command, {}, targets, "const_suggestion.compile.defining_before", timing,
-                    preamble ? &*preamble : nullptr);
+            compile(command, {}, targets, "const_suggestion.compile.defining_before", timing);
         if (!before.failure.empty() || !before.module || before.facts.size() != issues.size())
         {
             notChecked("the file does not compile with Clang as it is");
@@ -1145,12 +1037,6 @@ namespace ctrace::stack::analysis
                 const_suggestion::prepare(*before.module));
         }
         OriginalCache originals;
-        const clang::PrecompiledPreamble* reused = before.preamble ? &*preamble : nullptr;
-        // The defining unit compiled whole, for a rewrite that reaches its preamble: once.
-        std::optional<std::pair<std::multiset<std::string>,
-                                std::shared_ptr<const const_suggestion::ModuleText>>>
-            definingWhole;
-        bool definingWholeTried = false;
 
         // The other units a rewrite may reach: the analyzed ones and, with a compilation
         // database, every C or C++ file it lists.
@@ -1210,34 +1096,10 @@ namespace ctrace::stack::analysis
             std::string unchecked;
             const std::optional<Original> selfBefore =
                 Original{before.diagnostics, plan.overrides, definingCode};
-            std::optional<Original> selfWhole;
-            const auto definingBefore = [&](bool withPreamble) -> const std::optional<Original>&
-            {
-                if (withPreamble == before.preamble)
-                    return selfBefore;
-                if (!definingWholeTried)
-                {
-                    definingWholeTried = true;
-                    std::vector<Target> none;
-                    Compilation whole = compile(command, {}, none,
-                                                "const_suggestion.compile.defining_whole", timing);
-                    if (whole.failure.empty() && whole.module)
-                    {
-                        const analyzer::ScopedHotspot hotspot(timing, "const_suggestion.prepare");
-                        definingWhole.emplace(whole.diagnostics,
-                                              std::make_shared<const_suggestion::ModuleText>(
-                                                  const_suggestion::prepare(*whole.module)));
-                    }
-                }
-                if (definingWhole && !selfWhole)
-                    selfWhole =
-                        Original{definingWhole->first, plan.overrides, definingWhole->second};
-                return selfWhole;
-            };
             std::size_t checkedUnits = 1;
             const bool definingDone =
-                checkUnit(command, definingBefore, reused, planned, rewritten, symbolsBefore, plan,
-                          signature, accepted, renamed, removed, unchecked, timing);
+                checkUnit(command, selfBefore, planned, rewritten, symbolsBefore, plan, signature,
+                          accepted, renamed, removed, unchecked, timing);
             // Then every other unit that sees a rewritten file or references the function: the
             // analyzed ones and, with a compilation database, every file it lists, analyzed or
             // not. One that cannot be checked leaves the suggestion unchecked, unless another
@@ -1298,10 +1160,9 @@ namespace ctrace::stack::analysis
                 std::vector<std::string> otherAccepted;
                 std::string why;
                 ++checkedUnits;
-                const auto otherBefore = [&](bool) -> const std::optional<Original>&
-                { return originalOf(other, key, planned, originals, timing); };
-                if (!checkUnit(other, otherBefore, nullptr, planned, rewritten, symbolsBefore, plan,
-                               signature, otherAccepted, renamed, removed, why, timing))
+                if (!checkUnit(other, originalOf(other, key, planned, originals, timing), planned,
+                               rewritten, symbolsBefore, plan, signature, otherAccepted, renamed,
+                               removed, why, timing))
                 {
                     cannotCheck(why == kDoesNotCompileAsItIs
                                     ? unit.filename + " does not compile with Clang as it is"
