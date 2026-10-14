@@ -651,6 +651,9 @@ experimental:
 - it compiles the files that see the change again, once per suggestion: on this repository's
   self-analysis, the analysis takes about 19% longer.
 
+The option is a trade-off, not a fix: with it, a valid suggestion can still be removed; without
+it, suggestions whose type does not compile or changes the generated code are reported.
+
 The check runs these steps:
 
 1. Every declaration of the function that the defining file sees, in that file and its headers,
@@ -711,6 +714,13 @@ The check covers only:
 
 A CI job that enables the option checks the projects and configurations it analyzes, and nothing
 else: an analysis run without the option, by a user or by another job, is not checked.
+
+In this repository, `ci.yml` checks the default behavior, and the workflow
+`experimental-const-suggestion-check.yml` runs the check's tests with the option, on Linux and
+macOS (`scripts/ci/run_const_suggestion_check.py`): the const-suggestion fixtures and checks of
+`run_test.py`, which expect suggestions kept once checked, suggestions removed, and suggestions kept
+as not checked. It covers these fixtures, with their compile commands and the LLVM 20 of each
+runner; it does not check this repository's sources, other projects or other configurations.
 
 The message says how the suggestion was checked:
 - `checked in the analyzed files only, with their compile commands: ...`, without a compilation
