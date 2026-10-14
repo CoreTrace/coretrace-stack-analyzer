@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # The experimental check of const parameter suggestions, enabled by
-# --experimental-const-suggestion-check, is off by default; ci.yml checks the default behavior.
-# This workflow runs the check's tests with the option, on Linux and macOS: the const-suggestion
+# --experimental-const-suggestion-check, is off by default. ci.yml runs the whole run_test.py suite:
+# the default behavior, and these tests among the others. This workflow runs only the check's tests,
+# with the option, on Linux and macOS, so that their status shows apart: the const-suggestion
 # fixtures and checks of run_test.py, which expect suggestions kept once checked, suggestions
 # removed, and suggestions kept as not checked.
 #
@@ -73,6 +74,16 @@ jobs:
         restore-keys: |
           ccache-${{ runner.os }}-${{ github.ref_name }}-
           ccache-${{ runner.os }}-
+
+    - name: Restore FetchContent sources
+      uses: actions/cache/restore@v4
+      with:
+        path: |
+          build/_deps/cc-src
+          build/_deps/coretrace-logger-src
+        key: fetchcontent-${{ runner.os }}-llvm20-${{ hashFiles('CMakeLists.txt', 'cmake/**') }}
+        restore-keys: |
+          fetchcontent-${{ runner.os }}-llvm20-
 
     - name: Configure ccache
       run: |
