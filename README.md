@@ -665,15 +665,16 @@ The check runs these steps:
 2. Every file that sees the change is compiled again with its own compile command, at `-O0`.
    The files considered are the analyzed ones and, with `--compile-commands`, every C or C++ file
    of the compilation database, analyzed or not. A file sees the change when it reads a rewritten
-   file, when its analyzed code references the function, or, for a function outside any class,
-   when it names the function after preprocessing.
+   file, when its analyzed code references the function, or, for a function outside any class with
+   external linkage, when it names the function after preprocessing. A homonym with internal
+   linkage (`static`, anonymous namespace) in another file is another function.
 3. The suggestion is removed when one of these files:
    - no longer compiles;
    - gains one of these warnings: `incompatible-pointer-types-discards-qualifiers`,
      `incompatible-pointer-types`, `incompatible-function-pointer-types`, `int-conversion`,
      `overloaded-virtual`;
    - declares the function, outside the rewritten files, with another parameter type;
-   - converts the function's address with an explicit cast;
+   - converts the function's address with an explicit cast, other than a cast to `void`;
    - changes what the methods of that name override;
    - generates different code.
 

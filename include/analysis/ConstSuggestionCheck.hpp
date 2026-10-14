@@ -39,12 +39,21 @@ namespace ctrace::stack::analysis
         std::unordered_set<std::uint64_t> identifiers;
     };
 
+    // How the check compiles one unit.
+    struct UnitCommand
+    {
+        std::vector<std::string> args; // the driver's, as compilerlib builds them
+        std::string workingDir;
+    };
+
     // The inputs analyzed together.
     struct AnalyzedUnits
     {
         std::vector<AnalyzedUnit> units;
-        // The scan of each unit, by path, found when first needed.
+        // By path, found when first needed: the compile command of each unit (none when it has
+        // none), and its scan.
         mutable std::mutex scansMutex;
+        mutable std::map<std::string, std::optional<UnitCommand>> commands;
         mutable std::map<std::string, UnitScan> scans;
     };
 

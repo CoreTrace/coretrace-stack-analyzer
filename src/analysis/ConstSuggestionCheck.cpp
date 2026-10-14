@@ -98,9 +98,11 @@ namespace ctrace::stack::analysis
             std::string problem;
             std::multiset<std::string> overrides;
             unsigned paramIndex = 0;
-            // A free function can be declared by a file that reads none of the rewritten
-            // files; a method only where its class is defined.
-            bool freeFunction = false;
+            // A free function with external linkage can be declared by a file that reads none
+            // of the rewritten files; a method only where its class is defined. One with internal
+            // linkage (static, anonymous namespace) cannot: another file's homonym is another
+            // function.
+            bool declarableElsewhere = false;
             std::uint8_t reservedPadding[3] = {};
         };
 
@@ -119,12 +121,22 @@ namespace ctrace::stack::analysis
             std::uint8_t reservedPadding[7] = {};
         };
 
+        // An error or a checked warning, in the order Clang reports it.
+        struct Diagnostic
+        {
+            std::string key; // place and kind, as `diagnostics` holds it
+            std::string text;
+            bool error = false;
+            std::uint8_t reservedPadding[7] = {};
+        };
+
         struct Compilation
         {
             bool timing = false;
             std::uint8_t reservedPadding[7] = {};
             std::string failure; // the compilation could not run
             std::multiset<std::string> diagnostics;
+            std::vector<Diagnostic> reported;
             std::string firstDiagnostic;
             std::unique_ptr<llvm::LLVMContext> context;
             std::unique_ptr<llvm::Module> module;
@@ -181,13 +193,14 @@ namespace ctrace::stack::analysis
                                 std::to_string(presumed.getLine());
                     }
                 }
-                out_.diagnostics.insert(place + " #" + std::to_string(info.getID()));
+                const std::string key = place + " #" + std::to_string(info.getID());
+                out_.diagnostics.insert(key);
+                llvm::SmallString<160> text;
+                info.FormatDiagnostic(text);
+                out_.reported.push_back({key, place + ": " + text.str().str(),
+                                         level >= clang::DiagnosticsEngine::Error});
                 if (out_.firstDiagnostic.empty())
-                {
-                    llvm::SmallString<160> text;
-                    info.FormatDiagnostic(text);
-                    out_.firstDiagnostic = place + ": " + text.str().str();
-                }
+                    out_.firstDiagnostic = out_.reported.back().text;
             }
 
           private:
@@ -199,7 +212,16 @@ namespace ctrace::stack::analysis
         {
             std::size_t start = buffer.rfind('\n', offset);
             start = start == llvm::StringRef::npos ? 0 : start + 1;
-            while (start >= 2 && buffer[start - 2] == '\\')
+            // Whether the line before the one at `start` ends with a backslash, before its
+            // line break, "\n" or "\r\n".
+            const auto continued = [&](std::size_t at)
+            {
+                std::size_t end = at - 1;
+                if (end > 0 && buffer[end - 1] == '\r')
+                    --end;
+                return end > 0 && buffer[end - 1] == '\\';
+            };
+            while (start >= 2 && continued(start))
             {
                 const std::size_t previous = buffer.rfind('\n', start - 2);
                 start = previous == llvm::StringRef::npos ? 0 : previous + 1;
@@ -219,6 +241,7 @@ namespace ctrace::stack::analysis
             // Writes the suggested type where `param` writes its type.
             bool plan(const clang::FunctionDecl& function, const clang::ParmVarDecl& param)
             {
+                param_ = &param;
                 const clang::TypeSourceInfo* written = param.getTypeSourceInfo();
                 if (!written)
                     return fail("the parameter's type is not written in the source");
@@ -310,15 +333,25 @@ namespace ctrace::stack::analysis
                     else
                     {
                         // Written by a macro: a macro is text, `const` goes before its
-                        // invocation, unless that invocation writes the declaration too.
+                        // invocation, unless that invocation writes the declaration too, or
+                        // another parameter, which would take the qualifier.
                         const clang::CharSourceRange invocation = sm_.getExpansionRange(at);
-                        const clang::SourceLocation name =
-                            sm_.getExpansionLoc(function.getLocation());
-                        const bool writesDeclaration =
-                            !sm_.isBeforeInTranslationUnit(name, invocation.getBegin()) &&
-                            !sm_.isBeforeInTranslationUnit(invocation.getEnd(), name);
-                        if (length != 0 || writesDeclaration)
+                        const auto writes = [&](clang::SourceLocation place)
+                        {
+                            const clang::SourceLocation where = sm_.getExpansionLoc(place);
+                            return !sm_.isBeforeInTranslationUnit(where, invocation.getBegin()) &&
+                                   !sm_.isBeforeInTranslationUnit(invocation.getEnd(), where);
+                        };
+                        if (length != 0 || writes(function.getLocation()))
                             return fail("the declaration is written by a macro definition");
+                        for (const clang::ParmVarDecl* other : function.parameters())
+                        {
+                            if (other != param_ && writes(other->getLocation()))
+                            {
+                                return fail("the parameter's type is written by a macro that "
+                                            "writes other parameters too");
+                            }
+                        }
                         at = invocation.getBegin();
                     }
                     if (at.isMacroID())
@@ -341,6 +374,7 @@ namespace ctrace::stack::analysis
             clang::ASTContext& context_;
             const clang::SourceManager& sm_;
             FunctionFacts& facts_;
+            const clang::ParmVarDecl* param_ = nullptr;
         };
 
         // A type written canonically. An anonymous type, such as a lambda's, is written without
@@ -451,6 +485,9 @@ namespace ctrace::stack::analysis
 
             bool VisitExplicitCastExpr(clang::ExplicitCastExpr* cast)
             {
+                // `(void)f` converts the function to no other type.
+                if (cast->getType()->isVoidType())
+                    return true;
                 const clang::Expr* operand = cast->getSubExpr()->IgnoreParenImpCasts();
                 if (const auto* address = llvm::dyn_cast<clang::UnaryOperator>(operand))
                 {
@@ -552,8 +589,10 @@ namespace ctrace::stack::analysis
             void plan(Target& target, FunctionFacts& facts, const clang::FunctionDecl& function)
             {
                 const auto* method = llvm::dyn_cast<clang::CXXMethodDecl>(&function);
-                facts.freeFunction = method == nullptr;
-                const unsigned implicitThis = method && method->isInstance() ? 1 : 0;
+                facts.declarableElsewhere = method == nullptr && function.isExternallyVisible();
+                // An explicit object parameter (C++23) is numbered like the others.
+                const unsigned implicitThis =
+                    method && method->isImplicitObjectMemberFunction() ? 1 : 0;
                 if (target.debugArgNo <= implicitThis)
                 {
                     facts.notRewritten = "the parameter is not found in the source";
@@ -624,12 +663,6 @@ namespace ctrace::stack::analysis
           private:
             std::vector<Target>& targets_;
             Compilation& out_;
-        };
-
-        struct UnitCommand
-        {
-            std::vector<std::string> args; // the driver's, as compilerlib builds them
-            std::string workingDir;
         };
 
         bool commandFor(const AnalyzedUnit& unit, const AnalysisConfig& config, UnitCommand& out,
@@ -718,6 +751,7 @@ namespace ctrace::stack::analysis
                     for (const char* warning : kCheckedWarnings)
                         diagnostics.Warnings.push_back(warning);
                     out.diagnostics.clear();
+                    out.reported.clear();
                     out.firstDiagnostic.clear();
 
                     clang::CompilerInstance instance;
@@ -912,11 +946,15 @@ namespace ctrace::stack::analysis
                 notChecked = after.failure;
                 return false;
             }
-            for (const std::string& diagnostic : after.diagnostics)
+            // The first diagnostic the rewrite adds, not one the unit had before it.
+            for (const Diagnostic& diagnostic : after.reported)
             {
-                if (after.diagnostics.count(diagnostic) > before->diagnostics.count(diagnostic))
+                if (after.diagnostics.count(diagnostic.key) >
+                    before->diagnostics.count(diagnostic.key))
                 {
-                    removed = "does not compile: " + after.firstDiagnostic;
+                    removed =
+                        (diagnostic.error ? "does not compile: " : "gains a checked warning: ") +
+                        diagnostic.text;
                     return true;
                 }
             }
@@ -1120,13 +1158,32 @@ namespace ctrace::stack::analysis
                         cannotCheck(unit.filename + " uses the function but has no source");
                     continue;
                 }
-                UnitCommand other;
-                if (!commandFor(unit, config, other, error))
+                const std::string key = canonicalPath(unit.filename, config);
+                std::optional<UnitCommand> known;
+                bool resolved = false;
+                {
+                    std::lock_guard<std::mutex> lock(units->scansMutex);
+                    const auto found = units->commands.find(key);
+                    if (found != units->commands.end())
+                    {
+                        known = found->second;
+                        resolved = true;
+                    }
+                }
+                if (!resolved)
+                {
+                    UnitCommand command;
+                    if (commandFor(unit, config, command, error))
+                        known = std::move(command);
+                    std::lock_guard<std::mutex> lock(units->scansMutex);
+                    units->commands[key] = known;
+                }
+                if (!known)
                 {
                     cannotCheck("no compile command for " + unit.filename);
                     continue;
                 }
-                const std::string key = canonicalPath(unit.filename, config);
+                const UnitCommand& other = *known;
                 UnitScan seen;
                 bool cached = false;
                 {
@@ -1153,7 +1210,7 @@ namespace ctrace::stack::analysis
                     referencing ||
                     std::any_of(rewrittenFiles.begin(), rewrittenFiles.end(),
                                 [&](const std::string& path) { return seen.files.count(path); }) ||
-                    (plan.freeFunction &&
+                    (plan.declarableElsewhere &&
                      seen.identifiers.count(llvm::xxh3_64bits(planned.name)) != 0);
                 if (!sees)
                     continue;

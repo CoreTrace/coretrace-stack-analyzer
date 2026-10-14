@@ -420,11 +420,15 @@ namespace ctrace::stack::analysis
     {
         const std::string text = llvm::demangle(symbol);
         std::string out;
+        // An identifier is made of letters, digits and underscores: const_iterator is no
+        // qualifier.
+        const auto inWord = [&](std::size_t i)
+        { return std::isalnum(static_cast<unsigned char>(text[i])) || text[i] == '_'; };
         for (std::size_t i = 0; i < text.size();)
         {
-            const bool wordStart = i == 0 || !std::isalnum(static_cast<unsigned char>(text[i - 1]));
+            const bool wordStart = i == 0 || !inWord(i - 1);
             if (wordStart && text.compare(i, 5, "const") == 0 &&
-                (i + 5 == text.size() || !std::isalnum(static_cast<unsigned char>(text[i + 5]))))
+                (i + 5 == text.size() || !inWord(i + 5)))
             {
                 i += 5;
                 continue;
