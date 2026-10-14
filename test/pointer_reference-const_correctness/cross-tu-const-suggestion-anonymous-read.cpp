@@ -3,10 +3,10 @@
 // file has the same mangled name. That homonym must not refute this one's suggestion.
 namespace
 {
-int helper(int* p)
-{
-    return *p;
-}
+    int helper(int* p)
+    {
+        return *p;
+    }
 } // namespace
 
 int read_through_helper()

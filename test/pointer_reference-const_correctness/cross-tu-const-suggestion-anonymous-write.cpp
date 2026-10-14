@@ -3,11 +3,11 @@
 // namespace, which writes through its parameter.
 namespace
 {
-int helper(int* p)
-{
-    *p = 2;
-    return 0;
-}
+    int helper(int* p)
+    {
+        *p = 2;
+        return 0;
+    }
 } // namespace
 
 int write_through_helper()

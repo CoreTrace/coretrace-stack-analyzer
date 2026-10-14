@@ -10,8 +10,7 @@
 // not contains: in function 'int call<
 // not contains: in function 'int pick<
 
-template <typename F>
-int call(F&& f)
+template <typename F> int call(F&& f)
 {
     return f(1);
 }
@@ -28,20 +27,17 @@ int from_lvalues()
     return call(g) | call(h);
 }
 
-template <typename T>
-struct is_reference
+template <typename T> struct is_reference
 {
     static constexpr bool value = false;
 };
 
-template <typename T>
-struct is_reference<T&>
+template <typename T> struct is_reference<T&>
 {
     static constexpr bool value = true;
 };
 
-template <typename F>
-int pick(F&& f)
+template <typename F> int pick(F&& f)
 {
     if constexpr (is_reference<F>::value)
         return f(4);

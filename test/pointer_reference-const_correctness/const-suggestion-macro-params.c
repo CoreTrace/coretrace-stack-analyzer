@@ -12,7 +12,7 @@
 // ↳ not checked with Clang: the parameter's type is written by a macro that writes other parameters too
 
 // analyzer-arg: --experimental-const-suggestion-check
-#define READ_ARGS int n, int* q
+#define READ_ARGS int n, int *q
 
 int read_both(READ_ARGS)
 {
