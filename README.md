@@ -634,13 +634,13 @@ For test files, `run_test.py` also supports per-file model selection with:
 
 `ConstParameterNotModified` finds, in the LLVM IR, the pointer and reference parameters through
 which nothing is written. The IR does not show every constraint that C and C++ put on a parameter:
-the suggested `const` type may not compile (a callback of the old type, `&p` passed as `int**`),
-or may compile and select other code (an overload, an override, `sizeof`, `if constexpr`,
-`_Generic`).
+the suggested `const` type may not compile (a callback of the old type, or `&p` passed as `int**`
+in C++), may only drop a qualifier with a warning (the same `&p` in C), or may compile and select
+other code (an overload, an override, `sizeof`, `if constexpr`, `_Generic`).
 
 Without `--experimental-const-suggestion-check`, the default, nothing beyond the IR analysis is
 checked: every suggestion is reported as the IR analysis finds it, without a check line, including
-those whose suggested type does not compile or changes the generated code.
+those whose suggested type does not compile, drops a qualifier, or changes the generated code.
 
 With `--experimental-const-suggestion-check` (or `experimental-const-suggestion-check=true` in a
 config file), each suggestion is checked with Clang before it is reported. The check is
@@ -652,7 +652,8 @@ experimental:
   self-analysis, the analysis takes about 19% longer.
 
 The option is a trade-off, not a fix: with it, a valid suggestion can still be removed; without
-it, suggestions whose type does not compile or changes the generated code are reported.
+it, suggestions whose type does not compile, drops a qualifier, or changes the generated code are
+reported.
 
 The check runs these steps:
 
