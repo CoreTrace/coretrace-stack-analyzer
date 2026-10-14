@@ -38,3 +38,6 @@ int from_lvalue()
     const auto g = [](int x) { return x ^ 4; };
     return apply_twice(g);
 }
+
+// The Clang check of const suggestions is experimental: it runs only with this option.
+// analyzer-arg: --experimental-const-suggestion-check

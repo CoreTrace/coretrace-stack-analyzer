@@ -33,3 +33,6 @@ int read_and_log(int* p)
     log_text("value");
     return *p;
 }
+
+// The Clang check of const suggestions is experimental: it runs only with this option.
+// analyzer-arg: --experimental-const-suggestion-check

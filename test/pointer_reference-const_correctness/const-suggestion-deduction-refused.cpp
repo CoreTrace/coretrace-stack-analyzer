@@ -59,3 +59,6 @@ int pick_lvalue()
     const auto g = [](int x) { return x ^ 5; };
     return pick(g);
 }
+
+// The Clang check of const suggestions is experimental: it runs only with this option.
+// analyzer-arg: --experimental-const-suggestion-check

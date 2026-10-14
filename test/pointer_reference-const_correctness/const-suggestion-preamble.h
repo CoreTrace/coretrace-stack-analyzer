@@ -2,8 +2,8 @@
 #ifndef CONST_SUGGESTION_PREAMBLE_H
 #define CONST_SUGGESTION_PREAMBLE_H
 
-// A checked warning in the preamble: a compilation that reuses the preamble does not report it,
-// one that parses the file whole does.
+// A checked warning, reported by every compilation of the file, before and after the rewrite: it
+// must not count as new.
 static inline int* without_const(const int* p)
 {
     return p;

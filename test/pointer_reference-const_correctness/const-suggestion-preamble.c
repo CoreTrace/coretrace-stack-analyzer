@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
-// #217: the file is compiled again for each suggestion. Its preamble, the header below, is parsed
-// once and reused only while the rewrite leaves it untouched. Rewriting the declarations of
-// first_value and second_value changes the header: those compilations parse the file whole, and
-// are compared with the file before the rewrite parsed whole too. A preamble reused regardless
-// would declare the old types; comparing a whole compilation with one that reused the preamble
-// would count the header's warning as new. local_value is declared in this file: its
-// compilations reuse the preamble.
+// #217: rewriting the declarations of first_value and second_value rewrites the header below,
+// which holds a checked warning; local_value is declared in this file, and its rewrite leaves the
+// header untouched. The header must be named the same way before and after a rewrite: with a
+// relative input path, it was named relatively before and absolutely once the rewritten file was
+// remapped, and its warning counted as new. The file name recalls the precompiled preamble, since
+// removed, that this fixture also tested: the header sits in the file's preamble, its leading
+// #include lines.
 
 // strict-expectation-details: true
 
@@ -44,3 +44,6 @@ int local_value(int* r)
 {
     return *r;
 }
+
+// The Clang check of const suggestions is experimental: it runs only with this option.
+// analyzer-arg: --experimental-const-suggestion-check

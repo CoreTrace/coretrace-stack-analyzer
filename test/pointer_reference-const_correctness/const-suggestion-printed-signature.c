@@ -24,3 +24,6 @@ int signature_size(int* p)
 {
     return *p ? (int)sizeof(__PRETTY_FUNCTION__) : 0;
 }
+
+// The Clang check of const suggestions is experimental: it runs only with this option.
+// analyzer-arg: --experimental-const-suggestion-check

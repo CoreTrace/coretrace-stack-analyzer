@@ -89,3 +89,6 @@ int run_callback(BYTE* buffer)
 {
     return apply(object_macro_callback, buffer);
 }
+
+// The Clang check of const suggestions is experimental: it runs only with this option.
+// analyzer-arg: --experimental-const-suggestion-check

@@ -165,3 +165,6 @@ int call_twice(int* p)
 {
     return TWICE(p);
 }
+
+// The Clang check of const suggestions is experimental: it runs only with this option.
+// analyzer-arg: --experimental-const-suggestion-check

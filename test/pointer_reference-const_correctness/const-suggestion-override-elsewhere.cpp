@@ -22,3 +22,6 @@ int Derived::read(int* p)
 {
     return *p;
 }
+
+// The Clang check of const suggestions is experimental: it runs only with this option.
+// analyzer-arg: --experimental-const-suggestion-check

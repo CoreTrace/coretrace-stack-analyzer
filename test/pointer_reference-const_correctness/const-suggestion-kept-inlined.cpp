@@ -22,3 +22,6 @@ int read_with_lambda(int* p)
     auto get = [p] { return *p; };
     return read_once(get, false);
 }
+
+// The Clang check of const suggestions is experimental: it runs only with this option.
+// analyzer-arg: --experimental-const-suggestion-check

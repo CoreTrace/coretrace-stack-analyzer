@@ -99,6 +99,8 @@ _RE_STACK_LIMIT = re.compile(r"//\s*stack-limit\s*[:=]\s*(\S+)", re.IGNORECASE)
 _RE_RESOURCE_MODEL = re.compile(r"//\s*resource-model\s*[:=]\s*(\S+)", re.IGNORECASE)
 _RE_ESCAPE_MODEL = re.compile(r"//\s*escape-model\s*[:=]\s*(\S+)", re.IGNORECASE)
 _RE_BUFFER_MODEL = re.compile(r"//\s*buffer-model\s*[:=]\s*(\S+)", re.IGNORECASE)
+# `// analyzer-arg: <arg>`: one more analyzer argument for both passes of the fixture.
+_RE_ANALYZER_ARG = re.compile(r"//\s*analyzer-arg\s*[:=]\s*(\S+)", re.IGNORECASE)
 _RE_STRICT_DIAG = re.compile(r"//\s*strict-diagnostic-count\s*[:=]\s*(\S+)", re.IGNORECASE)
 _RE_STRICT_DETAILS = re.compile(r"//\s*strict-expectation-details\s*[:=]\s*(\S+)", re.IGNORECASE)
 # `// [smt-z3] not contains: ...` or `// [default] at line ...`: an expectation for one pass.
@@ -361,6 +363,7 @@ def extract_expectations(c_path: Path):
     resource_model = None
     escape_model = None
     buffer_model = None
+    analyzer_args = []
     strict_diag_count = None
     strict_details = None
     lines = c_path.read_text().splitlines()
@@ -397,6 +400,11 @@ def extract_expectations(c_path: Path):
         buffer_match = _RE_BUFFER_MODEL.match(stripped)
         if buffer_match:
             buffer_model = buffer_match.group(1)
+            i += 1
+            continue
+        analyzer_arg_match = _RE_ANALYZER_ARG.match(stripped)
+        if analyzer_arg_match:
+            analyzer_args.append(analyzer_arg_match.group(1))
             i += 1
             continue
         strict_match = _RE_STRICT_DIAG.match(stripped)
@@ -467,6 +475,7 @@ def extract_expectations(c_path: Path):
         strict_diag_count,
         strict_details,
         unknown_scopes,
+        analyzer_args,
     )
 
 
@@ -2765,11 +2774,12 @@ def _check_cross_tu_rule(
     rule_id: str,
     cases: list[tuple[str, list[str], list[str]]],
     copied_cases: list[tuple[str, list[str], list[str]]],
+    extra_args: tuple[str, ...] = (),
 ) -> bool:
     """
     Runs each case in both passes: the analyzer over its fixtures, then the functions reported
     under rule_id. The analyzer sorts its inputs: copied_cases run on copies named so that the
-    files keep the listed order.
+    files keep the listed order. extra_args go to every run.
     """
     print(f"=== Testing {title} ===")
     fixtures = RUN_CONFIG.test_dir / directory
@@ -2811,7 +2821,7 @@ def _check_cross_tu_rule(
                 runs.append((f"{pass_name}, {label}", files, pass_args, expected))
 
         for label, files, extra, expected in runs:
-            found = reported(files, extra)
+            found = reported(files, [*extra, *extra_args])
             if found == expected:
                 print(f"  ✅ {label}: {found}")
             else:
@@ -2880,6 +2890,7 @@ def check_const_suggestion_cross_tu() -> bool:
             ("def and an explicit cast", ["def.c", "cast.c"], []),
         ],
         [],
+        ("--experimental-const-suggestion-check",),
     )
 
 
@@ -2894,7 +2905,9 @@ def check_const_suggestion_without_source() -> bool:
     checked = "checked in the analyzed files only"
 
     def message(files: list[Path], function: str) -> Optional[str]:
-        result = run_analyzer([*map(str, files), "--format=json"])
+        result = run_analyzer(
+            [*map(str, files), "--format=json", "--experimental-const-suggestion-check"]
+        )
         try:
             diagnostics = json.loads(result.stdout or "").get("diagnostics", [])
         except json.JSONDecodeError:
@@ -2995,7 +3008,12 @@ def check_const_suggestion_compilation_database() -> bool:
             )
             # The database is an input the cache key does not cover.
             result = run_analyzer_uncached(
-                [str(files[0]), f"--compile-commands={database}", "--format=json"]
+                [
+                    str(files[0]),
+                    f"--compile-commands={database}",
+                    "--format=json",
+                    "--experimental-const-suggestion-check",
+                ]
             )
             try:
                 diagnostics = json.loads(result.stdout or "").get("diagnostics", [])
@@ -3066,6 +3084,67 @@ def check_const_suggestion_compilation_database() -> bool:
             detail = f": {text!r}" if ran else ": the analysis did not run"
             print(f"  {'✅' if good else '❌'} {label}" + ("" if good else detail))
             ok = ok and good
+    print()
+    return ok
+
+
+def check_const_suggestion_check_is_opt_in() -> bool:
+    """
+    #217: the Clang check of const suggestions is experimental and off by default. Without
+    --experimental-const-suggestion-check, the suggestions are reported as the IR analysis finds
+    them: one whose suggested type does not compile is still reported, and no line says how a
+    suggestion was checked. With the option, that suggestion is removed, and the one that compiles
+    says how it was checked.
+    """
+    print("=== Testing the Clang check of const suggestions as an opt-in ===")
+    fixture = (
+        RUN_CONFIG.test_dir
+        / "pointer_reference-const_correctness"
+        / "const-suggestion-must-compile.c"
+    )
+
+    def messages(extra: list[str]) -> Optional[dict[str, str]]:
+        result = run_analyzer([str(fixture), "--format=json", *extra])
+        if result.returncode != 0:
+            return None
+        try:
+            diagnostics = json.loads(result.stdout or "").get("diagnostics", [])
+        except json.JSONDecodeError:
+            return None
+        return {
+            str(d.get("location", {}).get("function", "")): str(
+                d.get("details", {}).get("message", "")
+            )
+            for d in diagnostics
+            if str(d.get("ruleId", "")).startswith("ConstParameterNotModified")
+        }
+
+    without = messages([])
+    checked = messages(["--experimental-const-suggestion-check"])
+    claims = ("checked in the", "not checked with Clang")
+    ok = True
+    for label, good in (
+        (
+            "without the option, a suggested type that does not compile is reported",
+            without is not None and "writer" in without and "read_slot" in without,
+        ),
+        (
+            "without the option, no suggestion says how it was checked",
+            without is not None
+            and not any(claim in text for text in without.values() for claim in claims),
+        ),
+        (
+            "with the option, the suggested types that do not compile are removed",
+            checked is not None and "writer" not in checked and "read_slot" not in checked,
+        ),
+        (
+            "with the option, the suggestion that compiles says how it was checked",
+            checked is not None
+            and "checked in the analyzed files only" in checked.get("read_value", ""),
+        ),
+    ):
+        print(f"  {'✅' if good else '❌'} {label}")
+        ok = ok and good
     print()
     return ok
 
@@ -5468,6 +5547,7 @@ def check_file(c_path: Path):
         strict_diag_count,
         strict_details,
         unknown_scopes,
+        analyzer_args,
     ) = extract_expectations(c_path)
     if unknown_scopes:
         known = ", ".join(f"[{p}]" for p in _EXPECTATION_PASSES)
@@ -5606,6 +5686,7 @@ def check_file(c_path: Path):
         resource_model=resource_model,
         escape_model=escape_model,
         buffer_model=buffer_model,
+        extra_args=tuple(analyzer_args),
     )
     # With runner-level --smt args this run is neither the default pass nor the smt-z3 one:
     # only unscoped expectations describe it.
@@ -5627,6 +5708,7 @@ def check_file(c_path: Path):
             escape_model=escape_model,
             buffer_model=buffer_model,
             extra_args=(
+                *analyzer_args,
                 "--smt=on",
                 "--smt-backend=z3",
                 "--smt-mode=single",
@@ -5712,6 +5794,7 @@ def main() -> int:
         check_const_suggestion_cross_tu,
         check_const_suggestion_without_source,
         check_const_suggestion_compilation_database,
+        check_const_suggestion_check_is_opt_in,
         check_duplicate_if_cross_tu,
         check_global_read_before_write_identity_across_files,
         check_size_minus_one_cross_tu,

@@ -21,3 +21,6 @@ int read_or_throw(int* p)
         throw Missing{};
     return *p;
 }
+
+// The Clang check of const suggestions is experimental: it runs only with this option.
+// analyzer-arg: --experimental-const-suggestion-check

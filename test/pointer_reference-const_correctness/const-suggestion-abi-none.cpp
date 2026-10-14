@@ -42,3 +42,6 @@ int use_internal_reads()
     int value = 1;
     return internal_read(&value) + anonymous_read(&value);
 }
+
+// The Clang check of const suggestions is experimental: it runs only with this option.
+// analyzer-arg: --experimental-const-suggestion-check
