@@ -2,6 +2,7 @@
 #include "StackUsageAnalyzer.hpp"
 #include "analysis/AnalyzerUtils.hpp"
 #include "analysis/ConstSuggestionCheck.hpp"
+#include "analysis/ConstSuggestionInternal.hpp"
 #include "app/CrossTUSummaryDriver.hpp"
 #include "app/AnalyzerApp.hpp"
 #include "cli/ArgParser.hpp"
@@ -741,6 +742,20 @@ namespace
         report.expect(linkerSymbolName(*elf->getFunction("_ZN5probe4peekEPNSt3__13tagE")) !=
                           linkerSymbolName(*elf->getFunction("_ZN5probe4peekEPNSt7__cxx113tagE")),
                       "LinkerSymbolName: std::__1 and std::__cxx11 symbols stay distinct");
+        return report.failures == 0;
+    }
+
+    /// #217: a symbol's demangled name without const keeps the identifiers that contain "const":
+    /// get_const(int*) and get_(int*) are two functions.
+    bool testConstSuggestionWithoutConstKeepsIdentifiers(TestReport& report)
+    {
+        using ctrace::stack::analysis::const_suggestion::withoutConst;
+        report.expect(withoutConst("_Z9get_constPi") != withoutConst("_Z4get_Pi"),
+                      "ConstSuggestionCode: get_const(int*) and get_(int*) stay distinct");
+        report.expect(withoutConst("_Z14const_iteratorPKi") == "const_iterator(int*)",
+                      "ConstSuggestionCode: const_iterator keeps its name, the qualifier goes");
+        report.expect(withoutConst("_Z1fPKi") == withoutConst("_Z1fPi"),
+                      "ConstSuggestionCode: f(const int*) and f(int*) have the same key");
         return report.failures == 0;
     }
 
@@ -2573,6 +2588,7 @@ int main(int argc, char** argv)
     (void)testSarifSecuritySeverity(report);
     (void)testAnalysisIncompleteNotesHaveTheirOwnRules(report);
     (void)testConstSuggestionCodeComparison(report);
+    (void)testConstSuggestionWithoutConstKeepsIdentifiers(report);
     (void)testConstSuggestionNormalizations(report);
     (void)testUnresolvedCallsMarkStackUnknown(repoRoot, report);
     (void)testAssumeExternalFrameReplacesUnknown(repoRoot, report);

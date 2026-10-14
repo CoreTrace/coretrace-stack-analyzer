@@ -1017,15 +1017,17 @@ def parse_human_diagnostic_messages(output: str):
 def _check_human_vs_json_parity_sample(sample: Path):
     lines = []
     sample_ok = True
+    # The arguments the fixture declares with `// analyzer-arg:`, as check_file passes them.
+    *_, fixture_args = extract_expectations(sample)
 
-    human = run_analyzer([str(sample)])
+    human = run_analyzer([str(sample), *fixture_args])
     if human.returncode != 0:
         lines.append(f"  ❌ human run failed for {sample} (code {human.returncode})")
         lines.append(human.stdout or "")
         lines.append(human.stderr or "")
         return False, "\n".join(lines).rstrip() + "\n"
 
-    structured = run_analyzer([str(sample), "--format=json"])
+    structured = run_analyzer([str(sample), "--format=json", *fixture_args])
     if structured.returncode != 0:
         lines.append(f"  ❌ json run failed for {sample} (code {structured.returncode})")
         lines.append(structured.stdout or "")
@@ -2874,8 +2876,9 @@ def check_const_suggestion_cross_tu() -> bool:
     #217: a suggested const type is reported only if every analyzed file still compiles with it,
     once every declaration the defining file sees is rewritten. Another analyzed file that stores
     the function where a non-const parameter is expected, declares it itself, or converts its
-    address with an explicit cast, removes the suggestion. A file that is not analyzed is not
-    checked. The callback and cast files sort before the definition, the redeclaration after it.
+    address with an explicit cast, removes the suggestion; a homonym with internal linkage in
+    another file does not. A file that is not analyzed is not checked. The callback and cast files
+    sort before the definition, the redeclaration after it.
     """
     return _check_cross_tu_rule(
         "suggested const types checked in every analyzed file",
@@ -2888,6 +2891,17 @@ def check_const_suggestion_cross_tu() -> bool:
             ("def and a callback of the old type", ["def.c", "callback.c"], []),
             ("def and a redeclaration", ["def.c", "redecl.c"], []),
             ("def and an explicit cast", ["def.c", "cast.c"], []),
+            # Another file's homonym with internal linkage is another function.
+            (
+                "a static function and a static homonym",
+                ["static-read.c", "static-write.c"],
+                ["helper"],
+            ),
+            (
+                "an anonymous namespace's function and its homonym",
+                ["anonymous-read.cpp", "anonymous-write.cpp"],
+                ["_ZN12_GLOBAL__N_16helperEPi"],
+            ),
         ],
         [],
         ("--experimental-const-suggestion-check",),
@@ -3144,6 +3158,179 @@ def check_const_suggestion_check_is_opt_in() -> bool:
         ),
     ):
         print(f"  {'✅' if good else '❌'} {label}")
+        ok = ok and good
+    print()
+    return ok
+
+
+def check_const_suggestion_line_endings() -> bool:
+    """
+    #217: a type written on a continuation line of a #define is in the macro definition, whether
+    the file ends its lines with LF or CRLF: rewriting it would change every expansion of the macro,
+    here a function that writes through p. The suggestion is kept as not checked with both.
+    """
+    print("=== Testing a macro definition's continuation lines, with LF and CRLF ===")
+    source = (
+        "#define PARAM(type) type p\n"
+        "#define DECLARE(name) \\\n"
+        "    int name(PARAM(int*))\n"
+        "DECLARE(read_first) { return *p; }\n"
+        "DECLARE(write_second) { *p = 1; return 0; }\n"
+    )
+    expected = "not checked with Clang: the declaration is written by a macro definition"
+    ok = True
+    with tempfile.TemporaryDirectory(prefix="ct_const_suggestion_line_endings_") as tmp:
+        for label, newline in (("LF", "\n"), ("CRLF", "\r\n")):
+            path = Path(tmp).resolve() / f"reader-{label.lower()}.c"
+            path.write_bytes(source.replace("\n", newline).encode("utf-8"))
+            # The file's bytes are an input the cache key does not cover.
+            result = run_analyzer_uncached(
+                [str(path), "--format=json", "--experimental-const-suggestion-check"]
+            )
+            text = None
+            try:
+                for d in json.loads(result.stdout or "").get("diagnostics", []):
+                    if str(d.get("ruleId", "")).startswith("ConstParameterNotModified") and str(
+                        d.get("location", {}).get("function", "")
+                    ) == "read_first":
+                        text = str(d.get("details", {}).get("message", ""))
+            except json.JSONDecodeError:
+                pass
+            good = result.returncode == 0 and text is not None and expected in text
+            print(f"  {'✅' if good else '❌'} {label}" + ("" if good else f": {text!r}"))
+            ok = ok and good
+    print()
+    return ok
+
+
+def check_const_suggestion_removal_reason() -> bool:
+    """
+    #217: the trace of a removed suggestion names the first diagnostic that the rewrite adds, not
+    one the file had before it, and says whether it is an error or a checked warning: in C, a
+    qualifier lost in a nested pointer type is a warning, and the code still compiles.
+    """
+    print("=== Testing the reason given for a removed const suggestion ===")
+    trace = re.compile(r"\[const-suggestion\] (\S+) parameter (\S+): (.*)")
+
+    def reasons(path: Path) -> dict[str, str]:
+        result = run_analyzer_uncached(
+            [str(path), "--experimental-const-suggestion-check", "--verbose"]
+        )
+        out = {}
+        for line in (result.stdout + result.stderr).splitlines():
+            match = trace.search(line)
+            if match:
+                out[f"{match.group(1)}/{match.group(2)}"] = match.group(3)
+        return out
+
+    fixture = (
+        RUN_CONFIG.test_dir
+        / "pointer_reference-const_correctness"
+        / "const-suggestion-must-compile.c"
+    ).resolve()
+    ok = True
+    with tempfile.TemporaryDirectory(prefix="ct_const_suggestion_reason_") as tmp:
+        before = Path(tmp).resolve() / "warning-before.c"
+        before.write_text(
+            "static int read_value(int* p) { return *p; }\n"
+            "int* drop_const(const int* q) { return q; }\n"
+            "int (*const reader)(int*) = read_value;\n"
+        )
+        fixture_reasons = reasons(fixture)
+        before_reasons = reasons(before)
+        for label, text, expected in (
+            (
+                "a qualifier lost in a nested pointer type is a checked warning",
+                fixture_reasons.get("address_to_int_pp/p", ""),
+                f"removed, gains a checked warning: {fixture}:46:",
+            ),
+            (
+                "a function pointer of the old type is an error",
+                fixture_reasons.get("read_slot/slot", ""),
+                f"removed, does not compile: {fixture}:36:",
+            ),
+            (
+                "the diagnostic the file had before the rewrite is not the reason",
+                before_reasons.get("read_value/p", ""),
+                f"removed, does not compile: {before}:3:",
+            ),
+        ):
+            good = text.startswith(expected)
+            print(f"  {'✅' if good else '❌'} {label}" + ("" if good else f": {text!r}"))
+            ok = ok and good
+    print()
+    return ok
+
+
+def check_const_suggestion_both_modes() -> bool:
+    """
+    #217: each const-suggestion fixture, and the IR input, analyzed without and with
+    --experimental-const-suggestion-check. Without the option, no suggestion says how it was
+    checked. With it, no suggestion appears that the IR analysis did not report, and each one kept
+    says how it was checked. Across these inputs, the option removes suggestions, keeps checked
+    ones, and keeps ones it could not check.
+    """
+    print("=== Testing const suggestions without and with the experimental check ===")
+    directory = RUN_CONFIG.test_dir / "pointer_reference-const_correctness"
+    inputs = sorted(
+        p for p in directory.glob("const-suggestion-*") if p.suffix in (".c", ".cpp", ".ll")
+    )
+    checked = "↳ checked in the"
+    not_checked = "↳ not checked with Clang"
+    claims = (checked, not_checked, "↳ ABI:", "↳ difference:")
+    parameter = re.compile(r"parameter '([^']+)' in function")
+
+    def suggestions(path: Path, extra: list[str]) -> Optional[dict[tuple[str, str], str]]:
+        result = run_analyzer([str(path), "--format=json", *extra])
+        if result.returncode != 0:
+            return None
+        try:
+            diagnostics = json.loads(result.stdout or "").get("diagnostics", [])
+        except json.JSONDecodeError:
+            return None
+        out = {}
+        for d in diagnostics:
+            if not str(d.get("ruleId", "")).startswith("ConstParameterNotModified"):
+                continue
+            message = str(d.get("details", {}).get("message", ""))
+            match = parameter.search(message)
+            function = str(d.get("location", {}).get("function", ""))
+            out[(function, match.group(1) if match else "")] = message
+        return out
+
+    option = "--experimental-const-suggestion-check"
+    ok = True
+    outcomes = {"removed": 0, "kept, checked": 0, "kept, not checked": 0}
+    for path in inputs:
+        # The fixture's other arguments (`// analyzer-arg:`), in both runs.
+        *_, declared = extract_expectations(path)
+        others = [arg for arg in declared if arg != option]
+        without = suggestions(path, others)
+        with_option = suggestions(path, [*others, option])
+        problems = []
+        if without is None or with_option is None:
+            problems.append("the analysis did not run")
+        else:
+            for key, text in without.items():
+                if any(claim in text for claim in claims):
+                    problems.append(f"without the option, {key} says how it was checked")
+            for key, text in with_option.items():
+                if key not in without:
+                    problems.append(f"{key} is reported only with the option")
+                elif not_checked in text:
+                    outcomes["kept, not checked"] += 1
+                elif checked in text:
+                    outcomes["kept, checked"] += 1
+                else:
+                    problems.append(f"with the option, {key} does not say how it was checked")
+            outcomes["removed"] += sum(1 for key in without if key not in with_option)
+        print(f"  {'❌' if problems else '✅'} {path.name}")
+        for problem in problems:
+            print(f"     {problem}")
+        ok = ok and not problems
+    for outcome, count in outcomes.items():
+        good = count > 0
+        print(f"  {'✅' if good else '❌'} the option has suggestions {outcome}: {count}")
         ok = ok and good
     print()
     return ok
@@ -5795,6 +5982,9 @@ def main() -> int:
         check_const_suggestion_without_source,
         check_const_suggestion_compilation_database,
         check_const_suggestion_check_is_opt_in,
+        check_const_suggestion_line_endings,
+        check_const_suggestion_removal_reason,
+        check_const_suggestion_both_modes,
         check_duplicate_if_cross_tu,
         check_global_read_before_write_identity_across_files,
         check_size_minus_one_cross_tu,
