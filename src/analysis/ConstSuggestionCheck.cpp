@@ -180,7 +180,7 @@ namespace ctrace::stack::analysis
                         sm.getPresumedLoc(sm.getExpansionLoc(info.getLocation()));
                     if (presumed.isValid())
                     {
-                        place = std::string(presumed.getFilename()) + ":" +
+                        place = realPath(presumed.getFilename()) + ":" +
                                 std::to_string(presumed.getLine());
                     }
                 }
