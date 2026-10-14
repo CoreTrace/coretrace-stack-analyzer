@@ -975,7 +975,7 @@ namespace ctrace::stack::analysis
     void checkConstSuggestions(const llvm::Module& mod, std::vector<ConstParamIssue>& issues,
                                const AnalysisConfig& config)
     {
-        if (issues.empty() || config.warningsOnly)
+        if (issues.empty() || config.warningsOnly || !config.constSuggestionCheck)
             return;
         const bool timing = config.timing;
         const analyzer::ScopedHotspot total(timing, "const_suggestion.total");

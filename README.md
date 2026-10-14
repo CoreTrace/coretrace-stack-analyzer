@@ -254,6 +254,7 @@ A model path given to one of these three options that is not a readable file sto
 --no-resource-cross-tu disables cross-TU resource summaries
 --resource-summary-cache-dir=<path> sets cache directory for cross-TU resource summaries (default: .cache/resource-lifetime)
 --resource-summary-cache-memory-only keeps cross-TU summary cache in memory only (process-local, no files)
+--experimental-const-suggestion-check checks each const parameter suggestion with Clang before reporting it (experimental, off by default; see "Experimental: const parameter suggestions checked with Clang")
 --compile-ir-cache-dir=<path> enables dependency-aware LLVM IR compile cache for unchanged source files
 --compile-ir-format=bc|ll selects source compilation IR format (`bc` default, `ll` for textual LLVM IR)
 --timing prints compile/analysis timings to stderr, including aggregated hotspot ranking
@@ -342,6 +343,7 @@ Supported keys:
 - `uninitialized-cross-tu`
 - `resource-summary-cache-dir`
 - `resource-summary-cache-memory-only`
+- `experimental-const-suggestion-check`
 - `compile-ir-cache-dir`
 - `compile-ir-format` (`bc` or `ll`)
 
@@ -628,10 +630,28 @@ Example run:
 For test files, `run_test.py` also supports per-file model selection with:
 `// resource-model: <path>`.
 
-### Const parameter suggestions checked with Clang
+### Experimental: const parameter suggestions checked with Clang
 
 `ConstParameterNotModified` finds, in the LLVM IR, the pointer and reference parameters through
-which nothing is written. Before reporting one, the analyzer checks the suggested type with Clang:
+which nothing is written. The IR does not show every constraint that C and C++ put on a parameter:
+the suggested `const` type may not compile (a callback of the old type, `&p` passed as `int**`),
+or may compile and select other code (an overload, an override, `sizeof`, `if constexpr`,
+`_Generic`).
+
+Without `--experimental-const-suggestion-check`, the default, nothing beyond the IR analysis is
+checked: every suggestion is reported as the IR analysis finds it, without a check line, including
+those whose suggested type does not compile or changes the generated code.
+
+With `--experimental-const-suggestion-check` (or `experimental-const-suggestion-check=true` in a
+config file), each suggestion is checked with Clang before it is reported. The check is
+experimental:
+- it compares the IR that Clang prints before and after the rewrite. A difference its
+  normalizations do not cover removes a suggestion that is valid; several such cases were found
+  and fixed, others may remain;
+- it compiles the files that see the change again, once per suggestion: on this repository's
+  self-analysis, the analysis takes about 19% longer.
+
+The check runs these steps:
 
 1. Every declaration of the function that the defining file sees, in that file and its headers,
    is rewritten in memory with the suggested type:
@@ -681,8 +701,18 @@ lists them:
   name;
 - a string constant whose only change is the signature that `__PRETTY_FUNCTION__` prints.
 
-The check covers only these files, with their compile commands, and the code these
-configurations compile. The message says how the suggestion was checked:
+The check covers only:
+- the suggestions it checks. A suggestion marked `not checked with Clang: ...` rests on the IR
+  analysis alone: a declaration written by a macro definition, an LLVM IR input, a file that sees
+  the change but cannot be preprocessed or does not compile as it is;
+- the files that see the change, with their compile commands, and the code those configurations
+  compile. Other configurations, other targets, code that the preprocessor excludes, and files
+  outside both the analysis and the compilation database are not checked.
+
+A CI job that enables the option checks the projects and configurations it analyzes, and nothing
+else: an analysis run without the option, by a user or by another job, is not checked.
+
+The message says how the suggestion was checked:
 - `checked in the analyzed files only, with their compile commands: ...`, without a compilation
   database;
 - `checked in every file of the compilation database that sees the change, with its compile

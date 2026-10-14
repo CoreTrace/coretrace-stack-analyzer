@@ -130,7 +130,9 @@ namespace ctrace::stack
         std::uint32_t resourceSummaryMemoryOnly : 1 = 0;
         std::uint32_t warningsOnly : 1 = 0;
         std::uint32_t assumeExternalFrame : 1 = 0;
-        std::uint32_t reservedFlags : 17 = 0;
+        // Experimental: check each const suggestion with Clang before reporting it.
+        std::uint32_t constSuggestionCheck : 1 = 0;
+        std::uint32_t reservedFlags : 16 = 0;
     };
 
     // Per-function result
