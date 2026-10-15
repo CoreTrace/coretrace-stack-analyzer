@@ -3797,6 +3797,143 @@ def check_compile_ir_cache_rebuilds_other_compiler() -> bool:
     return ok
 
 
+def check_coretrace_compiler_revision_follows_the_selected_sources() -> bool:
+    """
+    The compile IR cache records the coretrace-compiler revision the analyzer was built with,
+    which cmake/compiler/coretrace-compiler.cmake reads from the sources FetchContent selected.
+    It is known only for a clean git checkout that FetchContent fetched itself; for any other
+    sources it is empty, and the analyzer then neither reads nor writes the cache
+    (testCompileIRCacheWithoutCompilerRevision, analyzer_module_unit_tests).
+
+    Each case configures a project that includes that file. A local git repository stands for
+    coretrace-compiler, declared before the file's own declaration, as a parent project's would
+    be: FetchContent keeps the first one, so nothing is fetched from the network.
+    - normal build: cc declared at commit A, records A;
+    - a parent project declaring cc at B, around a subproject declaring it at A: records B;
+    - sources replaced with FETCHCONTENT_SOURCE_DIR_CC, a clone at A: records nothing;
+    - the checkout of a normal build changed by hand, then configured again: records nothing.
+    Last, the analyzer under test must record the revision of its own build's checkout.
+    """
+    print("=== Testing which coretrace-compiler revision the build records ===")
+    cmake = shutil.which("cmake")
+    git = shutil.which("git")
+    if cmake is None or git is None:
+        print("  ❌ cmake and git are needed")
+        return False
+    compiler_cmake = Path(__file__).resolve().parent / "cmake" / "compiler" / "coretrace-compiler.cmake"
+    ok = True
+    with tempfile.TemporaryDirectory(prefix="ct_compiler_revision_") as tmp:
+        root = Path(tmp)
+
+        def run_git(where, *args):
+            return subprocess.run(
+                [git, "-C", str(where), "-c", "user.name=run_test", "-c", "user.email=run_test@localhost",
+                 "-c", "commit.gpgsign=false", *args],
+                capture_output=True, text=True, check=True,
+            ).stdout.strip()
+
+        repo = root / "coretrace-compiler"
+        repo.mkdir()
+        run_git(repo, "init", "-q")
+        commits = []
+        for name in ("a", "b"):
+            (repo / "CMakeLists.txt").write_text(
+                f"cmake_minimum_required(VERSION 3.16)\nproject(cc NONE)\n# commit {name}\n")
+            run_git(repo, "add", "CMakeLists.txt")
+            run_git(repo, "commit", "-q", "-m", name)
+            commits.append(run_git(repo, "rev-parse", "HEAD"))
+        a, b = commits
+        clone = root / "clone"
+        run_git(root, "clone", "-q", str(repo), str(clone))
+        run_git(clone, "checkout", "-q", a)
+
+        def declare(commit):
+            return f'FetchContent_Declare(cc GIT_REPOSITORY "{repo.as_posix()}" GIT_TAG {commit})\n'
+
+        include_and_record = (
+            f'include("{compiler_cmake.as_posix()}")\n'
+            'file(WRITE "${CMAKE_BINARY_DIR}/revision.txt" "${CORETRACE_COMPILER_REVISION}")\n'
+        )
+
+        def write_project(where, body):
+            where.mkdir(parents=True, exist_ok=True)
+            (where / "CMakeLists.txt").write_text(
+                "cmake_minimum_required(VERSION 3.21)\nproject(revision_case NONE)\n"
+                "include(FetchContent)\n" + body)
+
+        def configure(source, build, *extra):
+            try:
+                result = subprocess.run([cmake, "-S", str(source), "-B", str(build), *extra],
+                                        capture_output=True, text=True, timeout=300)
+            except subprocess.TimeoutExpired:
+                return None, "configure timed out"
+            recorded = build / "revision.txt"
+            if result.returncode != 0 or not recorded.is_file():
+                return None, (result.stdout + result.stderr)[-500:]
+            return recorded.read_text(), ""
+
+        normal = root / "normal"
+        write_project(normal, declare(a) + include_and_record)
+        parent = root / "parent"
+        write_project(parent, declare(b) + "add_subdirectory(child)\n")
+        write_project(parent / "child", declare(a) + include_and_record)
+
+        cases = [
+            ("normal build", normal, root / "build-normal", [], a),
+            ("parent project declaring another revision", parent, root / "build-parent", [], b),
+            ("sources replaced with FETCHCONTENT_SOURCE_DIR_CC", normal, root / "build-replaced",
+             [f"-DFETCHCONTENT_SOURCE_DIR_CC={clone}"], ""),
+        ]
+        for case, source, build, extra, expected in cases:
+            recorded, failure = configure(source, build, *extra)
+            if recorded == expected:
+                print(f"  ✅ {case}: records {expected or 'nothing'}")
+            else:
+                ok = False
+                print(f"  ❌ {case}: records {recorded!r}, expected {expected!r} {failure}")
+
+        changed = root / "build-changed"
+        recorded, failure = configure(normal, changed)
+        checkout = changed / "_deps" / "cc-src"
+        if recorded != a or not (checkout / "CMakeLists.txt").is_file():
+            ok = False
+            print(f"  ❌ checkout changed by hand: before the change, records {recorded!r} {failure}")
+        else:
+            with (checkout / "CMakeLists.txt").open("a") as listing:
+                listing.write("# changed by hand\n")
+            recorded, failure = configure(normal, changed)
+            if recorded == "":
+                print("  ✅ checkout changed by hand: records nothing")
+            else:
+                ok = False
+                print(f"  ❌ checkout changed by hand: records {recorded!r} {failure}")
+
+        own_checkout = Path(RUN_CONFIG.analyzer).resolve().parent / "_deps" / "cc-src"
+        if not (own_checkout / ".git").exists():
+            print(f"  ⏭ the analyzer under test: no FetchContent checkout at {own_checkout}")
+        else:
+            expected = run_git(own_checkout, "rev-parse", "HEAD")
+            source = root / "value.c"
+            source.write_text("int value(void) { return 42; }\n")
+            cache = root / "compile-ir"
+            try:
+                returncode = subprocess.run(
+                    [str(Path(RUN_CONFIG.analyzer).resolve()), f"--compile-ir-cache-dir={cache}", str(source)],
+                    cwd=root, capture_output=True, text=True, timeout=RUN_CONFIG.analyzer_timeout).returncode
+            except subprocess.TimeoutExpired:
+                returncode = "timeout"
+            entries = sorted(cache.glob("*.json"))
+            recorded = json.loads(entries[0].read_text()).get("coretraceCompiler") if entries else None
+            if returncode == 0 and recorded == expected:
+                print(f"  ✅ the analyzer under test records its checkout's revision, {expected[:7]}")
+            else:
+                ok = False
+                print(f"  ❌ the analyzer under test: exit {returncode}, records {recorded!r}, "
+                      f"its checkout is at {expected}")
+    print()
+    return ok
+
+
 def check_unreadable_model_fails() -> bool:
     """
     A model the command line asks for, but that cannot be read, is a configuration error: the
@@ -5606,6 +5743,7 @@ def main() -> int:
         check_escape_model_rejects_unsupported_brackets,
         check_compile_ir_cache_rebuilds_previous_schema,
         check_compile_ir_cache_rebuilds_other_compiler,
+        check_coretrace_compiler_revision_follows_the_selected_sources,
         check_unreadable_model_fails,
         check_human_vs_json_parity,
         check_diagnostic_rule_coverage_regression,
