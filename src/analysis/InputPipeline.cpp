@@ -20,6 +20,7 @@
 
 #include <llvm/Bitcode/BitcodeReader.h>
 #include <llvm/Bitcode/BitcodeWriter.h>
+#include <llvm/Config/llvm-config.h>
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
 #include <llvm/IRReader/IRReader.h>
@@ -193,6 +194,12 @@ namespace ctrace::stack::analysis
         }
 
         constexpr llvm::StringLiteral kCompileIRCacheSchema = "compile-ir-cache-v3";
+
+        // The compiler that produced an entry: compile IR depends on it as much as on the
+        // command. An entry another coretrace-compiler revision or LLVM version produced is
+        // compiled again, which also covers caches restored from an earlier build, as CI does.
+        constexpr llvm::StringLiteral kCoretraceCompilerRevision = CORETRACE_COMPILER_REVISION;
+        constexpr llvm::StringLiteral kLLVMVersion = LLVM_VERSION_STRING;
 
         struct FileSnapshot
         {
@@ -485,6 +492,12 @@ namespace ctrace::stack::analysis
             if (!schema || *schema != kCompileIRCacheSchema)
                 return std::nullopt;
 
+            const auto revision = root->getString("coretraceCompiler");
+            const auto llvmVersion = root->getString("llvm");
+            if (!revision || *revision != kCoretraceCompilerRevision || !llvmVersion ||
+                *llvmVersion != kLLVMVersion)
+                return std::nullopt;
+
             const auto* sourceValue = root->get("source");
             if (!sourceValue)
                 return std::nullopt;
@@ -538,6 +551,8 @@ namespace ctrace::stack::analysis
 
             llvm::json::Object root;
             root["schema"] = kCompileIRCacheSchema;
+            root["coretraceCompiler"] = kCoretraceCompilerRevision;
+            root["llvm"] = kLLVMVersion;
             root["source"] = encodeSnapshot(sourceSnapshot);
             root["dependencies"] = std::move(dependenciesArray);
             root["diagnostics"] = diagnostics;

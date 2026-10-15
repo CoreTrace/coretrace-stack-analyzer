@@ -10,9 +10,11 @@ endif()
 
 # Pinned to a commit SHA so source builds are reproducible and a compromised
 # upstream default branch cannot silently enter a build. Bump deliberately.
+# The compile IR cache records it with each entry (InputPipeline.cpp).
+set(CORETRACE_COMPILER_REVISION 866fa76403f29e4fefda99770e04d284175f4408) # v0.7.0-33-g866fa76
 FetchContent_Declare(
     cc
     GIT_REPOSITORY https://github.com/CoreTrace/coretrace-compiler.git
-    GIT_TAG 866fa76403f29e4fefda99770e04d284175f4408 # v0.7.0-33-g866fa76
+    GIT_TAG ${CORETRACE_COMPILER_REVISION}
 )
 FetchContent_MakeAvailable(cc)
