@@ -3934,6 +3934,44 @@ def check_coretrace_compiler_revision_follows_the_selected_sources() -> bool:
     return ok
 
 
+def check_compile_ir_cache_hidden_from_builds_before_the_compiler_was_recorded() -> bool:
+    """
+    Builds from before compile IR cache entries recorded their compiler read schema
+    compile-ir-cache-v3: they reuse any entry of that schema whose sources are unchanged, and
+    ignore the fields they do not know. Going back to such a build after this one would make it
+    reuse the IR this one compiled, with another coretrace-compiler. An entry this build writes
+    must therefore carry another schema, which such a build neither looks up, the key holding the
+    schema, nor accepts.
+    """
+    print("=== Testing that builds before the compiler was recorded cannot read this build's entries ===")
+    with tempfile.TemporaryDirectory(prefix="ct_compile_ir_previous_builds_") as tmp:
+        root = Path(tmp)
+        source = root / "value.c"
+        source.write_text("int value(void) { return 42; }\n")
+        cache = root / "compile-ir"
+        try:
+            returncode = subprocess.run(
+                [str(Path(RUN_CONFIG.analyzer).resolve()), f"--compile-ir-cache-dir={cache}", str(source)],
+                cwd=root, capture_output=True, text=True, timeout=RUN_CONFIG.analyzer_timeout).returncode
+        except subprocess.TimeoutExpired:
+            returncode = "timeout"
+        entries = sorted(cache.glob("*.json"))
+        if returncode != 0 or len(entries) != 1:
+            print(f"  ❌ exit {returncode}, {len(entries)} cache entries")
+            print()
+            return False
+        metadata = json.loads(entries[0].read_text())
+        ok = metadata.get("schema") != "compile-ir-cache-v3" and bool(metadata.get("coretraceCompiler"))
+        if ok:
+            print(f"  ✅ the entry records its compiler under schema {metadata['schema']}")
+        else:
+            print(f"  ❌ the entry records schema {metadata.get('schema')!r} and compiler "
+                  f"{metadata.get('coretraceCompiler')!r}: builds before the compiler was recorded read it")
+    print()
+    return ok
+
+
+
 def check_unreadable_model_fails() -> bool:
     """
     A model the command line asks for, but that cannot be read, is a configuration error: the
@@ -5744,6 +5782,7 @@ def main() -> int:
         check_compile_ir_cache_rebuilds_previous_schema,
         check_compile_ir_cache_rebuilds_other_compiler,
         check_coretrace_compiler_revision_follows_the_selected_sources,
+        check_compile_ir_cache_hidden_from_builds_before_the_compiler_was_recorded,
         check_unreadable_model_fails,
         check_human_vs_json_parity,
         check_diagnostic_rule_coverage_regression,
