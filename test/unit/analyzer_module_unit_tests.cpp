@@ -7,6 +7,7 @@
 #include "analysis/DuplicateIfCondition.hpp"
 #include "analysis/FunctionFacts.hpp"
 #include "analysis/InputPipeline.hpp"
+#include "analysis/InputPipelineRevision.hpp"
 #include "analysis/IntRanges.hpp"
 #include "analysis/Reachability.hpp"
 #include "analysis/ResourceLifetimeAnalysis.hpp"
@@ -24,6 +25,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <map>
 #include <set>
 #include <unordered_map>
@@ -33,6 +35,7 @@
 #include <iostream>
 #include <memory>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -2336,6 +2339,148 @@ namespace
                       "AnalysisIncomplete: the notes' rules are not security rules");
         return report.failures == 0;
     }
+
+    std::optional<long long> returnedConstant(const llvm::Module& module, llvm::StringRef function)
+    {
+        const llvm::Function* defined = module.getFunction(function);
+        if (defined == nullptr)
+            return std::nullopt;
+        for (const llvm::BasicBlock& block : *defined)
+        {
+            const auto* ret = llvm::dyn_cast<llvm::ReturnInst>(block.getTerminator());
+            if (ret == nullptr)
+                continue;
+            if (const auto* value =
+                    llvm::dyn_cast_or_null<llvm::ConstantInt>(ret->getReturnValue()))
+                return value->getSExtValue();
+        }
+        return std::nullopt;
+    }
+
+    /// The compile IR cache records the coretrace-compiler revision of the build. A build that
+    /// does not know it (coretrace-compiler.cmake) must neither read the cache, whose entries
+    /// could come from any compiler, nor write it, with entries no build could check.
+    ///
+    /// An entry is written by a build of revision "known", then changed to return 7 where the
+    /// source returns 42. Recorded as revision "other", it is reused by a build of "other": it
+    /// is otherwise valid. Recorded with no revision, a build without one must still compile
+    /// the source, and leave the cache as it was. Over an empty cache, it must write nothing.
+    bool testCompileIRCacheWithoutCompilerRevision(TestReport& report)
+    {
+        char rootTemplate[] = "/tmp/ctrace-compile-ir-XXXXXX";
+        if (mkdtemp(rootTemplate) == nullptr)
+        {
+            report.expect(false, "Compile IR cache without revision: no temporary directory");
+            return false;
+        }
+        const std::filesystem::path root(rootTemplate);
+        const std::filesystem::path source = root / "value.c";
+        std::ofstream(source) << "int value(void) { return 42; }\n";
+
+        ctrace::stack::AnalysisConfig config;
+        config.compileIRFormat = ctrace::stack::CompileIRFormat::LL;
+        const auto load = [&](const std::filesystem::path& cache,
+                              llvm::StringRef revision) -> std::optional<long long>
+        {
+            config.compileIRCacheDir = cache.string();
+            llvm::LLVMContext context;
+            llvm::SMDiagnostic err;
+            const ctrace::stack::analysis::ModuleLoadResult loaded =
+                ctrace::stack::analysis::detail::loadModuleForAnalysis(source.string(), config,
+                                                                       context, err, revision);
+            if (!loaded.module)
+                return std::nullopt;
+            return returnedConstant(*loaded.module, "value");
+        };
+        // Every file of the cache, with its contents.
+        const auto contents = [](const std::filesystem::path& cache)
+        {
+            std::map<std::string, std::string> files;
+            std::error_code ec;
+            for (const auto& entry : std::filesystem::directory_iterator(cache, ec))
+            {
+                std::ostringstream text;
+                text << std::ifstream(entry.path(), std::ios::binary).rdbuf();
+                files[entry.path().filename().string()] = text.str();
+            }
+            return files;
+        };
+        const auto record = [](const std::filesystem::path& meta, llvm::StringRef revision)
+        {
+            std::ostringstream text;
+            text << std::ifstream(meta).rdbuf();
+            llvm::Expected<llvm::json::Value> parsed = llvm::json::parse(text.str());
+            if (!parsed)
+            {
+                llvm::consumeError(parsed.takeError());
+                return false;
+            }
+            llvm::json::Object* object = parsed->getAsObject();
+            if (object == nullptr)
+                return false;
+            (*object)["coretraceCompiler"] = revision.str();
+            std::string written;
+            llvm::raw_string_ostream out(written);
+            out << *parsed;
+            out.flush();
+            std::ofstream(meta, std::ios::trunc) << written;
+            return true;
+        };
+
+        const std::filesystem::path cache = root / "cache";
+        report.expect(load(cache, "known") == 42,
+                      "Compile IR cache: a build of a known revision compiles the source");
+        std::filesystem::path meta;
+        std::string recordedRevision = "<none>";
+        for (const auto& [name, text] : contents(cache))
+        {
+            if (!llvm::StringRef(name).ends_with(".json"))
+                continue;
+            meta = cache / name;
+            llvm::Expected<llvm::json::Value> parsed = llvm::json::parse(text);
+            if (!parsed)
+            {
+                llvm::consumeError(parsed.takeError());
+                continue;
+            }
+            if (const llvm::json::Object* object = parsed->getAsObject())
+                if (const auto revision = object->getString("coretraceCompiler"))
+                    recordedRevision = revision->str();
+        }
+        report.expect(recordedRevision == "known",
+                      "Compile IR cache: the entry records the build's revision (" +
+                          recordedRevision + ")");
+        report.expect(!meta.empty(),
+                      "Compile IR cache: a build of a known revision writes an entry");
+        if (meta.empty())
+        {
+            std::filesystem::remove_all(root);
+            return false;
+        }
+
+        const std::filesystem::path ir = std::filesystem::path(meta).replace_extension(".ll");
+        std::string irText = contents(cache)[ir.filename().string()];
+        const std::size_t at = irText.find("ret i32 42");
+        if (at != std::string::npos)
+            irText.replace(at, std::string("ret i32 42").size(), "ret i32 7");
+        std::ofstream(ir, std::ios::trunc) << irText;
+        report.expect(record(meta, "other") && load(cache, "other") == 7,
+                      "Compile IR cache: the changed entry is reused by a build of its revision");
+
+        report.expect(record(meta, ""), "Compile IR cache: the entry now records no revision");
+        const std::map<std::string, std::string> before = contents(cache);
+        report.expect(load(cache, "") == 42,
+                      "Compile IR cache: a build without revision does not read the cache");
+        report.expect(contents(cache) == before,
+                      "Compile IR cache: a build without revision leaves the cache as it was");
+
+        const std::filesystem::path empty = root / "empty-cache";
+        report.expect(load(empty, "") == 42 && contents(empty).empty(),
+                      "Compile IR cache: a build without revision writes no entry");
+
+        std::filesystem::remove_all(root);
+        return report.failures == 0;
+    }
 } // namespace
 
 int main(int argc, char** argv)
@@ -2381,6 +2526,7 @@ int main(int argc, char** argv)
     (void)testOwnershipFactCollector(repoRoot, report);
     (void)testOwnershipCollectorExceptions(repoRoot, report);
     (void)testOwnershipSummaryIndex(repoRoot, report);
+    (void)testCompileIRCacheWithoutCompilerRevision(report);
 
     if (report.failures == 0)
     {
