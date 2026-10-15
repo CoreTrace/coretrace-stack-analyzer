@@ -3709,8 +3709,9 @@ def check_compile_ir_cache_rebuilds_other_compiler() -> bool:
     The check rewrites the entry of the current key as another compiler would have left it, with
     the sources and dependencies left valid, and replaces its IR with that of another source,
     which returns the address of a local: reusing it reports an escape the source does not have.
-    Three cases, one at a time: no compiler recorded, as entries were written before it was;
-    another coretrace-compiler revision; another LLVM version. Each time, the next run must
+    Three cases, one at a time: no compiler recorded; another coretrace-compiler revision; another
+    LLVM version. Entries written before the compiler was recorded are not among them: they carry
+    an older schema, under another key, and are never looked up. Each time, the next run must
     compile again, give the diagnostics of a run without cache, and record the current compiler;
     the run after it must reuse that entry and give those diagnostics again.
     """
