@@ -207,7 +207,8 @@ jobs:
         key: ${{ steps.resource-cache.outputs.cache-primary-key }}
 
     - name: Upload SARIF to Code Scanning
-      if: runner.os == 'Linux' && always() && hashFiles('artifacts/self-analysis.sarif') != ''
+      # A pull request from a fork gets a read-only token, which Code Scanning refuses.
+      if: runner.os == 'Linux' && always() && hashFiles('artifacts/self-analysis.sarif') != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
       uses: github/codeql-action/upload-sarif@v3
       with:
         sarif_file: artifacts/self-analysis.sarif

@@ -150,6 +150,9 @@ add_library(stack_usage_analyzer_lib STATIC
     ${STACK_ANALYZER_SOURCES}
 )
 
+target_compile_definitions(stack_usage_analyzer_lib PRIVATE
+    CORETRACE_COMPILER_REVISION="${CORETRACE_COMPILER_REVISION}")
+
 if(ENABLE_WARN_REORDER_INIT_LIST AND CTRACE_STACK_HAS_WREORDER_INIT_LIST)
     target_compile_options(stack_usage_analyzer_lib PRIVATE -Wreorder-init-list)
 endif()

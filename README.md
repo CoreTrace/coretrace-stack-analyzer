@@ -292,6 +292,9 @@ sanitizers, profiling) while keeping include paths and macros.
 For multi-file runs, `--jobs=<N|auto>` parallelizes input loading; with cross-TU enabled it also parallelizes summary construction.
 `--compile-ir-cache-dir=<path>` reuses compiled LLVM IR for unchanged translation units
 based on source/dependency stamps, which reduces repeated C/C++ frontend cost across runs.
+IR that another compiler produced (another coretrace-compiler revision or LLVM version) is compiled again.
+The cache is not used when coretrace-compiler's sources are not a clean checkout FetchContent fetched itself
+(`FETCHCONTENT_SOURCE_DIR_CC`, for instance): the analyzer cannot then tell which revision it was built with.
 `--compile-ir-format=bc|ll` controls source compilation output format before module load:
 - `bc` (default): compile to LLVM bitcode then parse bitcode.
 - `ll`: compile to textual LLVM IR then parse text IR.

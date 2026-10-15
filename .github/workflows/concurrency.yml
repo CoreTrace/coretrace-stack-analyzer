@@ -63,3 +63,5 @@ jobs:
           version: v0.8.0
           compile-commands: build/compile_commands.json
           fail-on: error
+          # A pull request from a fork gets a read-only token, which Code Scanning refuses.
+          upload-sarif: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}

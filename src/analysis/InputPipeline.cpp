@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "analysis/InputPipeline.hpp"
+#include "InputPipelineRevision.hpp"
 #include "analysis/CompileCommands.hpp"
 #include "analysis/FrontendDiagnostics.hpp"
 #include "analyzer/HotspotProfiler.hpp"
@@ -20,6 +21,7 @@
 
 #include <llvm/Bitcode/BitcodeReader.h>
 #include <llvm/Bitcode/BitcodeWriter.h>
+#include <llvm/Config/llvm-config.h>
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
 #include <llvm/IRReader/IRReader.h>
@@ -192,7 +194,18 @@ namespace ctrace::stack::analysis
             }
         }
 
-        constexpr llvm::StringLiteral kCompileIRCacheSchema = "compile-ir-cache-v3";
+        // v4: entries record the compiler that produced them (below). Builds of v3 ignore those
+        // fields and would reuse such an entry; under v4, they do not even look it up, since the
+        // key holds the schema.
+        constexpr llvm::StringLiteral kCompileIRCacheSchema = "compile-ir-cache-v4";
+
+        // The compiler that produced an entry: compile IR depends on it as much as on the
+        // command. An entry another coretrace-compiler revision or LLVM version produced is
+        // compiled again, which also covers caches restored from an earlier build, as CI does.
+        // The revision is this build's (coretrace-compiler.cmake); it is empty when the build
+        // could not tell which coretrace-compiler it uses, and the cache is then not used at all.
+        constexpr llvm::StringLiteral kCoretraceCompilerRevision = CORETRACE_COMPILER_REVISION;
+        constexpr llvm::StringLiteral kLLVMVersion = LLVM_VERSION_STRING;
 
         struct FileSnapshot
         {
@@ -208,6 +221,7 @@ namespace ctrace::stack::analysis
             std::filesystem::path bcFile;
             std::filesystem::path irFile;
             std::filesystem::path depFile;
+            std::string coretraceCompilerRevision;
             std::uint64_t enabled : 1 = false;
             std::uint64_t reservedFlags : 63 = 0;
         };
@@ -335,15 +349,28 @@ namespace ctrace::stack::analysis
             return out.good();
         }
 
-        static CompileIRCachePaths buildCompileIRCachePaths(const AnalysisConfig& config,
-                                                            const std::string& filename,
-                                                            LanguageType language,
-                                                            const std::vector<std::string>& args,
-                                                            const std::string& workingDir)
+        static CompileIRCachePaths
+        buildCompileIRCachePaths(const AnalysisConfig& config, const std::string& filename,
+                                 LanguageType language, const std::vector<std::string>& args,
+                                 const std::string& workingDir,
+                                 llvm::StringRef coretraceCompilerRevision)
         {
             CompileIRCachePaths paths;
             if (config.compileIRCacheDir.empty())
                 return paths;
+            if (coretraceCompilerRevision.empty())
+            {
+                static std::once_flag warned;
+                std::call_once(warned,
+                               []
+                               {
+                                   coretrace::log(coretrace::Level::Warn,
+                                                  "Compilation cache not used: this build does "
+                                                  "not know which coretrace-compiler revision it "
+                                                  "uses\n");
+                               });
+                return paths;
+            }
 
             std::ostringstream keyPayload;
             keyPayload << std::string(kCompileIRCacheSchema) << "\n";
@@ -358,6 +385,7 @@ namespace ctrace::stack::analysis
 
             std::filesystem::path directory = config.compileIRCacheDir;
             paths.enabled = true;
+            paths.coretraceCompilerRevision = coretraceCompilerRevision.str();
             paths.directory = directory;
             paths.metaFile = directory / (key + ".json");
             paths.bcFile = directory / (key + ".bc");
@@ -485,6 +513,12 @@ namespace ctrace::stack::analysis
             if (!schema || *schema != kCompileIRCacheSchema)
                 return std::nullopt;
 
+            const auto revision = root->getString("coretraceCompiler");
+            const auto llvmVersion = root->getString("llvm");
+            if (!revision || *revision != cachePaths.coretraceCompilerRevision || !llvmVersion ||
+                *llvmVersion != kLLVMVersion)
+                return std::nullopt;
+
             const auto* sourceValue = root->get("source");
             if (!sourceValue)
                 return std::nullopt;
@@ -538,6 +572,8 @@ namespace ctrace::stack::analysis
 
             llvm::json::Object root;
             root["schema"] = kCompileIRCacheSchema;
+            root["coretraceCompiler"] = cachePaths.coretraceCompilerRevision;
+            root["llvm"] = kLLVMVersion;
             root["source"] = encodeSnapshot(sourceSnapshot);
             root["dependencies"] = std::move(dependenciesArray);
             root["diagnostics"] = diagnostics;
@@ -834,6 +870,15 @@ namespace ctrace::stack::analysis
                                            const AnalysisConfig& config, llvm::LLVMContext& ctx,
                                            llvm::SMDiagnostic& err)
     {
+        return detail::loadModuleForAnalysis(filename, config, ctx, err,
+                                             kCoretraceCompilerRevision);
+    }
+
+    ModuleLoadResult detail::loadModuleForAnalysis(const std::string& filename,
+                                                   const AnalysisConfig& config,
+                                                   llvm::LLVMContext& ctx, llvm::SMDiagnostic& err,
+                                                   llvm::StringRef coretraceCompilerRevision)
+    {
         using ctrace::stack::analyzer::ScopedHotspot;
         ModuleLoadResult result;
         const ScopedHotspot totalHotspot(config.timing, "input.load_module.total");
@@ -879,8 +924,8 @@ namespace ctrace::stack::analysis
             if (config.timing)
                 coretrace::log(coretrace::Level::Info, "Compiling {}...\n", filename);
             const bool preferBitcodeCompile = (config.compileIRFormat == CompileIRFormat::BC);
-            const CompileIRCachePaths cachePaths =
-                buildCompileIRCachePaths(config, inputPath, result.language, args, workingDir);
+            const CompileIRCachePaths cachePaths = buildCompileIRCachePaths(
+                config, inputPath, result.language, args, workingDir, coretraceCompilerRevision);
 
             std::error_code tempDirErr;
             std::filesystem::path tempDir = std::filesystem::temp_directory_path(tempDirErr);
@@ -1277,9 +1322,9 @@ namespace ctrace::stack::analysis
         const std::string cacheWorkingDir =
             cwdErr ? std::string() : baseDir.lexically_normal().generic_string();
         const CompileIRCachePaths cachePaths =
-            isTextIRInput
-                ? buildCompileIRCachePaths(config, inputPath, result.language, {}, cacheWorkingDir)
-                : CompileIRCachePaths{};
+            isTextIRInput ? buildCompileIRCachePaths(config, inputPath, result.language, {},
+                                                     cacheWorkingDir, coretraceCompilerRevision)
+                          : CompileIRCachePaths{};
 
         if (isTextIRInput && cachePaths.enabled)
         {
