@@ -3699,6 +3699,100 @@ def check_compile_ir_cache_rebuilds_previous_schema() -> bool:
     return ok
 
 
+def check_compile_ir_cache_rebuilds_other_compiler() -> bool:
+    """
+    Compile IR depends on the compiler that produced it as much as on the command, but an entry
+    used to record neither coretrace-compiler's revision nor LLVM's version: after an update, the
+    analyzer reused the IR the previous compiler had cached, and so would CI, which restores the
+    cache of earlier runs.
+
+    The check rewrites the entry of the current key as another compiler would have left it, with
+    the sources and dependencies left valid, and replaces its IR with that of another source,
+    which returns the address of a local: reusing it reports an escape the source does not have.
+    Three cases, one at a time: no compiler recorded, as entries were written before it was;
+    another coretrace-compiler revision; another LLVM version. Each time, the next run must
+    compile again, give the diagnostics of a run without cache, and record the current compiler;
+    the run after it must reuse that entry and give those diagnostics again.
+    """
+    print("=== Testing that compile IR cached by another compiler is rebuilt ===")
+    ok = True
+    with tempfile.TemporaryDirectory(prefix="ct_compile_ir_compiler_") as tmp:
+        root = Path(tmp)
+        source = root / "value.c"
+        source.write_text("int value(void) { int local = 42; return local; }\n")
+        escaping = root / "other" / "value.c"
+        escaping.parent.mkdir()
+        escaping.write_text("int* value(void) { int local = 42; return &local; }\n")
+        cache = root / "compile-ir"
+        analyzer = str(Path(RUN_CONFIG.analyzer).resolve())
+
+        def run(name, path=source, cached=True):
+            args = [analyzer, "--timing", "--format=json", "--compile-ir-format=ll",
+                    f"--dump-ir={root / f'ir-{name}'}/", str(path)]
+            if cached:
+                args.append(f"--compile-ir-cache-dir={cache}")
+            try:
+                result = subprocess.run(args, cwd=root, capture_output=True, text=True,
+                                        timeout=RUN_CONFIG.analyzer_timeout)
+                diagnostics = json.loads(result.stdout).get("diagnostics", [])
+            except (subprocess.TimeoutExpired, json.JSONDecodeError):
+                return None, False
+            return (sorted(json.dumps(d, sort_keys=True) for d in diagnostics),
+                    "Compilation cache hit" in result.stderr)
+
+        without_cache, _ = run("without-cache", cached=False)
+        escaping_diagnostics, _ = run("escaping", path=escaping, cached=False)
+        if without_cache is None or escaping_diagnostics in (None, without_cache):
+            print("  ❌ the other source's IR does not give other diagnostics")
+            return False
+        escaping_ir = next((root / "ir-escaping").glob("*.ll")).read_text()
+
+        diagnostics, _ = run("empty")
+        entries = sorted(cache.glob("*.json"))
+        if diagnostics != without_cache or len(entries) != 1:
+            print(f"  ❌ with an empty cache: diagnostics {diagnostics}, {len(entries)} cache entries")
+            return False
+        first = json.loads(entries[0].read_text())
+        current = {field: first.get(field) for field in ("coretraceCompiler", "llvm")}
+        if not all(current.values()):
+            ok = False
+            print(f"  ❌ the entry does not record the compiler that produced it: {current}")
+
+        for case, recorded in (
+            ("no compiler recorded", None),
+            ("another coretrace-compiler revision", {"coretraceCompiler": "0" * 40}),
+            ("another LLVM version", {"llvm": "0.0.0"}),
+        ):
+            metadata = json.loads(entries[0].read_text())
+            if recorded is None:
+                for field in current:
+                    metadata.pop(field, None)
+            else:
+                metadata.update(recorded)
+            entries[0].write_text(json.dumps(metadata))
+            entries[0].with_suffix(".ll").write_text(escaping_ir)
+
+            name = case.replace(" ", "-")
+            diagnostics, hit = run(f"{name}-previous")
+            rewritten = json.loads(entries[0].read_text())
+            rewritten = {field: rewritten.get(field) for field in current}
+            if diagnostics == without_cache and not hit and rewritten == current:
+                print(f"  ✅ {case}: the entry is compiled again and records the current compiler")
+            else:
+                ok = False
+                print(f"  ❌ {case}: diagnostics as without cache {diagnostics == without_cache}, "
+                      f"cache hit {hit}, entry records {rewritten}")
+            diagnostics, hit = run(f"{name}-rebuilt")
+            if diagnostics == without_cache and hit:
+                print(f"  ✅ {case}: the rewritten entry is reused")
+            else:
+                ok = False
+                print(f"  ❌ {case}, after the rebuild: diagnostics as without cache "
+                      f"{diagnostics == without_cache}, cache hit {hit}")
+    print()
+    return ok
+
+
 def check_unreadable_model_fails() -> bool:
     """
     A model the command line asks for, but that cannot be read, is a configuration error: the
@@ -5507,6 +5601,7 @@ def main() -> int:
         check_use_after_free_advanced_inter_tu,
         check_escape_model_rejects_unsupported_brackets,
         check_compile_ir_cache_rebuilds_previous_schema,
+        check_compile_ir_cache_rebuilds_other_compiler,
         check_unreadable_model_fails,
         check_human_vs_json_parity,
         check_diagnostic_rule_coverage_regression,
