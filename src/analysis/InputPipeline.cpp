@@ -198,6 +198,8 @@ namespace ctrace::stack::analysis
         // The compiler that produced an entry: compile IR depends on it as much as on the
         // command. An entry another coretrace-compiler revision or LLVM version produced is
         // compiled again, which also covers caches restored from an earlier build, as CI does.
+        // The revision is empty when the build could not tell which coretrace-compiler it
+        // uses (coretrace-compiler.cmake): the cache is then not used at all.
         constexpr llvm::StringLiteral kCoretraceCompilerRevision = CORETRACE_COMPILER_REVISION;
         constexpr llvm::StringLiteral kLLVMVersion = LLVM_VERSION_STRING;
 
@@ -351,6 +353,19 @@ namespace ctrace::stack::analysis
             CompileIRCachePaths paths;
             if (config.compileIRCacheDir.empty())
                 return paths;
+            if (kCoretraceCompilerRevision.empty())
+            {
+                static std::once_flag warned;
+                std::call_once(warned,
+                               []
+                               {
+                                   coretrace::log(coretrace::Level::Warn,
+                                                  "Compilation cache not used: this build does "
+                                                  "not know which coretrace-compiler revision it "
+                                                  "uses\n");
+                               });
+                return paths;
+            }
 
             std::ostringstream keyPayload;
             keyPayload << std::string(kCompileIRCacheSchema) << "\n";
