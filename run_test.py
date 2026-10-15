@@ -3811,7 +3811,8 @@ def check_coretrace_compiler_revision_follows_the_selected_sources() -> bool:
     - normal build: cc declared at commit A, records A;
     - a parent project declaring cc at B, around a subproject declaring it at A: records B;
     - sources replaced with FETCHCONTENT_SOURCE_DIR_CC, a clone at A: records nothing;
-    - the checkout of a normal build changed by hand, then configured again: records nothing.
+    - the checkout of a normal build changed by hand, then configured again: records nothing;
+    - the same, then built without configuring again: the build configures again, records nothing.
     Last, the analyzer under test must record the revision of its own build's checkout.
     """
     print("=== Testing which coretrace-compiler revision the build records ===")
@@ -3836,10 +3837,10 @@ def check_coretrace_compiler_revision_follows_the_selected_sources() -> bool:
         repo.mkdir()
         run_git(repo, "init", "-q")
         commits = []
+        (repo / "CMakeLists.txt").write_text("cmake_minimum_required(VERSION 3.16)\nproject(cc NONE)\n")
         for name in ("a", "b"):
-            (repo / "CMakeLists.txt").write_text(
-                f"cmake_minimum_required(VERSION 3.16)\nproject(cc NONE)\n# commit {name}\n")
-            run_git(repo, "add", "CMakeLists.txt")
+            (repo / "compiler.c").write_text(f"/* commit {name} */\n")
+            run_git(repo, "add", "CMakeLists.txt", "compiler.c")
             run_git(repo, "commit", "-q", "-m", name)
             commits.append(run_git(repo, "rev-parse", "HEAD"))
         a, b = commits
@@ -3895,18 +3896,41 @@ def check_coretrace_compiler_revision_follows_the_selected_sources() -> bool:
         changed = root / "build-changed"
         recorded, failure = configure(normal, changed)
         checkout = changed / "_deps" / "cc-src"
-        if recorded != a or not (checkout / "CMakeLists.txt").is_file():
+        if recorded != a or not (checkout / "compiler.c").is_file():
             ok = False
             print(f"  ❌ checkout changed by hand: before the change, records {recorded!r} {failure}")
         else:
-            with (checkout / "CMakeLists.txt").open("a") as listing:
-                listing.write("# changed by hand\n")
+            with (checkout / "compiler.c").open("a") as changed_source:
+                changed_source.write("/* changed by hand */\n")
             recorded, failure = configure(normal, changed)
             if recorded == "":
                 print("  ✅ checkout changed by hand: records nothing")
             else:
                 ok = False
                 print(f"  ❌ checkout changed by hand: records {recorded!r} {failure}")
+
+        built = root / "build-built"
+        recorded, failure = configure(normal, built)
+        checkout = built / "_deps" / "cc-src"
+        if recorded != a or not (checkout / "compiler.c").is_file():
+            ok = False
+            print(f"  ❌ checkout changed by hand, then built: before the change, records {recorded!r} {failure}")
+        else:
+            with (checkout / "compiler.c").open("a") as changed_source:
+                changed_source.write("/* changed by hand */\n")
+            try:
+                build = subprocess.run([cmake, "--build", str(built)], capture_output=True, text=True,
+                                       timeout=300)
+                returncode, output = build.returncode, (build.stdout + build.stderr)[-500:]
+            except subprocess.TimeoutExpired:
+                returncode, output = "timeout", ""
+            recorded = (built / "revision.txt").read_text()
+            if returncode == 0 and recorded == "":
+                print("  ✅ checkout changed by hand, then built without configuring: records nothing")
+            else:
+                ok = False
+                print(f"  ❌ checkout changed by hand, then built without configuring: build exit "
+                      f"{returncode}, records {recorded!r} {output}")
 
         own_checkout = Path(RUN_CONFIG.analyzer).resolve().parent / "_deps" / "cc-src"
         if not (own_checkout / ".git").exists():
@@ -3969,7 +3993,6 @@ def check_compile_ir_cache_hidden_from_builds_before_the_compiler_was_recorded()
                   f"{metadata.get('coretraceCompiler')!r}: builds before the compiler was recorded read it")
     print()
     return ok
-
 
 
 def check_unreadable_model_fails() -> bool:
