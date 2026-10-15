@@ -21,9 +21,10 @@ FetchContent_MakeAvailable(cc)
 # entry (InputPipeline.cpp). It is read from the sources FetchContent selected, not
 # taken from GIT_TAG above: a parent project's declaration of cc wins over this one.
 # It is known only for a clean git checkout that FetchContent made itself, read at
-# configure time. Sources FetchContent did not fetch (FETCHCONTENT_SOURCE_DIR_CC, a
-# SOURCE_DIR, an archive, a package) can change without CMake knowing: the revision
-# is then left empty, and the analyzer does not use the cache.
+# configure time and again whenever that checkout changes. Sources FetchContent did
+# not fetch (FETCHCONTENT_SOURCE_DIR_CC, a SOURCE_DIR, an archive, a package) can
+# change without CMake knowing: the revision is then left empty, and the analyzer
+# does not use the cache.
 set(CORETRACE_COMPILER_REVISION "")
 FetchContent_GetProperties(cc)
 find_package(Git QUIET)
@@ -37,6 +38,20 @@ if(GIT_FOUND AND NOT FETCHCONTENT_SOURCE_DIR_CC
         RESULT_VARIABLE cc_status_failed OUTPUT_VARIABLE cc_changes ERROR_QUIET)
     if(NOT cc_head_failed AND NOT cc_status_failed AND cc_changes STREQUAL "")
         set(CORETRACE_COMPILER_REVISION "${cc_head}")
+    endif()
+    # The revision holds only while the checkout stays as it is: changing any of its files, or
+    # its HEAD, makes the next build configure again and read the revision anew.
+    execute_process(
+        COMMAND "${GIT_EXECUTABLE}" -C "${cc_SOURCE_DIR}" -c core.quotePath=false ls-files
+        RESULT_VARIABLE cc_files_failed OUTPUT_VARIABLE cc_files
+        OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+    if(cc_files_failed)
+        set(CORETRACE_COMPILER_REVISION "")
+    else()
+        string(REPLACE "\n" ";" cc_files "${cc_files}")
+        list(TRANSFORM cc_files PREPEND "${cc_SOURCE_DIR}/")
+        set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+            ${cc_files} "${cc_SOURCE_DIR}/.git/HEAD")
     endif()
 endif()
 if(CORETRACE_COMPILER_REVISION)
