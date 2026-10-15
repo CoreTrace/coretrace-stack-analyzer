@@ -3745,7 +3745,11 @@ def check_compile_ir_cache_rebuilds_other_compiler() -> bool:
         if without_cache is None or escaping_diagnostics in (None, without_cache):
             print("  ❌ the other source's IR does not give other diagnostics")
             return False
-        escaping_ir = next((root / "ir-escaping").glob("*.ll")).read_text()
+        dumped = sorted((root / "ir-escaping").glob("*.ll"))
+        if not dumped:
+            print("  ❌ --dump-ir wrote no IR for the other source")
+            return False
+        escaping_ir = dumped[0].read_text()
 
         diagnostics, _ = run("empty")
         entries = sorted(cache.glob("*.json"))
