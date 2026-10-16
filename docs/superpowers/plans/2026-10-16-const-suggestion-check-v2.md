@@ -1957,10 +1957,270 @@ Unchanged and passing at `64ed37e`: `const-suggestion-kept*.cpp`, `const-suggest
 
 ### Task 1.6: collisions, stale declarations, link-edition assumption (§5.10)
 
-**Files:** `ConstSuggestionMatch.cpp`, `README.md`.
-**Work:** the linkage table of §5.10; a same entity defined in several units is no collision; a stale declaration gives indeterminate (D17); every reason that depends on linking states the assumption and its scope.
-**Tests:** D3, a new `run_test.py` check (t2: C `static` and external homonyms, both directions, verified; the README sentence corrected); D4, a new `run_test.py` check (t9: `f(const int*)` defined in another file, indeterminate with the assumption, files analyzed together and the other file only in the database); Review Focus 3, a new `run_test.py` check (a header defining `static inline` C and `inline` C++ functions, included by two analyzed files, verified); D17, the two changed expectations; the static and anonymous-namespace homonyms of `check_const_suggestion_cross_tu` unchanged.
-**Validation:** D3, D4 and Review Focus 3 pass.
+**Files:** `src/analysis/ConstSuggestionMatch.cpp`, `src/analysis/ConstSuggestionFacts.cpp`, `src/analysis/ConstSuggestionCheck.cpp`, `README.md`, `run_test.py`.
+
+**Interfaces.** `UnitFacts::Entity` gains:
+```cpp
+// After the rewrite: a symbol the entity takes that another entity defines here, or another
+// entity's declaration merged into it (ruling 3).
+struct Collision
+{
+    std::string symbol;
+    DeclarationSite site;                   // the other entity's definition, or declaration
+    std::optional<llvm::GlobalValue::LinkageTypes> linkage; // none for a declaration
+};
+std::vector<Collision> collisions;
+```
+and produces, in `ConstSuggestionMatch.cpp`:
+```cpp
+// §5.10: the verdict of the collisions that every unit found, after the units' judgements.
+Judgement judgeCollisions(const std::vector<const UnitFacts*>& units, std::size_t entity,
+                          const std::string& definingFile);
+```
+
+**Tests.** D4 (t9), the other file analyzed or only in the compilation database:
+
+```python
+def check_const_suggestion_overload_defined_elsewhere() -> bool:
+    """
+    #217: rewritten, f(int*) takes the symbol of the overload f(const int*), which another file
+    defines. The two definitions collide only if the files are linked together, which the check
+    does not know: the suggestion is kept, not checked, and the reason states that assumption,
+    whether the other file is analyzed or only listed in the compilation database.
+    """
+    print("=== Testing a const suggestion that takes the symbol of another file's overload ===")
+    sources = {
+        "api.hpp": "int f(int* p);\nint f(const int* p);\n",
+        "a.cpp": '#include "api.hpp"\nint f(int* p)\n{\n    return *p;\n}\n',
+        "b.cpp": '#include "api.hpp"\nint f(const int* p)\n{\n    return *p + 1;\n}\n',
+    }
+    claims = ("checked in the analyzed files only", "checked in every file of the compilation")
+    ok = True
+    with tempfile.TemporaryDirectory(prefix="ct_const_suggestion_overload_") as tmp:
+        root = Path(tmp).resolve()
+        for name, text in sources.items():
+            (root / name).write_text(text)
+        database = root / "compile_commands.json"
+        database.write_text(
+            json.dumps(
+                [
+                    {
+                        "directory": str(root),
+                        "file": str(root / f),
+                        "arguments": ["clang++", "-std=c++17", "-c", str(root / f)],
+                    }
+                    for f in ("a.cpp", "b.cpp")
+                ]
+            )
+        )
+        expected = (
+            f"not checked with Clang: _Z1fPKi is also defined in {root / 'b.cpp'}; if "
+            f"{root / 'a.cpp'} and {root / 'b.cpp'} are linked together, the two definitions "
+            "collide"
+        )
+        for label, args in (
+            ("both files analyzed", [str(root / "a.cpp"), str(root / "b.cpp")]),
+            (
+                "the other file only in the compilation database",
+                [str(root / "a.cpp"), f"--compile-commands={database}"],
+            ),
+        ):
+            run = _const_suggestion_run(args)
+            texts = run[0].get("_Z1fPi", []) if run else []
+            good = (
+                len(texts) == 1
+                and expected in texts[0]
+                and not any(claim in texts[0] for claim in claims)
+            )
+            print(f"  {'✅' if good else '❌'} {label}" + ("" if good else f": {texts}"))
+            ok = ok and good
+    print()
+    return ok
+```
+
+Review Focus 3, a function defined in a header that two analyzed files include:
+
+```python
+def check_const_suggestion_inline_in_a_header() -> bool:
+    """
+    #217: a function defined in a header that two analyzed files include is defined in both: a C
+    `static inline` function, one function in each file, and a C++ `inline` function, one function
+    that both files define. Neither definition collides with the other: each suggestion is checked.
+    """
+    print("=== Testing const suggestions for functions defined in a shared header ===")
+    sources = {
+        "peek.h": "static inline int peek_c(int* p)\n{\n    return *p;\n}\n",
+        "one.c": '#include "peek.h"\n'
+        "int use_one(void)\n{\n    int v = 1;\n    return peek_c(&v);\n}\n",
+        "two.c": '#include "peek.h"\n'
+        "int use_two(void)\n{\n    int v = 2;\n    return peek_c(&v);\n}\n",
+        "peek.hpp": "inline int peek_cpp(int* p)\n{\n    return *p;\n}\n",
+        "three.cpp": '#include "peek.hpp"\n'
+        "int use_three()\n{\n    int v = 3;\n    return peek_cpp(&v);\n}\n",
+        "four.cpp": '#include "peek.hpp"\n'
+        "int use_four()\n{\n    int v = 4;\n    return peek_cpp(&v);\n}\n",
+    }
+    checked = "checked in the analyzed files only"
+    ok = True
+    with tempfile.TemporaryDirectory(prefix="ct_const_suggestion_inline_") as tmp:
+        root = Path(tmp).resolve()
+        for name, text in sources.items():
+            (root / name).write_text(text)
+        for label, files, function in (
+            ("C, static inline", ["one.c", "two.c"], "peek_c"),
+            ("C++, inline", ["three.cpp", "four.cpp"], "_Z8peek_cppPi"),
+        ):
+            run = _const_suggestion_run([str(root / f) for f in files])
+            texts = run[0].get(function, []) if run else []
+            # One suggestion for the definition in each file.
+            good = len(texts) == 2 and all(checked in text for text in texts)
+            print(f"  {'✅' if good else '❌'} {label}" + ("" if good else f": {texts}"))
+            ok = ok and good
+    print()
+    return ok
+```
+
+D17, the two changed expectations:
+
+```diff
+--- a/run_test.py
++++ b/run_test.py
+@@ -3,8 +3,9 @@
+     #217: a suggested const type is reported only if every analyzed file still compiles with it,
+     once every declaration the defining file sees is rewritten. Another analyzed file that stores
+-    the function where a non-const parameter is expected, declares it itself, or converts its
+-    address with an explicit cast, removes the suggestion; a homonym with internal linkage in
+-    another file does not. A file that is not analyzed is not checked. The callback and cast files
+-    sort before the definition, the redeclaration after it.
++    the function where a non-const parameter is expected, or converts its address with an explicit
++    cast, removes the suggestion. One that declares it itself, without the header, keeps it, not
++    checked: whether that matters depends on how the files are linked. A homonym with internal
++    linkage in another file does not change it. A file that is not analyzed is not checked. The
++    callback and cast files sort before the definition, the redeclaration after it.
+     """
+     return _check_cross_tu_rule(
+@@ -17,5 +18,5 @@
+             ("def and a caller", ["def.c", "caller.c"], ["read_value"]),
+             ("def and a callback of the old type", ["def.c", "callback.c"], []),
+-            ("def and a redeclaration", ["def.c", "redecl.c"], []),
++            ("def and a redeclaration", ["def.c", "redecl.c"], ["read_value"]),
+             ("def and an explicit cast", ["def.c", "cast.c"], []),
+             # Another file's homonym with internal linkage is another function.
+```
+
+```diff
+--- a/run_test.py
++++ b/run_test.py
+@@ -3,11 +3,12 @@
+     #217: with a compilation database, a suggested const type is checked in every file the
+     database lists that sees the change, analyzed or not, with its own compile command. A file
+-    that is not analyzed and stores the function where a non-const parameter is expected, declares
+-    it itself without the header, or converts its address with an explicit cast, removes the
+-    suggestion, even listed after a file that cannot be checked. So does a file that takes the
+-    address of a method with the old type: it sees the change through the header alone. A file
+-    that sees the change but does not compile as it is, or cannot be preprocessed, keeps the
+-    suggestion as not checked, without the claim of the check. A file that does not see the change
+-    is not compiled.
++    that is not analyzed and stores the function where a non-const parameter is expected, or
++    converts its address with an explicit cast, removes the suggestion, even listed after a file
++    that cannot be checked. So does a file that takes the address of a method with the old type: it
++    sees the change through the header alone. A file that declares the function itself, without
++    the header, keeps the suggestion as not checked, and the reason names it and the link it
++    assumes. A file that sees the change but does not compile as it is, or cannot be preprocessed,
++    keeps the suggestion as not checked, without the claim of the check. A file that does not see
++    the change is not compiled.
+     """
+     print("=== Testing const suggestions checked in the compilation database ===")
+@@ -87,5 +88,14 @@
+             ),
+             # Without the header: only the name of the function shows that it sees the change.
+-            ("a redeclaration, not analyzed", ["def.c", "redecl.c"], "read_value", None),
++            (
++                "a redeclaration, not analyzed",
++                ["def.c", "redecl.c"],
++                "read_value",
++                "not checked with Clang: " + str(fixtures / f"{prefix}redecl.c")
++                + " declares read_value with its current type and does not see the rewrite: if "
++                + str(fixtures / f"{prefix}def.c") + " and " + str(fixtures / f"{prefix}redecl.c")
++                + " are linked together, that declaration no longer matches the rewritten "
++                "definition",
++            ),
+             ("an explicit cast, not analyzed", ["def.c", "cast.c"], "read_value", None),
+             ("a method alone", ["method.cpp"], method, checked),
+```
+
+Failure at `64ed37e`: t9 is "checked", in both runs; the redeclaration removes the suggestion, in both checks. Review Focus 3 passes at `64ed37e`: T v1 never sees a collision, so the test guards the exception of §5.10 ("a same entity defined in several files is no collision") against Task 1.6 itself. Its failure is shown on a mutant of this task's code (Step 4).
+
+```text
+check_const_suggestion_overload_defined_elsewhere: FAIL
+=== Testing a const suggestion that takes the symbol of another file's overload ===
+  ❌ both files analyzed: ["\t[ !Info! ] ConstParameterNotModified.Pointer: parameter 'p' in function 'f(int*)' is never used to modify the pointed object\n\t\t ↳ current type: int *p\n\t\t ↳ suggested type: const int *p\ …
+  ❌ the other file only in the compilation database: ["\t[ !Info! ] ConstParameterNotModified.Pointer: parameter 'p' in function 'f(int*)' is never used to modify the pointed object\n\t\t ↳ current type: int *p\n\t\t ↳ s …
+```
+
+```text
+check_const_suggestion_inline_in_a_header: PASS
+=== Testing const suggestions for functions defined in a shared header ===
+  ✅ C, static inline
+  ✅ C++, inline
+```
+
+```text
+check_const_suggestion_cross_tu (Task 1.6 version): FAIL
+=== Testing suggested const types checked in every analyzed file ===
+  ✅ default, def alone: ['read_value']
+  ✅ default, def and a caller: ['read_value']
+  ✅ default, def and a callback of the old type: []
+  ❌ default, def and a redeclaration: [], expected ['read_value']
+  ✅ default, def and an explicit cast: []
+  ✅ default, a static function and a static homonym: ['helper']
+  ✅ default, an anonymous namespace's function and its homonym: ['_ZN12_GLOBAL__N_16helperEPi']
+  ✅ smt-z3, def alone: ['read_value']
+  ✅ smt-z3, def and a caller: ['read_value']
+  ✅ smt-z3, def and a callback of the old type: []
+  ❌ smt-z3, def and a redeclaration: [], expected ['read_value']
+  ✅ smt-z3, def and an explicit cast: []
+  ✅ smt-z3, a static function and a static homonym: ['helper']
+  ✅ smt-z3, an anonymous namespace's function and its homonym: ['_ZN12_GLOBAL__N_16helperEPi']
+```
+
+```text
+check_const_suggestion_compilation_database (Task 1.6 version): FAIL
+=== Testing const suggestions checked in the compilation database ===
+  ✅ a caller
+  ✅ a callback of the old type, not analyzed
+  ❌ a redeclaration, not analyzed: None
+  ✅ an explicit cast, not analyzed
+  ✅ a method alone
+  ✅ a method's address of the old type, not analyzed
+  ✅ a file that does not compile as it is
+  ✅ a file that cannot be preprocessed
+  ✅ a file that cannot be checked, then a callback
+  ✅ a file that does not see the change
+```
+
+The static and anonymous-namespace homonyms of `check_const_suggestion_cross_tu` stay unchanged.
+
+- [ ] **Step 1: Add the two checks and the D17 expectations; run them.** Expected: D4 and the redeclaration cases FAIL, as above; Review Focus 3 passes.
+  Commits: `test(const-param): keep a rewrite that takes another file's symbol, unchecked`; `test(const-param): a function a shared header defines does not collide with itself`; `test(const-param): keep a suggestion that another file redeclares, unchecked`.
+- [ ] **Step 2: Collisions (§5.10).** After the rewrite, each compilation looks up every symbol the entity takes (its variants after the rewrite) in its module: a definition whose declaration is not the entity's (Task 1.4's identity) is a collision, with the IR linkage of that definition. A declaration the entity's redeclarations gain, compared with the unit's initial compilation, is a merge (ruling 3). Once every unit is judged, and none refutes, `judgeCollisions` applies the table of §5.10:
+  - local linkage (`internal`, `private`): no collision;
+  - `external`: in the defining file, Clang reports a redefinition, refuted at step 4; in another file, indeterminate, `… the two definitions collide`;
+  - `weak`, `extern_weak`, `common`: indeterminate, naming the definition the linker would use: the strong one;
+  - `weak_odr`, `linkonce_odr`: indeterminate, `… only one of the two is kept …`;
+  - a merge with a declaration: indeterminate, after any definition (ruling 1).
+  A definition that is the entity's, such as an `inline` function of a rewritten header, is no collision.
+  Run: `check_const_suggestion_overload_defined_elsewhere`, `check_const_suggestion_inline_in_a_header`. Expected: PASS.
+  Commit: `feat(const-param): keep a rewrite that may collide with another file, unchecked`.
+- [ ] **Step 3: Stale declarations (D17).** A unit that reads no rewritten file and declares the entity through the linker (Task 1.4, Step 3) makes the unit indeterminate, after steps 4 to 6: `<file> declares <function> with its current type and does not see the rewrite: …`. T v1's removal `declared in <file>:<line> with type <type>` goes.
+  Run: `check_const_suggestion_cross_tu`, `check_const_suggestion_compilation_database`. Expected: PASS, but for the `cast.c` cases (Task 1.7).
+  Commit: `fix(const-param): keep a suggestion that another file redeclares, unchecked`.
+- [ ] **Step 4: Failure of Review Focus 3 on a mutant.** Count the entity's own definition as another entity's in Step 2's lookup; run `check_const_suggestion_inline_in_a_header`. Expected: FAIL (`C++, inline`: indeterminate, `… only one of the two is kept …`). Restore the code; expected: PASS. Record both outputs in `evidence/217/stage1/`.
+- [ ] **Step 5: README (D3).** In "Const parameter suggestions checked with Clang", step 2: "A homonym with internal linkage (`static`, anonymous namespace) in another file is another function." becomes "A function with internal linkage (`static`, anonymous namespace) and a function of the same name in another file are two functions, whichever of them has internal linkage." The rest of the section is rewritten with the verdicts in Task 1.8.
+  Commit: `docs(readme): a static function and its homonym elsewhere are two functions`.
+- [ ] **Step 6: Task tests.** As Task 1.1, Step 6.
+
+**Validation:** D4, Review Focus 3 and the D17 expectations pass; Review Focus 3 failed on the mutant.
 
 ### Task 1.7: explicit address casts (D15)
 
