@@ -1301,11 +1301,118 @@ Review Focus 2: `const-suggestion-explicit-object.cpp` unchanged, passing at `64
 
 ### Task 1.3: planning and plan scope (§5.5)
 
-**Files:** `ConstSuggestionPlan.cpp` (new; T v1's `Planner`, `writtenType`, `expectedType`, `inMacroDefinition` move here), `CMakeLists.txt` (new sources).
-**Interfaces:** produces `std::optional<SuggestionPlan> plan(clang::ASTContext&, clang::Preprocessor&, const ConstParamIssue&, llvm::StringRef symbol)`.
-**Work:** the entity located by the suggestion's symbol through CodeGen's mangling of each candidate declaration's `GlobalDecl` variants, then described by its source identity; the candidate built on the structured type; edits on each redeclaration's `TypeLoc` under the macro rules of §5.5, macro definitions recognized by the preprocessor (D11); the plan scope (D5).
-**Tests:** D5, a new fixture (t3/m.c: a type written in a macro argument that `src` and `dst` share, indeterminate, the suggestion kept); D11, a new `run_test.py` case (t13: `\` followed by spaces, indeterminate); `const-suggestion-macros.c`, `const-suggestion-macro-params.c` and `check_const_suggestion_line_endings` unchanged.
-**Validation:** D5 and D11 pass; T v1 macro tests unchanged.
+**Files:** `src/analysis/ConstSuggestionPlan.cpp` (new), `src/analysis/ConstSuggestionCheck.cpp`, `src/analysis/ConstSuggestionInternal.hpp`, `CMakeLists.txt`, `test/pointer_reference-const_correctness/const-suggestion-macro-shared-type.c` (new), `run_test.py`.
+
+**Interfaces.** Produces:
+```cpp
+// The ranges of the macro definitions a compilation reads, by real path: from the macro's name
+// to its last token, as offsets (D11).
+using MacroDefinitions = std::map<std::string, std::vector<std::pair<unsigned, unsigned>>>;
+// Records them, for the compilation that plans (§5.5).
+std::unique_ptr<clang::PPCallbacks> recordMacroDefinitions(const clang::SourceManager& sm,
+                                                           MacroDefinitions& out);
+// Plans the rewrite of the parameter `binding` names, in `function`, located in the defining
+// unit's initial compilation by the suggestion's symbol (T v1's GetDeclForMangledName).
+SuggestionPlan plan(clang::ASTContext& context, const MacroDefinitions& macros,
+                    const clang::FunctionDecl& function, const ParameterDebugBinding& binding);
+```
+`Edit` moves to `ConstSuggestionInternal.hpp`. `SuggestionPlan` holds here `sourceIndex`, `expectedType`, `edits` and `indeterminate`; Task 1.4 adds `entity`, Task 1.8 `candidate`.
+
+**Tests.** D5, a new fixture (t3/m.c):
+
+`test/pointer_reference-const_correctness/const-suggestion-macro-shared-type.c`:
+
+```c
+// SPDX-License-Identifier: Apache-2.0
+// #217: a macro argument can write the type of several parameters. Rewriting the type of `src`
+// where it is written would rewrite `dst` too, which copy_one writes through: the rewrite would
+// reach beyond the suggestion. The suggestion is kept, not checked.
+
+// strict-expectation-details: true
+
+#define DECLARE_COPY(name, T) int name(T src, T dst)
+
+// at line 15, column 0
+// [ !Info! ] ConstParameterNotModified.Pointer: parameter 'src' in function 'copy_one' is never used to modify the pointed object
+// ↳ current type: int *src
+// ↳ suggested type: const int *src
+// ↳ not checked with Clang: the parameter's type is written in a macro argument that writes other parameters too
+DECLARE_COPY(copy_one, int*)
+{
+    *dst = *src;
+    return 0;
+}
+
+// The Clang check of const suggestions is experimental: it runs only with this option.
+// analyzer-arg: --experimental-const-suggestion-check
+```
+
+D11 (t13), a third case of `check_const_suggestion_line_endings`: spaces between the backslash and the line break, which Clang reads as a continuation, with a warning. Run as a check, not a fixture: a fixture's trailing spaces would not survive formatting and review.
+
+```diff
+--- a/run_test.py
++++ b/run_test.py
+@@ -2,8 +2,10 @@
+     """
+     #217: a type written on a continuation line of a #define is in the macro definition, whether
+-    the file ends its lines with LF or CRLF: rewriting it would change every expansion of the macro,
+-    here a function that writes through p. The suggestion is kept as not checked with both.
++    the file ends its lines with LF or CRLF, or puts spaces between the backslash and the line
++    break, which Clang accepts with a warning: rewriting it would change every expansion of the
++    macro, here a function that writes through p. The suggestion is kept as not checked in each
++    case.
+     """
+-    print("=== Testing a macro definition's continuation lines, with LF and CRLF ===")
++    print("=== Testing a macro definition's continuation lines, with LF, CRLF and spaces ===")
+     source = (
+         "#define PARAM(type) type p\n"
+@@ -16,7 +18,11 @@
+     ok = True
+     with tempfile.TemporaryDirectory(prefix="ct_const_suggestion_line_endings_") as tmp:
+-        for label, newline in (("LF", "\n"), ("CRLF", "\r\n")):
+-            path = Path(tmp).resolve() / f"reader-{label.lower()}.c"
+-            path.write_bytes(source.replace("\n", newline).encode("utf-8"))
++        for label, contents in (
++            ("LF", source),
++            ("CRLF", source.replace("\n", "\r\n")),
++            ("spaces after the backslash", source.replace("\\\n", "\\  \n")),
++        ):
++            path = Path(tmp).resolve() / f"reader-{label.lower().replace(' ', '-')}.c"
++            path.write_bytes(contents.encode("utf-8"))
+             # The file's bytes are an input the cache key does not cover.
+             result = run_analyzer_uncached(
+```
+
+Failure at `64ed37e`: both suggestions are removed. D5: the edit of the macro argument rewrites `dst` too, which copy_one writes. D11: the text scan does not see the continuation, so the macro body is rewritten, and so is write_second.
+
+```text
+new/const-suggestion-macro-shared-type.c: FAIL (2/4)
+=== Testing evidence/217/stage1/tests/fixtures/new/const-suggestion-macro-shared-type.c ===
+  ❌ (default) expectation #1 MISSING
+  ❌ (smt-z3) expectation #1 MISSING
+```
+
+```text
+check_const_suggestion_line_endings: FAIL
+=== Testing a macro definition's continuation lines, with LF, CRLF and spaces ===
+  ✅ LF
+  ✅ CRLF
+  ❌ spaces after the backslash: None
+```
+
+`const-suggestion-macros.c` and `const-suggestion-macro-params.c` stay unchanged and pass at `64ed37e`.
+
+- [ ] **Step 1: Add both tests and run them.** Run: the one-fixture command for `const-suggestion-macro-shared-type.c`, and the one-check command for `check_const_suggestion_line_endings`. Expected: FAIL, as above.
+  Commits: `test(const-param): keep a suggestion whose macro argument types two parameters`; `test(const-param): a backslash and spaces still continue a macro definition`.
+- [ ] **Step 2: Move the planning.** `Planner`, `writtenType`, `expectedType` and the body of `Inspector::plan` move to `ConstSuggestionPlan.cpp`, behind `plan()`; `FunctionFacts` keeps what the other compilations fill. No behavior changes.
+  Run: the T v1 macro fixtures. Expected: PASS. Commit: `refactor(const-param): move the planning of a suggestion to its own file`.
+- [ ] **Step 3: Macro definitions from the preprocessor (D11).** `recordMacroDefinitions` returns a `clang::PPCallbacks` whose `MacroDefined` records `[getDefinitionLoc(), getDefinitionEndLoc()]` of each macro written in a file (real path, offsets). `InspectAction::CreateASTConsumer` adds it to the preprocessor of the defining unit's initial compilation. `Planner::replace` asks the recorded ranges whether the offset it rewrites lies in a macro definition; the text scan `inMacroDefinition` goes.
+  Run: `check_const_suggestion_line_endings`. Expected: PASS. Commit: `fix(const-param): find macro definitions with the preprocessor, not the text`.
+- [ ] **Step 4: The plan's scope (D5).** An edit whose position comes from a macro argument (`isMacroArgExpansion`) serves only the parameter planned. `plan()` walks the other parameters of each redeclaration with the same `TypeLoc` walk as `Planner::plan`: one whose type's spelling location is an edit's position gives `the parameter's type is written in a macro argument that writes other parameters too`. Then, only when an edit comes from a macro argument, a `RecursiveASTVisitor` over the translation unit checks every other `DeclaratorDecl` and `TypedefNameDecl`: one whose type starts at an edit's position gives `the parameter's type is written in a macro argument that writes other declarations too`. Either way the plan is indeterminate and nothing is rewritten.
+  Run: the one-fixture command for `const-suggestion-macro-shared-type.c`. Expected: PASS. Commit: `fix(const-param): leave a rewrite that reaches another declaration unchecked`.
+- [ ] **Step 5: Task tests.** As Task 1.1, Step 6.
+
+**Validation:** D5 and D11 pass; T v1's macro tests unchanged.
 
 ### Task 1.4: compilations, facts R, O and K, scope after the rewrite (§5.3, §5.4, §5.6), judgement steps 1 to 6
 
