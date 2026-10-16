@@ -2595,6 +2595,23 @@ namespace
               {"this: artificial, source none", "vtt: artificial, source none",
                "x: int *, source 1"});
 
+        // Under the Microsoft ABI the hidden return argument comes after `this`: it has no type,
+        // so it carries no const contract.
+        if (const llvm::Function* make =
+                microsoft.module->getFunction("?make@Maker@@QEBA?AUBig@@PEAH@Z"))
+        {
+            const ParameterDebugBinding hiddenReturn =
+                resolveParameterDebugBinding(*make, *make->getArg(1));
+            report.expect(hiddenReturn.isArtificial && !hiddenReturn.type,
+                          "ParameterDebugBinding: the Microsoft ABI's hidden return argument has "
+                          "no type");
+        }
+        else
+        {
+            report.expect(false,
+                          "ParameterDebugBinding: ?make@Maker@@QEBA?AUBig@@PEAH@Z is missing");
+        }
+
         // What the rule displays for x does not depend on the constructor variant.
         const llvm::Function* complete = itanium.module->getFunction("_ZN6ReaderC1EPiPd");
         const llvm::Function* base = itanium.module->getFunction("_ZN6ReaderC2EPiPd");

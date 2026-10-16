@@ -85,6 +85,20 @@ Big make_big(int* p, ...)
     return big;
 }
 
+// A method that returns a struct through a hidden argument, which the Microsoft ABI puts after
+// `this`.
+struct Maker
+{
+    Big make(int* p) const;
+};
+
+Big Maker::make(int* p) const
+{
+    Big big{};
+    big.values[0] = *p;
+    return big;
+}
+
 // The empty parameter comes first: x is the second parameter the source declares.
 struct TagFirst : virtual Base
 {
