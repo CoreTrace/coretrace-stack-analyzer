@@ -3,8 +3,10 @@
 
 #include <cstdint>
 #include <limits>
+#include <optional>
 #include <string>
 
+#include <llvm/ADT/STLExtras.h>
 #include <llvm/ADT/SmallVector.h>
 #include <llvm/IR/Argument.h>
 #include <llvm/IR/DebugInfo.h>
@@ -90,6 +92,18 @@ namespace ctrace::stack::analysis
             std::uint8_t paddingTail[7] = {};
         };
 
+        // Whether F has an artificial parameter other than `this`: a vtt, an is_most_derived or a
+        // block's descriptor. The subroutine type lists the descriptor, not what the C++ ABI adds.
+        static bool hasArtificialOtherThanThis(const llvm::Function& F)
+        {
+            return llvm::any_of(F.args(),
+                                [](const llvm::Argument& other)
+                                {
+                                    const llvm::DILocalVariable* var = spilledParameter(other);
+                                    return var && var->isArtificial() && !var->isObjectPointer();
+                                });
+        }
+
         static DebugParamLayout buildDebugParamLayout(const llvm::Function& F,
                                                       const llvm::Argument& Arg,
                                                       const llvm::DISubprogram* SP)
@@ -111,26 +125,50 @@ namespace ctrace::stack::analysis
             // The spill slot names the source parameter whatever the ABI did to the list; the
             // position below only serves arguments that are not spilled, like a hidden sret.
             if (const llvm::DILocalVariable* spilled = spilledParameter(Arg);
-                spilled && spilled->getArg() != 0 && spilled->getArg() < typeArray.size())
+                spilled && spilled->getArg() != 0)
             {
-                layout.debugArgIndex = spilled->getArg();
-                layout.hasCanonicalDebugIndex = true;
+                // Its declaration gives its type. Without one, the subroutine type's entry at its
+                // debug number is its own only when no parameter makes that position ambiguous.
+                if (spilled->getType() ||
+                    (spilled->getArg() < typeArray.size() && !hasArtificialOtherThanThis(F)))
+                {
+                    layout.debugArgIndex = spilled->getArg();
+                    layout.hasCanonicalDebugIndex = true;
+                }
                 return layout;
             }
 
-            const unsigned irArgCount = static_cast<unsigned>(F.arg_size());
+            // The hidden return argument is no source parameter, wherever the ABI puts it: first
+            // under the Itanium ABI, after `this` under the Microsoft one. Positions leave it out.
+            const llvm::Argument* hiddenReturn = nullptr;
+            for (const llvm::Argument& other : F.args())
+            {
+                if (other.hasStructRetAttr())
+                    hiddenReturn = &other;
+            }
+            if (hiddenReturn == &Arg)
+            {
+                layout.isHiddenAbiArg = true;
+                return layout;
+            }
+            const unsigned irArgCount =
+                static_cast<unsigned>(F.arg_size()) - (hiddenReturn ? 1 : 0);
+            const unsigned argNo =
+                Arg.getArgNo() -
+                (hiddenReturn && hiddenReturn->getArgNo() < Arg.getArgNo() ? 1 : 0);
+
             const unsigned debugParamCount = static_cast<unsigned>(typeArray.size() - 1);
             if (irArgCount < debugParamCount)
                 return layout;
 
             const unsigned hiddenPrefix = irArgCount - debugParamCount;
-            if (Arg.getArgNo() < hiddenPrefix)
+            if (argNo < hiddenPrefix)
             {
                 layout.isHiddenAbiArg = true;
                 return layout;
             }
 
-            const unsigned debugParamOffset = Arg.getArgNo() - hiddenPrefix;
+            const unsigned debugParamOffset = argNo - hiddenPrefix;
             if (debugParamOffset >= debugParamCount)
                 return layout;
 
@@ -151,6 +189,24 @@ namespace ctrace::stack::analysis
                 return false;
             return var->isArtificial() || var->isObjectPointer() ||
                    hasSyntheticFlags(var->getFlags());
+        }
+
+        // The position of @p param among the parameters the source declares: the artificial ones
+        // before it (`this`, vtt, a block's descriptor) are not declared. An explicit object
+        // parameter is: Clang marks it an object pointer, not artificial.
+        static std::optional<unsigned> sourceIndexOf(const llvm::Function& F,
+                                                     const llvm::DILocalVariable& param)
+        {
+            unsigned artificialBefore = 0;
+            for (const llvm::Argument& other : F.args())
+            {
+                const llvm::DILocalVariable* var = spilledParameter(other);
+                if (var && var->getArg() < param.getArg() && var->isArtificial())
+                    ++artificialBefore;
+            }
+            if (artificialBefore >= param.getArg())
+                return std::nullopt;
+            return param.getArg() - 1 - artificialBefore;
         }
 
         static unsigned expectedDebugArgIndex(const llvm::Argument& Arg,
@@ -303,7 +359,9 @@ namespace ctrace::stack::analysis
 
         const llvm::DISubprogram* SP = F.getSubprogram();
         const DebugParamLayout layout = buildDebugParamLayout(F, Arg, SP);
-        if (layout.isHiddenAbiArg)
+        // The declaration of the spilled parameter says whether the source declares it.
+        const llvm::DILocalVariable* spilled = spilledParameter(Arg);
+        if (layout.isHiddenAbiArg || isSyntheticDebugVariable(spilled))
             binding.isArtificial = true;
 
         VariableCandidate best;
@@ -364,6 +422,10 @@ namespace ctrace::stack::analysis
             applyVariableLineAndColumn(binding, best);
         }
 
+        // The spilled parameter's own declaration gives its type first.
+        if (!binding.type && spilled)
+            binding.type = spilled->getType();
+
         if (!binding.type && layout.hasCanonicalDebugIndex && layout.subroutineType)
         {
             const auto typeArray = layout.subroutineType->getTypeArray();
@@ -383,6 +445,9 @@ namespace ctrace::stack::analysis
         {
             binding.line = SP->getLine();
         }
+
+        if (spilled && !spilled->isArtificial())
+            binding.sourceIndex = sourceIndexOf(F, *spilled);
 
         finalizeBindingName(binding, Arg);
         return binding;
