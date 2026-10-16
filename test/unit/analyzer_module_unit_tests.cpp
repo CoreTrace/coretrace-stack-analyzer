@@ -2559,11 +2559,12 @@ namespace
         check(blocks, "__use_block_block_invoke",
               {".block_descriptor: artificial", "x: int *", "y: double *"});
         // A variadic function's debug type ends with a null entry for `...`, which no parameter
-        // takes.
+        // takes; an empty parameter takes no IR argument, but keeps its debug declaration.
         check(itanium, "_ZN7VarargsC2EPiPdz",
               {"this: artificial", "vtt: artificial", "x: int *", "y: double *"});
         check(microsoft, "??0Varargs@@QEAA@PEAHPEANZZ",
               {"this: artificial", "is_most_derived: artificial", "x: int *", "y: double *"});
+        check(itanium, "_ZN6TaggedC2EPi3Tag", {"this: artificial", "vtt: artificial", "x: int *"});
 
         // What the rule displays for x does not depend on the constructor variant.
         const llvm::Function* complete = itanium.module->getFunction("_ZN6ReaderC1EPiPd");
