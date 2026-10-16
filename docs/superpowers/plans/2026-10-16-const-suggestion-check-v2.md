@@ -2224,9 +2224,99 @@ The static and anonymous-namespace homonyms of `check_const_suggestion_cross_tu`
 
 ### Task 1.7: explicit address casts (D15)
 
-**Files:** `ConstSuggestionFacts.cpp`, `ConstSuggestionCheck.cpp`.
-**Work:** a cast of the entity's address is recorded and named; alone, it gives indeterminate.
-**Tests:** changed expectations: `("def and an explicit cast", ["def.c", "cast.c"], ["read_value"])` in `check_const_suggestion_cross_tu`, and `("an explicit cast, not analyzed", …)` expecting a "not checked with Clang" reason naming `cross-tu-const-suggestion-cast.c` in `check_const_suggestion_compilation_database`.
+**Files:** `src/analysis/ConstSuggestionFacts.cpp`, `src/analysis/ConstSuggestionCheck.cpp`, `run_test.py`.
+
+**Tests.** The two changed expectations, on top of Task 1.6's:
+
+```diff
+--- a/run_test.py
++++ b/run_test.py
+@@ -3,9 +3,10 @@
+     #217: a suggested const type is reported only if every analyzed file still compiles with it,
+     once every declaration the defining file sees is rewritten. Another analyzed file that stores
+-    the function where a non-const parameter is expected, or converts its address with an explicit
+-    cast, removes the suggestion. One that declares it itself, without the header, keeps it, not
+-    checked: whether that matters depends on how the files are linked. A homonym with internal
+-    linkage in another file does not change it. A file that is not analyzed is not checked. The
+-    callback and cast files sort before the definition, the redeclaration after it.
++    the function where a non-const parameter is expected removes the suggestion. One that declares
++    it itself, without the header, or converts its address with an explicit cast, keeps it, not
++    checked: whether that matters depends on how the files are linked, or on what the cast hides.
++    A homonym with internal linkage in another file does not change it. A file that is not
++    analyzed is not checked. The callback and cast files sort before the definition, the
++    redeclaration after it.
+     """
+     return _check_cross_tu_rule(
+@@ -19,5 +20,5 @@
+             ("def and a callback of the old type", ["def.c", "callback.c"], []),
+             ("def and a redeclaration", ["def.c", "redecl.c"], ["read_value"]),
+-            ("def and an explicit cast", ["def.c", "cast.c"], []),
++            ("def and an explicit cast", ["def.c", "cast.c"], ["read_value"]),
+             # Another file's homonym with internal linkage is another function.
+             (
+```
+
+```diff
+--- a/run_test.py
++++ b/run_test.py
+@@ -3,12 +3,12 @@
+     #217: with a compilation database, a suggested const type is checked in every file the
+     database lists that sees the change, analyzed or not, with its own compile command. A file
+-    that is not analyzed and stores the function where a non-const parameter is expected, or
+-    converts its address with an explicit cast, removes the suggestion, even listed after a file
+-    that cannot be checked. So does a file that takes the address of a method with the old type: it
+-    sees the change through the header alone. A file that declares the function itself, without
+-    the header, keeps the suggestion as not checked, and the reason names it and the link it
+-    assumes. A file that sees the change but does not compile as it is, or cannot be preprocessed,
+-    keeps the suggestion as not checked, without the claim of the check. A file that does not see
+-    the change is not compiled.
++    that is not analyzed and stores the function where a non-const parameter is expected removes
++    the suggestion, even listed after a file that cannot be checked. So does a file that takes the
++    address of a method with the old type: it sees the change through the header alone. A file
++    that declares the function itself, without the header, keeps the suggestion as not checked,
++    and the reason names it and the link it assumes; so does a file that converts the function's
++    address with an explicit cast, and the reason names the cast. A file that sees the change but
++    does not compile as it is, or cannot be preprocessed, keeps the suggestion as not checked,
++    without the claim of the check. A file that does not see the change is not compiled.
+     """
+     print("=== Testing const suggestions checked in the compilation database ===")
+@@ -98,5 +98,11 @@
+                 "definition",
+             ),
+-            ("an explicit cast, not analyzed", ["def.c", "cast.c"], "read_value", None),
++            (
++                "an explicit cast, not analyzed",
++                ["def.c", "cast.c"],
++                "read_value",
++                "not checked with Clang: " + str(fixtures / f"{prefix}cast.c")
++                + ":10 converts the address of read_value with an explicit cast",
++            ),
+             ("a method alone", ["method.cpp"], method, checked),
+             (
+```
+
+Failure at `64ed37e`: both remove the suggestion (`its address is converted by an explicit cast`). The cast cases of the two checks:
+
+```text
+check_const_suggestion_cross_tu: FAIL
+=== Testing suggested const types checked in every analyzed file ===
+  ❌ default, def and an explicit cast: [], expected ['read_value']
+  ❌ smt-z3, def and an explicit cast: [], expected ['read_value']
+```
+
+```text
+check_const_suggestion_compilation_database: FAIL
+=== Testing const suggestions checked in the compilation database ===
+  ❌ an explicit cast, not analyzed: None
+```
+
+- [ ] **Step 1: Change the two expectations and run both checks.** Expected: FAIL on the `cast.c` cases.
+  Commit: `test(const-param): keep a suggestion whose address another file casts, unchecked`.
+- [ ] **Step 2: The cast, named.** `VisitExplicitCastExpr` (T v1's, cast to `void` still excluded) records the cast's site in `UnitFacts::Entity::casts` instead of a problem that refutes. After steps 4 to 6, a recorded cast makes the unit indeterminate: `<file>:<line> converts the address of <function> with an explicit cast`, the first cast in source order.
+  Run: both checks. Expected: PASS. `const-suggestion-void-cast.c`: unchanged, PASS.
+  Commit: `fix(const-param): keep a suggestion whose address is cast, unchecked`.
+- [ ] **Step 3: Task tests.** As Task 1.1, Step 6.
+
 **Validation:** both checks pass with their new expectations.
 
 ### Task 1.8: trace and README
