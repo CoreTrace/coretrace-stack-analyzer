@@ -303,7 +303,9 @@ namespace ctrace::stack::analysis
 
         const llvm::DISubprogram* SP = F.getSubprogram();
         const DebugParamLayout layout = buildDebugParamLayout(F, Arg, SP);
-        if (layout.isHiddenAbiArg)
+        // The declaration of the spilled parameter says whether the source declares it.
+        const llvm::DILocalVariable* spilled = spilledParameter(Arg);
+        if (layout.isHiddenAbiArg || isSyntheticDebugVariable(spilled))
             binding.isArtificial = true;
 
         VariableCandidate best;
@@ -363,6 +365,10 @@ namespace ctrace::stack::analysis
             binding.confidence = confidenceFromCandidate(best);
             applyVariableLineAndColumn(binding, best);
         }
+
+        // The spilled parameter's own declaration gives its type first.
+        if (!binding.type && spilled)
+            binding.type = spilled->getType();
 
         if (!binding.type && layout.hasCanonicalDebugIndex && layout.subroutineType)
         {
