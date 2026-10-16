@@ -147,8 +147,10 @@ sert au plan. Elle relève :
 - les erreurs et les avertissements suivis ;
 - l'IR préparé pour le comparateur.
 
-Les avertissements suivis sont activés avec `-Wno-error=<groupe>`, pour qu'un `-Werror` du projet
-ne les change pas en erreurs (D6).
+Les groupes d'avertissements suivis sont activés explicitement par `-W<groupe>`, puis maintenus comme
+avertissements par `-Wno-error=<groupe>`, avec la même politique dans les compilations initiale et
+modifiée. Une commande de projet qui désactive un groupe (`-Wno-<groupe>`) ou promeut les
+avertissements en erreurs (`-Werror`) ne change donc ni leur relevé ni leur nature (D6).
 
 ### 5.4 Faits R, O et K
 
@@ -190,7 +192,10 @@ Sur la compilation initiale du fichier de définition :
 
 Les fichiers réécrits sont remappés ; les mêmes faits qu'en 5.3 sont relevés. La portée est vérifiée
 dans chaque unité :
-- aucune déclaration des fichiers réécrits ne change hors du plan ;
+- aucune déclaration écrite dans les sources des fichiers réécrits ne change hors du plan. Les
+  signatures instanciées (spécialisations de gabarits) qui changent avec la réécriture ne relèvent
+  pas de cet invariant : elles sont examinées par les correspondances (5.7), comme dans
+  `const-suggestion-deduction-kept.cpp` ;
 - les redéclarations visées ont le type du candidat, comparé dans la langue de l'unité (D8).
 
 Si les déclarations nécessaires n'ont pas pu être inspectées (erreur fatale, unité incomplète), la
@@ -232,8 +237,10 @@ Inchangé, à une entrée près : il reçoit les paires établies (5.7).
 - Ses heuristiques (encodage masqué, `withoutConst`, `variantOf`, clé de gabarit) ne servent plus
   qu'à situer une différence dans la trace, pour les symboles que ces paires ne couvrent pas.
 - « Vérifiée » exige que chaque symbole qui disparaît ou apparaît soit couvert par une paire
-  établie. Une paire seulement supposée, ou une heuristique qui contredit une paire établie, donne
-  au mieux « indéterminée ».
+  établie. Une paire seulement supposée donne au mieux « indéterminée ».
+- Une heuristique n'a aucun pouvoir de verdict : elle ne peut ni établir une paire ni en invalider
+  une. Seuls des faits insuffisants ou incohérents empêchent d'établir une correspondance ; une
+  approximation de nom n'invalide jamais une preuve.
 - Les exceptions acceptées restent celles de T v1, chacune vérifiée et listée : le nom que `typeid`
   donne à un type nommé d'après la fonction, et la signature imprimée par `__PRETTY_FUNCTION__`.
 
@@ -285,6 +292,7 @@ suggestion valide.
 | D11 | `\` suivi d'espaces dans un `#define` (t13) | corps de macro réécrit, puis retirée | indéterminée (VP gardée) : déclaration écrite par une définition de macro | fixture | 1 |
 | D14 | correspondance non unique traitée comme une réfutation (`const-suggestion-deduction-refused.cpp`, cas `call`) | retirée | indéterminée (gardée) ; `pick` reste réfutée (condition `if constexpr`) | attente modifiée de la fixture | 1 |
 | D15 | conversion explicite de l'adresse traitée comme une réfutation (`cross-tu-const-suggestion-cast.c`) | retirée | indéterminée (gardée), sauf erreur ou effet établi | attentes modifiées des deux contrôles run_test.py qui l'utilisent | 1 |
+| D16 | `sizeof(__PRETTY_FUNCTION__)` (`const-suggestion-printed-signature.c`, cas `signature_size`) | retirée : le code généré change | indéterminée (gardée) : la différence n'est expliquée ni par R, ni par O, ni par K ; K n'est pas élargi pour conserver l'ancien verdict | attente modifiée de la fixture | 1 |
 | D6 | `-Werror` du projet et groupe suivi désactivé (t5) | « not checked: does not compile as it is » | vérifiée (VP) | fixture avec `--compile-arg` | 2 |
 | D8 | définition C, utilisateur C++ via `extern "C"` (t4) | « not checked: the rewritten declaration does not get the suggested type » ; témoin C vérifié | vérifiée (VP) | contrôle run_test.py, avec le témoin | 2 |
 | D10 | `const` écrit devant un typedef de pointeur (t3/t.c, t3/t.cpp) | réécrit en `const const int *` ; « not checked » | vérifiée (`const int *const`) ; indéterminée si le qualificatif vient d'une macro | fixtures C et C++ | 2 |
@@ -304,7 +312,7 @@ l'invocation Clang en double. Les deux coûts ne sont traités que s'ils sont me
 
 - **TDD, défaut par défaut.** Chaque test est soumis avec la preuve de son échec avant d'être ajouté.
 - **Non-régression.** Tous les tests de T v1, sauf les attentes à modifier, elles aussi soumises :
-  D12, D13, D14 et D15.
+  D12, D13, D14, D15 et D16.
 - **Corpus** (`src/`, zlib, tinyxml2, PCRE2). Chaque suggestion est comparée entre trois sorties :
   sans l'option, T v1 et T v2. Elle est classée vérifiée, gardée indéterminée, ou retirée sur une
   réfutation établie. Chaque disparition par rapport à la sortie sans l'option est expliquée par sa
@@ -328,7 +336,8 @@ acceptation d'un dépassement.
 2. **Branche `217-t-v2`**, depuis `2a5b0c1`. T v1 reste une référence immuable (`217-t-v1`, #221,
    bundle). Après la fusion de P0, `main` actualisé y est intégré et l'ensemble est validé.
 3. **Étape 1** : flux, identités, plan et portée, faits R, O et K, correspondances, paires établies
-   pour le comparateur, collisions, trace ; D1 (partie T), D2, D3, D4, D5, D7, D11, D14 et D15.
+   pour le comparateur, collisions, trace ; D1 (partie T), D2, D3, D4, D5, D7, D11, D14, D15 et
+   D16.
 4. **Étape 2** : D6, D8, D10, D12 et D13.
 5. **Étape 3** : les coûts mesurés et l'invocation Clang construite en un seul endroit.
 6. **Comparaison des corpus, mesure du coût et README** ; une PR en brouillon. La revue finale porte
@@ -342,7 +351,9 @@ restent un changement séparé, hors de ce calendrier.
 - Sans groupes d'édition de liens, une collision entre fichiers reste indéterminée.
 - L'ODR n'est pas tranchée.
 - Seules les configurations fournies par le chargement sont vérifiées.
-- Une différence observable que les faits R, O et K ne couvrent pas rend la suggestion
-  indéterminée, pas réfutée.
+- Une suggestion qui change réellement le comportement, d'une façon que R, O et K ne couvrent pas,
+  reste affichée comme non vérifiée, sans être retirée : par exemple `signature_size`, où
+  `sizeof(__PRETTY_FUNCTION__)` change. C'est la conséquence de la politique choisie : une
+  différence d'IR inexpliquée ne suffit plus à retirer une suggestion.
 - La technique d'identification des constructeurs hérités reste à démontrer.
 - Un succès du cache IR ne fournit pas d'AST : T compile toujours depuis les sources.
