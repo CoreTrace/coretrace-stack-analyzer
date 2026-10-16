@@ -4397,6 +4397,15 @@ def check_coretrace_compiler_revision_follows_the_selected_sources() -> bool:
         else:
             with (checkout / "compiler.c").open("a") as changed_source:
                 changed_source.write("/* changed by hand */\n")
+            # A file system with a coarse clock can give the edit the time of the files that
+            # configuring just wrote, and no build sees an edit that is not newer (#232): make it
+            # strictly newer, so that the case tests the reconfiguration it means to.
+            written = [p for p in built.rglob("*")
+                       if p.is_file() and "_deps" not in p.relative_to(built).parts]
+            newest = max(p.stat().st_mtime_ns for p in written)
+            edited = checkout / "compiler.c"
+            if edited.stat().st_mtime_ns <= newest:
+                os.utime(edited, ns=(newest + 1_000_000, newest + 1_000_000))
             try:
                 build = subprocess.run([cmake, "--build", str(built)], capture_output=True, text=True,
                                        timeout=300)

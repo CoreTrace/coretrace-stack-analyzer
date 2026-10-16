@@ -25,7 +25,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        # macos-14 builds with AppleClang 15 (Xcode 15.4), the oldest compiler CoreTrace builds
+        # the analyzer with; macos-latest has a newer one (#228).
+        os: [ubuntu-latest, macos-latest, macos-14]
 
     steps:
     - uses: actions/checkout@v4

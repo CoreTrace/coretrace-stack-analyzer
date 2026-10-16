@@ -1098,8 +1098,10 @@ static AppStatus analyzeWithSharedModuleLoading(const std::vector<std::string>& 
                         continue;
                     if (common.params != wrapper.params)
                         common.pairs.clear();
-                    std::erase_if(common.pairs,
-                                  [&](const auto& pair) { return wrapper.pairs.count(pair) == 0; });
+                    // Captures the member, not the structured binding: AppleClang 15 cannot
+                    // capture a structured binding.
+                    std::erase_if(common.pairs, [&pairs = wrapper.pairs](const auto& pair)
+                                  { return pairs.count(pair) == 0; });
                 }
             }
             grew = false;

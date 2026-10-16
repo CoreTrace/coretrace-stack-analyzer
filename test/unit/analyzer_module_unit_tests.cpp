@@ -11,6 +11,7 @@
 #include "analysis/InputPipeline.hpp"
 #include "analysis/InputPipelineRevision.hpp"
 #include "analysis/IntRanges.hpp"
+#include "analysis/ParameterDebugBinding.hpp"
 #include "analysis/Reachability.hpp"
 #include "analysis/ResourceLifetimeAnalysis.hpp"
 #include "analysis/ResourceModel.hpp"
@@ -44,6 +45,7 @@
 #include <llvm/Analysis/MemorySSA.h>
 #include <llvm/AsmParser/Parser.h>
 #include <llvm/IR/Constants.h>
+#include <llvm/IR/DebugInfoMetadata.h>
 #include <llvm/IR/Function.h>
 #include <llvm/IR/InstIterator.h>
 #include <llvm/IR/Instruction.h>
@@ -2710,6 +2712,164 @@ namespace
         std::filesystem::remove_all(root);
         return report.failures == 0;
     }
+
+    /// resolveParameterDebugBinding: each parameter gets its own type, and its position among the
+    /// parameters the source declares. The others are artificial: `this`, the vtt that the
+    /// base-object constructor (C2) of a class with a virtual base takes, is_most_derived under the
+    /// Microsoft ABI, a block's descriptor.
+    bool testParameterDebugBinding(const std::filesystem::path& repoRoot, TestReport& report)
+    {
+        using namespace ctrace::stack::analysis;
+        const auto describe = [](const llvm::Function& F)
+        {
+            std::vector<std::string> parameters;
+            for (const llvm::Argument& Arg : F.args())
+            {
+                const ParameterDebugBinding binding = resolveParameterDebugBinding(F, Arg);
+                std::string text = binding.name + ": ";
+                if (binding.isArtificial)
+                {
+                    text += "artificial";
+                }
+                else if (!binding.type)
+                {
+                    text += "no type";
+                }
+                else if (const auto* pointer = llvm::dyn_cast<llvm::DIDerivedType>(binding.type))
+                {
+                    const llvm::DIType* pointee = pointer->getBaseType();
+                    text += (pointee ? pointee->getName().str() : "?") + " *";
+                }
+                else
+                {
+                    text += binding.type->getName().str();
+                }
+                text += ", source " +
+                        (binding.sourceIndex ? std::to_string(*binding.sourceIndex) : "none");
+                parameters.push_back(text);
+            }
+            return parameters;
+        };
+        const auto check = [&](const LoadedModule& loaded, const char* symbol,
+                               const std::vector<std::string>& expected)
+        {
+            const llvm::Function* F = loaded.module->getFunction(symbol);
+            const std::vector<std::string> actual = F ? describe(*F) : std::vector<std::string>{};
+            std::string text;
+            for (const std::string& parameter : actual)
+                text += " [" + parameter + "]";
+            report.expect(actual == expected,
+                          std::string("ParameterDebugBinding: ") + symbol + text);
+        };
+        const auto load =
+            [&](const char* input, std::vector<std::string> compileArgs, LoadedModule& out)
+        {
+            ctrace::stack::AnalysisConfig config;
+            config.extraCompileArgs = std::move(compileArgs);
+            std::string loadError;
+            if (loadModuleFromSource(repoRoot / "test/unit" / input, config, out, loadError))
+                return true;
+            report.expect(false,
+                          "ParameterDebugBinding setup: failed to load module: " + loadError);
+            return false;
+        };
+
+        LoadedModule itanium;
+        LoadedModule microsoft;
+        LoadedModule blocks;
+        LoadedModule unestablished;
+        LoadedModule optimized;
+        if (!load("parameter_binding_input.cpp", {"-std=c++23"}, itanium) ||
+            !load("parameter_binding_input.cpp", {"-std=c++23", "--target=x86_64-pc-windows-msvc"},
+                  microsoft) ||
+            !load("parameter_binding_block_input.c", {"-fblocks"}, blocks) ||
+            !load("parameter_binding_unknown_input.ll", {}, unestablished) ||
+            !load("parameter_binding_o2_input.ll", {}, optimized))
+            return false;
+        check(itanium, "_Z13free_functionPiPd", {"a: int *, source 0", "b: double *, source 1"});
+        check(itanium, "_ZN6Reader3sumEPiPd",
+              {"this: artificial, source none", "p: int *, source 0", "q: double *, source 1"});
+        check(itanium, "_ZN6ReaderC1EPiPd",
+              {"this: artificial, source none", "x: int *, source 0", "y: double *, source 1"});
+        check(itanium, "_ZN6ReaderC2EPiPd",
+              {"this: artificial, source none", "vtt: artificial, source none",
+               "x: int *, source 0", "y: double *, source 1"});
+        check(itanium, "_ZNH6Picker4pickERKS_Pi",
+              {"self: artificial, source 0", "p: int *, source 1"});
+        check(microsoft, "??0Reader@@QEAA@PEAHPEAN@Z",
+              {"this: artificial, source none", "x: int *, source 0", "y: double *, source 1",
+               "is_most_derived: artificial, source none"});
+        check(blocks, "__use_block_block_invoke",
+              {".block_descriptor: artificial, source none", "x: int *, source 0",
+               "y: double *, source 1"});
+        // A variadic function's debug type ends with a null entry for `...`, which no parameter
+        // takes; an empty parameter takes no IR argument, but keeps its debug declaration.
+        check(itanium, "_ZN7VarargsC2EPiPdz",
+              {"this: artificial, source none", "vtt: artificial, source none",
+               "x: int *, source 0", "y: double *, source 1"});
+        check(microsoft, "??0Varargs@@QEAA@PEAHPEANZZ",
+              {"this: artificial, source none", "is_most_derived: artificial, source none",
+               "x: int *, source 0", "y: double *, source 1"});
+        check(itanium, "_ZN6TaggedC2EPi3Tag",
+              {"this: artificial, source none", "vtt: artificial, source none",
+               "x: int *, source 0"});
+        check(itanium, "_Z8make_bigPiz",
+              {"agg.result: artificial, source none", "p: int *, source 0"});
+
+        // A declaration's type is kept; without one, the debug type serves only where its
+        // entries are established.
+        check(unestablished, "ambiguous_typed",
+              {"hidden: artificial, source none", "x: double *, source 0"});
+        check(unestablished, "ambiguous_untyped",
+              {"hidden: artificial, source none", "x: no type, source 0"});
+        check(unestablished, "established_untyped", {"x: double *, source 0"});
+
+        // The empty parameter comes first: x is the second parameter the source declares.
+        check(itanium, "_ZN8TagFirstC2E3TagPi",
+              {"this: artificial, source none", "vtt: artificial, source none",
+               "x: int *, source 1"});
+
+        // Optimized code spills nothing: each argument is bound through its own debug records.
+        check(optimized, "_ZN8VariadicC2EPiPdz",
+              {"this: artificial, source none", "vtt: artificial, source none",
+               "v: int *, source none", "w: double *, source none"});
+        check(optimized, "split_variadic",
+              {"p: int *, source none", "s: Pair, source none", "s: Pair, source none"});
+
+        // Under the Microsoft ABI the hidden return argument comes after `this`: it has no type,
+        // so it carries no const contract.
+        if (const llvm::Function* make =
+                microsoft.module->getFunction("?make@Maker@@QEBA?AUBig@@PEAH@Z"))
+        {
+            const ParameterDebugBinding hiddenReturn =
+                resolveParameterDebugBinding(*make, *make->getArg(1));
+            report.expect(hiddenReturn.isArtificial && !hiddenReturn.type,
+                          "ParameterDebugBinding: the Microsoft ABI's hidden return argument has "
+                          "no type");
+        }
+        else
+        {
+            report.expect(false,
+                          "ParameterDebugBinding: ?make@Maker@@QEBA?AUBig@@PEAH@Z is missing");
+        }
+
+        // What the rule displays for x does not depend on the constructor variant.
+        const llvm::Function* complete = itanium.module->getFunction("_ZN6ReaderC1EPiPd");
+        const llvm::Function* base = itanium.module->getFunction("_ZN6ReaderC2EPiPd");
+        if (complete && base)
+        {
+            const ParameterDebugBinding inComplete =
+                resolveParameterDebugBinding(*complete, *complete->getArg(1));
+            const ParameterDebugBinding inBase =
+                resolveParameterDebugBinding(*base, *base->getArg(2));
+            report.expect(inComplete.name == inBase.name && inComplete.type == inBase.type &&
+                              inComplete.line == inBase.line &&
+                              inComplete.column == inBase.column &&
+                              inComplete.confidence == inBase.confidence,
+                          "ParameterDebugBinding: x binds alike in C1 and C2");
+        }
+        return report.failures == 0;
+    }
 } // namespace
 
 int main(int argc, char** argv)
@@ -2739,6 +2899,7 @@ int main(int argc, char** argv)
     (void)testAssumeExternalFrameReplacesUnknown(repoRoot, report);
     (void)testUninitializedFixpointBudgetIsExplicit(repoRoot, report);
     (void)testLinkerSymbolName(report);
+    (void)testParameterDebugBinding(repoRoot, report);
     (void)testUninitializedSummaryKeysAreLinkerSymbols(repoRoot, report);
     (void)testUninitializedIncompleteSummaries(repoRoot, report);
     (void)testUninitializedIncompleteSummariesInOneFile(repoRoot, report);
