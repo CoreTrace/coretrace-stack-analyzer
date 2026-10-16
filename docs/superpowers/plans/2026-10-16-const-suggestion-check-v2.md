@@ -1208,10 +1208,95 @@ check_const_suggestion_compiles_each_file_once: FAIL
 
 ### Task 1.2: the parameter from P0
 
-**Files:** `ConstSuggestionCheck.cpp` (or `ConstSuggestionPlan.cpp` once Task 1.3 creates it), `ConstParamAnalysis.cpp` (#221's `debugArgNo` removed).
-**Interfaces:** consumes `ParameterDebugBinding::sourceIndex` (Task P0.1).
-**Work:** the parameter is `issue.binding.sourceIndex`; none, or an artificial binding, gives indeterminate (`the parameter is not one the source declares`, `the parameter's position in the source is unknown`).
-**Tests:** D1, a new fixture `const-suggestion-virtual-base.cpp` (t10: `x` verified in C1 and C2; at I.1, T rewrites `y` for the suggestion on `x` in C2); Review Focus 2: `const-suggestion-explicit-object.cpp` unchanged.
+**Files:** `src/analysis/ConstSuggestionCheck.cpp`, `include/analysis/ConstParamAnalysis.hpp`, `src/analysis/ConstParamAnalysis.cpp`, `test/pointer_reference-const_correctness/const-suggestion-virtual-base.cpp` (new).
+
+**Interfaces.** Consumes `ParameterDebugBinding::sourceIndex` and `isArtificial` (P0). Removes `ConstParamIssue::debugArgNo` (#221) and `Target::debugArgNo`.
+
+**Tests.** D1, a new fixture (t10). `x` is reported twice, in C2 then C1; the ABI line tells them apart:
+
+`test/pointer_reference-const_correctness/const-suggestion-virtual-base.cpp`:
+
+```cpp
+// SPDX-License-Identifier: Apache-2.0
+// #217: the base-object constructor (C2) of a class with a virtual base takes a hidden `vtt` after
+// `this`. The check rewrites the parameter the suggestion names, found by its index among the
+// parameters the source declares: `x`, in both variants. `y`, which the constructor writes
+// through, is not rewritten.
+
+// strict-expectation-details: true
+
+struct V
+{
+    int v = 0;
+};
+
+struct D : virtual V
+{
+    int a, b;
+    D(int* x, int* y);
+};
+
+// at line 33, column 0
+// [ !Info! ] ConstParameterNotModified.Pointer: parameter 'x' in function 'D::D(int*, int*)' is never used to modify the pointed object
+// ↳ current type: int *x
+// ↳ suggested type: const int *x
+// ↳ checked in the analyzed files only, with their compile commands: they compile with the suggested type, and their generated code matches, metadata included, once debug information, diagnostic metadata, descriptive names and renamed symbols are set aside
+// ↳ ABI: the suggested type changes the symbol (_ZN1DC2EPiS0_ -> _ZN1DC2EPKiPi): code compiled separately must use the updated declaration and be recompiled
+
+// at line 33, column 0
+// [ !Info! ] ConstParameterNotModified.Pointer: parameter 'x' in function 'D::D(int*, int*)' is never used to modify the pointed object
+// ↳ current type: int *x
+// ↳ suggested type: const int *x
+// ↳ checked in the analyzed files only, with their compile commands: they compile with the suggested type, and their generated code matches, metadata included, once debug information, diagnostic metadata, descriptive names and renamed symbols are set aside
+// ↳ ABI: the suggested type changes the symbol (_ZN1DC1EPiS0_ -> _ZN1DC1EPKiPi): code compiled separately must use the updated declaration and be recompiled
+D::D(int* x, int* y) : a(*x), b(0)
+{
+    *y = 1;
+}
+
+int make()
+{
+    int p = 1, q = 2;
+    D d(&p, &q);
+    return d.a + q;
+}
+
+// The Clang check of const suggestions is experimental: it runs only with this option.
+// analyzer-arg: --experimental-const-suggestion-check
+```
+
+Failure at `64ed37e`: C1's block is found, C2's is missing: T rewrites `y` for the suggestion on `x` in C2, and removes it (`read-only variable is not assignable`).
+
+```text
+new/const-suggestion-virtual-base.cpp: FAIL (4/6)
+=== Testing evidence/217/stage1/tests/fixtures/new/const-suggestion-virtual-base.cpp ===
+  ❌ (default) expectation #1 MISSING
+  ✅ (default) expectation #2 FOUND
+  ❌ (smt-z3) expectation #1 MISSING
+  ✅ (smt-z3) expectation #2 FOUND
+```
+
+Review Focus 2: `const-suggestion-explicit-object.cpp` unchanged, passing at `64ed37e`.
+
+- [ ] **Step 1: Add the fixture and run it.** Run: the one-fixture command for `const-suggestion-virtual-base.cpp`. Expected: FAIL, expectation #1 (C2) missing.
+  Commit: `test(const-param): check the parameter a C2 constructor's suggestion names`.
+- [ ] **Step 2: The source index.** In `Inspector::plan`, the parameter is P0's:
+  ```cpp
+  const ParameterDebugBinding& binding = target.binding;
+  if (binding.isArtificial || !binding.sourceIndex)
+  {
+      facts.notRewritten = "the parameter is not found in the source";
+      return;
+  }
+  facts.paramIndex = *binding.sourceIndex;
+  ```
+  `Target` carries the issue's `binding` instead of `debugArgNo`; the `implicitThis` arithmetic goes. Ruling 8: no new text.
+  Run: the one-fixture command. Expected: PASS. Then `const-suggestion-explicit-object.cpp`: PASS.
+  Commit: `fix(const-param): rewrite the parameter at the source index P0 gives`.
+- [ ] **Step 3: Remove `debugArgNo`.** `ConstParamIssue::debugArgNo`, its padding and its assignment in `ConstParamAnalysis.cpp` go: nothing reads them.
+  Commit: `refactor(const-param): drop the debug number that the source index replaces`.
+- [ ] **Step 4: Task tests.** As Task 1.1, Step 6.
+
 **Validation:** D1 passes; explicit-object unchanged; every T v1 test passes.
 
 ### Task 1.3: planning and plan scope (§5.5)
