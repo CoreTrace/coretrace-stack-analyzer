@@ -2438,7 +2438,7 @@ check_const_suggestion_trace: FAIL
 
 ### Task 2.4: one candidate, displayed (D12, D13)
 **Work:** the displayed type and the "checked" line name the candidate: `const T &` for `ReferenceRvaluePreferValue` (passing by value is not checked), `const int *const p` for `PointerConstOnly`.
-**Tests:** D12, changed expectations of the two `ReferenceRvaluePreferValue` blocks of `const-suggestion-deduction-kept.cpp`, the only T fixture with that rule; D13, a new fixture that enables T (t15: `int* const p` only read, displayed and verified as `const int *const p`), presented with its failure evidence; no T v1 fixture covers `PointerConstOnly`, and the existing test without the option stays unchanged.
+**Tests:** D12, changed expectations of the two `ReferenceRvaluePreferValue` blocks of `const-suggestion-deduction-kept.cpp`, and of the one D14 adds to `const-suggestion-deduction-refused.cpp` (stage 1, ruling 10); D13, a new fixture that enables T (t15: `int* const p` only read, displayed and verified as `const int *const p`), presented with its failure evidence; no T v1 fixture covers `PointerConstOnly`, and the existing test without the option stays unchanged.
 
 **Validation of stage 2:** as stage 1, for D6, D8, D10, D12, D13 and Review Focus 5.
 
