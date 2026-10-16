@@ -2545,10 +2545,12 @@ namespace
         LoadedModule itanium;
         LoadedModule microsoft;
         LoadedModule blocks;
+        LoadedModule unestablished;
         if (!load("parameter_binding_input.cpp", {"-std=c++23"}, itanium) ||
             !load("parameter_binding_input.cpp", {"-std=c++23", "--target=x86_64-pc-windows-msvc"},
                   microsoft) ||
-            !load("parameter_binding_block_input.c", {"-fblocks"}, blocks))
+            !load("parameter_binding_block_input.c", {"-fblocks"}, blocks) ||
+            !load("parameter_binding_unknown_input.ll", {}, unestablished))
             return false;
         check(itanium, "_Z13free_functionPiPd", {"a: int *, source 0", "b: double *, source 1"});
         check(itanium, "_ZN6Reader3sumEPiPd",
@@ -2579,6 +2581,14 @@ namespace
                "x: int *, source 0"});
         check(itanium, "_Z8make_bigPiz",
               {"agg.result: artificial, source none", "p: int *, source 0"});
+
+        // A declaration's type is kept; without one, the debug type serves only where its
+        // entries are established.
+        check(unestablished, "ambiguous_typed",
+              {"hidden: artificial, source none", "x: double *, source 0"});
+        check(unestablished, "ambiguous_untyped",
+              {"hidden: artificial, source none", "x: no type, source 0"});
+        check(unestablished, "established_untyped", {"x: double *, source 0"});
 
         // What the rule displays for x does not depend on the constructor variant.
         const llvm::Function* complete = itanium.module->getFunction("_ZN6ReaderC1EPiPd");
