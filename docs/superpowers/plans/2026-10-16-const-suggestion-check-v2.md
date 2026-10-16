@@ -410,7 +410,7 @@ and add, after the block's check:
 
 ```cpp
         // A variadic function's debug type ends with a null entry for `...`, which no parameter
-        // takes; an empty parameter takes no IR argument, but keeps its debug declaration.
+        // takes.
         check(itanium, "_ZN7VarargsC2EPiPdz",
               {"this: artificial", "vtt: artificial", "x: int *", "y: double *"});
         check(microsoft, "??0Varargs@@QEAA@PEAHPEANZZ",
@@ -447,7 +447,7 @@ Tagged::Tagged(int* x, Tag tag)
 
 ```
 
-and, after the variadic checks: `check(itanium, "_ZN6TaggedC2EPi3Tag", {"this: artificial", "vtt: artificial", "x: int *"});`. Expected RED: `[FAIL] ParameterDebugBinding: _ZN6TaggedC2EPi3Tag [this: artificial] [vtt: int *] [x: ? *]`. Commit: `test(const-param): an empty parameter shifts no other parameter`.
+and, after the variadic checks: `check(itanium, "_ZN6TaggedC2EPi3Tag", {"this: artificial", "vtt: artificial", "x: int *"});`; the comment above the variadic checks gains `; an empty parameter takes no IR argument, but keeps its debug declaration`. Expected RED: `[FAIL] ParameterDebugBinding: _ZN6TaggedC2EPi3Tag [this: artificial] [vtt: int *] [x: ? *]`. Commit: `test(const-param): an empty parameter shifts no other parameter`.
 
 Step 7c, a variadic hidden return. Append to the input:
 
@@ -595,20 +595,19 @@ Replace the expectations with:
         check(blocks, "__use_block_block_invoke",
               {".block_descriptor: artificial, source none", "x: int *, source 0",
                "y: double *, source 1"});
-
         // A variadic function's debug type ends with a null entry for `...`, which no parameter
         // takes; an empty parameter takes no IR argument, but keeps its debug declaration.
         check(itanium, "_ZN7VarargsC2EPiPdz",
               {"this: artificial, source none", "vtt: artificial, source none",
+               "x: int *, source 0", "y: double *, source 1"});
+        check(microsoft, "??0Varargs@@QEAA@PEAHPEANZZ",
+              {"this: artificial, source none", "is_most_derived: artificial, source none",
                "x: int *, source 0", "y: double *, source 1"});
         check(itanium, "_ZN6TaggedC2EPi3Tag",
               {"this: artificial, source none", "vtt: artificial, source none",
                "x: int *, source 0"});
         check(itanium, "_Z8make_bigPiz",
               {"agg.result: artificial, source none", "p: int *, source 0"});
-        check(microsoft, "??0Varargs@@QEAA@PEAHPEANZZ",
-              {"this: artificial, source none", "is_most_derived: artificial, source none",
-               "x: int *, source 0", "y: double *, source 1"});
 ```
 
 and the comment above the test with:
