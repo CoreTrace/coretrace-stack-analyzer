@@ -2484,10 +2484,10 @@ namespace
         return report.failures == 0;
     }
 
-    /// resolveParameterDebugBinding: each parameter gets its own type. The parameters the source
-    /// does not declare are artificial: `this`, the vtt that the base-object constructor (C2) of a
-    /// class with a virtual base takes, is_most_derived under the Microsoft ABI, a block's
-    /// descriptor.
+    /// resolveParameterDebugBinding: each parameter gets its own type, and its position among the
+    /// parameters the source declares. The others are artificial: `this`, the vtt that the
+    /// base-object constructor (C2) of a class with a virtual base takes, is_most_derived under the
+    /// Microsoft ABI, a block's descriptor.
     bool testParameterDebugBinding(const std::filesystem::path& repoRoot, TestReport& report)
     {
         using namespace ctrace::stack::analysis;
@@ -2512,6 +2512,8 @@ namespace
                     const llvm::DIType* pointee = pointer ? pointer->getBaseType() : nullptr;
                     text += (pointee ? pointee->getName().str() : "?") + " *";
                 }
+                text += ", source " +
+                        (binding.sourceIndex ? std::to_string(*binding.sourceIndex) : "none");
                 parameters.push_back(text);
             }
             return parameters;
@@ -2548,24 +2550,35 @@ namespace
                   microsoft) ||
             !load("parameter_binding_block_input.c", {"-fblocks"}, blocks))
             return false;
-        check(itanium, "_Z13free_functionPiPd", {"a: int *", "b: double *"});
-        check(itanium, "_ZN6Reader3sumEPiPd", {"this: artificial", "p: int *", "q: double *"});
-        check(itanium, "_ZN6ReaderC1EPiPd", {"this: artificial", "x: int *", "y: double *"});
+        check(itanium, "_Z13free_functionPiPd", {"a: int *, source 0", "b: double *, source 1"});
+        check(itanium, "_ZN6Reader3sumEPiPd",
+              {"this: artificial, source none", "p: int *, source 0", "q: double *, source 1"});
+        check(itanium, "_ZN6ReaderC1EPiPd",
+              {"this: artificial, source none", "x: int *, source 0", "y: double *, source 1"});
         check(itanium, "_ZN6ReaderC2EPiPd",
-              {"this: artificial", "vtt: artificial", "x: int *", "y: double *"});
-        check(itanium, "_ZNH6Picker4pickERKS_Pi", {"self: artificial", "p: int *"});
+              {"this: artificial, source none", "vtt: artificial, source none",
+               "x: int *, source 0", "y: double *, source 1"});
+        check(itanium, "_ZNH6Picker4pickERKS_Pi",
+              {"self: artificial, source 0", "p: int *, source 1"});
         check(microsoft, "??0Reader@@QEAA@PEAHPEAN@Z",
-              {"this: artificial", "x: int *", "y: double *", "is_most_derived: artificial"});
+              {"this: artificial, source none", "x: int *, source 0", "y: double *, source 1",
+               "is_most_derived: artificial, source none"});
         check(blocks, "__use_block_block_invoke",
-              {".block_descriptor: artificial", "x: int *", "y: double *"});
+              {".block_descriptor: artificial, source none", "x: int *, source 0",
+               "y: double *, source 1"});
         // A variadic function's debug type ends with a null entry for `...`, which no parameter
         // takes; an empty parameter takes no IR argument, but keeps its debug declaration.
         check(itanium, "_ZN7VarargsC2EPiPdz",
-              {"this: artificial", "vtt: artificial", "x: int *", "y: double *"});
+              {"this: artificial, source none", "vtt: artificial, source none",
+               "x: int *, source 0", "y: double *, source 1"});
         check(microsoft, "??0Varargs@@QEAA@PEAHPEANZZ",
-              {"this: artificial", "is_most_derived: artificial", "x: int *", "y: double *"});
-        check(itanium, "_ZN6TaggedC2EPi3Tag", {"this: artificial", "vtt: artificial", "x: int *"});
-        check(itanium, "_Z8make_bigPiz", {"agg.result: artificial", "p: int *"});
+              {"this: artificial, source none", "is_most_derived: artificial, source none",
+               "x: int *, source 0", "y: double *, source 1"});
+        check(itanium, "_ZN6TaggedC2EPi3Tag",
+              {"this: artificial, source none", "vtt: artificial, source none",
+               "x: int *, source 0"});
+        check(itanium, "_Z8make_bigPiz",
+              {"agg.result: artificial, source none", "p: int *, source 0"});
 
         // What the rule displays for x does not depend on the constructor variant.
         const llvm::Function* complete = itanium.module->getFunction("_ZN6ReaderC1EPiPd");

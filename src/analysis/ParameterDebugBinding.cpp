@@ -3,6 +3,7 @@
 
 #include <cstdint>
 #include <limits>
+#include <optional>
 #include <string>
 
 #include <llvm/ADT/SmallVector.h>
@@ -154,6 +155,24 @@ namespace ctrace::stack::analysis
                 return false;
             return var->isArtificial() || var->isObjectPointer() ||
                    hasSyntheticFlags(var->getFlags());
+        }
+
+        // The position of @p param among the parameters the source declares: the artificial ones
+        // before it (`this`, vtt, a block's descriptor) are not declared. An explicit object
+        // parameter is: Clang marks it an object pointer, not artificial.
+        static std::optional<unsigned> sourceIndexOf(const llvm::Function& F,
+                                                     const llvm::DILocalVariable& param)
+        {
+            unsigned artificialBefore = 0;
+            for (const llvm::Argument& other : F.args())
+            {
+                const llvm::DILocalVariable* var = spilledParameter(other);
+                if (var && var->getArg() < param.getArg() && var->isArtificial())
+                    ++artificialBefore;
+            }
+            if (artificialBefore >= param.getArg())
+                return std::nullopt;
+            return param.getArg() - 1 - artificialBefore;
         }
 
         static unsigned expectedDebugArgIndex(const llvm::Argument& Arg,
@@ -392,6 +411,9 @@ namespace ctrace::stack::analysis
         {
             binding.line = SP->getLine();
         }
+
+        if (spilled && !spilled->isArtificial())
+            binding.sourceIndex = sourceIndexOf(F, *spilled);
 
         finalizeBindingName(binding, Arg);
         return binding;

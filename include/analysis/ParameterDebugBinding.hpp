@@ -2,6 +2,7 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <string>
 
 namespace llvm
@@ -28,6 +29,10 @@ namespace ctrace::stack::analysis
         const llvm::DIType* type = nullptr;
         unsigned line = 0;
         unsigned column = 0;
+        // The parameter's position among those the source declares, from 0. None for one the
+        // source does not declare (`this`, vtt, a block's descriptor), or that -O0 code does not
+        // spill.
+        std::optional<unsigned> sourceIndex;
         ParameterBindingConfidence confidence = ParameterBindingConfidence::Low;
         bool isArtificial = false;
         bool isAnonymous = false;
