@@ -1685,10 +1685,274 @@ Unchanged and passing at `64ed37e`: `const-suggestion-same-code.cpp`, `const-sug
 
 ### Task 1.5: correspondences and the comparator's pairs (§5.7, §5.9), judgement step 7
 
-**Files:** `ConstSuggestionMatch.cpp` (new), `ConstSuggestionCode.cpp`, `include/analysis/ConstSuggestionCheck.hpp`.
-**Interfaces:** produces `std::vector<SymbolPair> correspond(const UnitFacts& before, const UnitFacts& after, const SuggestionPlan&, std::string& missing)`; `codeDifference` gains `const std::vector<SymbolPair>& established`.
-**Work:** the entity's variants by `GlobalDecl`; nested entities (lambdas, local statics, local classes, RTTI names); instantiation contexts whose arguments change, paired under the four conditions of §5.7; inherited constructors through `getInheritedConstructor()`, adopted only once shown on t8 and a template case; verified requires every appearing or disappearing symbol to be covered by an established pair; the heuristics only place a difference in the trace.
-**Tests:** D7, a new fixture (t8: verified if the technique is shown, otherwise indeterminate, never removed); D14, changed expectation of `call` in `const-suggestion-deduction-refused.cpp` (indeterminate, kept); D16, changed expectation of `signature_size` in `const-suggestion-printed-signature.c` (indeterminate, kept); `const-suggestion-kept*.cpp`, `const-suggestion-abi*.cpp`, `const-suggestion-deduction-kept.cpp`, `print_and_read` unchanged.
+**Files:** `src/analysis/ConstSuggestionMatch.cpp` (new), `src/analysis/ConstSuggestionFacts.cpp`, `src/analysis/ConstSuggestionCode.cpp`, `src/analysis/ConstSuggestionCheck.cpp`, `src/analysis/ConstSuggestionInternal.hpp`, `include/analysis/ConstSuggestionCheck.hpp`, `CMakeLists.txt`, `test/pointer_reference-const_correctness/const-suggestion-inheriting-constructor.cpp` (new), `const-suggestion-deduction-refused.cpp` and `const-suggestion-printed-signature.c` (expectations changed).
+
+**Interfaces.** Adds `SymbolPair`. `UnitFacts::Entity` gains what the correspondences read:
+```cpp
+// A symbol that the rewrite may rename with the entity, and what it is in this compilation.
+struct Named
+{
+    std::string symbol;
+    std::string key; // what pairs it: its kind, its site mapped back, and its enclosing symbol
+};
+std::vector<Named> variants;   // the entity's: "C1", "C2", "D0"... or "" for a function
+std::vector<Named> inheriting; // the constructors inheriting it: derived class and variant
+std::vector<Named> nested;     // lambdas, local classes (methods, _ZTI, _ZTS, _ZTV), static
+                               // locals and their guards, in the entity or a specialization
+```
+An R fact's value also carries `template:<site>` when its target is a template specialization. Produces:
+```cpp
+// The pairs established between a unit's initial and modified compilations for one entity
+// (§5.7). `missing` receives the first reason a correspondence could not be established.
+std::vector<SymbolPair> correspond(const UnitFacts& before, const UnitFacts& after,
+                                   std::size_t entity, std::string& missing);
+// ConstSuggestionCode: the pairs replace `rewritten` and `renamedTo` (ruling 9).
+std::optional<std::string> codeDifference(const ModuleText& was, const ModuleText& now,
+                                          const std::vector<SymbolPair>& established,
+                                          const PrintedSignature* signature,
+                                          std::vector<std::string>* accepted);
+```
+`rewrittenCodeDifference` in `ConstSuggestionCheck.hpp` takes the pairs the same way.
+
+**Tests.** D7, a new fixture (t8 and three template cases, ruling 7):
+
+`test/pointer_reference-const_correctness/const-suggestion-inheriting-constructor.cpp`:
+
+```cpp
+// SPDX-License-Identifier: Apache-2.0
+// #217: a class that inherits a constructor (`using Base::Base`) gets constructors of its own,
+// whose symbols name the inherited constructor's parameter types: the rewrite renames them too.
+// The check pairs them before and after the rewrite through the constructor they inherit, so
+// each suggestion is checked: a plain class, a class template as the base, a class template as
+// the derived class, and a constructor template.
+
+// strict-expectation-details: true
+
+// at line 18, column 0
+// [ !Info! ] ConstParameterNotModified.Pointer: parameter 'p' in function 'Base::Base(int*)' is never used to modify the pointed object
+// ↳ current type: int *p
+// ↳ suggested type: const int *p
+// ↳ checked in the analyzed files only, with their compile commands: they compile with the suggested type, and their generated code matches, metadata included, once debug information, diagnostic metadata, descriptive names and renamed symbols are set aside
+struct Base
+{
+    int v;
+    Base(int* p) : v(*p) {}
+};
+
+struct Derived : Base
+{
+    using Base::Base;
+    int w = 0;
+};
+
+int make_derived(int x)
+{
+    Derived d(&x);
+    return d.v;
+}
+
+// at line 41, column 0
+// [ !Info! ] ConstParameterNotModified.Pointer: parameter 'p' in function 'TemplateBase<int>::TemplateBase(int*)' is never used to modify the pointed object
+// ↳ current type: int *p
+// ↳ suggested type: const int *p
+// ↳ checked in the analyzed files only, with their compile commands: they compile with the suggested type, and their generated code matches, metadata included, once debug information, diagnostic metadata, descriptive names and renamed symbols are set aside
+template <typename T> struct TemplateBase
+{
+    T v;
+    TemplateBase(T* p) : v(*p) {}
+};
+
+struct FromTemplate : TemplateBase<int>
+{
+    using TemplateBase::TemplateBase;
+    int w = 0;
+};
+
+int make_from_template(int x)
+{
+    FromTemplate d(&x);
+    return d.v;
+}
+
+// at line 64, column 0
+// [ !Info! ] ConstParameterNotModified.Pointer: parameter 'p' in function 'PlainBase::PlainBase(int*)' is never used to modify the pointed object
+// ↳ current type: int *p
+// ↳ suggested type: const int *p
+// ↳ checked in the analyzed files only, with their compile commands: they compile with the suggested type, and their generated code matches, metadata included, once debug information, diagnostic metadata, descriptive names and renamed symbols are set aside
+struct PlainBase
+{
+    int v;
+    PlainBase(int* p) : v(*p) {}
+};
+
+template <typename T> struct TemplateDerived : PlainBase
+{
+    using PlainBase::PlainBase;
+    T w = 0;
+};
+
+int make_template_derived(int x)
+{
+    TemplateDerived<int> d(&x);
+    return d.v;
+}
+
+// at line 87, column 0
+// [ !Info! ] ConstParameterNotModified.Pointer: parameter 'p' in function 'GenericBase::GenericBase<int>(int*)' is never used to modify the pointed object
+// ↳ current type: int *p
+// ↳ suggested type: const int *p
+// ↳ checked in the analyzed files only, with their compile commands: they compile with the suggested type, and their generated code matches, metadata included, once debug information, diagnostic metadata, descriptive names and renamed symbols are set aside
+struct GenericBase
+{
+    int v;
+    template <typename T> GenericBase(T* p) : v(*p) {}
+};
+
+struct FromGeneric : GenericBase
+{
+    using GenericBase::GenericBase;
+    int w = 0;
+};
+
+int make_from_generic(int x)
+{
+    FromGeneric d(&x);
+    return d.v;
+}
+
+// The Clang check of const suggestions is experimental: it runs only with this option.
+// analyzer-arg: --experimental-const-suggestion-check
+```
+
+D14, `call` in `const-suggestion-deduction-refused.cpp`: kept, not checked, the reason naming the specializations; `pick` stays removed:
+
+```diff
+--- a/test/pointer_reference-const_correctness/const-suggestion-deduction-refused.cpp
++++ b/test/pointer_reference-const_correctness/const-suggestion-deduction-refused.cpp
+@@ -1,14 +1,29 @@
+ // SPDX-License-Identifier: Apache-2.0
+ // #217: specializations of the rewritten template whose deduced type changes are paired only when
+-// the correspondence is unique, and their code is still compared.
++// the correspondence is one to one, and what they select is still compared.
+ // - call: g passes G& and h passes const G&; after the rewrite both deduce G, so two
+-//   specializations become one. No unique correspondence: both suggestions are removed. The
+-//   lambdas are noexcept, so that all three specializations get the same attributes: only the
+-//   correspondence tells them apart.
+-// - pick: the lvalue's specialization is paired, but its code changes with what F deduces.
++//   specializations become one. Without a one-to-one correspondence, nothing shows that the
++//   rewrite keeps or changes what they do: both suggestions are kept, not checked, and the reason
++//   names the specializations. The lambdas are noexcept, so that all three specializations get
++//   the same attributes: only the correspondence tells them apart.
++// - pick: the lvalue's specialization is paired, and the condition of its `if constexpr` changes
++//   with what F deduces: the suggestion is removed.
+ 
+-// not contains: in function 'int call<
++// strict-expectation-details: true
+ // not contains: in function 'int pick<
+ 
++// at line 28, column 0
++// [ !Info! ] ConstParameterNotModified.ReferenceRvaluePreferValue: parameter 'f' in function 'int call<from_temporary()::$_0>(from_temporary()::$_0&&)' is an rvalue reference and is only read, or passed where a reference to const is expected
++// ↳ consider passing by value (<anonymous type> f) or const reference (const <anonymous type> &f)
++// ↳ current type: <anonymous type> &&f
++// ↳ the callee's body is not checked: it may still modify the referred object through a cast
++// ↳ not checked with Clang: 'int call<from_lvalues()::$_0&>(from_lvalues()::$_0&)' and 'int call<from_lvalues()::$_0 const&>(from_lvalues()::$_0 const&)' both become 'int call<from_lvalues()::$_0>(from_lvalues()::$_0 const&)': their correspondence is not one to one
++
++// at line 28, column 0
++// [ !Info! ] ConstParameterNotModified.Reference: parameter 'f' in function 'int call<from_lvalues()::$_0&>(from_lvalues()::$_0&)' is only read, or passed where a reference to const is expected
++// ↳ current type: <anonymous type> &f
++// ↳ suggested type: const <anonymous type> &f
++// ↳ the callee's body is not checked: it may still modify the referred object through a cast
++// ↳ not checked with Clang: 'int call<from_lvalues()::$_0&>(from_lvalues()::$_0&)' and 'int call<from_lvalues()::$_0 const&>(from_lvalues()::$_0 const&)' both become 'int call<from_lvalues()::$_0>(from_lvalues()::$_0 const&)': their correspondence is not one to one
+ template <typename F> int call(F&& f)
+ {
+```
+
+D16, `signature_size` in `const-suggestion-printed-signature.c`: kept, not checked. The expectation stops after `signature_size:`, the comparator's text that follows names IR values:
+
+```diff
+--- a/test/pointer_reference-const_correctness/const-suggestion-printed-signature.c
++++ b/test/pointer_reference-const_correctness/const-suggestion-printed-signature.c
+@@ -2,8 +2,8 @@
+ // #217: __PRETTY_FUNCTION__ prints the function's signature, which the suggested type changes. The
+ // suggestion is kept, and the message says what the program prints differently. Any other use of
+-// that text, such as its size, is a change of the generated code.
++// that text, such as its size, changes the generated code in a way that no reference, override or
++// constant condition explains: that suggestion is kept, not checked.
+ 
+ // strict-expectation-details: true
+-// not contains: parameter 'p' in function 'signature_size'
+ // not contains: ↳ ABI:
+ #include <stdio.h>
+@@ -21,4 +21,9 @@
+ }
+ 
++// at line 28, column 0
++// [ !Info! ] ConstParameterNotModified.Pointer: parameter 'p' in function 'signature_size' is never used to modify the pointed object
++// ↳ current type: int *p
++// ↳ suggested type: const int *p
++// ↳ not checked with Clang: the generated code changes, and no reference, override or constant condition explains it: code changed in signature_size:
+ int signature_size(int* p)
+ {
+```
+
+Failure at `64ed37e`: the four inherited constructors and both `call` suggestions are removed ("symbols no longer used"), `signature_size` too ("the generated code changes").
+
+```text
+new/const-suggestion-inheriting-constructor.cpp: FAIL (2/10)
+=== Testing evidence/217/stage1/tests/fixtures/new/const-suggestion-inheriting-constructor.cpp ===
+  ❌ (default) expectation #1 MISSING
+  ❌ (default) expectation #2 MISSING
+  ❌ (default) expectation #3 MISSING
+  ❌ (default) expectation #4 MISSING
+  ❌ (smt-z3) expectation #1 MISSING
+  ❌ (smt-z3) expectation #2 MISSING
+  ❌ (smt-z3) expectation #3 MISSING
+  ❌ (smt-z3) expectation #4 MISSING
+```
+
+```text
+changed/const-suggestion-deduction-refused.cpp: FAIL (4/8)
+=== Testing evidence/217/stage1/tests/fixtures/changed/const-suggestion-deduction-refused.cpp ===
+  ❌ (default) expectation #1 MISSING
+  ❌ (default) expectation #2 MISSING
+  ✅ (default) negative expectation #1 NOT FOUND (as expected)
+  ❌ (smt-z3) expectation #1 MISSING
+  ❌ (smt-z3) expectation #2 MISSING
+  ✅ (smt-z3) negative expectation #1 NOT FOUND (as expected)
+```
+
+```text
+changed/const-suggestion-printed-signature.c: FAIL (6/8)
+=== Testing evidence/217/stage1/tests/fixtures/changed/const-suggestion-printed-signature.c ===
+  ✅ (default) expectation #1 FOUND
+  ❌ (default) expectation #2 MISSING
+  ✅ (default) negative expectation #1 NOT FOUND (as expected)
+  ✅ (smt-z3) expectation #1 FOUND
+  ❌ (smt-z3) expectation #2 MISSING
+  ✅ (smt-z3) negative expectation #1 NOT FOUND (as expected)
+```
+
+Unchanged and passing at `64ed37e`: `const-suggestion-kept*.cpp`, `const-suggestion-kept.c`, `const-suggestion-abi*.cpp`, `const-suggestion-deduction-kept.cpp`, `print_and_read` in `const-suggestion-printed-signature.c`. Their renamed symbols, measured before and after the rewrite (`evidence/217/stage1/nested-probe/symbols.txt`): the function; `_ZTI` and `_ZTS` of a local class; a lambda's call operator; the specializations of the rewritten template and the lambda instantiated in each.
+
+- [ ] **Step 1: Add the fixture, change the two expectations, run the three.** Expected: FAIL, as above.
+  Commits: `test(const-param): check a suggestion through the constructors that inherit it`; `test(const-param): keep the suggestions whose specializations merge, unchecked`; `test(const-param): keep a suggestion whose code change nothing explains, unchecked`.
+- [ ] **Step 2: Symbols from compilation facts.** The `Inspector` records, in every compilation:
+  - `variants`: the entity's variants, by `GlobalDecl` (Task 1.4, Step 3), keyed by variant;
+  - `inheriting`: each `CXXConstructorDecl` with `isInheritingConstructor()` whose `getInheritedConstructor().getConstructor()` is the entity, or a specialization of its pattern; its `Ctor_Complete` and `Ctor_Base` symbols, keyed by the derived class (its mangled type, `MangleContext::mangleCanonicalTypeName`) and the variant. `evidence/217/stage1/d7-probe/` shows these symbols equal to the IR's, before and after, in the four cases of the fixture;
+  - `nested`: in the entity, and in each function that a specialization of its template defines, every lambda's call operator, every local class's methods (by variant) and its `_ZTI`, `_ZTS` and `_ZTV` (`MangleContext::mangleCXXRTTI`, `mangleCXXRTTIName`, `mangleCXXVTable`), every static local variable and its guard (`mangleStaticGuardVariable`); keyed by kind, site mapped back, and the enclosing function's symbol. `evidence/217/stage1/d7-probe/nested-ast.txt` shows these symbols equal to the IR's (`nested-output.txt`).
+  Commit: `feat(const-param): record the symbols a rewrite may rename, with their declarations`.
+- [ ] **Step 3: `correspond` (§5.7)**, in `ConstSuggestionMatch.cpp`, in this order:
+  1. the entity's variants, by variant;
+  2. the inheriting constructors, by derived class and variant;
+  3. the instantiation contexts, from the R facts whose instantiations already map. For each such fact whose target changes, the pair (target before, target after) is a candidate if both are specializations of one template (`template:<site>` equal). The candidates of every fact are then checked together: a target before with two targets after, or two targets before with one after, gives `missing` (Texts, §5.7), and no pair for them. Each new pair maps more instantiations, and the step repeats until no pair is added;
+  4. the nested symbols, by key, once their enclosing symbols are paired.
+  A pair is established only from these facts; the names of the symbols play no part.
+  Commit: `feat(const-param): establish the correspondences of a rewrite from its facts`.
+- [ ] **Step 4: The comparator takes the pairs, step 7.** `codeDifference` renames the symbols of `established` before comparing; every symbol that only one side has, and that no pair covers, is listed in its difference, as T v1 lists it (`symbols no longer used: …; symbols used only after the rewrite: …`). The masked encodings, `withoutConst`, `variantOf`, `templateOf` and `namesTemplate` go (ruling 9). The ABI line takes the symbol after the rewrite from the pair of the suggestion's own symbol. In the judgement, `correspond` runs before step 6: the facts are compared through its pairs, and those in an instantiation it could not pair are left out. After step 6, its `missing` makes the unit indeterminate; otherwise a difference of the comparator makes it indeterminate with `the generated code changes, and no reference, override or constant condition explains it: <difference>`. Step 7 never refutes.
+  Run: the three tests of Step 1, then every T v1 fixture with the option. Expected: PASS; each T v1 "checked" stays checked; `pick` is refuted by its K fact, the R and O refutations of `const-suggestion-same-code.cpp` and `const-suggestion-override-elsewhere.cpp` by their facts.
+  Commit: `fix(const-param): compare the code through established pairs, never refuting`.
+- [ ] **Step 5: Task tests.** As Task 1.1, Step 6.
+
 **Validation:** D7, D14 and D16 pass; every T v1 "checked" stays verified.
 
 ### Task 1.6: collisions, stale declarations, link-edition assumption (§5.10)
