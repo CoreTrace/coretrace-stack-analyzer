@@ -56,7 +56,6 @@ Varargs::Varargs(int* x, double* y, ...)
     seed = *x + static_cast<int>(*y);
 }
 
-
 // An empty parameter takes no IR argument, but keeps its debug declaration and its number.
 struct Tag
 {
@@ -72,7 +71,6 @@ Tagged::Tagged(int* x, Tag tag)
     (void)tag;
     seed = *x;
 }
-
 
 // A variadic function that returns a struct through a hidden argument.
 struct Big

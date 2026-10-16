@@ -9,5 +9,9 @@ int call_block(int (^block)(int*, double*), int* a, double* b)
 
 int use_block(int* a, double* b)
 {
-    return call_block(^(int* x, double* y) { return *x + (int)*y; }, a, b);
+    return call_block(
+        ^(int* x, double* y) {
+          return *x + (int)*y;
+        },
+        a, b);
 }
