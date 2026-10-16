@@ -2590,6 +2590,11 @@ namespace
               {"hidden: artificial, source none", "x: no type, source 0"});
         check(unestablished, "established_untyped", {"x: double *, source 0"});
 
+        // The empty parameter comes first: x is the second parameter the source declares.
+        check(itanium, "_ZN8TagFirstC2E3TagPi",
+              {"this: artificial, source none", "vtt: artificial, source none",
+               "x: int *, source 1"});
+
         // What the rule displays for x does not depend on the constructor variant.
         const llvm::Function* complete = itanium.module->getFunction("_ZN6ReaderC1EPiPd");
         const llvm::Function* base = itanium.module->getFunction("_ZN6ReaderC2EPiPd");

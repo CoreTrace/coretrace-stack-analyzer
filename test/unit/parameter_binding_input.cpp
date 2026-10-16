@@ -84,3 +84,15 @@ Big make_big(int* p, ...)
     big.values[0] = *p;
     return big;
 }
+
+// The empty parameter comes first: x is the second parameter the source declares.
+struct TagFirst : virtual Base
+{
+    TagFirst(Tag tag, int* x);
+};
+
+TagFirst::TagFirst(Tag tag, int* x)
+{
+    (void)tag;
+    seed = *x;
+}
