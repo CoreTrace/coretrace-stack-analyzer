@@ -2565,6 +2565,7 @@ namespace
         check(microsoft, "??0Varargs@@QEAA@PEAHPEANZZ",
               {"this: artificial", "is_most_derived: artificial", "x: int *", "y: double *"});
         check(itanium, "_ZN6TaggedC2EPi3Tag", {"this: artificial", "vtt: artificial", "x: int *"});
+        check(itanium, "_Z8make_bigPiz", {"agg.result: artificial", "p: int *"});
 
         // What the rule displays for x does not depend on the constructor variant.
         const llvm::Function* complete = itanium.module->getFunction("_ZN6ReaderC1EPiPd");

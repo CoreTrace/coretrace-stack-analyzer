@@ -73,3 +73,16 @@ Tagged::Tagged(int* x, Tag tag)
     seed = *x;
 }
 
+
+// A variadic function that returns a struct through a hidden argument.
+struct Big
+{
+    long values[8];
+};
+
+Big make_big(int* p, ...)
+{
+    Big big{};
+    big.values[0] = *p;
+    return big;
+}
