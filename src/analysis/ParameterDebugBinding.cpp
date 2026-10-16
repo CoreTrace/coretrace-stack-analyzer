@@ -6,6 +6,7 @@
 #include <optional>
 #include <string>
 
+#include <llvm/ADT/STLExtras.h>
 #include <llvm/ADT/SmallVector.h>
 #include <llvm/IR/Argument.h>
 #include <llvm/IR/DebugInfo.h>
@@ -91,6 +92,18 @@ namespace ctrace::stack::analysis
             std::uint8_t paddingTail[7] = {};
         };
 
+        // Whether F has an artificial parameter other than `this`: a vtt, an is_most_derived or a
+        // block's descriptor. The subroutine type lists the descriptor, not what the C++ ABI adds.
+        static bool hasArtificialOtherThanThis(const llvm::Function& F)
+        {
+            return llvm::any_of(F.args(),
+                                [](const llvm::Argument& other)
+                                {
+                                    const llvm::DILocalVariable* var = spilledParameter(other);
+                                    return var && var->isArtificial() && !var->isObjectPointer();
+                                });
+        }
+
         static DebugParamLayout buildDebugParamLayout(const llvm::Function& F,
                                                       const llvm::Argument& Arg,
                                                       const llvm::DISubprogram* SP)
@@ -112,10 +125,16 @@ namespace ctrace::stack::analysis
             // The spill slot names the source parameter whatever the ABI did to the list; the
             // position below only serves arguments that are not spilled, like a hidden sret.
             if (const llvm::DILocalVariable* spilled = spilledParameter(Arg);
-                spilled && spilled->getArg() != 0 && spilled->getArg() < typeArray.size())
+                spilled && spilled->getArg() != 0)
             {
-                layout.debugArgIndex = spilled->getArg();
-                layout.hasCanonicalDebugIndex = true;
+                // Its declaration gives its type. Without one, the subroutine type's entry at its
+                // debug number is its own only when no parameter makes that position ambiguous.
+                if (spilled->getType() ||
+                    (spilled->getArg() < typeArray.size() && !hasArtificialOtherThanThis(F)))
+                {
+                    layout.debugArgIndex = spilled->getArg();
+                    layout.hasCanonicalDebugIndex = true;
+                }
                 return layout;
             }
 
