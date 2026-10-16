@@ -10,7 +10,7 @@
 
 **Spec:** `docs/superpowers/specs/2026-10-16-const-suggestion-check-v2-design.md`, approved at `8b283a8`.
 
-**Level of detail.** P0 is planned step by step with its code, validated in a throwaway prototype (evidence below). Stages 1 to 3 and the final phase are planned to the level of tasks, files, interfaces, tests and validation criteria. The step-level code of a stage is added to this plan when that stage starts: P0 and the updated `main` are integrated first, and they change the code these stages modify. A stage starts only once the previous one is validated.
+**Level of detail.** P0 is planned step by step with its code, validated in a throwaway prototype (evidence below). Stages 1 to 3 and the final phase are planned to the level of tasks, files, interfaces, tests and validation criteria. The step-level code of a stage is added to this plan when that stage starts: P0 and the updated `main` are integrated first, and they change the code these stages modify. A stage starts only once the previous one is validated. Stage 1's detail was written at its start, once Task I.1 was validated.
 
 **Evidence:** `coretrace-stack-analyzer-evidence/217/p0/` (`repro/`, `harness/`, `fixture/`, `effect/`, `prototype-v1.diff`, `prototype-v2.diff`, `prototype-v3.diff`, `ir/`, `variadic/`, `review-v3/`).
 
@@ -868,19 +868,124 @@ Expected: `changed: 0` among `main`'s fixtures (the script normalizes the logger
 
 ## Stage 1 — flow, identities, plan and scope, facts, correspondences, collisions, trace (§9.3)
 
-Catalogue: D1 (T part), D2, D3, D4, D5, D7, D11, D14, D15, D16, D17. Tests are submitted with their failure evidence at the start of each task.
+Catalogue: D1 (T part), D2, D3, D4, D5, D7, D11, D14, D15, D16, D17.
+
+**Detail, written at the stage's start** (Task I.1 validated at `64ed37e`). Each new or changed test is written out in full with its failure at `64ed37e`. They were run from `evidence/217/stage1/tests/`: the proposed `run_test.py` (`patched/`), the fixtures (`fixtures/new/`, `fixtures/changed/`), the runner `run_red.py` and its output `red-64ed37e.txt`. A test enters the repository only once the user authorizes it; its task starts by running it again to watch it fail. For the code, this section gives the interfaces, the decision logic and every new text; T v1's code that only moves keeps its form and is named.
+
+Commands used by the steps, from the worktree root:
+- one check: `python3 -c 'import sys, run_test as r; r.RUN_CONFIG.cache_enabled = False; sys.exit(not r.<check>())'`;
+- one fixture: `python3 -c 'import sys, run_test as r; from pathlib import Path; r.RUN_CONFIG.cache_enabled = False; ok, total, passed, report = r.check_file(Path("test/pointer_reference-const_correctness/<fixture>")); print(report); sys.exit(not ok)'`;
+- build, unit tests, suite and format: Global Constraints.
 
 **D17 (confirmed by the user).** §5.10 makes a stale declaration indeterminate. T v1 removes that suggestion, and two checks pin it: `check_const_suggestion_cross_tu` (`("def and a redeclaration", ["def.c", "redecl.c"], [])`) and `check_const_suggestion_compilation_database` (`("a redeclaration, not analyzed", ["def.c", "redecl.c"], "read_value", None)`). Both expectations change in Task 1.6, submitted with their failure evidence; the spec's catalogue and §7 list D17. Indeterminate keeps the suggestion as not checked: it does not show that the suggestion is valid, and the reason says so through the file and the link-edition assumption.
 
-Shared types, in `ConstSuggestionInternal.hpp` (fixed at the stage's start, from §3):
-- `enum class Verdict : std::uint8_t { Verified, Refuted, Indeterminate };` and `struct Judgement { Verdict verdict; std::string reason; }`;
-- `struct UnitConfiguration { std::string file; UnitCommand command; std::string fingerprint; }`, the fingerprint hashing the normalized arguments and working directory;
-- `struct DeclarationSite { std::string file; unsigned offset; }` (real path, offset in the original text);
-- `enum class SourceLinkage : std::uint8_t { None, Internal, External };` and `struct EntityIdentity { std::vector<DeclarationSite> redeclarations; SourceLinkage linkage; std::optional<DeclarationSite> templateOrigin; }`;
-- `struct Candidate { std::string type; std::string alternative; }` (§3 table);
-- `struct SuggestionPlan { EntityIdentity entity; unsigned sourceIndex; Candidate candidate; std::map<std::string, std::vector<Edit>> edits; std::optional<std::string> indeterminate; }`;
-- `struct FactKey { std::string unit; std::vector<std::string> instantiationContexts; DeclarationSite spelling; DeclarationSite expansion; }`, `enum class FactKind { Reference, Override, Constant }`, `struct Fact { FactKind kind; FactKey key; std::string value; }`;
-- `struct SymbolPair { std::string before; std::string after; }`.
+### Texts
+
+Every new text, verbatim. `<function>` is the name the diagnostic shows, `<symbol>` a symbol, `<file>` a real path, `'<a>'` a demangled name.
+
+Reasons of an indeterminate verdict, after `not checked with Clang: ` (shown in the diagnostic):
+
+| Reason | Task | When |
+|---|---|---|
+| `the parameter's type is written in a macro argument that writes other parameters too` | 1.3 | D5: the text an edit rewrites writes another parameter |
+| `the parameter's type is written in a macro argument that writes other declarations too` | 1.3 | the same, for another declaration |
+| `<file> could not be inspected once rewritten` | 1.4 | step 2 |
+| `the rewrite also changes the type of <name> (<file>:<line>)` | 1.4 | step 3 |
+| `the generated code changes, and no reference, override or constant condition explains it: <difference>` | 1.5 | step 7 (D16); `<difference>` is the comparator's text |
+| `'<a>' and '<b>' both become '<c>': their correspondence is not one to one` | 1.5 | §5.7, D14 |
+| `'<a>' becomes both '<b>' and '<c>': their correspondence is not one to one` | 1.5 | §5.7 |
+| `<symbol> is also defined in <file>; if <defining file> and <file> are linked together, the two definitions collide` | 1.6 | §5.10, strong (D4) |
+| `<symbol> is also defined, weak, in <file>; if <defining file> and <file> are linked together, the definition in <file> is used and the other one is ignored` | 1.6 | §5.10, weak |
+| `<symbol> is also defined in <file>, as an inline or template definition; if <defining file> and <file> are linked together, only one of the two is kept, and the check does not establish that they are equivalent` | 1.6 | §5.10, `weak_odr`, `linkonce_odr` |
+| `the rewrite gives <function> the symbol of another declaration (<file>:<line>); if a file linked with <defining file> defines it, the two definitions collide` | 1.6 | ruling 3 |
+| `<file> declares <function> with its current type and does not see the rewrite: if <defining file> and <file> are linked together, that declaration no longer matches the rewritten definition` | 1.6 | D17 |
+| `<file>:<line> converts the address of <function> with an explicit cast` | 1.7 | D15 |
+
+Reasons of a refuted verdict, in the trace only (a refuted suggestion is removed), after T v1's `removed, `:
+
+| Reason | Task |
+|---|---|
+| `<file>:<line> refers to '<b>' instead of '<a>'` | 1.4, R |
+| `'<method>' overrides <list> instead of <list>` (`'<a>', '<b>'`, or `nothing`) | 1.4, O |
+| `the condition at <file>:<line> becomes <true or false>` | 1.4, K (`if constexpr`) |
+| `the _Generic selection at <file>:<line> chooses another association` | 1.4, K |
+
+T v1's texts stay, `does not compile: <file>:<line>: …` and `gains a checked warning: <file>:<line>: …` included.
+
+Trace (`--verbose`). T v1's line `[const-suggestion] <symbol> parameter <name>: <outcome>` comes first, unchanged. The new lines follow it; none matches T v1's pattern `(\S+) parameter (\S+): `, which `check_const_suggestion_removal_reason` reads:
+
+```
+[const-suggestion] <symbol> parameter <name>, suggestion: <rule id> on <function>, source index <i>
+[const-suggestion] <symbol> parameter <name>, transformation: <current type> becomes <candidate> (<alternative>)
+[const-suggestion] <symbol> parameter <name>, rewritten at: <file>:<line>
+[const-suggestion] <symbol> parameter <name>, unit <file> [<fingerprint>]: <verdict>[: <reason>]
+[const-suggestion] <symbol> parameter <name>, verdict: <verdict>[: <reason>]
+```
+- one `rewritten at` line per edit, none when the plan is not executed; one `unit` line per unit judged, in judgement order (Task 1.1 adds these lines, Task 1.8 the others);
+- `<verdict>`: `verified`, `refuted` or `indeterminate`;
+- `<alternative>`, from §3: `pointer to const`, `pointer to const, top-level const kept`, `reference to const`, `reference to const; passing by value is not checked`;
+- `<fingerprint>`: 16 lowercase hexadecimal digits, `llvm::xxh3_64bits` of the unit's arguments and working directory as T builds them, each followed by a NUL byte.
+
+### Rulings
+
+The spec leaves these open; each one is the user's to overturn.
+1. **Which reason is shown.** A refuted suggestion gives the reason of the first unit that refutes it, in judgement order: the defining unit, then the others in T v1's order. An indeterminate one gives the reason of the first indeterminate unit in that order; if no unit is indeterminate, the first collision's, a definition before a declaration. Cost if wrong: another reason is shown; the verdict stays.
+2. **The initial compilation of another unit is shared by the suggestions of one module.** T runs once per analyzed module (`checkConstSuggestions`): a unit that sees the changes of two modules is compiled once as it is for each. Sharing it across modules needs the facts of entities not planned yet; Task 3.1 measures what it would save. Cost if wrong: one more initial compilation per module and unit.
+3. **A declaration of another entity that the rewrite merges into the entity** (t9 without `b.cpp`: `api.hpp` also declares `f(const int*)`) is a possible collision (§3, "collision possible entre fichiers"): indeterminate, with its own reason, shown after a definition's. Cost if wrong: a suggestion kept as not checked that a definition elsewhere would refute or not.
+4. **R identifies a target by its declarations.** The value of an R fact is its target's declaration sites, mapped back to the original text; for a template specialization or an implicit function, which have no declaration of their own, its symbol, mapped back through the established pairs. An R fact is unchanged when its target after the rewrite keeps every declaration it had: a merge (ruling 3) adds the entity's, and the collisions judge it, not the facts. A target that loses a declaration, or another target, refutes. A symbol alone would not do: once t9 is rewritten, `_Z1fPKi` names both the entity and the overload it merges with. Cost if wrong: a merge refuted, or a reference to the wrong declaration missed.
+5. **D3 is pinned in Task 1.4, not 1.6**: both directions are fixed by the source identity with its linkage, which Task 1.4 brings. Task 1.6 keeps D4, Review Focus 3 and D17.
+6. **Task 1.1 gets a second test**, the shared initial compilation, counted with `--timing`: the plan named it as work but did not pin it.
+7. **D7's fixture holds four cases**: t8, and as templates a base class template, a derived class template and a constructor template. The technique of §5.7 holds on all four in `evidence/217/stage1/d7-probe/` (`probe.cpp`, `probe-output.txt`): `getInheritedConstructor()` finds the constructor each inheriting constructor comes from, and the symbols CodeGen gives the inheriting constructors are the IR's, before and after. So D7 expects verified.
+8. **The two reasons of Task 1.2 are not added.** After P0, the rule reports no artificial parameter, and every parameter of the `-O0` code the analyzer compiles from sources is spilled, so it has a source index: no input reaches those reasons, and no test could fail first. A binding without a source index, or artificial, keeps T v1's text `the parameter is not found in the source`. Cost if wrong: a less precise reason on an input not found.
+9. **The comparator's name heuristics are removed** once the established pairs replace them (Task 1.5): the masked encodings, `withoutConst`, `variantOf` and the template keys. The difference text keeps listing the symbols left without a pair, which locates the difference, as §5.9 asks. Cost if wrong: a trace that no longer suggests a probable counterpart.
+10. **D12 (Task 2.4) also changes the `ReferenceRvaluePreferValue` block that D14 adds** to `const-suggestion-deduction-refused.cpp`.
+11. **Task 1.4 gets a check of the scope after the rewrite** (`check_const_suggestion_header_read_differently`): a header that another file reads as other declarations, through a macro it defines otherwise. Without it, step 3 of §5.8 would have no failing test: the plan's scope (Task 1.3) holds in the defining unit.
+12. **No error limit, and step 2 without a test.** T's compilations set no error limit. Otherwise a rewrite that breaks more than 19 uses would end in "too many errors", which is fatal, and step 2 would keep as not checked a suggestion that T v1 removes. Step 2 then guards only a fatal error that the rewrite itself brings, which inserting `const` does not bring in any input of the suite: it has no failing test. Cost if wrong: an untested guard.
+13. **Task 1.4 gets a fixture where R and K refute without a change of code** (`const-suggestion-facts-without-code-change.cpp`). T v1 compares only code and keeps both suggestions as checked; since every refutation of T v1's tests comes with a code difference, the facts of Task 1.4 would otherwise have no failing test.
+
+### Shared types
+
+In `ConstSuggestionInternal.hpp`, each added by the task that first needs it:
+```cpp
+enum class Verdict : std::uint8_t { Verified, Refuted, Indeterminate };              // 1.1
+struct Judgement { Verdict verdict = Verdict::Verified; std::string reason; };      // 1.1
+struct UnitConfiguration { std::string file; UnitCommand command; std::string fingerprint; }; // 1.1
+struct DeclarationSite                                                                // 1.4
+{
+    std::string file;    // real path
+    unsigned offset = 0; // in the original text
+    auto operator<=>(const DeclarationSite&) const = default;
+};
+enum class SourceLinkage : std::uint8_t { None, Internal, External };               // 1.4
+struct EntityIdentity                                                                 // 1.4
+{
+    std::vector<DeclarationSite> redeclarations; // the defining unit's, sorted
+    SourceLinkage linkage = SourceLinkage::None;
+    std::optional<DeclarationSite> templateOrigin; // the pattern's first declaration
+    std::vector<std::string> symbols; // every variant's, before the rewrite (CodeGen)
+};
+struct Candidate { std::string current; std::string type; std::string alternative; }; // 1.8
+struct SuggestionPlan                                                                 // 1.3
+{
+    EntityIdentity entity; // 1.4
+    unsigned sourceIndex = 0;
+    Candidate candidate;   // 1.8
+    std::string expectedType; // the candidate, written canonically (T v1's expectedType)
+    std::map<std::string, std::vector<Edit>> edits; // by real path
+    std::optional<std::string> indeterminate;       // why the plan is not executed
+};
+enum class FactKind : std::uint8_t { Reference, Override, Constant };               // 1.4
+struct FactKey                                                                        // 1.4
+{
+    std::vector<std::string> contexts; // the instantiations around the fact, outermost first
+    DeclarationSite spelling;
+    DeclarationSite expansion;
+    auto operator<=>(const FactKey&) const = default;
+};
+struct Fact { FactKind kind; FactKey key; std::vector<std::string> value; };        // 1.4
+struct SymbolPair { std::string before; std::string after; };                       // 1.5
+```
+`FactKey` has no unit: each unit's facts are kept apart. `Fact::value` is sorted: for R, the target's declaration sites, or its symbol (ruling 4); for O, the overridden methods, each the same way; for K, `true`, `false` or the selected association's index.
 
 ### Task 1.1: units, verdicts, aggregation, report
 
