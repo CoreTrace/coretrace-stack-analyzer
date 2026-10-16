@@ -2506,11 +2506,14 @@ namespace
                 {
                     text += "no type";
                 }
+                else if (const auto* pointer = llvm::dyn_cast<llvm::DIDerivedType>(binding.type))
+                {
+                    const llvm::DIType* pointee = pointer->getBaseType();
+                    text += (pointee ? pointee->getName().str() : "?") + " *";
+                }
                 else
                 {
-                    const auto* pointer = llvm::dyn_cast_or_null<llvm::DIDerivedType>(binding.type);
-                    const llvm::DIType* pointee = pointer ? pointer->getBaseType() : nullptr;
-                    text += (pointee ? pointee->getName().str() : "?") + " *";
+                    text += binding.type->getName().str();
                 }
                 text += ", source " +
                         (binding.sourceIndex ? std::to_string(*binding.sourceIndex) : "none");
@@ -2546,11 +2549,13 @@ namespace
         LoadedModule microsoft;
         LoadedModule blocks;
         LoadedModule unestablished;
+        LoadedModule optimized;
         if (!load("parameter_binding_input.cpp", {"-std=c++23"}, itanium) ||
             !load("parameter_binding_input.cpp", {"-std=c++23", "--target=x86_64-pc-windows-msvc"},
                   microsoft) ||
             !load("parameter_binding_block_input.c", {"-fblocks"}, blocks) ||
-            !load("parameter_binding_unknown_input.ll", {}, unestablished))
+            !load("parameter_binding_unknown_input.ll", {}, unestablished) ||
+            !load("parameter_binding_o2_input.ll", {}, optimized))
             return false;
         check(itanium, "_Z13free_functionPiPd", {"a: int *, source 0", "b: double *, source 1"});
         check(itanium, "_ZN6Reader3sumEPiPd",
@@ -2594,6 +2599,13 @@ namespace
         check(itanium, "_ZN8TagFirstC2E3TagPi",
               {"this: artificial, source none", "vtt: artificial, source none",
                "x: int *, source 1"});
+
+        // Optimized code spills nothing: each argument is bound through its own debug records.
+        check(optimized, "_ZN8VariadicC2EPiPdz",
+              {"this: artificial, source none", "vtt: artificial, source none",
+               "v: int *, source none", "w: double *, source none"});
+        check(optimized, "split_variadic",
+              {"p: int *, source none", "s: Pair, source none", "s: Pair, source none"});
 
         // Under the Microsoft ABI the hidden return argument comes after `this`: it has no type,
         // so it carries no const contract.
