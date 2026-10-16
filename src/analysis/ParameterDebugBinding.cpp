@@ -107,6 +107,9 @@ namespace ctrace::stack::analysis
             const auto typeArray = subroutineType->getTypeArray();
             if (typeArray.size() < 2)
                 return layout; // [0] return type, [1..] params.
+            // A variadic function's type ends with a null entry for `...`: no parameter's.
+            const unsigned listed =
+                static_cast<unsigned>(typeArray.size()) - (typeArray[typeArray.size() - 1] ? 1 : 2);
 
             // The spill slot names the source parameter whatever the ABI did to the list; the
             // position below only serves arguments that are not spilled, like a hidden sret.
@@ -119,7 +122,7 @@ namespace ctrace::stack::analysis
             }
 
             const unsigned irArgCount = static_cast<unsigned>(F.arg_size());
-            const unsigned debugParamCount = static_cast<unsigned>(typeArray.size() - 1);
+            const unsigned debugParamCount = listed;
             if (irArgCount < debugParamCount)
                 return layout;
 
