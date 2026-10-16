@@ -1416,11 +1416,272 @@ check_const_suggestion_line_endings: FAIL
 
 ### Task 1.4: compilations, facts R, O and K, scope after the rewrite (§5.3, §5.4, §5.6), judgement steps 1 to 6
 
-**Files:** `ConstSuggestionFacts.cpp` (new; T v1's `Inspector`, `InspectAction`, `compile`, `scan` move here).
-**Interfaces:** produces `struct UnitFacts { bool complete; std::vector<Fact> facts; std::map<std::string, llvm::GlobalValue::LinkageTypes> defined; std::vector<DeclarationSite> addressCasts; std::vector<Diagnostic> diagnostics; std::shared_ptr<const ModuleText> code; std::vector<DeclarationSite> entityDeclarations; }` and `UnitFacts inspect(const UnitConfiguration&, const std::map<std::string, std::string>& remapped, const SuggestionPlan&)`.
-**Work:** facts keyed by unit, instantiation contexts, spelling and expansion positions mapped back through the plan's edits; scope after the rewrite on source-written declarations only (instantiated signatures go to Task 1.5); an incomplete inspection gives an unknown scope; judgement steps 1 to 6.
-**Tests:** D2, a new `run_test.py` check (t1: a member operator used in another file, verified in both files); `const-suggestion-same-code.cpp`, `const-suggestion-override-elsewhere.cpp`, `pick` in `const-suggestion-deduction-refused.cpp`, `generic_selection` in `const-suggestion-must-compile.c` unchanged.
-**Validation:** D2 passes; the refutations by R, O and K of T v1's tests unchanged.
+**Files:** `src/analysis/ConstSuggestionFacts.cpp` (new), `src/analysis/ConstSuggestionCheck.cpp`, `src/analysis/ConstSuggestionPlan.cpp`, `src/analysis/ConstSuggestionInternal.hpp`, `CMakeLists.txt`, `run_test.py`, `test/pointer_reference-const_correctness/const-suggestion-facts-without-code-change.cpp` (new).
+
+**Interfaces.** Adds `DeclarationSite`, `SourceLinkage`, `EntityIdentity`, `FactKind`, `FactKey`, `Fact` (Shared types) and `SuggestionPlan::entity`. Produces:
+```cpp
+// What one compilation shows (§5.3, §5.6). R and K cover the whole unit; the rest is kept for
+// each plan given, in their order.
+struct UnitFacts
+{
+    std::string failure;   // the compilation could not run (T v1's Compilation::failure)
+    bool complete = false; // the AST holds the whole unit: no fatal error
+    std::vector<Diagnostic> diagnostics; // errors and tracked warnings, in Clang's order
+    std::shared_ptr<const const_suggestion::ModuleText> code; // prepared for the comparator
+    std::map<std::string, llvm::GlobalValue::LinkageTypes> defined; // symbols with a body
+    std::vector<Fact> facts; // R and K
+    std::map<DeclarationSite, std::string> writtenTypes; // declarations of the rewritten files
+    struct Entity
+    {
+        bool found = false;
+        std::vector<std::string> symbols;     // every variant's, in this compilation
+        std::vector<DeclarationSite> sites;   // its declarations here
+        std::vector<Fact> overrides;          // O, for the methods named like it
+        std::vector<DeclarationSite> casts;   // explicit casts of its address (Task 1.7)
+        std::vector<std::string> stale;       // T v1's "declared in <file>:<line> with type <type>"
+        std::string printedSignature;         // T v1's, for __PRETTY_FUNCTION__
+    };
+    std::vector<Entity> entities;
+};
+// Compiles `unit` with `remapped` files, and inspects it for `plans`.
+UnitFacts inspect(const UnitConfiguration& unit, const std::map<std::string, std::string>& remapped,
+                  const std::vector<const SuggestionPlan*>& plans, bool timing);
+```
+The defining unit's initial compilation also plans: `inspect` locates each suggestion's function by its symbol there, calls `plan()`, then collects the facts with the identities planned.
+
+**Tests.** D2 (t1) and D3 (t2, ruling 5), two new checks, registered after the checks of Task 1.1:
+
+```python
+def check_const_suggestion_operator_used_elsewhere() -> bool:
+    """
+    #217: a function is found by its declaration in every file that sees the change, not by its
+    name: an operator has no identifier. Here a member operator and a method, declared in a header,
+    defined in one file and called in another: both suggestions are checked in both files.
+    """
+    print("=== Testing const suggestions for a member operator used in another file ===")
+    sources = {
+        "vec.hpp": "struct Vec\n{\n    int x;\n    bool operator==(Vec& o) const;\n"
+        "    int dot(Vec& o) const;\n};\n",
+        "vec.cpp": '#include "vec.hpp"\n'
+        "bool Vec::operator==(Vec& o) const\n{\n    return x == o.x;\n}\n"
+        "int Vec::dot(Vec& o) const\n{\n    return x * o.x;\n}\n",
+        "use.cpp": '#include "vec.hpp"\n'
+        "int use(Vec a, Vec b)\n{\n    return (a == b) + a.dot(b);\n}\n",
+    }
+    checked = "checked in the analyzed files only"
+    with tempfile.TemporaryDirectory(prefix="ct_const_suggestion_operator_") as tmp:
+        root = Path(tmp).resolve()
+        for name, text in sources.items():
+            (root / name).write_text(text)
+        run = _const_suggestion_run([str(root / "vec.cpp"), str(root / "use.cpp")])
+    if run is None:
+        return fail_check("the analysis did not run")
+    messages, trace, _ = run
+    ok = True
+    for label, function in (("operator==", "_ZNK3VeceqERS_"), ("dot", "_ZNK3Vec3dotERS_")):
+        texts = messages.get(function, [])
+        good = (
+            len(texts) == 1
+            and checked in texts[0]
+            and f"{function} parameter o: checked in 2 file(s)" in trace
+        )
+        print(f"  {'✅' if good else '❌'} {label}" + ("" if good else f": {texts}"))
+        ok = ok and good
+    print()
+    return ok
+```
+
+```python
+def check_const_suggestion_homonyms_across_files() -> bool:
+    """
+    #217: in C, a function with internal linkage and a function of the same name with external
+    linkage in another file are two functions: neither file declares the other's. Whichever of the
+    two gets the suggestion, the other file does not refute it, and it is checked.
+    """
+    print("=== Testing const suggestions for C homonyms with internal and external linkage ===")
+    sources = {
+        "static-reads.c": "static int helper(int* p)\n{\n    return *p;\n}\n"
+        "int use_helper(void)\n{\n    int v = 1;\n    return helper(&v);\n}\n",
+        "external-writes.c": "int helper(int* p)\n{\n    *p = 2;\n    return 0;\n}\n",
+        "external-reads.c": "int reader(int* p)\n{\n    return *p;\n}\n",
+        "static-writes.c": "static int reader(int* p)\n{\n    *p = 3;\n    return 0;\n}\n"
+        "int use_reader(void)\n{\n    int v = 1;\n    return reader(&v);\n}\n",
+    }
+    checked = "checked in the analyzed files only"
+    ok = True
+    with tempfile.TemporaryDirectory(prefix="ct_const_suggestion_homonyms_") as tmp:
+        root = Path(tmp).resolve()
+        for name, text in sources.items():
+            (root / name).write_text(text)
+        for label, files, function in (
+            (
+                "a static reader, an external writer",
+                ["static-reads.c", "external-writes.c"],
+                "helper",
+            ),
+            (
+                "an external reader, a static writer",
+                ["external-reads.c", "static-writes.c"],
+                "reader",
+            ),
+        ):
+            run = _const_suggestion_run([str(root / f) for f in files])
+            texts = run[0].get(function, []) if run else []
+            good = len(texts) == 1 and checked in texts[0]
+            print(f"  {'✅' if good else '❌'} {label}" + ("" if good else f": {texts}"))
+            ok = ok and good
+    print()
+    return ok
+```
+
+The scope after the rewrite (§5.6), a third check: a header whose text another file reads as other declarations (ruling 11):
+
+```python
+def check_const_suggestion_header_read_differently() -> bool:
+    """
+    #217: a header can mean other declarations in another file, through a macro that file defines
+    otherwise. Here pair.h declares read_value in def.c, and a global pointer in slot.c: rewriting
+    the type pair.h writes changes that global's type too, although the generated code does not
+    show it. The rewrite reaches beyond the suggestion: it is kept, not checked.
+    """
+    print("=== Testing a const suggestion whose header means other declarations elsewhere ===")
+    sources = {
+        "pair.h": "PAIR(read_value, int*)\n",
+        "def.c": '#define PAIR(name, type) int name(type p);\n#include "pair.h"\n#undef PAIR\n'
+        "int read_value(int* p)\n{\n    return *p;\n}\n",
+        "slot.c": '#define PAIR(name, type) type name##_slot;\n#include "pair.h"\n',
+    }
+    with tempfile.TemporaryDirectory(prefix="ct_const_suggestion_xmacro_") as tmp:
+        root = Path(tmp).resolve()
+        for name, text in sources.items():
+            (root / name).write_text(text)
+        run = _const_suggestion_run([str(root / "def.c"), str(root / "slot.c")])
+        expected = (
+            "not checked with Clang: the rewrite also changes the type of read_value_slot "
+            f"({root / 'pair.h'}:1)"
+        )
+    texts = run[0].get("read_value", []) if run else []
+    good = len(texts) == 1 and expected in texts[0]
+    detail = "" if good else f": {texts}"
+    print(f"  {'✅' if good else '❌'} the global slot.c declares{detail}")
+    print()
+    return good
+```
+
+A new fixture: facts refute without a change of the generated code. T v1 never sees these, since it compares only code:
+
+`test/pointer_reference-const_correctness/const-suggestion-facts-without-code-change.cpp`:
+
+```cpp
+// SPDX-License-Identifier: Apache-2.0
+// #217: a call or a constant condition that the suggested type changes refutes the suggestion,
+// even when the generated code stays the same:
+// - sized: sizeof names sized(bool) before the rewrite and sized(const int*) after it; both return
+//   int, so the size, and the code, stay the same;
+// - typed: if constexpr tests the parameter's own type, and both branches are the same code.
+
+// not contains: parameter 'p' in function 'sized(int*)'
+// not contains: parameter 'p' in function 'typed(int*)'
+#include <type_traits>
+
+int sized(int* p)
+{
+    return *p;
+}
+
+int sized(bool flag);
+
+int size_of_call(const int* q)
+{
+    return static_cast<int>(sizeof(sized(q)));
+}
+
+int typed(int* p)
+{
+    if constexpr (std::is_const_v<std::remove_pointer_t<decltype(p)>>)
+        return *p;
+    else
+        return *p;
+}
+
+// The Clang check of const suggestions is experimental: it runs only with this option.
+// analyzer-arg: --experimental-const-suggestion-check
+```
+
+Failure at `64ed37e`. D2: `operator==` is removed, "the methods it overrides change": T v1 recognizes a method by its identifier after the rewrite, and an operator has none. D3: both removed, "declared in b.c:1 / d.c:1 with type int *": T v1 takes a homonym for the function, whatever its linkage. The header: checked, since the global's new type leaves the IR as it was. The fixture: both kept as checked.
+
+```text
+check_const_suggestion_operator_used_elsewhere: FAIL
+=== Testing const suggestions for a member operator used in another file ===
+  ❌ operator==: []
+  ✅ dot
+```
+
+```text
+check_const_suggestion_homonyms_across_files: FAIL
+=== Testing const suggestions for C homonyms with internal and external linkage ===
+  ❌ a static reader, an external writer: []
+  ❌ an external reader, a static writer: []
+```
+
+```text
+check_const_suggestion_header_read_differently: FAIL
+=== Testing a const suggestion whose header means other declarations elsewhere ===
+  ❌ the global slot.c declares: ["\t[ !Info! ] ConstParameterNotModified.Pointer: parameter 'p' in function 'read_value' is never used to modify the pointed object\n\t\t ↳ current type: int *p\n\t\t ↳ suggested type: con …
+```
+
+```text
+new/const-suggestion-facts-without-code-change.cpp: FAIL (2/6)
+=== Testing evidence/217/stage1/tests/fixtures/new/const-suggestion-facts-without-code-change.cpp ===
+  ❌ (default) negative expectation #1 FOUND (unexpected)
+  ❌ (default) negative expectation #2 FOUND (unexpected)
+  ❌ (smt-z3) negative expectation #1 FOUND (unexpected)
+  ❌ (smt-z3) negative expectation #2 FOUND (unexpected)
+```
+
+Unchanged and passing at `64ed37e`: `const-suggestion-same-code.cpp`, `const-suggestion-override-elsewhere.cpp`, `pick` in `const-suggestion-deduction-refused.cpp`, `generic_selection` in `const-suggestion-must-compile.c`.
+
+- [ ] **Step 1: Add the four tests and run them.** Expected: FAIL, as above.
+  Commits: `test(const-param): check a member operator's suggestion in the file that calls it`; `test(const-param): a C homonym with another linkage is another function`; `test(const-param): a changed call or constant refutes even with the same code`; `test(const-param): keep a rewrite that changes another file's declaration`.
+- [ ] **Step 2: Move the compilation.** `DiagnosticCollector`, `Inspector`, `InspectAction`, `compile` and `scan` move to `ConstSuggestionFacts.cpp`. No behavior changes. Run: the T v1 checks and fixtures. Expected: PASS.
+  Commit: `refactor(const-param): move the compilation and its inspection to their own file`.
+- [ ] **Step 3: The entity's identity (§3, §5.5).** `plan()` describes the located function: its redeclarations' sites (the expansion location of each name, as a real path and an offset), its formal linkage (`External` for external or module linkage, `Internal` for internal or unique-external, `None` otherwise), its template pattern's first declaration, and its variants' symbols, from `CodeGenerator::GetMangledName` (a constructor's `Ctor_Complete` and `Ctor_Base`, a destructor's `Dtor_Deleting`, `Dtor_Complete` and `Dtor_Base`, otherwise the function's).
+  In every other compilation, the entity is the function that has one of those sites, once mapped back to the original text through the plan's edits:
+  ```cpp
+  // An offset of the rewritten text, in the original one. An offset inside inserted text maps
+  // to the edit's position.
+  std::size_t originalOffset(const std::vector<Edit>& sortedEdits, std::size_t offset)
+  {
+      std::size_t inserted = 0; // text the edits before `offset` add
+      std::size_t removed = 0;  // and remove
+      for (const Edit& edit : sortedEdits)
+      {
+          const std::size_t at = edit.offset + inserted - removed;
+          if (offset < at)
+              break;
+          if (offset < at + edit.text.size())
+              return edit.offset;
+          inserted += edit.text.size();
+          removed += edit.length;
+      }
+      return offset - inserted + removed;
+  }
+  ```
+  A unit that shares none of those sites declares the entity only through the linker: a function with external linkage whose symbol is one of the entity's. T v1's name and symbol test (`isTarget`, `locate`'s `withoutConst` search) goes. A unit sees the change (§5.2) through a reference in its analyzed module only if the entity has external linkage.
+  Run: both checks. Expected: PASS. Commit: `fix(const-param): find the function by its declarations, not by its name`.
+- [ ] **Step 4: Facts R, O and K (§5.4).** The `Inspector` visits the whole unit, template instantiations included:
+  - R: `DeclRefExpr`, `MemberExpr`, `CXXConstructExpr`, `CXXNewExpr` and `CXXDeleteExpr` that name a function. Key: the instantiations around the expression (each by its symbol, outermost first), and its spelling and expansion sites, mapped back. Value (ruling 4): the target's declaration sites, mapped back; for a template specialization or an implicit function, its symbol;
+  - O: for each method with the entity's `DeclarationName`, the methods it overrides (`overridden_methods()`), each by the same value as R. Key: the method's site;
+  - K: each `IfStmt` with `isConstexpr()` and a condition that is not value-dependent: `true` or `false`, from `EvaluateKnownConstInt`; each `GenericSelectionExpr` that is not result-dependent: `getResultIndex()`.
+  A symbol comes from `CodeGenerator::GetMangledName`, cached by declaration. A fact is compared only when its key's instantiations all map to the other compilation: here, through the entity's own symbol pairs (Task 1.5 adds the others). An R fact is unchanged when its value after contains its value before (ruling 4); O and K must be equal. T v1's comparison of overrides by qualified name goes.
+  Judgement step 6, after T v1's diagnostics (steps 4 and 5): the first changed fact refutes, with its text (Texts).
+  Run: the new fixture, then `const-suggestion-same-code.cpp`, `const-suggestion-override-elsewhere.cpp`, `const-suggestion-deduction-refused.cpp` and `const-suggestion-must-compile.c`. Expected: PASS.
+  Commit: `feat(const-param): refute a suggestion that changes a call, override or constant`.
+- [ ] **Step 5: Scope after the rewrite (§5.6), steps 2 and 3.** Each compilation records `writtenTypes`: the canonical type (`writtenType`) of every declaration whose name's expansion location lies in a file that some plan rewrites (`DeclaratorDecl`, `TypedefNameDecl`), neither implicit nor instantiated, by its site. After the rewrite, every site keeps its type, except the planned parameters and the entity's redeclarations; a planned parameter must have the candidate (T v1's `the rewritten declaration does not get the suggested type`). Otherwise step 3: `the rewrite also changes the type of <name> (<file>:<line>)`. A compilation with a fatal error (`hasFatalErrorOccurred()`) has an incomplete inspection, step 2: `<file> could not be inspected once rewritten`. T's compilations set no error limit (`DiagnosticOptions::ErrorLimit = 0`): "too many errors" would otherwise make a rewrite that breaks many uses incomplete instead of refuted, where T v1 refutes it. Step 2 then guards only a fatal error that a rewrite brings, such as a missing file: no input of the suite reaches it (ruling 12). The judgement now runs steps 1 to 6 in the order of §5.8; T v1's code comparison stays step 7 until Task 1.5.
+  Run: `check_const_suggestion_header_read_differently`. Expected: PASS. Commit: `feat(const-param): leave a rewrite that changes another declaration unchecked`.
+- [ ] **Step 6: Task tests.** As Task 1.1, Step 6.
+
+**Validation:** D2, D3, the header check and the new fixture pass; the refutations by R, O and K of T v1's tests unchanged.
 
 ### Task 1.5: correspondences and the comparator's pairs (§5.7, §5.9), judgement step 7
 
