@@ -43,3 +43,16 @@ int use_picker(int* p)
 {
     return Picker{}.pick(p);
 }
+
+// A variadic constructor: the debug type of the function ends with a null entry for `...`, which
+// no parameter takes. Under the Microsoft ABI, is_most_derived comes second.
+struct Varargs : virtual Base
+{
+    Varargs(int* x, double* y, ...);
+};
+
+Varargs::Varargs(int* x, double* y, ...)
+{
+    seed = *x + static_cast<int>(*y);
+}
+
