@@ -1,7 +1,7 @@
 # Vérification des suggestions const par Clang, version 2 (#217)
 
-Statut : conception validée en conversation (approche 1, sections A à D) ; à relire avant le plan
-d'implémentation. N'autorise ni le code ni la modification des tests : chaque lot présentera ses
+Statut : validée à `8b283a8`, puis complétée à la relecture du plan d'implémentation (D17, fixture
+de D13). N'autorise ni le code ni la modification des tests : chaque lot présentera ses
 tests, avec leurs preuves d'échec, avant de les ajouter. La fusion n'est pas autorisée.
 Issue : #217. Liens : #221 (T v1, référence conservée), #167 (faits et contrat const), #197
 (identité d'un global entre fichiers).
@@ -283,7 +283,7 @@ suggestion valide.
 
 | # | Défaut (cas) | Fait observé | Verdict attendu | Test prévu | Étape |
 |---|---|---|---|---|---|
-| D1 | paramètre artificiel `vtt` d'un constructeur de base (t10) | la règle suggère `vtt` ; T réécrit `x` et l'affiche « checked » ; `x` (variante C2) est retiré | P0 : plus de suggestion sur `vtt`. T : `x` vérifiée. Un paramètre artificiel qui atteindrait T : indéterminée | P0 : fixture de la règle. T : fixture du constructeur | P0, 1 |
+| D1 | paramètre artificiel `vtt` d'un constructeur de base (t10) | la règle suggère `vtt` ; T réécrit `x` et l'affiche « checked » ; `x` (variante C2) est retiré | P0 : plus de suggestion sur `vtt`. T : `x` vérifiée. Un paramètre artificiel qui atteindrait T : indéterminée | P0 : test unitaire de la liaison et fixture de la règle. T : fixture du constructeur | P0, 1 |
 | D2 | opérateur membre utilisé dans un autre fichier (t1) | retirée : « the methods it overrides change » | vérifiée (VP) | contrôle run_test.py à deux fichiers | 1 |
 | D3 | homonymes C `static` et externe (t2, deux sens) | retirée : « declared in b.c / d.c » | vérifiée (VP), dans les deux sens ; README corrigé | contrôle run_test.py, deux sens | 1 |
 | D4 | `f(const int*)` défini dans un autre fichier (t9) | « checked in 2 file(s) » ; l'appliquer définit `_Z1fPKi` deux fois | indéterminée, en énonçant l'hypothèse d'édition de liens | contrôle run_test.py : fichiers analysés ensemble, et autre fichier venant seulement de la base | 1 |
@@ -293,11 +293,12 @@ suggestion valide.
 | D14 | correspondance non unique traitée comme une réfutation (`const-suggestion-deduction-refused.cpp`, cas `call`) | retirée | indéterminée (gardée) ; `pick` reste réfutée (condition `if constexpr`) | attente modifiée de la fixture | 1 |
 | D15 | conversion explicite de l'adresse traitée comme une réfutation (`cross-tu-const-suggestion-cast.c`) | retirée | indéterminée (gardée), sauf erreur ou effet établi | attentes modifiées des deux contrôles run_test.py qui l'utilisent | 1 |
 | D16 | `sizeof(__PRETTY_FUNCTION__)` (`const-suggestion-printed-signature.c`, cas `signature_size`) | retirée : le code généré change | indéterminée (gardée) : la différence n'est expliquée ni par R, ni par O, ni par K ; K n'est pas élargi pour conserver l'ancien verdict | attente modifiée de la fixture | 1 |
+| D17 | redéclaration avec l'ancien type dans un autre fichier (`cross-tu-const-suggestion-redecl.c`), relevée à la planification | retirée : le fichier déclare la fonction lui-même, sans l'en-tête | indéterminée (gardée non vérifiée, ce qui ne démontre pas qu'elle est valide) ; la raison nomme le fichier et l'hypothèse d'édition de liens (§5.10) | attentes modifiées de `check_const_suggestion_cross_tu` et de `check_const_suggestion_compilation_database` | 1 |
 | D6 | `-Werror` du projet et groupe suivi désactivé (t5) | « not checked: does not compile as it is » | vérifiée (VP) | fixture avec `--compile-arg` | 2 |
 | D8 | définition C, utilisateur C++ via `extern "C"` (t4) | « not checked: the rewritten declaration does not get the suggested type » ; témoin C vérifié | vérifiée (VP) | contrôle run_test.py, avec le témoin | 2 |
 | D10 | `const` écrit devant un typedef de pointeur (t3/t.c, t3/t.cpp) | réécrit en `const const int *` ; « not checked » | vérifiée (`const int *const`) ; indéterminée si le qualificatif vient d'une macro | fixtures C et C++ | 2 |
 | D12 | alternative de `ReferenceRvaluePreferValue` | seul `const T &` est vérifié ; la ligne dit « the suggested type » | vérifiée ; le type affiché et la ligne nomment `const T &`, le passage par valeur n'est pas vérifié | attentes modifiées (`const-suggestion-deduction-kept.cpp` et autres) | 2 |
-| D13 | `PointerConstOnly` (t15) | affiche `const int *p`, vérifie `const int *const p` | vérifiée ; le type affiché et la ligne nomment `const int *const p` | attentes modifiées des fixtures concernées | 2 |
+| D13 | `PointerConstOnly` (t15) | affiche `const int *p`, vérifie `const int *const p` | vérifiée ; le type affiché et la ligne nomment `const int *const p` | nouvelle fixture qui active T, aucune fixture de T v1 ne couvrant `PointerConstOnly` ; le test existant sans l'option reste inchangé | 2 |
 
 **Non retenus :**
 - le cache « avant » indexé par l'identifiant (point 9 de la revue) : non reproduit (t12) ; les
@@ -312,7 +313,8 @@ l'invocation Clang en double. Les deux coûts ne sont traités que s'ils sont me
 
 - **TDD, défaut par défaut.** Chaque test est soumis avec la preuve de son échec avant d'être ajouté.
 - **Non-régression.** Tous les tests de T v1, sauf les attentes à modifier, elles aussi soumises :
-  D12, D13, D14, D15 et D16.
+  D12, D14, D15, D16 et D17. D13 ajoute une fixture qui active T ; le test existant sans l'option
+  reste inchangé.
 - **Corpus** (`src/`, zlib, tinyxml2, PCRE2). Chaque suggestion est comparée entre trois sorties :
   sans l'option, T v1 et T v2. Elle est classée vérifiée, gardée indéterminée, ou retirée sur une
   réfutation établie. Chaque disparition par rapport à la sortie sans l'option est expliquée par sa
@@ -336,8 +338,8 @@ acceptation d'un dépassement.
 2. **Branche `217-t-v2`**, depuis `2a5b0c1`. T v1 reste une référence immuable (`217-t-v1`, #221,
    bundle). Après la fusion de P0, `main` actualisé y est intégré et l'ensemble est validé.
 3. **Étape 1** : flux, identités, plan et portée, faits R, O et K, correspondances, paires établies
-   pour le comparateur, collisions, trace ; D1 (partie T), D2, D3, D4, D5, D7, D11, D14, D15 et
-   D16.
+   pour le comparateur, collisions, trace ; D1 (partie T), D2, D3, D4, D5, D7, D11, D14, D15, D16
+   et D17.
 4. **Étape 2** : D6, D8, D10, D12 et D13.
 5. **Étape 3** : les coûts mesurés et l'invocation Clang construite en un seul endroit.
 6. **Comparaison des corpus, mesure du coût et README** ; une PR en brouillon. La revue finale porte
