@@ -989,11 +989,222 @@ struct SymbolPair { std::string before; std::string after; };                   
 
 ### Task 1.1: units, verdicts, aggregation, report
 
-**Files:** `ConstSuggestionCheck.cpp`, `ConstSuggestionInternal.hpp`, `DiagnosticEmitter.cpp`.
-**Interfaces:** produces `Verdict`, `Judgement`, `UnitConfiguration`, `aggregate(const std::vector<Judgement>&) -> Judgement` (§5.10: refuted if a unit refutes; else indeterminate if a unit or a collision is; else verified).
-**Work:** one unit per file and configuration that the loader provides; the units that see the change as §5.2 defines them, from T v1's scan; a unit without a command, that cannot be preprocessed or does not compile as it is, unverifiable (judgement step 1); one initial compilation per unit and configuration, whose artifact (diagnostics, prepared IR, defined symbols, and the facts its inspection collects for every planned entity) every suggestion shares; what depends on the entity is derived from that artifact, never by compiling the unit again (§5, step 3). T v1 compiles a unit once per function name, so two functions of one file cost two initial compilations; T v1's outcomes mapped onto the three verdicts with T v1's texts; the trace names each unit's file and configuration fingerprint on its own `[const-suggestion]` line.
-**Tests:** Review Focus 4, a new `run_test.py` check (a compilation database that lists `cross-tu-const-suggestion-def.c` twice, with and without `-DREAD_TWICE`; the trace names one configuration for that file; the "checked" line stays T v1's).
-**Validation:** every T v1 test passes unchanged; the new check passes.
+**Files:** `src/analysis/ConstSuggestionCheck.cpp`, `src/analysis/ConstSuggestionInternal.hpp`, `run_test.py`.
+
+**Interfaces.** Produces `Verdict`, `Judgement`, `UnitConfiguration` (Shared types) and:
+```cpp
+// §5.10: refuted if a judgement refutes, else indeterminate if one is, else verified; with the
+// reason of the first judgement that has that verdict (ruling 1).
+Judgement aggregate(const std::vector<Judgement>& judgements);
+// 16 hexadecimal digits: xxh3 of the arguments and the working directory, each NUL-terminated.
+std::string fingerprintOf(const UnitCommand& command);
+```
+
+**Tests.** A helper that later tasks' checks share, and two checks, registered after `check_const_suggestion_both_modes`:
+
+```python
+def _const_suggestion_run(
+    args: list[str], env_overrides: Optional[dict[str, str]] = None
+) -> Optional[tuple[dict[str, list[str]], list[str], str]]:
+    """
+    #217: runs the analyzer with the Clang check of const suggestions and its trace (--verbose), on
+    inputs the cache key does not cover. Returns the messages of the const suggestions by function
+    (a function reported twice, such as a constructor's two variants, has two), the trace's lines
+    without their "[const-suggestion] " prefix, and the whole output; None when the analysis did
+    not run.
+    """
+    result = run_analyzer_uncached(
+        [*args, "--format=json", "--experimental-const-suggestion-check", "--verbose"],
+        env_overrides,
+    )
+    if result.returncode != 0:
+        return None
+    try:
+        diagnostics = json.loads(result.stdout or "").get("diagnostics", [])
+    except json.JSONDecodeError:
+        return None
+    messages: dict[str, list[str]] = {}
+    for d in diagnostics:
+        if str(d.get("ruleId", "")).startswith("ConstParameterNotModified"):
+            function = str(d.get("location", {}).get("function", ""))
+            messages.setdefault(function, []).append(str(d.get("details", {}).get("message", "")))
+    output = (result.stdout or "") + (result.stderr or "")
+    trace = [
+        line.split("[const-suggestion] ", 1)[1]
+        for line in output.splitlines()
+        if "[const-suggestion] " in line
+    ]
+    return messages, trace, output
+```
+
+Review Focus 4, the one configuration of a file the database lists twice:
+
+```python
+def check_const_suggestion_one_configuration_per_file() -> bool:
+    """
+    #217: a compilation database can list a file twice, with different commands. The analysis
+    loads one command per file, and the Clang check of const suggestions compiles each file with
+    that one only: its trace names one configuration for each file, here the defining file,
+    analyzed, and a caller that only the database lists.
+    """
+    print("=== Testing const suggestions with files the compilation database lists twice ===")
+    fixtures = (RUN_CONFIG.test_dir / "pointer_reference-const_correctness").resolve()
+    definition = fixtures / "cross-tu-const-suggestion-def.c"
+    caller = fixtures / "cross-tu-const-suggestion-caller.c"
+    unit = re.compile(r"read_value parameter p, unit (\S+) \[([0-9a-f]+)\]: ")
+    with tempfile.TemporaryDirectory(prefix="ct_const_suggestion_twice_") as tmp:
+        database = Path(tmp).resolve() / "compile_commands.json"
+        # A macro the files do not use: the two commands differ, the code does not.
+        database.write_text(
+            json.dumps(
+                [
+                    {
+                        "directory": str(fixtures),
+                        "file": str(f),
+                        "arguments": ["clang", *extra, "-I", str(fixtures), "-c", str(f)],
+                    }
+                    for f in (definition, caller)
+                    for extra in ([], ["-DLISTED_TWICE"])
+                ]
+            )
+        )
+        run = _const_suggestion_run([str(definition), f"--compile-commands={database}"])
+    if run is None:
+        return fail_check("the analysis did not run")
+    messages, trace, _ = run
+    configurations: dict[str, set[str]] = {}
+    for line in trace:
+        match = unit.match(line)
+        if match:
+            configurations.setdefault(match.group(1), set()).add(match.group(2))
+    checked = "checked in every file of the compilation database that sees the change"
+    ok = True
+    for label, good in (
+        (
+            "the suggestion is checked in the compilation database",
+            any(checked in text for text in messages.get("read_value", [])),
+        ),
+        (
+            "one configuration of the defining file",
+            len(configurations.get(str(definition), ())) == 1,
+        ),
+        ("one configuration of the caller", len(configurations.get(str(caller), ())) == 1),
+    ):
+        print(f"  {'✅' if good else '❌'} {label}" + ("" if good else f": {configurations}"))
+        ok = ok and good
+    print()
+    return ok
+```
+
+Ruling 6, the initial compilation shared by the suggestions:
+
+```python
+def check_const_suggestion_compiles_each_file_once() -> bool:
+    """
+    #217: the Clang check compiles each file that sees a change once as it is, for all the
+    suggestions it checks there: here two functions, defined in one file and called in another.
+    Each file is compiled once before the rewrites (`--timing`), and both suggestions are checked.
+    """
+    print("=== Testing that each file is compiled once as it is for several const suggestions ===")
+    sources = {
+        "readers.h": "int read_a(int* p);\nint read_b(int* q);\n",
+        "readers.c": '#include "readers.h"\n'
+        "int read_a(int* p)\n{\n    return *p;\n}\n"
+        "int read_b(int* q)\n{\n    return *q + 1;\n}\n",
+        "user.c": '#include "readers.h"\n'
+        "int use_both(void)\n{\n    int v = 1;\n    return read_a(&v) + read_b(&v);\n}\n",
+    }
+    calls = re.compile(r"const_suggestion\.compile\.(\w+) .*\bcalls=(\d+)")
+    with tempfile.TemporaryDirectory(prefix="ct_const_suggestion_once_") as tmp:
+        root = Path(tmp).resolve()
+        for name, text in sources.items():
+            (root / name).write_text(text)
+        # Every hotspot, not the 20 longest.
+        run = _const_suggestion_run(
+            [str(root / "readers.c"), str(root / "user.c"), "--timing"],
+            {"CTRACE_HOTSPOT_TOP": "200"},
+        )
+    if run is None:
+        return fail_check("the analysis did not run")
+    messages, _, output = run
+    compiled = {m.group(1): int(m.group(2)) for m in calls.finditer(output)}
+    checked = "checked in the analyzed files only"
+    ok = True
+    for label, good in (
+        (
+            "both suggestions are checked",
+            all(any(checked in t for t in messages.get(f, [])) for f in ("read_a", "read_b")),
+        ),
+        ("the defining file is compiled once as it is", compiled.get("defining_before") == 1),
+        ("the other file is compiled once as it is", compiled.get("other_before") == 1),
+    ):
+        print(f"  {'✅' if good else '❌'} {label}" + ("" if good else f": {compiled}"))
+        ok = ok and good
+    print()
+    return ok
+```
+
+Failure at `64ed37e`: no trace line names a unit; the caller is compiled once per function name.
+
+```text
+check_const_suggestion_one_configuration_per_file: FAIL
+=== Testing const suggestions with files the compilation database lists twice ===
+  ✅ the suggestion is checked in the compilation database
+  ❌ one configuration of the defining file: {}
+  ❌ one configuration of the caller: {}
+```
+
+```text
+check_const_suggestion_compiles_each_file_once: FAIL
+=== Testing that each file is compiled once as it is for several const suggestions ===
+  ✅ both suggestions are checked
+  ✅ the defining file is compiled once as it is
+  ❌ the other file is compiled once as it is: {'after': 4, 'other_before': 2, 'defining_before': 1}
+```
+
+- [ ] **Step 1: Add the helper and the two checks, then run them.**
+  Run: the one-check command for `check_const_suggestion_one_configuration_per_file`, then for `check_const_suggestion_compiles_each_file_once`.
+  Expected: FAIL, as above.
+- [ ] **Step 2: Commit the tests.**
+  `test(const-param): name the one configuration of a file listed twice`;
+  `test(const-param): compile each file once as it is for all its suggestions`.
+- [ ] **Step 3: Judgements and aggregation.** Add `Verdict`, `Judgement`, `UnitConfiguration` and `aggregate` to `ConstSuggestionInternal.hpp` and `ConstSuggestionCheck.cpp`:
+  ```cpp
+  Judgement aggregate(const std::vector<Judgement>& judgements)
+  {
+      for (const Verdict verdict : {Verdict::Refuted, Verdict::Indeterminate})
+      {
+          for (const Judgement& judgement : judgements)
+          {
+              if (judgement.verdict == verdict)
+                  return judgement;
+          }
+      }
+      return {};
+  }
+  ```
+  `checkUnit` returns a `Judgement` instead of its `bool` and its `removed` and `notChecked` strings: T v1's `removed` text is a refutation's reason, its `notChecked` text an indeterminate one's, and a unit that passes is verified. The loop over the units keeps T v1's order and stops at the first refutation, as T v1 does. The outcome maps onto T v1's report: refuted removes the suggestion (`removed, <reason>`), indeterminate adds `kNotChecked + reason` (`not checked, <reason>`), verified adds the "checked" line and the ABI line, unchanged.
+  Commit: `refactor(const-param): judge each unit and aggregate three verdicts`.
+- [ ] **Step 4: Units and their configuration.** A unit is a `UnitConfiguration`: the file's real path (`canonicalPath`), its `UnitCommand` (`commandFor`, cached as T v1 caches it in `AnalyzedUnits::commands`), and `fingerprintOf(command)`:
+  ```cpp
+  std::string fingerprintOf(const UnitCommand& command)
+  {
+      std::string text;
+      for (const std::string& arg : command.args)
+          text.append(arg).push_back('\0');
+      text.append(command.workingDir).push_back('\0');
+      return llvm::utohexstr(llvm::xxh3_64bits(text), /*LowerCase=*/true, /*Width=*/16);
+  }
+  ```
+  After each unit's judgement, the trace gives a line `<symbol> parameter <name>, unit <file> [<fingerprint>]: <verdict>[: <reason>]`, through a second `coretrace::log` call next to T v1's `trace`.
+  Run: the one-check command for `check_const_suggestion_one_configuration_per_file`. Expected: PASS.
+  Commit: `feat(const-param): name each unit and its configuration in the trace`.
+- [ ] **Step 5: One initial compilation per unit and configuration.** `originalOf` is keyed by the unit (`file` and `fingerprint`), no longer by `(unit, function name)`, and compiles the unit once with every target of the module: `Original` keeps one entry of facts per target (`std::vector<FunctionFacts>`, indexed like `targets`). `checkUnit` reads the entry of its suggestion.
+  Run: the one-check command for `check_const_suggestion_compiles_each_file_once`. Expected: PASS.
+  Commit: `perf(const-param): compile each other file once as it is for all suggestions`.
+- [ ] **Step 6: Task tests.** Build; unit tests; the T v1 checks and fixtures (`python3 run_test.py --jobs 8 --no-cache`). Expected: all pass; the trace lines of T v1 unchanged (`check_const_suggestion_removal_reason`).
+
+**Validation:** every T v1 test passes unchanged; both new checks pass.
 
 ### Task 1.2: the parameter from P0
 
