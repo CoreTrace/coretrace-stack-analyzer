@@ -2321,12 +2321,106 @@ check_const_suggestion_compilation_database: FAIL
 
 ### Task 1.8: trace and README
 
-**Files:** `ConstSuggestionCheck.cpp`, `README.md`.
-**Work:** the trace of §4 for each verdict (rule, function and symbol, parameter by name and source index, transformation, unit and configuration, verdict and reason), on `[const-suggestion]` lines after T v1's; the README describes the three verdicts and the limits of §10.
-**Tests:** `check_const_suggestion_removal_reason` unchanged; a new check of the trace fields on one verified, one refuted and one indeterminate suggestion.
-**Validation:** both pass.
+**Files:** `src/analysis/ConstSuggestionCheck.cpp`, `src/analysis/ConstSuggestionPlan.cpp`, `src/analysis/ConstSuggestionInternal.hpp`, `README.md`, `run_test.py`.
 
-**Validation of stage 1:** the catalogue tests D1 (T), D2, D3, D4, D5, D7, D11, D14, D15, D16, D17 and Review Focus 2 to 4 pass; every T v1 test passes, except the changed expectations of D14, D15, D16 and D17; suite without and with the option, unit tests, on macOS and Linux; review cases t1 to t15 give the verdicts of §6 for the stage-1 IDs; CI green and code scanning triaged.
+**Interfaces.** Adds `Candidate` and `SuggestionPlan::candidate` (Shared types): `current` and `type` printed with the parameter's name (`QualType::print` with the name as placeholder, `const int *const p` for `PointerConstOnly`), `alternative` from the rule (Texts).
+
+**Tests.** A new check of the trace's fields, on one verified, one refuted and one indeterminate suggestion; `check_const_suggestion_removal_reason` unchanged:
+
+```python
+def check_const_suggestion_trace() -> bool:
+    """
+    #217: with --verbose, the trace gives each verdict's grounds after the line of its outcome: the
+    suggestion (rule, function, the parameter's index among the source's parameters), the
+    transformation (current type, candidate, alternative) and where it is written, each unit
+    checked with its configuration and its verdict, then the verdict and its reason. Here one
+    suggestion verified, one refuted and one not checked.
+    """
+    print("=== Testing the trace of const suggestion verdicts ===")
+    source = (
+        "int read_value(int* p)\n{\n    return *p;\n}\n"
+        "static int read_slot(int* slot)\n{\n    return *slot;\n}\n"
+        "int (*const stored)(int*) = read_slot;\n"
+        "#define DECLARE(name) int name(int* q)\n"
+        "DECLARE(read_macro)\n{\n    return *q;\n}\n"
+    )
+    with tempfile.TemporaryDirectory(prefix="ct_const_suggestion_trace_") as tmp:
+        path = Path(tmp).resolve() / "verdicts.c"
+        path.write_text(source)
+        run = _const_suggestion_run([str(path)])
+    if run is None:
+        return fail_check("the analysis did not run")
+    _, trace, _ = run
+    file = re.escape(str(path))
+    unit = rf"unit {file} \[[0-9a-f]+\]"
+    rule = r"ConstParameterNotModified\.Pointer"
+    expected = {
+        "verified": [
+            r"read_value parameter p: checked in 1 file\(s\)",
+            rf"read_value parameter p, suggestion: {rule} on read_value, source index 0",
+            r"read_value parameter p, transformation: int \*p becomes const int \*p "
+            r"\(pointer to const\)",
+            rf"read_value parameter p, rewritten at: {file}:1",
+            rf"read_value parameter p, {unit}: verified",
+            r"read_value parameter p, verdict: verified",
+        ],
+        "refuted": [
+            rf"read_slot parameter slot: removed, does not compile: {file}:9:",
+            rf"read_slot parameter slot, suggestion: {rule} on read_slot, source index 0",
+            r"read_slot parameter slot, transformation: int \*slot becomes const int \*slot "
+            r"\(pointer to const\)",
+            rf"read_slot parameter slot, rewritten at: {file}:5",
+            rf"read_slot parameter slot, {unit}: refuted: does not compile: {file}:9:",
+            rf"read_slot parameter slot, verdict: refuted: does not compile: {file}:9:",
+        ],
+        "not checked": [
+            r"read_macro parameter q: not checked, the declaration is written by a macro "
+            r"definition",
+            rf"read_macro parameter q, suggestion: {rule} on read_macro, source index 0",
+            r"read_macro parameter q, transformation: int \*q becomes const int \*q "
+            r"\(pointer to const\)",
+            r"read_macro parameter q, verdict: indeterminate: the declaration is written by a "
+            r"macro definition",
+        ],
+    }
+    ok = True
+    for label, patterns in expected.items():
+        missing = [p for p in patterns if not any(re.match(p, line) for line in trace)]
+        good = not missing
+        print(f"  {'✅' if good else '❌'} {label}" + ("" if good else f": missing {missing}"))
+        ok = ok and good
+    if not ok:
+        print("     trace:\n" + "\n".join(f"       {line}" for line in trace))
+    print()
+    return ok
+```
+
+Failure at `64ed37e`: only T v1's line per suggestion.
+
+```text
+check_const_suggestion_trace: FAIL
+=== Testing the trace of const suggestion verdicts ===
+  ❌ verified: missing ['read_value parameter p, suggestion: ConstParameterNotModified\\.Pointer on read_value, source index 0', 'read_value parameter p, transformation: int \\*p becomes const int \\*p \\(pointer to const …
+  ❌ refuted: missing ['read_slot parameter slot, suggestion: ConstParameterNotModified\\.Pointer on read_slot, source index 0', 'read_slot parameter slot, transformation: int \\*slot becomes const int \\*slot \\(pointer  …
+  ❌ not checked: missing ['read_macro parameter q, suggestion: ConstParameterNotModified\\.Pointer on read_macro, source index 0', 'read_macro parameter q, transformation: int \\*q becomes const int \\*q \\(pointer to co …
+```
+
+- [ ] **Step 1: Add the check and run it.** Expected: FAIL, as above.
+  Commit: `test(const-param): give each verdict's grounds in the trace`.
+- [ ] **Step 2: The trace (§4).** After T v1's line, `checkConstSuggestions` logs the `suggestion`, `transformation`, `rewritten at` and `verdict` lines (Texts), around Task 1.1's `unit` lines. A suggestion not planned has no `rewritten at` and no `unit` line.
+  Run: `check_const_suggestion_trace`, `check_const_suggestion_removal_reason`. Expected: PASS.
+  Commit: `feat(const-param): trace the suggestion, its rewrite, its units and its verdict`.
+- [ ] **Step 3: README.** "Const parameter suggestions checked with Clang" describes:
+  - the three verdicts (§3): verified, with the "checked" line; refuted, removed, on an error or a tracked warning introduced, or a changed call, override or constant condition; indeterminate, kept with `not checked with Clang: <reason>`;
+  - steps 1 to 3 as T v2 runs them: the plan and its scope, the units that see the change, the judgement of §5.8;
+  - the limits of §10: collisions between files and the ODR not decided, one configuration per file, a change of behavior that R, O and K do not cover kept as not checked (`signature_size`), a cost to measure (stage 3).
+  The experimental notice keeps its sense; the sentence "A difference its normalizations do not cover removes a suggestion that is valid" becomes "A difference that the facts do not explain keeps the suggestion as not checked".
+  Commit: `docs(readme): describe the three verdicts of the const suggestion check`.
+- [ ] **Step 4: Task tests.** As Task 1.1, Step 6.
+
+**Validation:** both checks pass.
+
+**Validation of stage 1:** the catalogue tests D1 (T), D2, D3, D4, D5, D7, D11, D14, D15, D16, D17, Review Focus 2 to 4, and the tests that rulings 6, 11 and 13 add, pass; every T v1 test passes, except the changed expectations of D14, D15, D16 and D17; the suite without and with the option, the unit tests, on macOS and Linux; the review cases t1 to t15 give the verdicts of §6 for the stage-1 IDs; CI green and code scanning triaged.
 
 ## Stage 2 — D6, D8, D10, D12, D13
 
