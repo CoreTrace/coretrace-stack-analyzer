@@ -12,7 +12,7 @@
 
 **Level of detail.** P0 is planned step by step with its code, validated in a throwaway prototype (evidence below). Stages 1 to 3 and the final phase are planned to the level of tasks, files, interfaces, tests and validation criteria. The step-level code of a stage is added to this plan when that stage starts: P0 and the updated `main` are integrated first, and they change the code these stages modify. A stage starts only once the previous one is validated.
 
-**Evidence:** `coretrace-stack-analyzer-evidence/217/p0/` (`repro/`, `harness/`, `fixture/`, `effect/`, `prototype-v1.diff`, `prototype-v2.diff`, `ir/`, `variadic/`).
+**Evidence:** `coretrace-stack-analyzer-evidence/217/p0/` (`repro/`, `harness/`, `fixture/`, `effect/`, `prototype-v1.diff`, `prototype-v2.diff`, `prototype-v3.diff`, `ir/`, `variadic/`, `review-v3/`).
 
 **Execution:** native (superpowers:executing-plans), as the user chose; an independent review of P0 before its merge (Task P0.2). Progress ledger: `wt-217-v2/.superpowers/sdd/2026-10-16-const-suggestion-check-v2/progress.md`.
 
@@ -100,14 +100,14 @@ Root cause, at `main` `d1d9271`. At `-O0`, `buildDebugParamLayout` indexes the f
 - `is_most_derived` (an `int`) is reported as `double *is_most_derived`;
 - a block's `.block_descriptor` is reported as `<unknown type> *.block_descriptor`.
 
-Two counts make the correction harder than an offset. A variadic function's subroutine type ends with a null entry for `...`, which no parameter takes: counted as a parameter, it shifts `x` and `y` again in `D(int* x, double* y, ...)`. An empty parameter takes no IR argument but keeps its debug declaration and its number: counting the spilled arguments misses it. The number of declared parameters is therefore read from the debug declarations, and a layout that the counts do not establish leaves the parameter without a type, never with a guessed one.
+The fix takes each spilled parameter's type and artificiality from its own declaration, the one `spilledParameter` finds; this alone binds every case above. The subroutine type stays a fallback for a declaration that gives no type, only where its entries are established, and for arguments without a declaration, like a hidden sret, whose count no longer includes the null entry that ends a variadic function's type. A first prototype reconciled positions in the subroutine type instead (`evidence/217/p0/prototype-v2.diff`); it was dropped once the direct declaration was shown to bind every case, with no output change on the 424 fixtures.
 
 Reproductions: `evidence/217/p0/repro/` (`main-d1d9271.txt`, `caller-main-d1d9271.txt`, `block-main-d1d9271.txt`).
 
 ### Task P0.1: bind each parameter to its own declaration
 
 **Files:**
-- Create: `test/unit/parameter_binding_input.cpp`, `test/unit/parameter_binding_block_input.c`, `test/unit/parameter_binding_unknown_input.ll`
+- Create: `test/unit/parameter_binding_input.cpp`, `test/unit/parameter_binding_block_input.c`, `test/unit/parameter_binding_unknown_input.ll` (Step 12)
 - Create: `test/pointer_reference-const_correctness/virtual-base-vtt.cpp`
 - Modify: `test/unit/analyzer_module_unit_tests.cpp` (includes, new test, its call in `main`)
 - Modify: `include/analysis/ParameterDebugBinding.hpp`, `src/analysis/ParameterDebugBinding.cpp`
@@ -378,9 +378,9 @@ git add test/unit/analyzer_module_unit_tests.cpp test/unit/parameter_binding_inp
 git commit -m "test(const-param): an artificial parameter is neither reported nor shifts the others"
 ```
 
-- [ ] **Step 7: Add the cases submitted after the plan's review, once the user authorizes them.** A variadic function's debug type ends with a null entry for `...`; an empty parameter takes no IR argument but keeps its debug declaration; a variadic function can return a struct through a hidden argument; and a layout that the debug information does not establish must leave the parameter without a type.
+- [ ] **Step 7: Add the Clang cases the user authorized, one commit each.** A variadic function's debug type ends with a null entry for `...`; an empty parameter takes no IR argument but keeps its debug declaration; a variadic function can return a struct through a hidden argument.
 
-Append to `test/unit/parameter_binding_input.cpp`:
+Step 7a, variadic constructors. Append to `test/unit/parameter_binding_input.cpp`:
 
 ```cpp
 // A variadic constructor: the debug type of the function ends with a null entry for `...`, which
@@ -395,6 +395,40 @@ Varargs::Varargs(int* x, double* y, ...)
     seed = *x + static_cast<int>(*y);
 }
 
+```
+
+In `testParameterDebugBinding`, give `describe` a branch for a parameter without a type, between the artificial branch and the pointer one:
+
+```cpp
+                else if (!binding.type)
+                {
+                    text += "no type";
+                }
+```
+
+and add, after the block's check:
+
+```cpp
+        // A variadic function's debug type ends with a null entry for `...`, which no parameter
+        // takes; an empty parameter takes no IR argument, but keeps its debug declaration.
+        check(itanium, "_ZN7VarargsC2EPiPdz",
+              {"this: artificial", "vtt: artificial", "x: int *", "y: double *"});
+        check(microsoft, "??0Varargs@@QEAA@PEAHPEANZZ",
+              {"this: artificial", "is_most_derived: artificial", "x: int *", "y: double *"});
+```
+
+Expected RED, besides the four failures of Step 5:
+
+```
+[FAIL] ParameterDebugBinding: _ZN7VarargsC2EPiPdz [this: artificial] [vtt: int *] [x: double *] [y: no type]
+[FAIL] ParameterDebugBinding: ??0Varargs@@QEAA@PEAHPEANZZ [this: artificial] [is_most_derived: int *] [x: double *] [y: no type]
+```
+
+Commit: `test(const-param): a variadic constructor keeps the types of its parameters` (the input and the test file).
+
+Step 7b, an empty parameter. Append to the input:
+
+```cpp
 // An empty parameter takes no IR argument, but keeps its debug declaration and its number.
 struct Tag
 {
@@ -411,6 +445,13 @@ Tagged::Tagged(int* x, Tag tag)
     seed = *x;
 }
 
+```
+
+and, after the variadic checks: `check(itanium, "_ZN6TaggedC2EPi3Tag", {"this: artificial", "vtt: artificial", "x: int *"});`. Expected RED: `[FAIL] ParameterDebugBinding: _ZN6TaggedC2EPi3Tag [this: artificial] [vtt: int *] [x: ? *]`. Commit: `test(const-param): an empty parameter shifts no other parameter`.
+
+Step 7c, a variadic hidden return. Append to the input:
+
+```cpp
 // A variadic function that returns a struct through a hidden argument.
 struct Big
 {
@@ -425,75 +466,9 @@ Big make_big(int* p, ...)
 }
 ```
 
-Create `test/unit/parameter_binding_unknown_input.ll`:
+and add `check(itanium, "_Z8make_bigPiz", {"agg.result: artificial", "p: int *"});`. Expected RED: `[FAIL] ParameterDebugBinding: _Z8make_bigPiz [agg.result: int *] [p: int *]`. Commit: `test(const-param): a variadic function's hidden return argument is artificial`.
 
-```llvm
-; SPDX-License-Identifier: Apache-2.0
-; An artificial parameter other than `this`, in a function whose debug type lists three parameters:
-; neither all the declared ones (2) nor all but the artificial one (1). Where the type lists x is not
-; established, so x takes no type from it.
-
-define void @unestablished(ptr %hidden, ptr %x) !dbg !10 {
-entry:
-  %hidden.addr = alloca ptr
-  %x.addr = alloca ptr
-  store ptr %hidden, ptr %hidden.addr
-    #dbg_declare(ptr %hidden.addr, !14, !DIExpression(), !16)
-  store ptr %x, ptr %x.addr
-    #dbg_declare(ptr %x.addr, !15, !DIExpression(), !16)
-  ret void, !dbg !16
-}
-
-!llvm.dbg.cu = !{!0}
-!llvm.module.flags = !{!2, !3}
-
-!0 = distinct !DICompileUnit(language: DW_LANG_C_plus_plus_14, file: !1, producer: "hand-written", isOptimized: false, runtimeVersion: 0, emissionKind: FullDebug)
-!1 = !DIFile(filename: "parameter_binding_unknown_input.ll", directory: ".")
-!2 = !{i32 7, !"Dwarf Version", i32 5}
-!3 = !{i32 2, !"Debug Info Version", i32 3}
-!10 = distinct !DISubprogram(name: "unestablished", scope: !1, file: !1, line: 1, type: !11, scopeLine: 1, spFlags: DISPFlagDefinition, unit: !0)
-!11 = !DISubroutineType(types: !12)
-!12 = !{null, !13, !13, !13}
-!13 = !DIDerivedType(tag: DW_TAG_pointer_type, baseType: !17, size: 64)
-!14 = !DILocalVariable(name: "hidden", arg: 1, scope: !10, file: !1, line: 1, type: !13, flags: DIFlagArtificial)
-!15 = !DILocalVariable(name: "x", arg: 2, scope: !10, file: !1, line: 1, type: !13)
-!16 = !DILocation(line: 1, scope: !10)
-!17 = !DIBasicType(name: "int", size: 32, encoding: DW_ATE_signed)
-```
-
-In `testParameterDebugBinding`, give `describe` a branch for a parameter without a type, between the artificial branch and the pointer one:
-
-```cpp
-                else if (!binding.type)
-                {
-                    text += "no type";
-                }
-```
-
-declare `LoadedModule unestablished;` after `LoadedModule blocks;`, load it last:
-
-```cpp
-            !load("parameter_binding_block_input.c", {"-fblocks"}, blocks) ||
-            !load("parameter_binding_unknown_input.ll", {}, unestablished))
-            return false;
-```
-
-and add, after the block's check:
-
-```cpp
-        // A variadic function's debug type ends with a null entry for `...`, which no parameter
-        // takes; an empty parameter takes no IR argument, but keeps its debug declaration.
-        check(itanium, "_ZN7VarargsC2EPiPdz",
-              {"this: artificial", "vtt: artificial", "x: int *", "y: double *"});
-        check(itanium, "_ZN6TaggedC2EPi3Tag", {"this: artificial", "vtt: artificial", "x: int *"});
-        check(itanium, "_Z8make_bigPiz", {"agg.result: artificial", "p: int *"});
-        check(microsoft, "??0Varargs@@QEAA@PEAHPEANZZ",
-              {"this: artificial", "is_most_derived: artificial", "x: int *", "y: double *"});
-        // Where the debug type lists x is not established: x takes no type from it.
-        check(unestablished, "unestablished", {"hidden: artificial", "x: no type"});
-```
-
-The fixture becomes:
+Step 7d, the fixture's variadic constructor. The fixture becomes:
 
 ```cpp
 // SPDX-License-Identifier: Apache-2.0
@@ -563,136 +538,9 @@ Leaf::Leaf(int* p, const double* q) : Writer(p, q) {}
 // not contains: parameter 'vtt'
 ```
 
-- [ ] **Step 8: Build and run, expect RED.** Expected on `main` (`evidence/217/p0/harness/red-variadic-main.txt`, `evidence/217/p0/fixture/red-fixture-variadic-main.txt`): the four failures of Step 5, and
+Expected RED: the fixture also finds `current type: double *v`, in both passes. Commit: `test(const-param): report a variadic constructor's parameter with its own type`.
 
-```
-[FAIL] ParameterDebugBinding: _ZN7VarargsC2EPiPdz [this: artificial] [vtt: int *] [x: double *] [y: no type]
-[FAIL] ParameterDebugBinding: _ZN6TaggedC2EPi3Tag [this: artificial] [vtt: int *] [x: ? *]
-[FAIL] ParameterDebugBinding: _Z8make_bigPiz [agg.result: int *] [p: int *]
-[FAIL] ParameterDebugBinding: ??0Varargs@@QEAA@PEAHPEANZZ [this: artificial] [is_most_derived: int *] [x: double *] [y: no type]
-[FAIL] ParameterDebugBinding: unestablished [hidden: int *] [x: int *]
-```
-
-The fixture finds its four forbidden texts (`current type: double *x`, `current type: double *v`, Leaf's `p`, `vtt`) in both passes. The first prototype of the fix, which counted the `...` entry and the spilled arguments, failed the same five checks (`evidence/217/p0/harness/red-variadic-prototype-v1.txt`).
-
-- [ ] **Step 9: Commit.**
-
-```bash
-git add test/unit/analyzer_module_unit_tests.cpp test/unit/parameter_binding_input.cpp test/unit/parameter_binding_unknown_input.ll test/pointer_reference-const_correctness/virtual-base-vtt.cpp
-git commit -m "test(const-param): a parameter takes its type only from an established debug layout"
-```
-
-- [ ] **Step 10: Bind each parameter to its own declaration.** In `src/analysis/ParameterDebugBinding.cpp`:
-
-Add `#include <algorithm>` before `#include <cstdint>`, and `#include <optional>` after `#include <limits>`. Replace `DebugParamLayout` with:
-
-```cpp
-        struct DebugParamLayout
-        {
-            const llvm::DISubroutineType* subroutineType = nullptr;
-            bool hasCanonicalDebugIndex = false;
-            bool isHiddenAbiArg = false;
-            // Make alignment intent explicit before the 32-bit indexes.
-            std::uint16_t paddingBeforeDebugArgIndex = 0;
-            unsigned debugArgIndex = 0; // The debug parameter number (arg:): `this` and vtt count.
-            unsigned typeIndex = 0;     // Its entry in the subroutine type, which omits vtt.
-            std::uint32_t paddingTail = 0;
-        };
-```
-
-Add before `buildDebugParamLayout`:
-
-```cpp
-        // The highest parameter number that F's debug declarations give. At -O0 Clang declares
-        // every parameter in the entry block, one that takes no IR argument (an empty struct)
-        // included.
-        static unsigned declaredParameters(const llvm::Function& F)
-        {
-            const llvm::DISubprogram* SP = F.getSubprogram();
-            unsigned last = 0;
-            const auto declares = [&](const llvm::DILocalVariable* var)
-            {
-                if (var && var->isParameter() && var->getScope() == SP)
-                    last = std::max(last, var->getArg());
-            };
-            for (const llvm::Instruction& I : F.getEntryBlock())
-            {
-                for (const llvm::DbgVariableRecord& record :
-                     llvm::filterDbgVars(I.getDbgRecordRange()))
-                    declares(record.getVariable());
-                if (const auto* intrinsic = llvm::dyn_cast<llvm::DbgVariableIntrinsic>(&I))
-                    declares(intrinsic->getVariable());
-            }
-            return last;
-        }
-
-        // The entry of @p param in the subroutine type: 0 when the type does not list it, none when
-        // the debug information does not establish it. Clang marks artificial the parameters that
-        // the source does not declare. The type lists `this` and a block's descriptor, but not what
-        // the C++ ABI adds, like the vtt of a constructor of a class with a virtual base: the
-        // artificial parameters other than `this` are unlisted when the type lacks exactly that
-        // many of the declared parameters, listed when it lacks none.
-        static std::optional<unsigned> subroutineTypeIndex(const llvm::Function& F,
-                                                           const llvm::DILocalVariable& param,
-                                                           unsigned listed)
-        {
-            const auto artificialOtherThanThis = [](const llvm::DILocalVariable& var)
-            { return var.isArtificial() && !var.isObjectPointer(); };
-            unsigned artificial = 0;
-            unsigned artificialBefore = 0;
-            for (const llvm::Argument& other : F.args())
-            {
-                const llvm::DILocalVariable* var = spilledParameter(other);
-                if (!var || !artificialOtherThanThis(*var))
-                    continue;
-                ++artificial;
-                if (var->getArg() < param.getArg())
-                    ++artificialBefore;
-            }
-            if (artificial == 0)
-                return param.getArg();
-            const unsigned declared = declaredParameters(F);
-            if (declared == listed)
-                return param.getArg();
-            if (declared != listed + artificial)
-                return std::nullopt;
-            return artificialOtherThanThis(param) ? 0 : param.getArg() - artificialBefore;
-        }
-
-```
-
-In `buildDebugParamLayout`, after `return layout; // [0] return type, [1..] params.`, replace the spilled branch with:
-
-```cpp
-            // A variadic function's type ends with a null entry for `...`: no parameter's.
-            const unsigned listed =
-                static_cast<unsigned>(typeArray.size()) - (typeArray[typeArray.size() - 1] ? 1 : 2);
-
-            // The spill slot names the source parameter whatever the ABI did to the list; the
-            // position below only serves arguments that are not spilled, like a hidden sret.
-            if (const llvm::DILocalVariable* spilled = spilledParameter(Arg);
-                spilled && spilled->getArg() != 0)
-            {
-                const std::optional<unsigned> typeIndex = subroutineTypeIndex(F, *spilled, listed);
-                if (typeIndex == 0u)
-                {
-                    layout.isHiddenAbiArg = true;
-                }
-                else if (typeIndex && *typeIndex <= listed)
-                {
-                    layout.debugArgIndex = spilled->getArg();
-                    layout.typeIndex = *typeIndex;
-                    layout.hasCanonicalDebugIndex = true;
-                }
-                // Otherwise its entry stays unknown: the position below would only guess it.
-                return layout;
-            }
-
-```
-
-then compute `debugParamCount` as `listed` (`const unsigned debugParamCount = listed;`, instead of `typeArray.size() - 1`), and after `layout.debugArgIndex = debugParamOffset + 1;`, add `layout.typeIndex = layout.debugArgIndex;`.
-
-In `resolveParameterDebugBinding`, replace `if (layout.isHiddenAbiArg)` with:
+- [ ] **Step 8: Take a parameter's type and its artificiality from its own declaration.** In `resolveParameterDebugBinding`, replace `if (layout.isHiddenAbiArg)` with:
 
 ```cpp
         // The declaration of the spilled parameter says whether the source declares it.
@@ -700,20 +548,28 @@ In `resolveParameterDebugBinding`, replace `if (layout.isHiddenAbiArg)` with:
         if (layout.isHiddenAbiArg || isSyntheticDebugVariable(spilled))
 ```
 
-and in the fallback on the subroutine type, index `typeArray` with `layout.typeIndex` instead of `layout.debugArgIndex` (the bound check and the subscript).
+and, before the fallback on the subroutine type (`if (!binding.type && layout.hasCanonicalDebugIndex && layout.subroutineType)`):
 
-A spilled argument no longer falls back to the position of its IR argument: when the debug information does not establish its entry, it gets no type, and the rule does not report it. `declaredParameters` reads the entry block only for a function with an artificial parameter other than `this`.
-
-- [ ] **Step 11: Build and run, expect GREEN.** The 13 `ParameterDebugBinding` checks pass; the fixture passes in both passes (14 of 14); `./build/stack_usage_analyzer_unit_tests .` ends with `All analyzer module unit tests passed.`
-
-- [ ] **Step 12: Commit.**
-
-```bash
-git add src/analysis/ParameterDebugBinding.cpp
-git commit -m "fix(const-param): bind each parameter to its own debug declaration"
+```cpp
+        // The spilled parameter's own declaration gives its type first.
+        if (!binding.type && spilled)
+            binding.type = spilled->getType();
 ```
 
-- [ ] **Step 13: Expect source indexes in the unit test.** In `describe`, after the `if`/`else` chain, add:
+Expected: every check passes but `_Z8make_bigPiz`, whose hidden argument is not spilled; the fixture passes in both passes (14 of 14). Commit: `fix(const-param): take a parameter's type and artificiality from its own declaration`.
+
+- [ ] **Step 9: Do not count the `...` of a variadic function.** In `buildDebugParamLayout`, after `return layout; // [0] return type, [1..] params.`:
+
+```cpp
+            // A variadic function's type ends with a null entry for `...`: no parameter's.
+            const unsigned listed =
+                static_cast<unsigned>(typeArray.size()) - (typeArray[typeArray.size() - 1] ? 1 : 2);
+
+```
+
+and compute `debugParamCount` as `listed` (`const unsigned debugParamCount = listed;`). Expected: the 12 checks pass. Commit: `fix(const-param): do not count the ... of a variadic function as a parameter`.
+
+- [ ] **Step 10: Expect source indexes in the unit test.** In `describe`, after the `if`/`else` chain, add:
 
 ```cpp
                 text += ", source " +
@@ -753,10 +609,6 @@ Replace the expectations with:
         check(microsoft, "??0Varargs@@QEAA@PEAHPEANZZ",
               {"this: artificial, source none", "is_most_derived: artificial, source none",
                "x: int *, source 0", "y: double *, source 1"});
-        // Where the debug type lists x is not established: x takes no type from it.
-        check(unestablished, "unestablished",
-              {"hidden: artificial, source none", "x: no type, source 0"});
-
 ```
 
 and the comment above the test with:
@@ -768,11 +620,9 @@ and the comment above the test with:
     /// Microsoft ABI, a block's descriptor.
 ```
 
-`self` stays artificial, as on `main`: Clang marks it an object pointer, which the binding has always treated as synthetic. Its source index is 0 all the same, since the source declares it. `tag` takes no IR argument, so no check lists it.
+`self` stays artificial, as on `main`: Clang marks it an object pointer, which the binding has always treated as synthetic. Its source index is 0 all the same, since the source declares it. `tag` takes no IR argument, so no check lists it. Expected RED: `error: no member named 'sourceIndex' in 'ctrace::stack::analysis::ParameterDebugBinding'`.
 
-- [ ] **Step 14: Build, expect RED.** Expected: `error: no member named 'sourceIndex' in 'ctrace::stack::analysis::ParameterDebugBinding'` (twice; `evidence/217/p0/harness/red-final-compile-main.txt`).
-
-- [ ] **Step 15: Give each parameter its source index.** In `include/analysis/ParameterDebugBinding.hpp`, add `#include <optional>` after `#include <cstdint>`, and after `unsigned column = 0;`:
+- [ ] **Step 11: Give each parameter its source index.** In `include/analysis/ParameterDebugBinding.hpp`, add `#include <optional>` after `#include <cstdint>`, and after `unsigned column = 0;`:
 
 ```cpp
         // The parameter's position among those the source declares, from 0. None for one the
@@ -781,9 +631,7 @@ and the comment above the test with:
         std::optional<unsigned> sourceIndex;
 ```
 
-The struct keeps no implicit padding: `std::optional<unsigned>` takes 8 bytes at a 4-byte boundary, after `column`.
-
-In `src/analysis/ParameterDebugBinding.cpp`, after `isSyntheticDebugVariable`:
+The struct keeps no implicit padding: `std::optional<unsigned>` takes 8 bytes at a 4-byte boundary, after `column`. In `src/analysis/ParameterDebugBinding.cpp`, add `#include <optional>` after `#include <limits>`, and after `isSyntheticDebugVariable`:
 
 ```cpp
         // The position of @p param among the parameters the source declares: the artificial ones
@@ -812,22 +660,148 @@ In `resolveParameterDebugBinding`, before `finalizeBindingName(binding, Arg);`:
             binding.sourceIndex = sourceIndexOf(F, *spilled);
 ```
 
-- [ ] **Step 16: Build and run, expect GREEN.** The 13 checks pass with their source indexes (`evidence/217/p0/harness/green-final-prototype-v2.txt`).
+Expected: the 12 checks pass with their source indexes. Commit: `feat(analysis): give a bound parameter its position among the source's`; it carries its test with its code, so that every commit builds.
 
-- [ ] **Step 17: Format, full suite, warnings.** Run clang-format on the changed C++ files, the build (no warning: `-Wpadded` is on), both unit test executables, and the suite. Expected: everything passes, no expectation changed.
+- [ ] **Step 12: Untyped declarations, once the user authorizes these cases.** A declaration that gives no type does not occur in Clang's output; the subroutine type then serves only where its entries are established, which the hand-written IR below checks. Create `test/unit/parameter_binding_unknown_input.ll`:
 
-- [ ] **Step 18: Commit.**
+```llvm
+; SPDX-License-Identifier: Apache-2.0
+; A parameter's declaration gives its type; when it gives none, the debug type of the function
+; serves only where its entries are the declared parameters in order: when no artificial parameter
+; other than `this` exists. vtt, is_most_derived or a block's descriptor make the position
+; ambiguous, since the debug type lists some of them and not others.
 
-```bash
-git add include/analysis/ParameterDebugBinding.hpp src/analysis/ParameterDebugBinding.cpp test/unit/analyzer_module_unit_tests.cpp
-git commit -m "feat(analysis): give a bound parameter its position among the source's"
+; An artificial parameter other than `this`: the debug type's entries are ambiguous. x's
+; declaration gives its type, double *, which is kept.
+define void @ambiguous_typed(ptr %hidden, ptr %x) !dbg !20 {
+entry:
+  %hidden.addr = alloca ptr
+  %x.addr = alloca ptr
+  store ptr %hidden, ptr %hidden.addr
+    #dbg_declare(ptr %hidden.addr, !21, !DIExpression(), !23)
+  store ptr %x, ptr %x.addr
+    #dbg_declare(ptr %x.addr, !22, !DIExpression(), !23)
+  ret void, !dbg !23
+}
+
+; The same, but x's declaration gives no type: x stays without one.
+define void @ambiguous_untyped(ptr %hidden, ptr %x) !dbg !30 {
+entry:
+  %hidden.addr = alloca ptr
+  %x.addr = alloca ptr
+  store ptr %hidden, ptr %hidden.addr
+    #dbg_declare(ptr %hidden.addr, !31, !DIExpression(), !33)
+  store ptr %x, ptr %x.addr
+    #dbg_declare(ptr %x.addr, !32, !DIExpression(), !33)
+  ret void, !dbg !33
+}
+
+; No artificial parameter: the debug type's entries are the parameters, in order. x's declaration
+; gives no type, the debug type gives double *.
+define void @established_untyped(ptr %x) !dbg !40 {
+entry:
+  %x.addr = alloca ptr
+  store ptr %x, ptr %x.addr
+    #dbg_declare(ptr %x.addr, !41, !DIExpression(), !42)
+  ret void, !dbg !42
+}
+
+!llvm.dbg.cu = !{!0}
+!llvm.module.flags = !{!2, !3}
+
+!0 = distinct !DICompileUnit(language: DW_LANG_C_plus_plus_14, file: !1, producer: "hand-written", isOptimized: false, runtimeVersion: 0, emissionKind: FullDebug)
+!1 = !DIFile(filename: "parameter_binding_unknown_input.ll", directory: ".")
+!2 = !{i32 7, !"Dwarf Version", i32 5}
+!3 = !{i32 2, !"Debug Info Version", i32 3}
+!10 = !DIBasicType(name: "int", size: 32, encoding: DW_ATE_signed)
+!11 = !DIBasicType(name: "double", size: 64, encoding: DW_ATE_float)
+!12 = !DIDerivedType(tag: DW_TAG_pointer_type, baseType: !10, size: 64)
+!13 = !DIDerivedType(tag: DW_TAG_pointer_type, baseType: !11, size: 64)
+!14 = !DISubroutineType(types: !15)
+!15 = !{null, !12, !12, !12}
+!16 = !DISubroutineType(types: !17)
+!17 = !{null, !13}
+!20 = distinct !DISubprogram(name: "ambiguous_typed", scope: !1, file: !1, line: 1, type: !14, scopeLine: 1, spFlags: DISPFlagDefinition, unit: !0)
+!21 = !DILocalVariable(name: "hidden", arg: 1, scope: !20, file: !1, line: 1, type: !12, flags: DIFlagArtificial)
+!22 = !DILocalVariable(name: "x", arg: 2, scope: !20, file: !1, line: 1, type: !13)
+!23 = !DILocation(line: 1, scope: !20)
+!30 = distinct !DISubprogram(name: "ambiguous_untyped", scope: !1, file: !1, line: 2, type: !14, scopeLine: 2, spFlags: DISPFlagDefinition, unit: !0)
+!31 = !DILocalVariable(name: "hidden", arg: 1, scope: !30, file: !1, line: 2, type: !12, flags: DIFlagArtificial)
+!32 = !DILocalVariable(name: "x", arg: 2, scope: !30, file: !1, line: 2)
+!33 = !DILocation(line: 2, scope: !30)
+!40 = distinct !DISubprogram(name: "established_untyped", scope: !1, file: !1, line: 3, type: !16, scopeLine: 3, spFlags: DISPFlagDefinition, unit: !0)
+!41 = !DILocalVariable(name: "x", arg: 1, scope: !40, file: !1, line: 3)
+!42 = !DILocation(line: 3, scope: !40)
 ```
 
-This commit carries its test with its code, so that every commit builds; its failure evidence is the compile error of Step 14.
+Declare `LoadedModule unestablished;` after `LoadedModule blocks;`, load it last:
+
+```cpp
+            !load("parameter_binding_block_input.c", {"-fblocks"}, blocks) ||
+            !load("parameter_binding_unknown_input.ll", {}, unestablished))
+            return false;
+```
+
+and add, after the last check of Step 10:
+
+```cpp
+        // A declaration's type is kept; without one, the debug type serves only where its
+        // entries are established.
+        check(unestablished, "ambiguous_typed",
+              {"hidden: artificial, source none", "x: double *, source 0"});
+        check(unestablished, "ambiguous_untyped",
+              {"hidden: artificial, source none", "x: no type, source 0"});
+        check(unestablished, "established_untyped", {"x: double *, source 0"});
+
+```
+
+Expected RED: `[FAIL] ParameterDebugBinding: ambiguous_untyped [hidden: artificial, source none] [x: int *, source 0]`; `ambiguous_typed` passes since Step 8, `established_untyped` keeps `main`'s fallback. Commit: `test(const-param): an untyped declaration takes the debug type only where it is established`.
+
+- [ ] **Step 13: Use the debug type of the function only where its entries are established.** Add `#include <llvm/ADT/STLExtras.h>` before `#include <llvm/ADT/SmallVector.h>`, and before `buildDebugParamLayout`:
+
+```cpp
+        // Whether F has an artificial parameter other than `this`: a vtt, an is_most_derived or a
+        // block's descriptor. The subroutine type lists the descriptor, not what the C++ ABI adds.
+        static bool hasArtificialOtherThanThis(const llvm::Function& F)
+        {
+            return llvm::any_of(F.args(),
+                                [](const llvm::Argument& other)
+                                {
+                                    const llvm::DILocalVariable* var = spilledParameter(other);
+                                    return var && var->isArtificial() && !var->isObjectPointer();
+                                });
+        }
+
+```
+
+In `buildDebugParamLayout`, replace the spilled branch with:
+
+```cpp
+            // The spill slot names the source parameter whatever the ABI did to the list; the
+            // position below only serves arguments that are not spilled, like a hidden sret.
+            if (const llvm::DILocalVariable* spilled = spilledParameter(Arg);
+                spilled && spilled->getArg() != 0)
+            {
+                // Its declaration gives its type. Without one, the subroutine type's entry at its
+                // debug number is its own only when no parameter makes that position ambiguous.
+                if (spilled->getType() ||
+                    (spilled->getArg() <= listed && !hasArtificialOtherThanThis(F)))
+                {
+                    layout.debugArgIndex = spilled->getArg();
+                    layout.hasCanonicalDebugIndex = true;
+                }
+                return layout;
+            }
+
+```
+
+Expected: the 15 checks pass. Mutants checked on the prototype: without the fallback for an untyped declaration, `established_untyped` fails; with a fallback even where the position is ambiguous, `ambiguous_untyped` fails. Commit: `fix(const-param): use the debug type of the function only where its entries are established`.
+
+- [ ] **Step 14: Format, full suite, warnings.** Run clang-format on the changed C++ files, the build (no warning: `-Wpadded` is on), both unit test executables, and the suite. Expected: everything passes, no expectation changed; a formatting change, if any, goes in its own commit.
 
 **Validation of P0.1:**
-- `testParameterDebugBinding`: 13 checks pass; both unit test executables pass.
-- `virtual-base-vtt.cpp` passes in the default and smt-z3 passes.
+- `testParameterDebugBinding`: 15 checks pass (12 before Step 12); both unit test executables pass.
+- `virtual-base-vtt.cpp` passes in the default and smt-z3 passes (14 of 14).
 - The suite passes on macOS with no expectation changed; no new warning; clang-format clean.
 
 ### Task P0.2: measure the effect without the option, then deliver
@@ -838,7 +812,7 @@ Expected effect on the rule, without the option:
 - Microsoft ABI targets: no suggestion on `is_most_derived`;
 - blocks (`-fblocks`, the default on macOS): no suggestion on `.block_descriptor`;
 - variadic functions: the `...` entry is no parameter's, so the constructors above keep their types when variadic, and a variadic function that returns a struct through a hidden argument no longer types that argument as its first parameter;
-- a parameter whose entry the debug information does not establish gets no type, so the rule does not report it, instead of reporting it with a guessed type (no such case in Clang's output so far);
+- a parameter whose declaration gives no type, in a function with an artificial parameter other than `this`, gets no type instead of a guessed one, so the rule does not report it (Clang always gives the type);
 - nothing else: line, column, confidence and name of every other parameter unchanged; the other rules use `spilledParameter` and `declaredVariable`, which do not change.
 
 - [ ] **Step 1: Compare every fixture's output.**
