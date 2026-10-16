@@ -68,7 +68,7 @@ P0, from `main`:
 | File | Responsibility |
 |---|---|
 | `include/analysis/ParameterDebugBinding.hpp` | `ParameterDebugBinding::sourceIndex`. |
-| `src/analysis/ParameterDebugBinding.cpp` | Entry in the subroutine type past the parameters it does not list; artificial from the parameter's own declaration; source index. |
+| `src/analysis/ParameterDebugBinding.cpp` | Type and artificiality from the parameter's own declaration; the hidden return argument recognized by its attribute; source index. |
 | `test/unit/analyzer_module_unit_tests.cpp` | `testParameterDebugBinding`. |
 | `test/unit/parameter_binding_input.cpp`, `test/unit/parameter_binding_block_input.c` | Its inputs. |
 | `test/pointer_reference-const_correctness/virtual-base-vtt.cpp` | What the rule reports. |
@@ -100,7 +100,7 @@ Root cause, at `main` `d1d9271`. At `-O0`, `buildDebugParamLayout` indexes the f
 - `is_most_derived` (an `int`) is reported as `double *is_most_derived`;
 - a block's `.block_descriptor` is reported as `<unknown type> *.block_descriptor`.
 
-The fix takes each spilled parameter's type and artificiality from its own declaration, the one `spilledParameter` finds; this alone binds every case above. The subroutine type stays a fallback for a declaration that gives no type, only where its entries are established, and for arguments without a declaration, like a hidden sret, whose count no longer includes the null entry that ends a variadic function's type. A first prototype reconciled positions in the subroutine type instead (`evidence/217/p0/prototype-v2.diff`); it was dropped once the direct declaration was shown to bind every case, with no output change on the 424 fixtures.
+The fix takes each spilled parameter's type and artificiality from its own declaration, the one `spilledParameter` finds; this alone binds every case above. The subroutine type stays a fallback for a declaration that gives no type, only where its entries are established, and for arguments without a declaration, the hidden return argument being recognized by its sret attribute wherever the ABI puts it. A first version left the null entry that ends a variadic function's type out of the positional count instead: the independent review showed it misbound optimized variadic functions, and it was reverted. A first prototype reconciled positions in the subroutine type instead (`evidence/217/p0/prototype-v2.diff`); it was dropped once the direct declaration was shown to bind every case, with no output change on the 424 fixtures.
 
 Reproductions: `evidence/217/p0/repro/` (`main-d1d9271.txt`, `caller-main-d1d9271.txt`, `block-main-d1d9271.txt`).
 
@@ -558,16 +558,37 @@ and, before the fallback on the subroutine type (`if (!binding.type && layout.ha
 
 Expected: every check passes but `_Z8make_bigPiz`, whose hidden argument is not spilled; the fixture passes in both passes (14 of 14). Commit: `fix(const-param): take a parameter's type and artificiality from its own declaration`.
 
-- [ ] **Step 9: Do not count the `...` of a variadic function.** In `buildDebugParamLayout`, after `return layout; // [0] return type, [1..] params.`:
+- [ ] **Step 9: Leave the hidden return argument out of the positions.** In `buildDebugParamLayout`, before `const unsigned hiddenPrefix = irArgCount - debugParamCount;`, replace the computation of `irArgCount` and `debugParamCount` with:
 
 ```cpp
-            // A variadic function's type ends with a null entry for `...`: no parameter's.
-            const unsigned listed =
-                static_cast<unsigned>(typeArray.size()) - (typeArray[typeArray.size() - 1] ? 1 : 2);
+            // The hidden return argument is no source parameter, wherever the ABI puts it: first
+            // under the Itanium ABI, after `this` under the Microsoft one. Positions leave it out.
+            const llvm::Argument* hiddenReturn = nullptr;
+            for (const llvm::Argument& other : F.args())
+            {
+                if (other.hasStructRetAttr())
+                    hiddenReturn = &other;
+            }
+            if (hiddenReturn == &Arg)
+            {
+                layout.isHiddenAbiArg = true;
+                return layout;
+            }
+            const unsigned irArgCount =
+                static_cast<unsigned>(F.arg_size()) - (hiddenReturn ? 1 : 0);
+            const unsigned argNo =
+                Arg.getArgNo() -
+                (hiddenReturn && hiddenReturn->getArgNo() < Arg.getArgNo() ? 1 : 0);
+
+            const unsigned debugParamCount = static_cast<unsigned>(typeArray.size() - 1);
+            if (irArgCount < debugParamCount)
+                return layout;
 
 ```
 
-and compute `debugParamCount` as `listed` (`const unsigned debugParamCount = listed;`). Expected: the 12 checks pass. Commit: `fix(const-param): do not count the ... of a variadic function as a parameter`.
+and use `argNo` instead of `Arg.getArgNo()` in the two lines that follow (`if (argNo < hiddenPrefix)`, `const unsigned debugParamOffset = argNo - hiddenPrefix;`). Expected: the 12 checks pass. Commit: `fix(const-param): leave a struct return argument out of the parameters' positions`.
+
+Executed history: a first Step 9 left the `...` entry out of the positional count (522344e); the independent review showed that optimized variadic functions were then misbound, so 21cfb67 reverts it, with `_Z8make_bigPiz` failing again, and 7cf76bf is this step.
 
 - [ ] **Step 10: Expect source indexes in the unit test.** In `describe`, after the `if`/`else` chain, add:
 
@@ -796,10 +817,12 @@ In `buildDebugParamLayout`, replace the spilled branch with:
 
 Expected: the 15 checks pass. Mutants checked on the prototype: without the fallback for an untyped declaration, `established_untyped` fails; with a fallback even where the position is ambiguous, `ambiguous_untyped` fails. Commit: `fix(const-param): use the debug type of the function only where its entries are established`.
 
-- [ ] **Step 14: Format, full suite, warnings.** Run clang-format on the changed C++ files, the build (no warning: `-Wpadded` is on), both unit test executables, and the suite. Expected: everything passes, no expectation changed; a formatting change, if any, goes in its own commit.
+- [ ] **Step 14: Cases from the independent review, once the user authorizes them.** In `test/unit/parameter_binding_input.cpp`, a method of `Maker` returning `Big` (under the Microsoft ABI its hidden return argument comes after `this`) and `TagFirst(Tag tag, int* x)` (an empty first parameter); `test/unit/parameter_binding_o2_input.ll`, generated by Clang 20 at `-O2` for x86-64 Linux from a variadic constructor of a class with a virtual base and a variadic function taking a struct by value; `describe` names a type that is not a pointer; checks: `_ZN8TagFirstC2E3TagPi` (`x: int *, source 1`), `_ZN8VariadicC2EPiPdz` and `split_variadic` at `-O2` (each argument bound to its own declaration), and the Microsoft hidden return argument without a type. A fixture, `implicit-move-constructor.cpp`: an implicitly defined move constructor's parameter is not reported. Code and failure evidence: `evidence/217/p0/proposals/` and `harness/test_G.inc`.
+
+- [ ] **Step 15: Format, full suite, warnings.** Run clang-format on the changed C++ files, the build (no warning: `-Wpadded` is on), both unit test executables, and the suite. Expected: everything passes, no expectation changed; a formatting change, if any, goes in its own commit.
 
 **Validation of P0.1:**
-- `testParameterDebugBinding`: 15 checks pass (12 before Step 12); both unit test executables pass.
+- `testParameterDebugBinding`: every check passes (12 before Step 12, 15 after Step 13, 19 after Step 14); both unit test executables pass.
 - `virtual-base-vtt.cpp` passes in the default and smt-z3 passes (14 of 14).
 - The suite passes on macOS with no expectation changed; no new warning; clang-format clean.
 
@@ -810,7 +833,8 @@ Expected effect on the rule, without the option:
 - constructors that call such a C2: the #167 contract reads the callee's real parameter types; a false "passed where a pointer to const is expected" disappears, and a true one can appear;
 - Microsoft ABI targets: no suggestion on `is_most_derived`;
 - blocks (`-fblocks`, the default on macOS): no suggestion on `.block_descriptor`;
-- variadic functions: the `...` entry is no parameter's, so the constructors above keep their types when variadic, and a variadic function that returns a struct through a hidden argument no longer types that argument as its first parameter;
+- variadic functions: the constructors above keep their types when variadic, and a hidden return argument is artificial wherever the ABI puts it; under the Microsoft ABI, the one after `this` no longer carries `this`'s const contract;
+- parameters that Clang marks artificial are no longer reported: the parameter of an implicitly defined special member (an implicit move constructor's), the hidden argument that `pass_object_size` adds, the `__context` of a captured statement;
 - a parameter whose declaration gives no type, in a function with an artificial parameter other than `this`, gets no type instead of a guessed one, so the rule does not report it (Clang always gives the type);
 - nothing else: line, column, confidence and name of every other parameter unchanged; the other rules use `spilledParameter` and `declaredVariable`, which do not change.
 
