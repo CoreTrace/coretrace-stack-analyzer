@@ -119,19 +119,37 @@ namespace ctrace::stack::analysis
                 return layout;
             }
 
-            const unsigned irArgCount = static_cast<unsigned>(F.arg_size());
+            // The hidden return argument is no source parameter, wherever the ABI puts it: first
+            // under the Itanium ABI, after `this` under the Microsoft one. Positions leave it out.
+            const llvm::Argument* hiddenReturn = nullptr;
+            for (const llvm::Argument& other : F.args())
+            {
+                if (other.hasStructRetAttr())
+                    hiddenReturn = &other;
+            }
+            if (hiddenReturn == &Arg)
+            {
+                layout.isHiddenAbiArg = true;
+                return layout;
+            }
+            const unsigned irArgCount =
+                static_cast<unsigned>(F.arg_size()) - (hiddenReturn ? 1 : 0);
+            const unsigned argNo =
+                Arg.getArgNo() -
+                (hiddenReturn && hiddenReturn->getArgNo() < Arg.getArgNo() ? 1 : 0);
+
             const unsigned debugParamCount = static_cast<unsigned>(typeArray.size() - 1);
             if (irArgCount < debugParamCount)
                 return layout;
 
             const unsigned hiddenPrefix = irArgCount - debugParamCount;
-            if (Arg.getArgNo() < hiddenPrefix)
+            if (argNo < hiddenPrefix)
             {
                 layout.isHiddenAbiArg = true;
                 return layout;
             }
 
-            const unsigned debugParamOffset = Arg.getArgNo() - hiddenPrefix;
+            const unsigned debugParamOffset = argNo - hiddenPrefix;
             if (debugParamOffset >= debugParamCount)
                 return layout;
 
