@@ -2627,7 +2627,7 @@ check_const_suggestion_trace: FAIL
 
 **Validation:** both checks pass.
 
-**Validation of stage 1:** the catalogue tests D1 (T), D2, D3, D4, D5, D7, D11, D14, D15, D16, D17, Review Focus 2 to 4, and the tests that rulings 6, 11 and 13 add, pass; every T v1 test passes, except the changed expectations of D14, D15, D16 and D17; the suite without and with the option, the unit tests, on macOS and Linux; the review cases t1 to t15 give the verdicts of §6 for the stage-1 IDs; CI green and code scanning triaged.
+**Validation of stage 1:** the catalogue tests D1 (T), D2, D3, D4, D5, D7, D11, D14, D15, D16, D17, Review Focus 2 to 4, the tests that rulings 6, 11, 12, 13 and 14 add, and the unit tests that ruling 15 adapts, pass; every T v1 test passes, except the changed expectations of D14, D15, D16 and D17; the suite without and with the option, the unit tests, on macOS and Linux; the review cases t1 to t15 give the verdicts of §6 for the stage-1 IDs; CI green and code scanning triaged.
 
 ## Stage 2 — D6, D8, D10, D12, D13
 
