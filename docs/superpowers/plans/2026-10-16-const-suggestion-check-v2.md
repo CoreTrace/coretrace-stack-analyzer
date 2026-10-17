@@ -1425,7 +1425,7 @@ check_const_suggestion_line_endings: FAIL
 
 **Files:** `src/analysis/ConstSuggestionFacts.cpp` (new), `src/analysis/ConstSuggestionCheck.cpp`, `src/analysis/ConstSuggestionPlan.cpp`, `src/analysis/ConstSuggestionInternal.hpp`, `CMakeLists.txt`, `run_test.py`, `test/pointer_reference-const_correctness/const-suggestion-facts-without-code-change.cpp` (new).
 
-**Interfaces.** Adds `DeclarationSite`, `SourceLinkage`, `EntityIdentity`, `FactKind`, `FactKey`, `Fact` (Shared types) and `SuggestionPlan::entity`. Produces:
+**Interfaces.** Adds `SourcePosition`, `DeclarationSite`, `SourceLinkage`, `EntityIdentity`, `FactKind`, `FactKey`, `Fact` (Shared types) and `SuggestionPlan::entity`. Produces:
 ```cpp
 // What one compilation shows (§5.3, §5.6). R and K cover the whole unit; the rest is kept for
 // each plan given, in their order.
@@ -1437,7 +1437,7 @@ struct UnitFacts
     std::shared_ptr<const const_suggestion::ModuleText> code; // prepared for the comparator
     std::map<std::string, llvm::GlobalValue::LinkageTypes> defined; // symbols with a body
     std::vector<Fact> facts; // R and K
-    std::map<DeclarationSite, std::string> writtenTypes; // declarations of the rewritten files
+    std::map<DeclarationSite, std::string> writtenTypes; // declarations of the rewritten files, by both positions
     struct Entity
     {
         bool found = false;
@@ -1615,7 +1615,102 @@ int typed(int* p)
 // analyzer-arg: --experimental-const-suggestion-check
 ```
 
-Failure at `64ed37e`. D2: `operator==` is removed, "the methods it overrides change": T v1 recognizes a method by its identifier after the rewrite, and an operator has none. D3: both removed, "declared in b.c:1 / d.c:1 with type int *": T v1 takes a homonym for the function, whatever its linkage. The header: checked, since the global's new type leaves the IR as it was. The fixture: both kept as checked.
+Step 2 of §5.8, a new fixture (ruling 12): the suggested type selects a template whose instantiation never ends, and the compilation stops at that fatal error. The expectation stops after `compilation:`; the file, the line and Clang's message follow:
+
+`test/pointer_reference-const_correctness/const-suggestion-incomplete-inspection.cpp`:
+
+```cpp
+// SPDX-License-Identifier: Apache-2.0
+// #217: the suggested type can make a compilation stop at a fatal error, after which the code it
+// would have parsed is not inspected. Here sizeof(sized(p)) selects sized(int*) before the rewrite,
+// and the template once p points to const: deducing its return type instantiates Deep without end.
+// What the rewrite changes is then unknown: the suggestion is kept, not checked.
+
+// strict-expectation-details: true
+
+template <typename T> struct Deep
+{
+    static constexpr int value = Deep<T*>::value + 1;
+};
+
+int sized(int* p);
+
+template <typename T> auto sized(const T* p)
+{
+    return Deep<T>::value + *p;
+}
+
+// at line 26, column 0
+// [ !Info! ] ConstParameterNotModified.Pointer: parameter 'p' in function 'read_sized(int*)' is never used to modify the pointed object
+// ↳ current type: int *p
+// ↳ suggested type: const int *p
+// ↳ not checked with Clang: the rewritten code cannot be inspected entirely, a fatal error stops its compilation:
+int read_sized(int* p)
+{
+    return *p + static_cast<int>(sizeof(sized(p)));
+}
+
+// The Clang check of const suggestions is experimental: it runs only with this option.
+// analyzer-arg: --experimental-const-suggestion-check
+```
+
+The identity by both positions, a new fixture (ruling 14): one macro invocation declares two functions; the one suggested comes first in one invocation, second in the other:
+
+`test/pointer_reference-const_correctness/const-suggestion-macro-two-functions.c`:
+
+```c
+// SPDX-License-Identifier: Apache-2.0
+// #217: one macro invocation can declare several functions, whose names it expands at the same
+// place. Each one is also known by where its name is written: the check rewrites the function the
+// suggestion names and leaves the other one, which writes through its parameter, whichever the
+// invocation declares first.
+
+// strict-expectation-details: true
+
+#define DECLARE_TWO(a, Ta, b, Tb)                                                                  \
+    int a(Ta p);                                                                                   \
+    int b(Tb q);
+
+DECLARE_TWO(read_first, int*, write_first, int*)
+DECLARE_TWO(write_second, int*, read_second, int*)
+
+// at line 21, column 0
+// [ !Info! ] ConstParameterNotModified.Pointer: parameter 'p' in function 'read_first' is never used to modify the pointed object
+// ↳ current type: int *p
+// ↳ suggested type: const int *p
+// ↳ checked in the analyzed files only, with their compile commands: they compile with the suggested type, and their generated code matches, metadata included, once debug information, diagnostic metadata, descriptive names and renamed symbols are set aside
+int read_first(int* p)
+{
+    return *p;
+}
+
+int write_first(int* q)
+{
+    *q = 1;
+    return 0;
+}
+
+int write_second(int* p)
+{
+    *p = 2;
+    return 0;
+}
+
+// at line 43, column 0
+// [ !Info! ] ConstParameterNotModified.Pointer: parameter 'q' in function 'read_second' is never used to modify the pointed object
+// ↳ current type: int *q
+// ↳ suggested type: const int *q
+// ↳ checked in the analyzed files only, with their compile commands: they compile with the suggested type, and their generated code matches, metadata included, once debug information, diagnostic metadata, descriptive names and renamed symbols are set aside
+int read_second(int* q)
+{
+    return *q;
+}
+
+// The Clang check of const suggestions is experimental: it runs only with this option.
+// analyzer-arg: --experimental-const-suggestion-check
+```
+
+Failure at `64ed37e`. D2: `operator==` is removed, "the methods it overrides change": T v1 recognizes a method by its identifier after the rewrite, and an operator has none. D3: both removed, "declared in b.c:1 / d.c:1 with type int *": T v1 takes a homonym for the function, whatever its linkage. The header: checked, since the global's new type leaves the IR as it was. The facts' fixture: both kept as checked. The incomplete inspection: removed, `does not compile: …: recursive template instantiation exceeded maximum depth of 1024`, which a fatal error does not establish (step 2 comes before step 4). The two functions of one invocation pass at `64ed37e`: T v1 finds a function by its symbol. Their failure is shown on a mutant, in Step 3.
 
 ```text
 check_const_suggestion_operator_used_elsewhere: FAIL
@@ -1646,13 +1741,29 @@ new/const-suggestion-facts-without-code-change.cpp: FAIL (2/6)
   ❌ (smt-z3) negative expectation #2 FOUND (unexpected)
 ```
 
+```text
+new/const-suggestion-incomplete-inspection.cpp: FAIL (2/4)
+=== Testing evidence/217/stage1/tests/fixtures/new/const-suggestion-incomplete-inspection.cpp ===
+  ❌ (default) expectation #1 MISSING
+  ❌ (smt-z3) expectation #1 MISSING
+```
+
+```text
+new/const-suggestion-macro-two-functions.c: PASS (6/6)
+=== Testing evidence/217/stage1/tests/fixtures/new/const-suggestion-macro-two-functions.c ===
+  ✅ (default) expectation #1 FOUND
+  ✅ (default) expectation #2 FOUND
+  ✅ (smt-z3) expectation #1 FOUND
+  ✅ (smt-z3) expectation #2 FOUND
+```
+
 Unchanged and passing at `64ed37e`: `const-suggestion-same-code.cpp`, `const-suggestion-override-elsewhere.cpp`, `pick` in `const-suggestion-deduction-refused.cpp`, `generic_selection` in `const-suggestion-must-compile.c`.
 
-- [ ] **Step 1: Add the four tests and run them.** Expected: FAIL, as above.
-  Commits: `test(const-param): check a member operator's suggestion in the file that calls it`; `test(const-param): a C homonym with another linkage is another function`; `test(const-param): a changed call or constant refutes even with the same code`; `test(const-param): keep a rewrite that changes another file's declaration`.
+- [ ] **Step 1: Add the six tests and run them.** Expected: FAIL, as above, but for the two functions of one invocation, which pass.
+  Commits: `test(const-param): check a member operator's suggestion in the file that calls it`; `test(const-param): a C homonym with another linkage is another function`; `test(const-param): a changed call or constant refutes even with the same code`; `test(const-param): keep a rewrite that changes another file's declaration`; `test(const-param): keep a suggestion whose rewrite stops at a fatal error, unchecked`; `test(const-param): tell apart two functions that one macro invocation declares`.
 - [ ] **Step 2: Move the compilation.** `DiagnosticCollector`, `Inspector`, `InspectAction`, `compile` and `scan` move to `ConstSuggestionFacts.cpp`. No behavior changes. Run: the T v1 checks and fixtures. Expected: PASS.
   Commit: `refactor(const-param): move the compilation and its inspection to their own file`.
-- [ ] **Step 3: The entity's identity (§3, §5.5).** `plan()` describes the located function: its redeclarations' sites (the expansion location of each name, as a real path and an offset), its formal linkage (`External` for external or module linkage, `Internal` for internal or unique-external, `None` otherwise), its template pattern's first declaration, and its variants' symbols, from `CodeGenerator::GetMangledName` (a constructor's `Ctor_Complete` and `Ctor_Base`, a destructor's `Dtor_Deleting`, `Dtor_Complete` and `Dtor_Base`, otherwise the function's).
+- [ ] **Step 3: The entity's identity (§3, §5.5).** `plan()` describes the located function: its redeclarations' sites (ruling 14: the expansion and the spelling location of each name, each as a real path and an offset), its formal linkage (`External` for external or module linkage, `Internal` for internal or unique-external, `None` otherwise), its template pattern's first declaration, and its variants' symbols, from `CodeGenerator::GetMangledName` (a constructor's `Ctor_Complete` and `Ctor_Base`, a destructor's `Dtor_Deleting`, `Dtor_Complete` and `Dtor_Base`, otherwise the function's).
   In every other compilation, the entity is the function that has one of those sites, once mapped back to the original text through the plan's edits:
   ```cpp
   // An offset of the rewritten text, in the original one. An offset inside inserted text maps
@@ -1674,21 +1785,22 @@ Unchanged and passing at `64ed37e`: `const-suggestion-same-code.cpp`, `const-sug
       return offset - inserted + removed;
   }
   ```
-  A unit that shares none of those sites declares the entity only through the linker: a function with external linkage whose symbol is one of the entity's. T v1's name and symbol test (`isTarget`, `locate`'s `withoutConst` search) goes. A unit sees the change (§5.2) through a reference in its analyzed module only if the entity has external linkage.
-  Run: both checks. Expected: PASS. Commit: `fix(const-param): find the function by its declarations, not by its name`.
+  Both positions of a site are mapped back; a site matches only when both do. A unit that shares none of those sites declares the entity only through the linker: a function with external linkage whose symbol is one of the entity's. T v1's name and symbol test (`isTarget`, `locate`'s `withoutConst` search) goes. A unit sees the change (§5.2) through a reference in its analyzed module only if the entity has external linkage.
+  Run: both checks, and `const-suggestion-macro-two-functions.c`. Expected: PASS. Mutant: compare only the expansion position of a site; run the fixture. Expected: FAIL, one of the two suggested functions confused with the function its invocation declares beside it. Restore; record both outputs in `evidence/217/stage1/`.
+  Commit: `fix(const-param): find the function by its declarations, not by its name`.
 - [ ] **Step 4: Facts R, O and K (§5.4).** The `Inspector` visits the whole unit, template instantiations included:
-  - R: `DeclRefExpr`, `MemberExpr`, `CXXConstructExpr`, `CXXNewExpr` and `CXXDeleteExpr` that name a function. Key: the instantiations around the expression (each by its symbol, outermost first), and its spelling and expansion sites, mapped back. Value (ruling 4): the target's declaration sites, mapped back; for a template specialization or an implicit function, its symbol;
+  - R: `DeclRefExpr`, `MemberExpr`, `CXXConstructExpr`, `CXXNewExpr` and `CXXDeleteExpr` that name a function. Key: the instantiations around the expression (each by its symbol, outermost first), and its site, both positions mapped back. Value (ruling 4): the target's declaration sites, mapped back; for a template specialization or an implicit function, its symbol;
   - O: for each method with the entity's `DeclarationName`, the methods it overrides (`overridden_methods()`), each by the same value as R. Key: the method's site;
   - K: each `IfStmt` with `isConstexpr()` and a condition that is not value-dependent: `true` or `false`, from `EvaluateKnownConstInt`; each `GenericSelectionExpr` that is not result-dependent: `getResultIndex()`.
   A symbol comes from `CodeGenerator::GetMangledName`, cached by declaration. A fact is compared only when its key's instantiations all map to the other compilation: here, through the entity's own symbol pairs (Task 1.5 adds the others). An R fact is unchanged when its value after contains its value before (ruling 4); O and K must be equal. T v1's comparison of overrides by qualified name goes.
   Judgement step 6, after T v1's diagnostics (steps 4 and 5): the first changed fact refutes, with its text (Texts).
   Run: the new fixture, then `const-suggestion-same-code.cpp`, `const-suggestion-override-elsewhere.cpp`, `const-suggestion-deduction-refused.cpp` and `const-suggestion-must-compile.c`. Expected: PASS.
   Commit: `feat(const-param): refute a suggestion that changes a call, override or constant`.
-- [ ] **Step 5: Scope after the rewrite (§5.6), steps 2 and 3.** Each compilation records `writtenTypes`: the canonical type (`writtenType`) of every declaration whose name's expansion location lies in a file that some plan rewrites (`DeclaratorDecl`, `TypedefNameDecl`), neither implicit nor instantiated, by its site. After the rewrite, every site keeps its type, except the planned parameters and the entity's redeclarations; a planned parameter must have the candidate (T v1's `the rewritten declaration does not get the suggested type`). Otherwise step 3: `the rewrite also changes the type of <name> (<file>:<line>)`. A compilation with a fatal error (`hasFatalErrorOccurred()`) has an incomplete inspection, step 2: `<file> could not be inspected once rewritten`. T's compilations set no error limit (`DiagnosticOptions::ErrorLimit = 0`): "too many errors" would otherwise make a rewrite that breaks many uses incomplete instead of refuted, where T v1 refutes it. Step 2 then guards only a fatal error that a rewrite brings, such as a missing file: no input of the suite reaches it (ruling 12). The judgement now runs steps 1 to 6 in the order of §5.8; T v1's code comparison stays step 7 until Task 1.5.
-  Run: `check_const_suggestion_header_read_differently`. Expected: PASS. Commit: `feat(const-param): leave a rewrite that changes another declaration unchecked`.
+- [ ] **Step 5: Scope after the rewrite (§5.6), steps 2 and 3.** Each compilation records `writtenTypes`: the canonical type (`writtenType`) of every declaration whose name's expansion location lies in a file that some plan rewrites (`DeclaratorDecl`, `TypedefNameDecl`), neither implicit nor instantiated, by its site, both positions (ruling 14). After the rewrite, every site keeps its type, except the planned parameters and the entity's redeclarations; a planned parameter must have the candidate (T v1's `the rewritten declaration does not get the suggested type`). Otherwise step 3: `the rewrite also changes the type of <name> (<file>:<line>)`. A compilation after the rewrite with a fatal error (`hasFatalErrorOccurred()`) has an incomplete inspection, step 2: `the rewritten code cannot be inspected entirely, a fatal error stops its compilation: <file>:<line>: <message>`, the first fatal error. T's compilations set no error limit (`DiagnosticOptions::ErrorLimit = 0`): "too many errors" would otherwise make a rewrite that breaks many uses incomplete instead of refuted, where T v1 refutes it (ruling 12). The judgement now runs steps 1 to 6 in the order of §5.8; T v1's code comparison stays step 7 until Task 1.5.
+  Run: `check_const_suggestion_header_read_differently`, `const-suggestion-incomplete-inspection.cpp`. Expected: PASS. Commit: `feat(const-param): leave a rewrite that changes another declaration unchecked`.
 - [ ] **Step 6: Task tests.** As Task 1.1, Step 6.
 
-**Validation:** D2, D3, the header check and the new fixture pass; the refutations by R, O and K of T v1's tests unchanged.
+**Validation:** D2, D3, the header check and the three new fixtures pass; the mutant of Step 3 failed; the refutations by R, O and K of T v1's tests unchanged.
 
 ### Task 1.5: correspondences and the comparator's pairs (§5.7, §5.9), judgement step 7
 
