@@ -3336,6 +3336,96 @@ def check_const_suggestion_both_modes() -> bool:
     return ok
 
 
+def _const_suggestion_run(
+    args: list[str], env_overrides: Optional[dict[str, str]] = None
+) -> Optional[tuple[dict[str, list[str]], list[str], str]]:
+    """
+    #217: runs the analyzer with the Clang check of const suggestions and its trace (--verbose), on
+    inputs the cache key does not cover. Returns the messages of the const suggestions by function
+    (a function reported twice, such as a constructor's two variants, has two), the trace's lines
+    without their "[const-suggestion] " prefix, and the whole output; None when the analysis did
+    not run.
+    """
+    result = run_analyzer_uncached(
+        [*args, "--format=json", "--experimental-const-suggestion-check", "--verbose"],
+        env_overrides,
+    )
+    if result.returncode != 0:
+        return None
+    try:
+        diagnostics = json.loads(result.stdout or "").get("diagnostics", [])
+    except json.JSONDecodeError:
+        return None
+    messages: dict[str, list[str]] = {}
+    for d in diagnostics:
+        if str(d.get("ruleId", "")).startswith("ConstParameterNotModified"):
+            function = str(d.get("location", {}).get("function", ""))
+            messages.setdefault(function, []).append(str(d.get("details", {}).get("message", "")))
+    output = (result.stdout or "") + (result.stderr or "")
+    trace = [
+        line.split("[const-suggestion] ", 1)[1]
+        for line in output.splitlines()
+        if "[const-suggestion] " in line
+    ]
+    return messages, trace, output
+
+
+def check_const_suggestion_one_configuration_per_file() -> bool:
+    """
+    #217: a compilation database can list a file twice, with different commands. The analysis
+    loads one command per file, and the Clang check of const suggestions compiles each file with
+    that one only: its trace names one configuration for each file, here the defining file,
+    analyzed, and a caller that only the database lists.
+    """
+    print("=== Testing const suggestions with files the compilation database lists twice ===")
+    fixtures = (RUN_CONFIG.test_dir / "pointer_reference-const_correctness").resolve()
+    definition = fixtures / "cross-tu-const-suggestion-def.c"
+    caller = fixtures / "cross-tu-const-suggestion-caller.c"
+    unit = re.compile(r"read_value parameter p, unit (\S+) \[([0-9a-f]+)\]: ")
+    with tempfile.TemporaryDirectory(prefix="ct_const_suggestion_twice_") as tmp:
+        database = Path(tmp).resolve() / "compile_commands.json"
+        # A macro the files do not use: the two commands differ, the code does not.
+        database.write_text(
+            json.dumps(
+                [
+                    {
+                        "directory": str(fixtures),
+                        "file": str(f),
+                        "arguments": ["clang", *extra, "-I", str(fixtures), "-c", str(f)],
+                    }
+                    for f in (definition, caller)
+                    for extra in ([], ["-DLISTED_TWICE"])
+                ]
+            )
+        )
+        run = _const_suggestion_run([str(definition), f"--compile-commands={database}"])
+    if run is None:
+        return fail_check("the analysis did not run")
+    messages, trace, _ = run
+    configurations: dict[str, set[str]] = {}
+    for line in trace:
+        match = unit.match(line)
+        if match:
+            configurations.setdefault(match.group(1), set()).add(match.group(2))
+    checked = "checked in every file of the compilation database that sees the change"
+    ok = True
+    for label, good in (
+        (
+            "the suggestion is checked in the compilation database",
+            any(checked in text for text in messages.get("read_value", [])),
+        ),
+        (
+            "one configuration of the defining file",
+            len(configurations.get(str(definition), ())) == 1,
+        ),
+        ("one configuration of the caller", len(configurations.get(str(caller), ())) == 1),
+    ):
+        print(f"  {'✅' if good else '❌'} {label}" + ("" if good else f": {configurations}"))
+        ok = ok and good
+    print()
+    return ok
+
+
 def check_duplicate_if_cross_tu() -> bool:
     """
     #157: a function defined in another file is deterministic when every definition of it is, as
@@ -6291,6 +6381,7 @@ def main() -> int:
         check_const_suggestion_line_endings,
         check_const_suggestion_removal_reason,
         check_const_suggestion_both_modes,
+        check_const_suggestion_one_configuration_per_file,
         check_duplicate_if_cross_tu,
         check_global_read_before_write_identity_across_files,
         check_size_minus_one_cross_tu,
