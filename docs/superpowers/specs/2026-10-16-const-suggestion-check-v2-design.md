@@ -1,7 +1,7 @@
 # Vérification des suggestions const par Clang, version 2 (#217)
 
 Statut : validée à `8b283a8`, puis complétée à la relecture du plan d'implémentation (D17, fixture
-de D13). N'autorise ni le code ni la modification des tests : chaque lot présentera ses
+de D13), et au détail de l'étape 1 (mutualisation limitée au module, §5 et §10). N'autorise ni le code ni la modification des tests : chaque lot présentera ses
 tests, avec leurs preuves d'échec, avant de les ajouter. La fusion n'est pas autorisée.
 Issue : #217. Liens : #221 (T v1, référence conservée), #167 (faits et contrat const), #197
 (identité d'un global entre fichiers).
@@ -118,7 +118,10 @@ ou interface.
 1. Compilation initiale du fichier de définition, et collecte de ses faits « avant ».
 2. Planification de chaque suggestion sur cette même compilation.
 3. Compilation initiale de chaque autre unité concernée, une fois par unité et configuration,
-   réutilisée pour toutes les suggestions.
+   réutilisée pour toutes les suggestions du même module analysé. À l'étape 1, la mutualisation
+   s'arrête là : T s'exécute une fois par module, et une unité qui voit les changements de deux
+   modules est compilée telle quelle une fois pour chacun. C'est moins que la mutualisation prévue
+   d'abord, pour toutes les suggestions de l'analyse (§10).
 4. Compilation modifiée de chaque unité concernée.
 5. Correspondance et jugement par unité, agrégation, rapport.
 
@@ -359,3 +362,8 @@ restent un changement séparé, hors de ce calendrier.
   différence d'IR inexpliquée ne suffit plus à retirer une suggestion.
 - La technique d'identification des constructeurs hérités reste à démontrer.
 - Un succès du cache IR ne fournit pas d'AST : T compile toujours depuis les sources.
+- La compilation initiale d'une unité n'est partagée qu'entre les suggestions d'un même module
+  (§5, étape 3) : la partager entre modules demanderait les faits d'entités pas encore planifiées.
+  Ce compromis, accepté provisoirement pour l'étape 1, réduit la mutualisation prévue ; son coût
+  entre modules est mesuré à l'étape 3 (tâche 3.1). Le critère de +10 % sur l'auto-analyse (§8)
+  reste inchangé.
