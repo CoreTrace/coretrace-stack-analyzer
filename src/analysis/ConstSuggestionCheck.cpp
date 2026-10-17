@@ -117,10 +117,12 @@ namespace ctrace::stack::analysis
             std::string expectedType;
             std::set<std::string> rewrittenFiles;
             const std::set<std::string>* symbolsBefore = nullptr; // to find the renamed function
-            unsigned debugArgNo = 0;
+            // The parameter's position among those the source declares (P0), none for one it
+            // does not declare.
+            std::optional<unsigned> sourceIndex;
             unsigned paramIndex = 0;
             bool plan = false; // before the rewrite, in the defining unit
-            std::uint8_t reservedPadding[7] = {};
+            std::uint8_t reservedPadding[3] = {};
         };
 
         // An error or a checked warning, in the order Clang reports it.
@@ -594,15 +596,12 @@ namespace ctrace::stack::analysis
             {
                 const auto* method = llvm::dyn_cast<clang::CXXMethodDecl>(&function);
                 facts.declarableElsewhere = method == nullptr && function.isExternallyVisible();
-                // An explicit object parameter (C++23) is numbered like the others.
-                const unsigned implicitThis =
-                    method && method->isImplicitObjectMemberFunction() ? 1 : 0;
-                if (target.debugArgNo <= implicitThis)
+                if (!target.sourceIndex)
                 {
                     facts.notRewritten = "the parameter is not found in the source";
                     return;
                 }
-                facts.paramIndex = target.debugArgNo - 1 - implicitThis;
+                facts.paramIndex = *target.sourceIndex;
                 if (facts.paramIndex >= function.getNumParams())
                 {
                     facts.notRewritten = "the parameter is not found in the source";
@@ -1103,7 +1102,8 @@ namespace ctrace::stack::analysis
         for (std::size_t i = 0; i < issues.size(); ++i)
         {
             targets[i].symbol = issues[i].funcName;
-            targets[i].debugArgNo = issues[i].debugArgNo;
+            if (!issues[i].binding.isArtificial)
+                targets[i].sourceIndex = issues[i].binding.sourceIndex;
             targets[i].plan = true;
         }
         Compilation before =
