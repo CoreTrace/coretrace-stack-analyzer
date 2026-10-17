@@ -55,7 +55,9 @@ namespace ctrace::stack::analysis
 {
     namespace
     {
+        using const_suggestion::Judgement;
         using const_suggestion::variantOf;
+        using const_suggestion::Verdict;
         using const_suggestion::withoutConst;
 
         // What the check covers: the analyzed files, or every file of the compilation database.
@@ -919,19 +921,26 @@ namespace ctrace::stack::analysis
             return out;
         }
 
+        Judgement refuted(std::string why)
+        {
+            return {std::move(why), Verdict::Refuted};
+        }
+
+        Judgement indeterminate(std::string why)
+        {
+            return {std::move(why), Verdict::Indeterminate};
+        }
+
         // Checks one suggestion in one unit, against the unit before the rewrite.
-        bool checkUnit(const UnitCommand& command, const std::optional<Original>& before,
-                       const Target& planned, const std::map<std::string, std::string>& rewritten,
-                       const std::set<std::string>& symbolsBefore, const FunctionFacts& plan,
-                       PrintedSignature& signature, std::vector<std::string>& accepted,
-                       std::string& renamed, std::string& removed, std::string& notChecked,
-                       bool timing)
+        Judgement checkUnit(const UnitCommand& command, const std::optional<Original>& before,
+                            const Target& planned,
+                            const std::map<std::string, std::string>& rewritten,
+                            const std::set<std::string>& symbolsBefore, const FunctionFacts& plan,
+                            PrintedSignature& signature, std::vector<std::string>& accepted,
+                            std::string& renamed, bool timing)
         {
             if (!before)
-            {
-                notChecked = kDoesNotCompileAsItIs;
-                return false;
-            }
+                return indeterminate(kDoesNotCompileAsItIs);
             std::vector<Target> targets{planned};
             targets[0].plan = false;
             targets[0].renamed = renamed;
@@ -943,45 +952,29 @@ namespace ctrace::stack::analysis
             Compilation after =
                 compile(command, rewritten, targets, "const_suggestion.compile.after", timing);
             if (!after.failure.empty())
-            {
-                notChecked = after.failure;
-                return false;
-            }
+                return indeterminate(after.failure);
             // The first diagnostic the rewrite adds, not one the unit had before it.
             for (const Diagnostic& diagnostic : after.reported)
             {
                 if (after.diagnostics.count(diagnostic.key) >
                     before->diagnostics.count(diagnostic.key))
                 {
-                    removed =
+                    return refuted(
                         (diagnostic.error ? "does not compile: " : "gains a checked warning: ") +
-                        diagnostic.text;
-                    return true;
+                        diagnostic.text);
                 }
             }
             if (!after.module)
-            {
-                removed = "does not compile: " + after.firstDiagnostic;
-                return true;
-            }
+                return refuted("does not compile: " + after.firstDiagnostic);
             if (renamed.empty())
                 renamed = targets[0].renamed;
             const FunctionFacts& facts = after.facts.empty() ? FunctionFacts() : after.facts[0];
             if (facts.problem.starts_with("rewritten:"))
-            {
-                notChecked = "the rewritten declaration does not get the suggested type";
-                return false;
-            }
+                return indeterminate("the rewritten declaration does not get the suggested type");
             if (!facts.problem.empty())
-            {
-                removed = facts.problem;
-                return true;
-            }
+                return refuted(facts.problem);
             if (before->overrides != facts.overrides)
-            {
-                removed = "the methods it overrides change";
-                return true;
-            }
+                return refuted("the methods it overrides change");
             if (signature.after.empty() && !facts.printedSignature.empty())
                 signature.after = facts.printedSignature;
             std::string renamedTo;
@@ -993,15 +986,25 @@ namespace ctrace::stack::analysis
                                                               &signature, &accepted, &renamedTo);
             }
             if (difference)
-            {
-                removed = "the generated code changes: " + *difference;
-                return true;
-            }
+                return refuted("the generated code changes: " + *difference);
             if (renamed.empty() || renamed == planned.symbol)
                 renamed = renamedTo;
-            return true;
+            return {};
         }
     } // namespace
+
+    Judgement const_suggestion::aggregate(const std::vector<Judgement>& judgements)
+    {
+        for (const Verdict verdict : {Verdict::Refuted, Verdict::Indeterminate})
+        {
+            for (const Judgement& judgement : judgements)
+            {
+                if (judgement.verdict == verdict)
+                    return judgement;
+            }
+        }
+        return {};
+    }
 
     std::shared_ptr<const AnalyzedUnits> analyzedUnitOf(const std::string& filename,
                                                         const llvm::Module& module)
@@ -1131,27 +1134,24 @@ namespace ctrace::stack::analysis
             PrintedSignature signature{plan.printedSignature, ""};
             std::vector<std::string> accepted;
             std::string renamed;
-            std::string removed;
-            std::string unchecked;
             const std::optional<Original> selfBefore =
                 Original{before.diagnostics, plan.overrides, definingCode};
-            std::size_t checkedUnits = 1;
-            const bool definingDone =
-                checkUnit(command, selfBefore, planned, rewritten, symbolsBefore, plan, signature,
-                          accepted, renamed, removed, unchecked, timing);
+            std::vector<Judgement> judgements{checkUnit(command, selfBefore, planned, rewritten,
+                                                        symbolsBefore, plan, signature, accepted,
+                                                        renamed, timing)};
             // Then every other unit that sees a rewritten file or references the function: the
             // analyzed ones and, with a compilation database, every file it lists, analyzed or
             // not. One that cannot be checked leaves the suggestion unchecked, unless another
             // one refutes it.
             const auto cannotCheck = [&](const std::string& why)
-            {
-                if (unchecked.empty())
-                    unchecked = why;
-            };
+            { judgements.push_back(indeterminate(why)); };
             for (const AnalyzedUnit& unit : candidates)
             {
-                if (!definingDone || !removed.empty())
+                if (judgements.front().verdict != Verdict::Verified ||
+                    judgements.back().verdict == Verdict::Refuted)
+                {
                     break;
+                }
                 const bool referencing = unit.module && references(*unit.module, issue.funcName);
                 if (unit.language != LanguageType::C && unit.language != LanguageType::CXX)
                 {
@@ -1216,35 +1216,35 @@ namespace ctrace::stack::analysis
                 if (!sees)
                     continue;
                 std::vector<std::string> otherAccepted;
-                std::string why;
-                ++checkedUnits;
-                if (!checkUnit(other, originalOf(other, key, planned, originals, timing), planned,
-                               rewritten, symbolsBefore, plan, signature, otherAccepted, renamed,
-                               removed, why, timing))
+                Judgement judgement = checkUnit(
+                    other, originalOf(other, key, planned, originals, timing), planned, rewritten,
+                    symbolsBefore, plan, signature, otherAccepted, renamed, timing);
+                if (judgement.verdict == Verdict::Indeterminate &&
+                    judgement.reason == kDoesNotCompileAsItIs)
                 {
-                    cannotCheck(why == kDoesNotCompileAsItIs
-                                    ? unit.filename + " does not compile with Clang as it is"
-                                    : why);
+                    judgement.reason = unit.filename + " does not compile with Clang as it is";
                 }
+                judgements.push_back(std::move(judgement));
                 for (const std::string& line : otherAccepted)
                 {
                     if (std::find(accepted.begin(), accepted.end(), line) == accepted.end())
                         accepted.push_back(line);
                 }
             }
-            if (!removed.empty())
+            const Judgement verdict = const_suggestion::aggregate(judgements);
+            if (verdict.verdict == Verdict::Refuted)
             {
-                trace(issue, "removed, " + removed);
+                trace(issue, "removed, " + verdict.reason);
                 continue;
             }
-            if (!unchecked.empty())
+            if (verdict.verdict == Verdict::Indeterminate)
             {
-                issue.checkLines.push_back(kNotChecked + unchecked);
-                trace(issue, "not checked, " + unchecked);
+                issue.checkLines.push_back(kNotChecked + verdict.reason);
+                trace(issue, "not checked, " + verdict.reason);
                 kept.push_back(std::move(issue));
                 continue;
             }
-            trace(issue, "checked in " + std::to_string(checkedUnits) + " file(s)");
+            trace(issue, "checked in " + std::to_string(judgements.size()) + " file(s)");
             const std::string checked =
                 std::string(config.compilationDatabase ? kCheckedDatabase : kCheckedAnalyzed) +
                 kCheckedResult;

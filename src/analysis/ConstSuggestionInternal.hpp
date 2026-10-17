@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 #pragma once
 
+#include <cstdint>
 #include <map>
 #include <optional>
 #include <set>
@@ -21,6 +22,25 @@ namespace ctrace::stack::analysis
 
 namespace ctrace::stack::analysis::const_suggestion
 {
+    // What the check concludes about a suggestion, in one unit or overall (#217 v2, §3).
+    enum class Verdict : std::uint8_t
+    {
+        Verified,
+        Refuted,
+        Indeterminate
+    };
+
+    struct Judgement
+    {
+        std::string reason; // empty when verified
+        Verdict verdict = Verdict::Verified;
+        std::uint8_t reservedPadding[7] = {};
+    };
+
+    // Refuted if a judgement refutes, else indeterminate if one is, else verified; with the
+    // reason of the first judgement that has that verdict.
+    Judgement aggregate(const std::vector<Judgement>& judgements);
+
     // The demangled form of a symbol without const and spaces, with && written &: the rewritten
     // function, and what is named inside it, keep this form across the rewrite.
     std::string withoutConst(const std::string& symbol);
