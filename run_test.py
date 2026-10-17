@@ -3426,6 +3426,51 @@ def check_const_suggestion_one_configuration_per_file() -> bool:
     return ok
 
 
+def check_const_suggestion_compiles_each_file_once() -> bool:
+    """
+    #217: the Clang check compiles each file that sees a change once as it is, for all the
+    suggestions it checks there: here two functions, defined in one file and called in another.
+    Each file is compiled once before the rewrites (`--timing`), and both suggestions are checked.
+    """
+    print("=== Testing that each file is compiled once as it is for several const suggestions ===")
+    sources = {
+        "readers.h": "int read_a(int* p);\nint read_b(int* q);\n",
+        "readers.c": '#include "readers.h"\n'
+        "int read_a(int* p)\n{\n    return *p;\n}\n"
+        "int read_b(int* q)\n{\n    return *q + 1;\n}\n",
+        "user.c": '#include "readers.h"\n'
+        "int use_both(void)\n{\n    int v = 1;\n    return read_a(&v) + read_b(&v);\n}\n",
+    }
+    calls = re.compile(r"const_suggestion\.compile\.(\w+) .*\bcalls=(\d+)")
+    with tempfile.TemporaryDirectory(prefix="ct_const_suggestion_once_") as tmp:
+        root = Path(tmp).resolve()
+        for name, text in sources.items():
+            (root / name).write_text(text)
+        # Every hotspot, not the 20 longest.
+        run = _const_suggestion_run(
+            [str(root / "readers.c"), str(root / "user.c"), "--timing"],
+            {"CTRACE_HOTSPOT_TOP": "200"},
+        )
+    if run is None:
+        return fail_check("the analysis did not run")
+    messages, _, output = run
+    compiled = {m.group(1): int(m.group(2)) for m in calls.finditer(output)}
+    checked = "checked in the analyzed files only"
+    ok = True
+    for label, good in (
+        (
+            "both suggestions are checked",
+            all(any(checked in t for t in messages.get(f, [])) for f in ("read_a", "read_b")),
+        ),
+        ("the defining file is compiled once as it is", compiled.get("defining_before") == 1),
+        ("the other file is compiled once as it is", compiled.get("other_before") == 1),
+    ):
+        print(f"  {'✅' if good else '❌'} {label}" + ("" if good else f": {compiled}"))
+        ok = ok and good
+    print()
+    return ok
+
+
 def check_duplicate_if_cross_tu() -> bool:
     """
     #157: a function defined in another file is deterministic when every definition of it is, as
@@ -6382,6 +6427,7 @@ def main() -> int:
         check_const_suggestion_removal_reason,
         check_const_suggestion_both_modes,
         check_const_suggestion_one_configuration_per_file,
+        check_const_suggestion_compiles_each_file_once,
         check_duplicate_if_cross_tu,
         check_global_read_before_write_identity_across_files,
         check_size_minus_one_cross_tu,
