@@ -1804,9 +1804,9 @@ Unchanged and passing at `64ed37e`: `const-suggestion-same-code.cpp`, `const-sug
 
 ### Task 1.5: correspondences and the comparator's pairs (§5.7, §5.9), judgement step 7
 
-**Files:** `src/analysis/ConstSuggestionMatch.cpp` (new), `src/analysis/ConstSuggestionFacts.cpp`, `src/analysis/ConstSuggestionCode.cpp`, `src/analysis/ConstSuggestionCheck.cpp`, `src/analysis/ConstSuggestionInternal.hpp`, `include/analysis/ConstSuggestionCheck.hpp`, `CMakeLists.txt`, `test/pointer_reference-const_correctness/const-suggestion-inheriting-constructor.cpp` (new), `const-suggestion-deduction-refused.cpp` and `const-suggestion-printed-signature.c` (expectations changed).
+**Files:** `src/analysis/ConstSuggestionMatch.cpp` (new), `src/analysis/ConstSuggestionFacts.cpp`, `src/analysis/ConstSuggestionCode.cpp`, `src/analysis/ConstSuggestionCheck.cpp`, `src/analysis/ConstSuggestionInternal.hpp`, `include/analysis/ConstSuggestionCheck.hpp`, `CMakeLists.txt`, `test/unit/analyzer_module_unit_tests.cpp` (adapted, ruling 15), `test/pointer_reference-const_correctness/const-suggestion-inheriting-constructor.cpp` (new), `const-suggestion-deduction-refused.cpp` and `const-suggestion-printed-signature.c` (expectations changed).
 
-**Interfaces.** Adds `SymbolPair`. `UnitFacts::Entity` gains what the correspondences read:
+**Interfaces.** Adds `SymbolPair` (Shared types). `UnitFacts::Entity` gains what the correspondences read:
 ```cpp
 // A symbol that the rewrite may rename with the entity, and what it is in this compilation.
 struct Named
@@ -1815,7 +1815,8 @@ struct Named
     std::string key; // what pairs it: its kind, its site mapped back, and its enclosing symbol
 };
 std::vector<Named> variants;   // the entity's: "C1", "C2", "D0"... or "" for a function
-std::vector<Named> inheriting; // the constructors inheriting it: derived class and variant
+std::vector<Named> inheriting; // the constructors inheriting it: derived class, inherited
+                               // specialization and variant (ruling 7)
 std::vector<Named> nested;     // lambdas, local classes (methods, _ZTI, _ZTS, _ZTV), static
                                // locals and their guards, in the entity or a specialization
 ```
@@ -1831,9 +1832,15 @@ std::optional<std::string> codeDifference(const ModuleText& was, const ModuleTex
                                           const PrintedSignature* signature,
                                           std::vector<std::string>* accepted);
 ```
-`rewrittenCodeDifference` in `ConstSuggestionCheck.hpp` takes the pairs the same way.
+`SymbolPair` is declared in `ConstSuggestionCheck.hpp`, whose `rewrittenCodeDifference` takes the pairs the same way:
+```cpp
+std::optional<std::string> rewrittenCodeDifference(llvm::Module& before, llvm::Module& after,
+                                                   const std::vector<SymbolPair>& established,
+                                                   const PrintedSignature* signature = nullptr,
+                                                   std::vector<std::string>* accepted = nullptr);
+```
 
-**Tests.** D7, a new fixture (t8 and three template cases, ruling 7):
+**Tests.** D7, a new fixture (t8 and three template cases, the constructor template inherited for `int*` and for `double*`, ruling 7):
 
 `test/pointer_reference-const_correctness/const-suggestion-inheriting-constructor.cpp`:
 
@@ -1843,11 +1850,12 @@ std::optional<std::string> codeDifference(const ModuleText& was, const ModuleTex
 // whose symbols name the inherited constructor's parameter types: the rewrite renames them too.
 // The check pairs them before and after the rewrite through the constructor they inherit, so
 // each suggestion is checked: a plain class, a class template as the base, a class template as
-// the derived class, and a constructor template.
+// the derived class, and a constructor template, inherited twice, for int* and for double*: the
+// derived class inherits two constructors, one from each specialization.
 
 // strict-expectation-details: true
 
-// at line 18, column 0
+// at line 19, column 0
 // [ !Info! ] ConstParameterNotModified.Pointer: parameter 'p' in function 'Base::Base(int*)' is never used to modify the pointed object
 // ↳ current type: int *p
 // ↳ suggested type: const int *p
@@ -1870,7 +1878,7 @@ int make_derived(int x)
     return d.v;
 }
 
-// at line 41, column 0
+// at line 42, column 0
 // [ !Info! ] ConstParameterNotModified.Pointer: parameter 'p' in function 'TemplateBase<int>::TemplateBase(int*)' is never used to modify the pointed object
 // ↳ current type: int *p
 // ↳ suggested type: const int *p
@@ -1893,7 +1901,7 @@ int make_from_template(int x)
     return d.v;
 }
 
-// at line 64, column 0
+// at line 65, column 0
 // [ !Info! ] ConstParameterNotModified.Pointer: parameter 'p' in function 'PlainBase::PlainBase(int*)' is never used to modify the pointed object
 // ↳ current type: int *p
 // ↳ suggested type: const int *p
@@ -1916,10 +1924,16 @@ int make_template_derived(int x)
     return d.v;
 }
 
-// at line 87, column 0
+// at line 94, column 0
 // [ !Info! ] ConstParameterNotModified.Pointer: parameter 'p' in function 'GenericBase::GenericBase<int>(int*)' is never used to modify the pointed object
 // ↳ current type: int *p
 // ↳ suggested type: const int *p
+// ↳ checked in the analyzed files only, with their compile commands: they compile with the suggested type, and their generated code matches, metadata included, once debug information, diagnostic metadata, descriptive names and renamed symbols are set aside
+
+// at line 94, column 0
+// [ !Info! ] ConstParameterNotModified.Pointer: parameter 'p' in function 'GenericBase::GenericBase<double>(double*)' is never used to modify the pointed object
+// ↳ current type: double *p
+// ↳ suggested type: const double *p
 // ↳ checked in the analyzed files only, with their compile commands: they compile with the suggested type, and their generated code matches, metadata included, once debug information, diagnostic metadata, descriptive names and renamed symbols are set aside
 struct GenericBase
 {
@@ -1934,6 +1948,12 @@ struct FromGeneric : GenericBase
 };
 
 int make_from_generic(int x)
+{
+    FromGeneric d(&x);
+    return d.v;
+}
+
+int make_from_generic_double(double x)
 {
     FromGeneric d(&x);
     return d.v;
@@ -2014,19 +2034,87 @@ D16, `signature_size` in `const-suggestion-printed-signature.c`: kept, not check
  {
 ```
 
-Failure at `64ed37e`: the four inherited constructors and both `call` suggestions are removed ("symbols no longer used"), `signature_size` too ("the generated code changes").
+The comparator's unit tests, adapted to the established pairs (ruling 15):
+
+```diff
+--- a/test/unit/analyzer_module_unit_tests.cpp
++++ b/test/unit/analyzer_module_unit_tests.cpp
+@@ -751,24 +751,12 @@
+     }
+ 
+-    /// #217: a symbol's demangled name without const keeps the identifiers that contain "const":
+-    /// get_const(int*) and get_(int*) are two functions.
+-    bool testConstSuggestionWithoutConstKeepsIdentifiers(TestReport& report)
+-    {
+-        using ctrace::stack::analysis::const_suggestion::withoutConst;
+-        report.expect(withoutConst("_Z9get_constPi") != withoutConst("_Z4get_Pi"),
+-                      "ConstSuggestionCode: get_const(int*) and get_(int*) stay distinct");
+-        report.expect(withoutConst("_Z14const_iteratorPKi") == "const_iterator(int*)",
+-                      "ConstSuggestionCode: const_iterator keeps its name, the qualifier goes");
+-        report.expect(withoutConst("_Z1fPKi") == withoutConst("_Z1fPi"),
+-                      "ConstSuggestionCode: f(const int*) and f(int*) have the same key");
+-        return report.failures == 0;
+-    }
+-
+     /// #217: the code generated before and after a const rewrite is compared once the symbols
+-    /// the rewrite renames are paired. A symbol the unit only declares has no code to compare: it
+-    /// is paired only if it is the rewritten function itself.
++    /// the rewrite renames are paired, by the pairs its correspondences established and by them
++    /// only: a symbol renamed without a pair, even one whose name differs only by const, is a
++    /// difference.
+     bool testConstSuggestionCodeComparison(TestReport& report)
+     {
+         using ctrace::stack::analysis::rewrittenCodeDifference;
++        using ctrace::stack::analysis::SymbolPair;
+         llvm::LLVMContext context;
+         llvm::SMDiagnostic error;
+@@ -816,9 +804,13 @@
+             return false;
+         }
+-        report.expect(!rewrittenCodeDifference(*calledBefore, *calledAfter, "_Z1fPi"),
++        const std::vector<SymbolPair> function = {{"_Z1fPi", "_Z1fPKi"}};
++        report.expect(!rewrittenCodeDifference(*calledBefore, *calledAfter, function),
+                       "ConstSuggestionCode: the rewritten function and its caller are renamed "
+                       "together");
+-        report.expect(rewrittenCodeDifference(*thrownBefore, *thrownAfter, "_Z1fPi").has_value(),
+-                      "ConstSuggestionCode: typeinfo for int* and for int const*, only declared, "
++        report.expect(rewrittenCodeDifference(*calledBefore, *calledAfter, {}).has_value(),
++                      "ConstSuggestionCode: a function renamed without an established pair is a "
++                      "difference");
++        report.expect(rewrittenCodeDifference(*thrownBefore, *thrownAfter, function).has_value(),
++                      "ConstSuggestionCode: typeinfo for int* and for int const*, without a pair, "
+                       "are not paired");
+         return report.failures == 0;
+@@ -841,5 +833,5 @@
+             if (!was || !now)
+                 return std::optional<bool>();
+-            return std::optional<bool>(rewrittenCodeDifference(*was, *now, "f").has_value());
++            return std::optional<bool>(rewrittenCodeDifference(*was, *now, {}).has_value());
+         };
+         const auto replaced = [](std::string text, const std::string& from, const std::string& to)
+@@ -2894,5 +2886,4 @@
+     (void)testAnalysisIncompleteNotesHaveTheirOwnRules(report);
+     (void)testConstSuggestionCodeComparison(report);
+-    (void)testConstSuggestionWithoutConstKeepsIdentifiers(report);
+     (void)testConstSuggestionNormalizations(report);
+     (void)testUnresolvedCallsMarkStackUnknown(repoRoot, report);
+```
+
+Failure at `64ed37e`: the five inherited constructors and both `call` suggestions are removed ("symbols no longer used"), `signature_size` too ("the generated code changes").
 
 ```text
-new/const-suggestion-inheriting-constructor.cpp: FAIL (2/10)
+new/const-suggestion-inheriting-constructor.cpp: FAIL (2/12)
 === Testing evidence/217/stage1/tests/fixtures/new/const-suggestion-inheriting-constructor.cpp ===
   ❌ (default) expectation #1 MISSING
   ❌ (default) expectation #2 MISSING
   ❌ (default) expectation #3 MISSING
   ❌ (default) expectation #4 MISSING
+  ❌ (default) expectation #5 MISSING
   ❌ (smt-z3) expectation #1 MISSING
   ❌ (smt-z3) expectation #2 MISSING
   ❌ (smt-z3) expectation #3 MISSING
   ❌ (smt-z3) expectation #4 MISSING
+  ❌ (smt-z3) expectation #5 MISSING
 ```
 
 ```text
@@ -2057,22 +2145,22 @@ Unchanged and passing at `64ed37e`: `const-suggestion-kept*.cpp`, `const-suggest
   Commits: `test(const-param): check a suggestion through the constructors that inherit it`; `test(const-param): keep the suggestions whose specializations merge, unchecked`; `test(const-param): keep a suggestion whose code change nothing explains, unchecked`.
 - [ ] **Step 2: Symbols from compilation facts.** The `Inspector` records, in every compilation:
   - `variants`: the entity's variants, by `GlobalDecl` (Task 1.4, Step 3), keyed by variant;
-  - `inheriting`: each `CXXConstructorDecl` with `isInheritingConstructor()` whose `getInheritedConstructor().getConstructor()` is the entity, or a specialization of its pattern; its `Ctor_Complete` and `Ctor_Base` symbols, keyed by the derived class (its mangled type, `MangleContext::mangleCanonicalTypeName`) and the variant. `evidence/217/stage1/d7-probe/` shows these symbols equal to the IR's, before and after, in the four cases of the fixture;
+  - `inheriting`: each `CXXConstructorDecl` with `isInheritingConstructor()` whose `getInheritedConstructor().getConstructor()` is the entity, or a specialization of its pattern; its `Ctor_Complete` and `Ctor_Base` symbols, keyed by the derived class (its mangled type, `MangleContext::mangleCanonicalTypeName`), the specialization it inherits (the template arguments of `getInheritedConstructor().getConstructor()`, each written canonically as `writtenType` does, none for a constructor that is no template) and the variant. `evidence/217/stage1/d7-probe/` shows these symbols equal to the IR's, before and after, in the five cases of the fixture;
   - `nested`: in the entity, and in each function that a specialization of its template defines, every lambda's call operator, every local class's methods (by variant) and its `_ZTI`, `_ZTS` and `_ZTV` (`MangleContext::mangleCXXRTTI`, `mangleCXXRTTIName`, `mangleCXXVTable`), every static local variable and its guard (`mangleStaticGuardVariable`); keyed by kind, site mapped back, and the enclosing function's symbol. `evidence/217/stage1/d7-probe/nested-ast.txt` shows these symbols equal to the IR's (`nested-output.txt`).
   Commit: `feat(const-param): record the symbols a rewrite may rename, with their declarations`.
 - [ ] **Step 3: `correspond` (§5.7)**, in `ConstSuggestionMatch.cpp`, in this order:
   1. the entity's variants, by variant;
-  2. the inheriting constructors, by derived class and variant;
+  2. the inheriting constructors, by derived class, inherited specialization and variant;
   3. the instantiation contexts, from the R facts whose instantiations already map. For each such fact whose target changes, the pair (target before, target after) is a candidate if both are specializations of one template (`template:<site>` equal). The candidates of every fact are then checked together: a target before with two targets after, or two targets before with one after, gives `missing` (Texts, §5.7), and no pair for them. Each new pair maps more instantiations, and the step repeats until no pair is added;
   4. the nested symbols, by key, once their enclosing symbols are paired.
   A pair is established only from these facts; the names of the symbols play no part.
   Commit: `feat(const-param): establish the correspondences of a rewrite from its facts`.
-- [ ] **Step 4: The comparator takes the pairs, step 7.** `codeDifference` renames the symbols of `established` before comparing; every symbol that only one side has, and that no pair covers, is listed in its difference, as T v1 lists it (`symbols no longer used: …; symbols used only after the rewrite: …`). The masked encodings, `withoutConst`, `variantOf`, `templateOf` and `namesTemplate` go (ruling 9). The ABI line takes the symbol after the rewrite from the pair of the suggestion's own symbol. In the judgement, `correspond` runs before step 6: the facts are compared through its pairs, and those in an instantiation it could not pair are left out. After step 6, its `missing` makes the unit indeterminate; otherwise a difference of the comparator makes it indeterminate with `the generated code changes, and no reference, override or constant condition explains it: <difference>`. Step 7 never refutes.
-  Run: the three tests of Step 1, then every T v1 fixture with the option. Expected: PASS; each T v1 "checked" stays checked; `pick` is refuted by its K fact, the R and O refutations of `const-suggestion-same-code.cpp` and `const-suggestion-override-elsewhere.cpp` by their facts.
+- [ ] **Step 4: The comparator takes the pairs, step 7.** First the unit tests: adapt `analyzer_module_unit_tests.cpp` as above; the unit-test target no longer compiles, `rewrittenCodeDifference` taking no pairs yet. Give `rewrittenCodeDifference` and `codeDifference` the pairs, still pairing by names as well (the mutant of this step): the unit tests build, and "a function renamed without an established pair is a difference" FAILS, the name heuristics pairing `_Z1fPi` and `_Z1fPKi`. Record that output in `evidence/217/stage1/`. Then `codeDifference` renames the symbols of `established` before comparing; every symbol that only one side has, and that no pair covers, is listed in its difference, as T v1 lists it (`symbols no longer used: …; symbols used only after the rewrite: …`). The masked encodings, `withoutConst`, `variantOf`, `templateOf` and `namesTemplate` go (ruling 9). The ABI line takes the symbol after the rewrite from the pair of the suggestion's own symbol. In the judgement, `correspond` runs before step 6: the facts are compared through its pairs, and those in an instantiation it could not pair are left out. After step 6, its `missing` makes the unit indeterminate; otherwise a difference of the comparator makes it indeterminate with `the generated code changes, and no reference, override or constant condition explains it: <difference>`. Step 7 never refutes.
+  Run: the unit tests, the three tests of Step 1, then every T v1 fixture with the option. Expected: PASS; each T v1 "checked" stays checked; `pick` is refuted by its K fact, the R and O refutations of `const-suggestion-same-code.cpp` and `const-suggestion-override-elsewhere.cpp` by their facts.
   Commit: `fix(const-param): compare the code through established pairs, never refuting`.
 - [ ] **Step 5: Task tests.** As Task 1.1, Step 6.
 
-**Validation:** D7, D14 and D16 pass; every T v1 "checked" stays verified.
+**Validation:** D7, D14, D16 and the adapted unit tests pass, the latter after failing on the mutant; every T v1 "checked" stays verified.
 
 ### Task 1.6: collisions, stale declarations, link-edition assumption (§5.10)
 
