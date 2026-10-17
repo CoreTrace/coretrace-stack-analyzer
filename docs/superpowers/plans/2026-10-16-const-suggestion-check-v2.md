@@ -888,7 +888,6 @@ Reasons of an indeterminate verdict, after `not checked with Clang: ` (shown in 
 | Reason | Task | When |
 |---|---|---|
 | `the parameter's type is written in a macro argument that writes other parameters too` | 1.3 | D5: the text an edit rewrites writes another parameter |
-| `the parameter's type is written in a macro argument that writes other declarations too` | 1.3 | the same, for another declaration |
 | `the rewritten code cannot be inspected entirely, a fatal error stops its compilation: <file>:<line>: <message>` | 1.4 | step 2 |
 | `the rewrite also changes the type of <name> (<file>:<line>)` | 1.4 | step 3 |
 | `the generated code changes, and no reference, override or constant condition explains it: <difference>` | 1.5 | step 7 (D16); `<difference>` is the comparator's text |
@@ -944,6 +943,7 @@ The spec leaves these open. The user confirmed them on 2026-10-17, ruling 2 prov
 13. **Task 1.4 gets a fixture where R and K refute without a change of code** (`const-suggestion-facts-without-code-change.cpp`). T v1 compares only code and keeps both suggestions as checked; since every refutation of T v1's tests comes with a code difference, the facts of Task 1.4 would otherwise have no failing test.
 14. **A declaration is known by where it is expanded and where it is written.** One macro invocation can declare several functions, whose names it expands at the same place: a `DeclarationSite` holds both positions, for the identity of the entity and for the scope after the rewrite. `const-suggestion-macro-two-functions.c` pins it: it passes at `64ed37e`, where T v1 finds a function by its symbol, and its failure is shown on a mutant of Task 1.4 that keeps only the expansion position.
 15. **The comparator's unit tests are adapted in Task 1.5**, as changed tests submitted with the task: `testConstSuggestionCodeComparison` and `testConstSuggestionNormalizations` pass the established pairs, and keep their guarantees; `testConstSuggestionWithoutConstKeepsIdentifiers` goes with `withoutConst`, its guarantee (two functions whose names differ by `const` are not paired) now held by a case where a renamed symbol without a pair is a difference.
+16. **At planning, the scope of D5 covers the parameters only.** Another declaration whose type a macro argument shares with the parameter, such as a variable that the same invocation declares, is caught after the rewrite by the scope of Task 1.4 (step 3, `the rewrite also changes the type of <name> (<file>:<line>)`), which `check_const_suggestion_header_read_differently` pins; at planning, no test would reach it. Cost if wrong: that case gets the step-3 reason.
 
 ### Shared types
 
@@ -1312,18 +1312,19 @@ Review Focus 2: `const-suggestion-explicit-object.cpp` unchanged, passing at `64
 
 **Interfaces.** Produces:
 ```cpp
-// The ranges of the macro definitions a compilation reads, by real path: from the macro's name
-// to its last token, as offsets (D11).
-using MacroDefinitions = std::map<std::string, std::vector<std::pair<unsigned, unsigned>>>;
+// The macro definitions a compilation reads, by file: from each macro's name to its last token,
+// as offsets (D11). A FileID, not a real path: the planning reads them in the same compilation.
+using MacroDefinitions = std::map<clang::FileID, std::vector<std::pair<unsigned, unsigned>>>;
 // Records them, for the compilation that plans (§5.5).
 std::unique_ptr<clang::PPCallbacks> recordMacroDefinitions(const clang::SourceManager& sm,
                                                            MacroDefinitions& out);
-// Plans the rewrite of the parameter `binding` names, in `function`, located in the defining
-// unit's initial compilation by the suggestion's symbol (T v1's GetDeclForMangledName).
+// Plans the rewrite of the parameter at `sourceIndex` (P0's, none for an artificial binding) of
+// `function`, located in the defining unit's initial compilation by the suggestion's symbol
+// (T v1's GetDeclForMangledName).
 SuggestionPlan plan(clang::ASTContext& context, const MacroDefinitions& macros,
-                    const clang::FunctionDecl& function, const ParameterDebugBinding& binding);
+                    const clang::FunctionDecl& function, std::optional<unsigned> sourceIndex);
 ```
-`Edit` moves to `ConstSuggestionInternal.hpp`. `SuggestionPlan` holds here `sourceIndex`, `expectedType`, `edits` and `indeterminate`; Task 1.4 adds `entity`, Task 1.8 `candidate`.
+`Edit`, `realPath` and `writtenType` move to `ConstSuggestionInternal.hpp`. `SuggestionPlan` holds here `edits`, `expectedType`, `indeterminate`, `sourceIndex` and `declarableElsewhere`, which leave `FunctionFacts`; Task 1.4 adds `entity`, Task 1.8 `candidate`.
 
 **Tests.** D5, a new fixture (t3/m.c):
 
@@ -1413,10 +1414,10 @@ check_const_suggestion_line_endings: FAIL
   Commits: `test(const-param): keep a suggestion whose macro argument types two parameters`; `test(const-param): a backslash and spaces still continue a macro definition`.
 - [ ] **Step 2: Move the planning.** `Planner`, `writtenType`, `expectedType` and the body of `Inspector::plan` move to `ConstSuggestionPlan.cpp`, behind `plan()`; `FunctionFacts` keeps what the other compilations fill. No behavior changes.
   Run: the T v1 macro fixtures. Expected: PASS. Commit: `refactor(const-param): move the planning of a suggestion to its own file`.
-- [ ] **Step 3: Macro definitions from the preprocessor (D11).** `recordMacroDefinitions` returns a `clang::PPCallbacks` whose `MacroDefined` records `[getDefinitionLoc(), getDefinitionEndLoc()]` of each macro written in a file (real path, offsets). `InspectAction::CreateASTConsumer` adds it to the preprocessor of the defining unit's initial compilation. `Planner::replace` asks the recorded ranges whether the offset it rewrites lies in a macro definition; the text scan `inMacroDefinition` goes.
+- [ ] **Step 3: Macro definitions from the preprocessor (D11).** `recordMacroDefinitions` returns a `clang::PPCallbacks` whose `MacroDefined` records `[getDefinitionLoc(), getDefinitionEndLoc()]` of each macro written in a file (its FileID, offsets): no real path per macro. `InspectAction::CreateASTConsumer` adds it to the preprocessor of the defining unit's initial compilation. `Planner::replace` asks the recorded ranges whether the offset it rewrites lies in a macro definition; the text scan `inMacroDefinition` goes.
   Run: `check_const_suggestion_line_endings`. Expected: PASS. Commit: `fix(const-param): find macro definitions with the preprocessor, not the text`.
-- [ ] **Step 4: The plan's scope (D5).** An edit whose position comes from a macro argument (`isMacroArgExpansion`) serves only the parameter planned. `plan()` walks the other parameters of each redeclaration with the same `TypeLoc` walk as `Planner::plan`: one whose type's spelling location is an edit's position gives `the parameter's type is written in a macro argument that writes other parameters too`. Then, only when an edit comes from a macro argument, a `RecursiveASTVisitor` over the translation unit checks every other `DeclaratorDecl` and `TypedefNameDecl`: one whose type starts at an edit's position gives `the parameter's type is written in a macro argument that writes other declarations too`. Either way the plan is indeterminate and nothing is rewritten.
-  Run: the one-fixture command for `const-suggestion-macro-shared-type.c`. Expected: PASS. Commit: `fix(const-param): leave a rewrite that reaches another declaration unchecked`.
+- [ ] **Step 4: The plan's scope (D5).** An edit whose position comes from a macro argument (`isMacroArgExpansion`) serves only the parameter planned. Only then, a `RecursiveASTVisitor` over the translation unit checks every other `ParmVarDecl`: one with a part of its type (`TypeLoc::getNextTypeLoc` chain) written in a macro argument at an edit's spelling location gives `the parameter's type is written in a macro argument that writes other parameters too`; the plan is then indeterminate and nothing is rewritten. A comparison of spelled ranges does not do: a type whose first token a macro definition writes (`BYTE`) and whose last one the use site writes spans the file, and `argument_macro` of `const-suggestion-macros.c` then fails. Another declaration than a parameter (a variable the invocation declares) is left to the scope after the rewrite, Task 1.4's step 3, which its test pins (ruling 16).
+  Run: the one-fixture command for `const-suggestion-macro-shared-type.c`. Expected: PASS. Commit: `fix(const-param): leave a rewrite that reaches another parameter unchecked`.
 - [ ] **Step 5: Task tests.** As Task 1.1, Step 6.
 
 **Validation:** D5 and D11 pass; T v1's macro tests unchanged.
