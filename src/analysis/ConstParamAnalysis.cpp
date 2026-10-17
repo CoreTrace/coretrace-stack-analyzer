@@ -719,8 +719,6 @@ namespace ctrace::stack::analysis
                 ConstParamIssue issue;
                 issue.funcName = F.getName().str();
                 issue.binding = binding;
-                if (const DILocalVariable* variable = spilledParameter(Arg))
-                    issue.debugArgNo = variable->getArg();
                 issue.confidence =
                     computeIssueConfidence(binding, readOnlyByMetadata, anonymousType);
                 issue.pointerConstOnly =
