@@ -2410,11 +2410,11 @@ The static and anonymous-namespace homonyms of `check_const_suggestion_cross_tu`
 
 - [ ] **Step 1: Add the two checks and the D17 expectations; run them.** Expected: D4 and the redeclaration cases FAIL, as above; Review Focus 3 passes.
   Commits: `test(const-param): keep a rewrite that takes another file's symbol, unchecked`; `test(const-param): a function a shared header defines does not collide with itself`; `test(const-param): keep a suggestion that another file redeclares, unchecked`.
-- [ ] **Step 2: Collisions (§5.10).** After the rewrite, each compilation looks up every symbol the entity takes (its variants after the rewrite) in its module: a definition whose declaration is not the entity's (Task 1.4's identity) is a collision, with the IR linkage of that definition. A declaration the entity's redeclarations gain, compared with the unit's initial compilation, is a merge (ruling 3). Once every unit is judged, and none refutes, `judgeCollisions` applies the table of §5.10:
+- [ ] **Step 2: Collisions (§5.10).** After the rewrite, each compilation looks up every symbol the entity takes (its variants after the rewrite) in its module: a definition whose declaration is not the entity's (Task 1.4's identity) is a collision, with the IR linkage of that definition; the defining unit gives the linkage of the entity's own. A declaration the entity's redeclarations gain, compared with the unit's initial compilation, is a merge (ruling 3). Once every unit is judged, and none refutes, `judgeCollisions` applies the table of §5.10:
   - local linkage (`internal`, `private`): no collision;
-  - `external`: in the defining file, Clang reports a redefinition, refuted at step 4; in another file, indeterminate, `… the two definitions collide`;
-  - `weak`, `extern_weak`, `common`: indeterminate, naming the definition the linker would use: the strong one;
-  - `weak_odr`, `linkonce_odr`: indeterminate, `… only one of the two is kept …`;
+  - both strong (`external`): in the defining file, Clang reports a redefinition, refuted at step 4; in another file, indeterminate, `… the two definitions collide`;
+  - one definition strong (`external`), the other weak (`weak`, `weak_odr`, `linkonce`, `linkonce_odr`), whichever of the two is the entity's: indeterminate, `… the strong definition, in <file>, is used and the weak one, in <file>, is ignored`;
+  - both weak: indeterminate, `… the linker keeps one of the two weak definitions, and the check establishes neither which one nor that they are equivalent`;
   - a merge with a declaration: indeterminate, after any definition (ruling 1).
   A definition that is the entity's, such as an `inline` function of a rewritten header, is no collision.
   Run: `check_const_suggestion_overload_defined_elsewhere`, `check_const_suggestion_inline_in_a_header`. Expected: PASS.
@@ -2422,7 +2422,7 @@ The static and anonymous-namespace homonyms of `check_const_suggestion_cross_tu`
 - [ ] **Step 3: Stale declarations (D17).** A unit that reads no rewritten file and declares the entity through the linker (Task 1.4, Step 3) makes the unit indeterminate, after steps 4 to 6: `<file> declares <function> with its current type and does not see the rewrite: …`. T v1's removal `declared in <file>:<line> with type <type>` goes.
   Run: `check_const_suggestion_cross_tu`, `check_const_suggestion_compilation_database`. Expected: PASS, but for the `cast.c` cases (Task 1.7).
   Commit: `fix(const-param): keep a suggestion that another file redeclares, unchecked`.
-- [ ] **Step 4: Failure of Review Focus 3 on a mutant.** Count the entity's own definition as another entity's in Step 2's lookup; run `check_const_suggestion_inline_in_a_header`. Expected: FAIL (`C++, inline`: indeterminate, `… only one of the two is kept …`). Restore the code; expected: PASS. Record both outputs in `evidence/217/stage1/`.
+- [ ] **Step 4: Failure of Review Focus 3 on a mutant.** Count the entity's own definition as another entity's in Step 2's lookup; run `check_const_suggestion_inline_in_a_header`. Expected: FAIL (`C++, inline`: indeterminate, `… the linker keeps one of the two weak definitions …`). Restore the code; expected: PASS. Record both outputs in `evidence/217/stage1/`.
 - [ ] **Step 5: README (D3).** In "Const parameter suggestions checked with Clang", step 2: "A homonym with internal linkage (`static`, anonymous namespace) in another file is another function." becomes "A function with internal linkage (`static`, anonymous namespace) and a function of the same name in another file are two functions, whichever of them has internal linkage." The rest of the section is rewritten with the verdicts in Task 1.8.
   Commit: `docs(readme): a static function and its homonym elsewhere are two functions`.
 - [ ] **Step 6: Task tests.** As Task 1.1, Step 6.
