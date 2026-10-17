@@ -145,12 +145,13 @@ namespace ctrace::stack::analysis
             std::vector<FunctionFacts> facts;
         };
 
-        // A unit before the rewrite, prepared once: its diagnostics, what the methods of the
-        // function's name override, and its generated code ready to compare.
+        // A unit before the rewrite, prepared once for every suggestion of the module: its
+        // diagnostics, what the methods of each function's name override (indexed like the
+        // targets), and its generated code ready to compare.
         struct Original
         {
             std::multiset<std::string> diagnostics;
-            std::multiset<std::string> overrides;
+            std::vector<std::multiset<std::string>> overrides;
             std::shared_ptr<const const_suggestion::ModuleText> code;
         };
 
@@ -894,28 +895,40 @@ namespace ctrace::stack::analysis
             return out;
         }
 
-        // A unit before the rewrite, for the function a target names: compiled once per call.
-        using OriginalCache =
-            std::map<std::pair<std::string, std::string>, std::optional<Original>>;
+        // The overrides that each target's inspection recorded, indexed like the targets.
+        std::vector<std::multiset<std::string>> overridesOf(const Compilation& compilation)
+        {
+            std::vector<std::multiset<std::string>> out;
+            for (const FunctionFacts& facts : compilation.facts)
+                out.push_back(facts.overrides);
+            return out;
+        }
+
+        // A unit before the rewrite, by its file and its configuration: compiled once for every
+        // suggestion of the module (#217, §5, step 3).
+        using OriginalCache = std::map<std::string, std::optional<Original>>;
 
         const std::optional<Original>& originalOf(const UnitCommand& command,
-                                                  const std::string& key, const Target& planned,
+                                                  const std::string& key,
+                                                  const std::vector<Target>& planned,
                                                   OriginalCache& cache, bool timing)
         {
-            std::optional<Original>& out = cache[{key, planned.name}];
+            std::optional<Original>& out =
+                cache[key + '\0' + const_suggestion::fingerprintOf(command)];
             if (out)
                 return out;
-            std::vector<Target> targets{planned};
-            targets[0].plan = false;
-            targets[0].expectedType.clear();
+            std::vector<Target> targets = planned;
+            for (Target& target : targets)
+            {
+                target.plan = false;
+                target.expectedType.clear();
+            }
             Compilation before =
                 compile(command, {}, targets, "const_suggestion.compile.other_before", timing);
             if (!before.failure.empty() || !before.module)
                 return out;
             const analyzer::ScopedHotspot hotspot(timing, "const_suggestion.prepare");
-            out = Original{before.diagnostics,
-                           before.facts.empty() ? std::multiset<std::string>()
-                                                : before.facts[0].overrides,
+            out = Original{before.diagnostics, overridesOf(before),
                            std::make_shared<const_suggestion::ModuleText>(
                                const_suggestion::prepare(*before.module))};
             return out;
@@ -931,9 +944,10 @@ namespace ctrace::stack::analysis
             return {std::move(why), Verdict::Indeterminate};
         }
 
-        // Checks one suggestion in one unit, against the unit before the rewrite.
+        // Checks one suggestion, the target at `index`, in one unit, against the unit before the
+        // rewrite.
         Judgement checkUnit(const UnitCommand& command, const std::optional<Original>& before,
-                            const Target& planned,
+                            std::size_t index, const Target& planned,
                             const std::map<std::string, std::string>& rewritten,
                             const std::set<std::string>& symbolsBefore, const FunctionFacts& plan,
                             PrintedSignature& signature, std::vector<std::string>& accepted,
@@ -973,7 +987,7 @@ namespace ctrace::stack::analysis
                 return indeterminate("the rewritten declaration does not get the suggested type");
             if (!facts.problem.empty())
                 return refuted(facts.problem);
-            if (before->overrides != facts.overrides)
+            if (before->overrides[index] != facts.overrides)
                 return refuted("the methods it overrides change");
             if (signature.after.empty() && !facts.printedSignature.empty())
                 signature.after = facts.printedSignature;
@@ -1108,6 +1122,8 @@ namespace ctrace::stack::analysis
             definingCode = std::make_shared<const_suggestion::ModuleText>(
                 const_suggestion::prepare(*before.module));
         }
+        const std::optional<Original> definingBefore =
+            Original{before.diagnostics, overridesOf(before), definingCode};
         OriginalCache originals;
 
         // The other units a rewrite may reach: the analyzed ones and, with a compilation
@@ -1164,11 +1180,9 @@ namespace ctrace::stack::analysis
             PrintedSignature signature{plan.printedSignature, ""};
             std::vector<std::string> accepted;
             std::string renamed;
-            const std::optional<Original> selfBefore =
-                Original{before.diagnostics, plan.overrides, definingCode};
-            std::vector<Judgement> judgements{checkUnit(command, selfBefore, planned, rewritten,
-                                                        symbolsBefore, plan, signature, accepted,
-                                                        renamed, timing)};
+            std::vector<Judgement> judgements{checkUnit(command, definingBefore, i, planned,
+                                                        rewritten, symbolsBefore, plan, signature,
+                                                        accepted, renamed, timing)};
             std::vector<std::string> judged{label(canonicalPath(self->filename, config), &command)};
             // Then every other unit that sees a rewritten file or references the function: the
             // analyzed ones and, with a compilation database, every file it lists, analyzed or
@@ -1255,8 +1269,8 @@ namespace ctrace::stack::analysis
                     continue;
                 std::vector<std::string> otherAccepted;
                 Judgement judgement = checkUnit(
-                    other, originalOf(other, key, planned, originals, timing), planned, rewritten,
-                    symbolsBefore, plan, signature, otherAccepted, renamed, timing);
+                    other, originalOf(other, key, targets, originals, timing), i, planned,
+                    rewritten, symbolsBefore, plan, signature, otherAccepted, renamed, timing);
                 if (judgement.verdict == Verdict::Indeterminate &&
                     judgement.reason == kDoesNotCompileAsItIs)
                 {
