@@ -889,14 +889,14 @@ Reasons of an indeterminate verdict, after `not checked with Clang: ` (shown in 
 |---|---|---|
 | `the parameter's type is written in a macro argument that writes other parameters too` | 1.3 | D5: the text an edit rewrites writes another parameter |
 | `the parameter's type is written in a macro argument that writes other declarations too` | 1.3 | the same, for another declaration |
-| `<file> could not be inspected once rewritten` | 1.4 | step 2 |
+| `the rewritten code cannot be inspected entirely, a fatal error stops its compilation: <file>:<line>: <message>` | 1.4 | step 2 |
 | `the rewrite also changes the type of <name> (<file>:<line>)` | 1.4 | step 3 |
 | `the generated code changes, and no reference, override or constant condition explains it: <difference>` | 1.5 | step 7 (D16); `<difference>` is the comparator's text |
 | `'<a>' and '<b>' both become '<c>': their correspondence is not one to one` | 1.5 | §5.7, D14 |
 | `'<a>' becomes both '<b>' and '<c>': their correspondence is not one to one` | 1.5 | §5.7 |
 | `<symbol> is also defined in <file>; if <defining file> and <file> are linked together, the two definitions collide` | 1.6 | §5.10, strong (D4) |
-| `<symbol> is also defined, weak, in <file>; if <defining file> and <file> are linked together, the definition in <file> is used and the other one is ignored` | 1.6 | §5.10, weak |
-| `<symbol> is also defined in <file>, as an inline or template definition; if <defining file> and <file> are linked together, only one of the two is kept, and the check does not establish that they are equivalent` | 1.6 | §5.10, `weak_odr`, `linkonce_odr` |
+| `<symbol> is also defined in <file>; if <defining file> and <file> are linked together, the strong definition, in <file>, is used and the weak one, in <file>, is ignored` | 1.6 | §5.10, one definition strong and the other weak, whichever is the entity's |
+| `<symbol> is also defined in <file>; if <defining file> and <file> are linked together, the linker keeps one of the two weak definitions, and the check establishes neither which one nor that they are equivalent` | 1.6 | §5.10, both weak (`weak`, `weak_odr`, `linkonce`, `linkonce_odr`) |
 | `the rewrite gives <function> the symbol of another declaration (<file>:<line>); if a file linked with <defining file> defines it, the two definitions collide` | 1.6 | ruling 3 |
 | `<file> declares <function> with its current type and does not see the rewrite: if <defining file> and <file> are linked together, that declaration no longer matches the rewritten definition` | 1.6 | D17 |
 | `<file>:<line> converts the address of <function> with an explicit cast` | 1.7 | D15 |
@@ -928,20 +928,22 @@ Trace (`--verbose`). T v1's line `[const-suggestion] <symbol> parameter <name>: 
 
 ### Rulings
 
-The spec leaves these open; each one is the user's to overturn.
+The spec leaves these open. The user confirmed them on 2026-10-17, ruling 2 provisionally, and corrected rulings 7 and 12; rulings 14 and 15 come from that review.
 1. **Which reason is shown.** A refuted suggestion gives the reason of the first unit that refutes it, in judgement order: the defining unit, then the others in T v1's order. An indeterminate one gives the reason of the first indeterminate unit in that order; if no unit is indeterminate, the first collision's, a definition before a declaration. Cost if wrong: another reason is shown; the verdict stays.
-2. **The initial compilation of another unit is shared by the suggestions of one module.** T runs once per analyzed module (`checkConstSuggestions`): a unit that sees the changes of two modules is compiled once as it is for each. Sharing it across modules needs the facts of entities not planned yet; Task 3.1 measures what it would save. Cost if wrong: one more initial compilation per module and unit.
+2. **The initial compilation of another unit is shared by the suggestions of one module.** T runs once per analyzed module (`checkConstSuggestions`): a unit that sees the changes of two modules is compiled once as it is for each. Sharing it across modules needs the facts of entities not planned yet. The user accepted this limit for stage 1, provisionally; the spec states it (§5, step 3; §10): it reduces the sharing planned at first. Task 3.1 measures its cost across modules; the +10 % criterion is unchanged.
 3. **A declaration of another entity that the rewrite merges into the entity** (t9 without `b.cpp`: `api.hpp` also declares `f(const int*)`) is a possible collision (§3, "collision possible entre fichiers"): indeterminate, with its own reason, shown after a definition's. Cost if wrong: a suggestion kept as not checked that a definition elsewhere would refute or not.
 4. **R identifies a target by its declarations.** The value of an R fact is its target's declaration sites, mapped back to the original text; for a template specialization or an implicit function, which have no declaration of their own, its symbol, mapped back through the established pairs. An R fact is unchanged when its target after the rewrite keeps every declaration it had: a merge (ruling 3) adds the entity's, and the collisions judge it, not the facts. A target that loses a declaration, or another target, refutes. A symbol alone would not do: once t9 is rewritten, `_Z1fPKi` names both the entity and the overload it merges with. Cost if wrong: a merge refuted, or a reference to the wrong declaration missed.
 5. **D3 is pinned in Task 1.4, not 1.6**: both directions are fixed by the source identity with its linkage, which Task 1.4 brings. Task 1.6 keeps D4, Review Focus 3 and D17.
 6. **Task 1.1 gets a second test**, the shared initial compilation, counted with `--timing`: the plan named it as work but did not pin it.
-7. **D7's fixture holds four cases**: t8, and as templates a base class template, a derived class template and a constructor template. The technique of §5.7 holds on all four in `evidence/217/stage1/d7-probe/` (`probe.cpp`, `probe-output.txt`): `getInheritedConstructor()` finds the constructor each inheriting constructor comes from, and the symbols CodeGen gives the inheriting constructors are the IR's, before and after. So D7 expects verified.
+7. **D7's fixture holds five cases**: t8, and as templates a base class template, a derived class template and a constructor template, inherited for `int*` and for `double*`. The technique of §5.7 holds on all of them in `evidence/217/stage1/d7-probe/` (`probe.cpp`, `probe-output.txt`) and `evidence/217/stage1/corrections/` (`generic-before.cpp`): `getInheritedConstructor()` finds the constructor each inheriting constructor comes from, and the symbols CodeGen gives the inheriting constructors are the IR's, before and after. So D7 expects verified. An inheriting constructor is paired by its derived class, its variant, and the specialization it inherits: one derived class inherits a constructor template once per specialization (`FromGeneric` for `int*` and `double*`), which the derived class and the variant alone confuse.
 8. **The two reasons of Task 1.2 are not added.** After P0, the rule reports no artificial parameter, and every parameter of the `-O0` code the analyzer compiles from sources is spilled, so it has a source index: no input reaches those reasons, and no test could fail first. A binding without a source index, or artificial, keeps T v1's text `the parameter is not found in the source`. Cost if wrong: a less precise reason on an input not found.
 9. **The comparator's name heuristics are removed** once the established pairs replace them (Task 1.5): the masked encodings, `withoutConst`, `variantOf` and the template keys. The difference text keeps listing the symbols left without a pair, which locates the difference, as §5.9 asks. Cost if wrong: a trace that no longer suggests a probable counterpart.
 10. **D12 (Task 2.4) also changes the `ReferenceRvaluePreferValue` block that D14 adds** to `const-suggestion-deduction-refused.cpp`.
 11. **Task 1.4 gets a check of the scope after the rewrite** (`check_const_suggestion_header_read_differently`): a header that another file reads as other declarations, through a macro it defines otherwise. Without it, step 3 of §5.8 would have no failing test: the plan's scope (Task 1.3) holds in the defining unit.
-12. **No error limit, and step 2 without a test.** T's compilations set no error limit. Otherwise a rewrite that breaks more than 19 uses would end in "too many errors", which is fatal, and step 2 would keep as not checked a suggestion that T v1 removes. Step 2 then guards only a fatal error that the rewrite itself brings, which inserting `const` does not bring in any input of the suite: it has no failing test. Cost if wrong: an untested guard.
+12. **No error limit; step 2 tested.** T's compilations set no error limit: otherwise a rewrite that breaks more than 19 uses would end in "too many errors", which is fatal, and step 2 would keep as not checked a suggestion that T v1 removes. A fatal error still comes from the rewrite itself when the suggested type selects a template whose instantiation never ends ("recursive template instantiation exceeded maximum depth"): `const-suggestion-incomplete-inspection.cpp` tests step 2 with it.
 13. **Task 1.4 gets a fixture where R and K refute without a change of code** (`const-suggestion-facts-without-code-change.cpp`). T v1 compares only code and keeps both suggestions as checked; since every refutation of T v1's tests comes with a code difference, the facts of Task 1.4 would otherwise have no failing test.
+14. **A declaration is known by where it is expanded and where it is written.** One macro invocation can declare several functions, whose names it expands at the same place: a `DeclarationSite` holds both positions, for the identity of the entity and for the scope after the rewrite. `const-suggestion-macro-two-functions.c` pins it: it passes at `64ed37e`, where T v1 finds a function by its symbol, and its failure is shown on a mutant of Task 1.4 that keeps only the expansion position.
+15. **The comparator's unit tests are adapted in Task 1.5**, as changed tests submitted with the task: `testConstSuggestionCodeComparison` and `testConstSuggestionNormalizations` pass the established pairs, and keep their guarantees; `testConstSuggestionWithoutConstKeepsIdentifiers` goes with `withoutConst`, its guarantee (two functions whose names differ by `const` are not paired) now held by a case where a renamed symbol without a pair is a difference.
 
 ### Shared types
 
@@ -950,10 +952,16 @@ In `ConstSuggestionInternal.hpp`, each added by the task that first needs it:
 enum class Verdict : std::uint8_t { Verified, Refuted, Indeterminate };              // 1.1
 struct Judgement { Verdict verdict = Verdict::Verified; std::string reason; };      // 1.1
 struct UnitConfiguration { std::string file; UnitCommand command; std::string fingerprint; }; // 1.1
-struct DeclarationSite                                                                // 1.4
+struct SourcePosition                                                                 // 1.4
 {
     std::string file;    // real path
     unsigned offset = 0; // in the original text
+    auto operator<=>(const SourcePosition&) const = default;
+};
+struct DeclarationSite                                                                // 1.4
+{
+    SourcePosition expansion; // where Clang expands the name
+    SourcePosition spelling;  // where it is written (ruling 14)
     auto operator<=>(const DeclarationSite&) const = default;
 };
 enum class SourceLinkage : std::uint8_t { None, Internal, External };               // 1.4
@@ -978,12 +986,11 @@ enum class FactKind : std::uint8_t { Reference, Override, Constant };           
 struct FactKey                                                                        // 1.4
 {
     std::vector<std::string> contexts; // the instantiations around the fact, outermost first
-    DeclarationSite spelling;
-    DeclarationSite expansion;
+    DeclarationSite site;              // the expression's, both positions
     auto operator<=>(const FactKey&) const = default;
 };
 struct Fact { FactKind kind; FactKey key; std::vector<std::string> value; };        // 1.4
-struct SymbolPair { std::string before; std::string after; };                       // 1.5
+struct SymbolPair { std::string before; std::string after; }; // 1.5, in ConstSuggestionCheck.hpp
 ```
 `FactKey` has no unit: each unit's facts are kept apart. `Fact::value` is sorted: for R, the target's declaration sites, or its symbol (ruling 4); for O, the overridden methods, each the same way; for K, `true`, `false` or the selected association's index.
 
