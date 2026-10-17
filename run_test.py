@@ -3166,10 +3166,12 @@ def check_const_suggestion_check_is_opt_in() -> bool:
 def check_const_suggestion_line_endings() -> bool:
     """
     #217: a type written on a continuation line of a #define is in the macro definition, whether
-    the file ends its lines with LF or CRLF: rewriting it would change every expansion of the macro,
-    here a function that writes through p. The suggestion is kept as not checked with both.
+    the file ends its lines with LF or CRLF, or puts spaces between the backslash and the line
+    break, which Clang accepts with a warning: rewriting it would change every expansion of the
+    macro, here a function that writes through p. The suggestion is kept as not checked in each
+    case.
     """
-    print("=== Testing a macro definition's continuation lines, with LF and CRLF ===")
+    print("=== Testing a macro definition's continuation lines, with LF, CRLF and spaces ===")
     source = (
         "#define PARAM(type) type p\n"
         "#define DECLARE(name) \\\n"
@@ -3180,9 +3182,13 @@ def check_const_suggestion_line_endings() -> bool:
     expected = "not checked with Clang: the declaration is written by a macro definition"
     ok = True
     with tempfile.TemporaryDirectory(prefix="ct_const_suggestion_line_endings_") as tmp:
-        for label, newline in (("LF", "\n"), ("CRLF", "\r\n")):
-            path = Path(tmp).resolve() / f"reader-{label.lower()}.c"
-            path.write_bytes(source.replace("\n", newline).encode("utf-8"))
+        for label, contents in (
+            ("LF", source),
+            ("CRLF", source.replace("\n", "\r\n")),
+            ("spaces after the backslash", source.replace("\\\n", "\\  \n")),
+        ):
+            path = Path(tmp).resolve() / f"reader-{label.lower().replace(' ', '-')}.c"
+            path.write_bytes(contents.encode("utf-8"))
             # The file's bytes are an input the cache key does not cover.
             result = run_analyzer_uncached(
                 [str(path), "--format=json", "--experimental-const-suggestion-check"]
