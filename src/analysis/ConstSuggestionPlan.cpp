@@ -4,12 +4,14 @@
 #include "ConstSuggestionInternal.hpp"
 
 #include <algorithm>
+#include <set>
 #include <string>
 #include <vector>
 
 #include <clang/AST/ASTContext.h>
 #include <clang/AST/Decl.h>
 #include <clang/AST/DeclCXX.h>
+#include <clang/AST/RecursiveASTVisitor.h>
 #include <clang/AST/TypeLoc.h>
 #include <clang/Basic/SourceManager.h>
 #include <clang/Lex/Lexer.h>
@@ -158,12 +160,14 @@ namespace ctrace::stack::analysis
             {
                 if (at.isInvalid())
                     return fail("the parameter's type has no position");
+                bool inArgument = false;
                 if (at.isMacroID())
                 {
                     if (sm_.isMacroArgExpansion(at))
                     {
                         // Written in a macro argument: rewritten where it is written.
                         at = sm_.getSpellingLoc(at);
+                        inArgument = true;
                     }
                     else
                     {
@@ -203,14 +207,73 @@ namespace ctrace::stack::analysis
                                               { return edit.offset == offset; });
                 if (!seen)
                     edits.push_back({offset, length, text});
+                if (inArgument)
+                    inArguments_.push_back(at);
                 return true;
             }
 
+          public:
+            // The edits written in a macro argument, which other declarations may share.
+            const std::vector<clang::SourceLocation>& inArguments() const
+            {
+                return inArguments_;
+            }
+
+          private:
             clang::ASTContext& context_;
             const clang::SourceManager& sm_;
             const MacroDefinitions& macros_;
             SuggestionPlan& plan_;
+            std::vector<clang::SourceLocation> inArguments_;
             const clang::ParmVarDecl* param_ = nullptr;
+        };
+
+        // Whether a parameter other than `planned` has its type written at one of `edits`, the
+        // edits written in a macro argument: a macro argument can write the type of several
+        // parameters (D5).
+        class SharedTypes : public clang::RecursiveASTVisitor<SharedTypes>
+        {
+          public:
+            SharedTypes(const clang::SourceManager& sm,
+                        const std::vector<clang::SourceLocation>& edits,
+                        const std::set<const clang::ParmVarDecl*>& planned)
+                : sm_(sm), edits_(edits), planned_(planned)
+            {
+            }
+
+            bool VisitParmVarDecl(clang::ParmVarDecl* parameter)
+            {
+                if (!shared && !planned_.count(parameter))
+                    shared = writtenAtAnEdit(parameter->getTypeSourceInfo());
+                return true;
+            }
+
+            bool shared = false;
+            std::uint8_t reservedPadding_[7] = {};
+
+          private:
+            // Whether a part of the type, written in a macro argument, is written at an edit.
+            bool writtenAtAnEdit(const clang::TypeSourceInfo* written) const
+            {
+                if (!written)
+                    return false;
+                for (clang::TypeLoc loc = written->getTypeLoc(); !loc.isNull();
+                     loc = loc.getNextTypeLoc())
+                {
+                    const clang::SourceLocation at = loc.getBeginLoc();
+                    if (at.isMacroID() && sm_.isMacroArgExpansion(at) &&
+                        std::find(edits_.begin(), edits_.end(), sm_.getSpellingLoc(at)) !=
+                            edits_.end())
+                    {
+                        return true;
+                    }
+                }
+                return false;
+            }
+
+            const clang::SourceManager& sm_;
+            const std::vector<clang::SourceLocation>& edits_;
+            const std::set<const clang::ParmVarDecl*>& planned_;
         };
 
         // The type the parameter must have once rewritten, written canonically.
@@ -292,6 +355,24 @@ namespace ctrace::stack::analysis
             }
             if (!planner.plan(*declaration, *declaration->getParamDecl(out.sourceIndex)))
                 return out;
+        }
+        // The plan's scope (§5.5): an edit written in a macro argument serves only the parameter
+        // planned.
+        if (!planner.inArguments().empty())
+        {
+            std::set<const clang::ParmVarDecl*> planned;
+            for (const clang::FunctionDecl* declaration : pattern->redecls())
+            {
+                if (out.sourceIndex < declaration->getNumParams())
+                    planned.insert(declaration->getParamDecl(out.sourceIndex));
+            }
+            SharedTypes shared(context.getSourceManager(), planner.inArguments(), planned);
+            shared.TraverseDecl(context.getTranslationUnitDecl());
+            if (shared.shared)
+            {
+                out.indeterminate = "the parameter's type is written in a macro argument that "
+                                    "writes other parameters too";
+            }
         }
         return out;
     }
