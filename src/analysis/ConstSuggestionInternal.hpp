@@ -3,6 +3,7 @@
 
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <optional>
 #include <set>
 #include <string>
@@ -15,8 +16,11 @@
 namespace clang
 {
     class ASTContext;
+    class FileID;
     class FunctionDecl;
+    class PPCallbacks;
     class QualType;
+    class SourceManager;
 } // namespace clang
 
 namespace llvm
@@ -82,10 +86,18 @@ namespace ctrace::stack::analysis::const_suggestion
     // A type written canonically, an anonymous type without its location.
     std::string writtenType(const clang::ASTContext& context, clang::QualType type);
 
+    // The macro definitions a compilation reads, by file: from each macro's name to its last
+    // token, as offsets (D11).
+    using MacroDefinitions = std::map<clang::FileID, std::vector<std::pair<unsigned, unsigned>>>;
+
+    // Records them, in the compilation that plans.
+    std::unique_ptr<clang::PPCallbacks> recordMacroDefinitions(const clang::SourceManager& sm,
+                                                               MacroDefinitions& out);
+
     // Plans the rewrite of the parameter at `sourceIndex` of `function`, located in the defining
     // unit's initial compilation by the suggestion's symbol.
-    SuggestionPlan plan(clang::ASTContext& context, const clang::FunctionDecl& function,
-                        std::optional<unsigned> sourceIndex);
+    SuggestionPlan plan(clang::ASTContext& context, const MacroDefinitions& macros,
+                        const clang::FunctionDecl& function, std::optional<unsigned> sourceIndex);
 
     // The demangled form of a symbol without const and spaces, with && written &: the rewritten
     // function, and what is named inside it, keep this form across the rewrite.

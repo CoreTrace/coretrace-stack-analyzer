@@ -13,44 +13,63 @@
 #include <clang/AST/TypeLoc.h>
 #include <clang/Basic/SourceManager.h>
 #include <clang/Lex/Lexer.h>
+#include <clang/Lex/MacroInfo.h>
+#include <clang/Lex/PPCallbacks.h>
 
 namespace ctrace::stack::analysis
 {
     namespace
     {
         using const_suggestion::Edit;
+        using const_suggestion::MacroDefinitions;
         using const_suggestion::realPath;
         using const_suggestion::SuggestionPlan;
         using const_suggestion::writtenType;
 
-        // Whether `offset` of `buffer` lies on a #define line, continuations included.
-        bool inMacroDefinition(llvm::StringRef buffer, std::size_t offset)
+        // Records where each macro definition lies, by file.
+        class MacroRecorder : public clang::PPCallbacks
         {
-            std::size_t start = buffer.rfind('\n', offset);
-            start = start == llvm::StringRef::npos ? 0 : start + 1;
-            // Whether the line before the one at `start` ends with a backslash, before its
-            // line break, "\n" or "\r\n".
-            const auto continued = [&](std::size_t at)
+          public:
+            MacroRecorder(const clang::SourceManager& sm, MacroDefinitions& out)
+                : sm_(sm), out_(out)
             {
-                std::size_t end = at - 1;
-                if (end > 0 && buffer[end - 1] == '\r')
-                    --end;
-                return end > 0 && buffer[end - 1] == '\\';
-            };
-            while (start >= 2 && continued(start))
-            {
-                const std::size_t previous = buffer.rfind('\n', start - 2);
-                start = previous == llvm::StringRef::npos ? 0 : previous + 1;
             }
-            const llvm::StringRef line = buffer.substr(start, offset - start).ltrim();
-            return line.starts_with("#") && line.drop_front().ltrim().starts_with("define");
+
+            void MacroDefined(const clang::Token&, const clang::MacroDirective* directive) override
+            {
+                const clang::MacroInfo* info = directive->getMacroInfo();
+                const clang::SourceLocation begin = info->getDefinitionLoc();
+                const clang::SourceLocation end = info->getDefinitionEndLoc();
+                if (!begin.isFileID() || !end.isFileID())
+                    return;
+                const auto [file, from] = sm_.getDecomposedLoc(begin);
+                if (sm_.getFileID(end) == file)
+                    out_[file].push_back({from, sm_.getFileOffset(end)});
+            }
+
+          private:
+            const clang::SourceManager& sm_;
+            MacroDefinitions& out_;
+        };
+
+        // Whether `offset` of `file` lies in a macro definition, as the preprocessor read it:
+        // continuation lines included, whatever spaces follow their backslash.
+        bool inMacroDefinition(const MacroDefinitions& macros, clang::FileID file,
+                               std::size_t offset)
+        {
+            const auto found = macros.find(file);
+            return found != macros.end() &&
+                   std::any_of(found->second.begin(), found->second.end(),
+                               [&](const std::pair<unsigned, unsigned>& range)
+                               { return range.first <= offset && offset <= range.second; });
         }
 
         class Planner
         {
           public:
-            Planner(clang::ASTContext& context, SuggestionPlan& plan)
-                : context_(context), sm_(context.getSourceManager()), plan_(plan)
+            Planner(clang::ASTContext& context, const MacroDefinitions& macros,
+                    SuggestionPlan& plan)
+                : context_(context), sm_(context.getSourceManager()), macros_(macros), plan_(plan)
             {
             }
 
@@ -177,7 +196,7 @@ namespace ctrace::stack::analysis
                 const clang::OptionalFileEntryRef entry = sm_.getFileEntryRefForID(file);
                 if (!entry)
                     return fail("the parameter's type is not written in a file");
-                if (inMacroDefinition(sm_.getBufferData(file), offset))
+                if (inMacroDefinition(macros_, file, offset))
                     return fail("the declaration is written by a macro definition");
                 std::vector<Edit>& edits = plan_.edits[realPath(entry->getName())];
                 const bool seen = std::any_of(edits.begin(), edits.end(), [&](const Edit& edit)
@@ -189,6 +208,7 @@ namespace ctrace::stack::analysis
 
             clang::ASTContext& context_;
             const clang::SourceManager& sm_;
+            const MacroDefinitions& macros_;
             SuggestionPlan& plan_;
             const clang::ParmVarDecl* param_ = nullptr;
         };
@@ -226,7 +246,14 @@ namespace ctrace::stack::analysis
         return type.getCanonicalType().getAsString(policy);
     }
 
+    std::unique_ptr<clang::PPCallbacks>
+    const_suggestion::recordMacroDefinitions(const clang::SourceManager& sm, MacroDefinitions& out)
+    {
+        return std::make_unique<MacroRecorder>(sm, out);
+    }
+
     SuggestionPlan const_suggestion::plan(clang::ASTContext& context,
+                                          const MacroDefinitions& macros,
                                           const clang::FunctionDecl& function,
                                           std::optional<unsigned> sourceIndex)
     {
@@ -253,7 +280,7 @@ namespace ctrace::stack::analysis
         const clang::FunctionDecl* pattern = function.getTemplateInstantiationPattern();
         if (!pattern)
             pattern = &function;
-        Planner planner(context, out);
+        Planner planner(context, macros, out);
         for (const clang::FunctionDecl* declaration : pattern->redecls())
         {
             if (declaration->isImplicit())

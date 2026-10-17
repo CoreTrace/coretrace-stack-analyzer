@@ -36,6 +36,7 @@
 #include <clang/Frontend/FrontendActions.h>
 #include <clang/Frontend/MultiplexConsumer.h>
 #include <clang/Frontend/Utils.h>
+#include <clang/Lex/Preprocessor.h>
 #include <clang/Lex/PreprocessorOptions.h>
 #include <compilerlib/toolchain.hpp>
 #include <coretrace/logger.hpp>
@@ -130,6 +131,7 @@ namespace ctrace::stack::analysis
             std::unique_ptr<llvm::LLVMContext> context;
             std::unique_ptr<llvm::Module> module;
             std::vector<FunctionFacts> facts;
+            const_suggestion::MacroDefinitions macros; // read only when the compilation plans
         };
 
         // A unit before the rewrite, prepared once for every suggestion of the module: its
@@ -364,7 +366,8 @@ namespace ctrace::stack::analysis
                 if (target.name.empty() && function->getIdentifier())
                     target.name = function->getIdentifier()->getName().str();
                 if (target.plan)
-                    facts.plan = const_suggestion::plan(*context_, *function, target.sourceIndex);
+                    facts.plan = const_suggestion::plan(*context_, out_.macros, *function,
+                                                        target.sourceIndex);
             }
 
             std::uint8_t reservedPadding_[7] = {};
@@ -395,6 +398,12 @@ namespace ctrace::stack::analysis
                 std::vector<std::unique_ptr<clang::ASTConsumer>> consumers;
                 consumers.push_back(std::move(generator));
                 consumers.push_back(std::make_unique<Inspector>(*this, targets_, out_));
+                if (std::any_of(targets_.begin(), targets_.end(),
+                                [](const Target& target) { return target.plan; }))
+                {
+                    ci.getPreprocessor().addPPCallbacks(const_suggestion::recordMacroDefinitions(
+                        ci.getSourceManager(), out_.macros));
+                }
                 return std::make_unique<clang::MultiplexConsumer>(std::move(consumers));
             }
 
