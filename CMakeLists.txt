@@ -21,6 +21,8 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(LLVM_LINK_LLVM_DYLIB ON)
 
 find_package(LLVM REQUIRED CONFIG)
+# The check of const suggestions drives Clang itself (#217).
+find_package(Clang REQUIRED CONFIG)
 
 message(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION}")
 message(STATUS "Using LLVMConfig.cmake in: ${LLVM_DIR}")
@@ -74,6 +76,8 @@ set(STACK_ANALYZER_SOURCES
     src/analysis/AnalyzerUtils.cpp
     src/analysis/CompileCommands.cpp
     src/analysis/ConstParamAnalysis.cpp
+    src/analysis/ConstSuggestionCheck.cpp
+    src/analysis/ConstSuggestionCode.cpp
     src/analysis/CommandInjectionAnalysis.cpp
     src/analysis/DuplicateIfCondition.cpp
     src/analysis/DynamicAlloca.cpp
@@ -194,6 +198,7 @@ target_include_directories(stack_usage_analyzer_lib
 target_include_directories(stack_usage_analyzer_lib SYSTEM
     PUBLIC
         ${LLVM_INCLUDE_DIRS}
+        ${CLANG_INCLUDE_DIRS}
 )
 
 # Treat external dependency headers as system includes to reduce warning noise
@@ -234,6 +239,21 @@ else()
             ${llvm_libs}
             cc::compilerlib_static
             coretrace::logger
+    )
+endif()
+# The same Clang libraries as compilerlib links.
+if(CLANG_LINK_CLANG_DYLIB)
+    target_link_libraries(stack_usage_analyzer_lib PUBLIC clang-cpp)
+else()
+    target_link_libraries(stack_usage_analyzer_lib
+        PUBLIC
+            clangAST
+            clangBasic
+            clangCodeGen
+            clangDriver
+            clangFrontend
+            clangLex
+            clangSema
     )
 endif()
 

@@ -254,6 +254,7 @@ A model path given to one of these three options that is not a readable file sto
 --no-resource-cross-tu disables cross-TU resource summaries
 --resource-summary-cache-dir=<path> sets cache directory for cross-TU resource summaries (default: .cache/resource-lifetime)
 --resource-summary-cache-memory-only keeps cross-TU summary cache in memory only (process-local, no files)
+--experimental-const-suggestion-check checks each const parameter suggestion with Clang before reporting it (experimental, off by default; see "Experimental: const parameter suggestions checked with Clang")
 --compile-ir-cache-dir=<path> enables dependency-aware LLVM IR compile cache for unchanged source files
 --compile-ir-format=bc|ll selects source compilation IR format (`bc` default, `ll` for textual LLVM IR)
 --timing prints compile/analysis timings to stderr, including aggregated hotspot ranking
@@ -345,6 +346,7 @@ Supported keys:
 - `uninitialized-cross-tu`
 - `resource-summary-cache-dir`
 - `resource-summary-cache-memory-only`
+- `experimental-const-suggestion-check`
 - `compile-ir-cache-dir`
 - `compile-ir-format` (`bc` or `ll`)
 
@@ -630,6 +632,112 @@ Example run:
 
 For test files, `run_test.py` also supports per-file model selection with:
 `// resource-model: <path>`.
+
+### Experimental: const parameter suggestions checked with Clang
+
+`ConstParameterNotModified` finds, in the LLVM IR, the pointer and reference parameters through
+which nothing is written. The IR does not show every constraint that C and C++ put on a parameter:
+the suggested `const` type may not compile (a callback of the old type, or `&p` passed as `int**`
+in C++), may only drop a qualifier with a warning (the same `&p` in C), or may compile and select
+other code (an overload, an override, `sizeof`, `if constexpr`, `_Generic`).
+
+Without `--experimental-const-suggestion-check`, the default, nothing beyond the IR analysis is
+checked: every suggestion is reported as the IR analysis finds it, without a check line, including
+those whose suggested type does not compile, drops a qualifier, or changes the generated code.
+
+With `--experimental-const-suggestion-check` (or `experimental-const-suggestion-check=true` in a
+config file), each suggestion is checked with Clang before it is reported. The check is
+experimental:
+- it compares the IR that Clang prints before and after the rewrite. A difference its
+  normalizations do not cover removes a suggestion that is valid; several such cases were found
+  and fixed, others may remain;
+- it compiles the files that see the change again, once per suggestion: on this repository's
+  self-analysis, the analysis takes about 19% longer.
+
+The option is a trade-off, not a fix: with it, a valid suggestion can still be removed; without
+it, suggestions whose type does not compile, drops a qualifier, or changes the generated code are
+reported.
+
+The check runs these steps:
+
+1. Every declaration of the function that the defining file sees, in that file and its headers,
+   is rewritten in memory with the suggested type:
+   - a type written in a macro argument is rewritten where it is written;
+   - a type written by a macro that writes only the parameter gets `const` before the invocation.
+
+   A macro definition is never rewritten.
+2. Every file that sees the change is compiled again with its own compile command, at `-O0`.
+   The files considered are the analyzed ones and, with `--compile-commands`, every C or C++ file
+   of the compilation database, analyzed or not. A file sees the change when it reads a rewritten
+   file, when its analyzed code references the function, or, for a function outside any class with
+   external linkage, when it names the function after preprocessing. A homonym with internal
+   linkage (`static`, anonymous namespace) in another file is another function.
+3. The suggestion is removed when one of these files:
+   - no longer compiles;
+   - gains one of these warnings: `incompatible-pointer-types-discards-qualifiers`,
+     `incompatible-pointer-types`, `incompatible-function-pointer-types`, `int-conversion`,
+     `overloaded-virtual`;
+   - declares the function, outside the rewritten files, with another parameter type;
+   - converts the function's address with an explicit cast, other than a cast to `void`;
+   - changes what the methods of that name override;
+   - generates different code.
+
+   A file that cannot be preprocessed, or does not compile as it is, cannot be checked: the
+   suggestion is then kept as not checked, unless another file refutes it.
+
+Generated code is compared function by function and global by global, after these
+normalizations:
+- debug information is not generated;
+- two kinds of metadata that do not change what the program does are removed: the source position
+  of inline assembly (`!srcloc`), used only to report errors, and annotations (`!annotation`),
+  which the LLVM Language Reference defines as without effect on the program;
+- alias scopes and their domains lose their descriptive names, which identify nothing: each one
+  stays a distinct scope;
+- every other metadata, module flags included, is compared by contents, not by number;
+- attribute groups are compared by contents, not by numbers;
+- values are numbered, not named, and comments of the printed IR are ignored;
+- the symbols the rewrite renames are paired: the function, and what is named or instantiated
+  inside it. A symbol the file only declares is paired only if it is the function itself.
+- rewritten as `const T&`, a forwarding reference `T&&` deduces `G` instead of `G&` or `const G&`
+  for an lvalue argument: a specialization of the rewritten template that changes this way, and
+  what is named inside it, is paired when its name without `const` and references is carried by
+  exactly one symbol before the rewrite and one after. Its code is then compared like any other.
+
+Two differences that a program can observe are accepted, each only once verified, and the message
+lists them:
+- the name that `typeid` gives a type named after the function: it holds the function's mangled
+  name;
+- a string constant whose only change is the signature that `__PRETTY_FUNCTION__` prints.
+
+The check covers only:
+- the suggestions it checks. A suggestion marked `not checked with Clang: ...` rests on the IR
+  analysis alone: a declaration written by a macro definition, an LLVM IR input, a file that sees
+  the change but cannot be preprocessed or does not compile as it is;
+- the files that see the change, with their compile commands, and the code those configurations
+  compile. Other configurations, other targets, code that the preprocessor excludes, and files
+  outside both the analysis and the compilation database are not checked.
+
+A CI job that enables the option checks the projects and configurations it analyzes, and nothing
+else: an analysis run without the option, by a user or by another job, is not checked.
+
+In this repository, `ci.yml` runs the whole `run_test.py` suite on Linux and macOS. It checks the
+default behavior, and the check's tests with the option: the const-suggestion fixtures declare it
+(`// analyzer-arg:`), and the checks pass it. These tests expect suggestions kept once checked,
+suggestions removed, and suggestions kept as not checked, and analyze the same inputs without the
+option too. They cover these fixtures, with their compile commands and the LLVM 20 of each runner;
+they do not check this repository's sources, other projects or other configurations.
+
+The message says how the suggestion was checked:
+- `checked in the analyzed files only, with their compile commands: ...`, without a compilation
+  database;
+- `checked in every file of the compilation database that sees the change, with its compile
+  command: ...`, with one;
+- `difference: ...`, for each accepted difference;
+- `ABI: ...`, for a C++ function with external linkage: its symbol changes, so code compiled
+  separately must use the updated declaration and be recompiled;
+- `not checked with Clang: ...`, when the check could not run, for example on an LLVM IR input
+  (`.ll`, `.bc`), which has no source, or for a file of the compilation database that cannot be
+  preprocessed. The suggestion then rests on the IR analysis alone.
 
 ### Example
 
