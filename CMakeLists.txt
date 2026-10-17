@@ -78,6 +78,7 @@ set(STACK_ANALYZER_SOURCES
     src/analysis/ConstParamAnalysis.cpp
     src/analysis/ConstSuggestionCheck.cpp
     src/analysis/ConstSuggestionCode.cpp
+    src/analysis/ConstSuggestionPlan.cpp
     src/analysis/CommandInjectionAnalysis.cpp
     src/analysis/DuplicateIfCondition.cpp
     src/analysis/DynamicAlloca.cpp
