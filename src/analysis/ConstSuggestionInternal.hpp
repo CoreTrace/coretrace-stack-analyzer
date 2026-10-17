@@ -10,6 +10,8 @@
 
 #include <llvm/ADT/StringRef.h>
 
+#include "analysis/ConstSuggestionCheck.hpp"
+
 namespace llvm
 {
     class Module;
@@ -40,6 +42,10 @@ namespace ctrace::stack::analysis::const_suggestion
     // Refuted if a judgement refutes, else indeterminate if one is, else verified; with the
     // reason of the first judgement that has that verdict.
     Judgement aggregate(const std::vector<Judgement>& judgements);
+
+    // 16 hexadecimal digits: xxh3 of the arguments and the working directory, each followed by a
+    // NUL byte.
+    std::string fingerprintOf(const UnitCommand& command);
 
     // The demangled form of a symbol without const and spaces, with && written &: the rewritten
     // function, and what is named inside it, keep this form across the rewrite.

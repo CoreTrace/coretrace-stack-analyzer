@@ -993,6 +993,15 @@ namespace ctrace::stack::analysis
         }
     } // namespace
 
+    std::string const_suggestion::fingerprintOf(const UnitCommand& command)
+    {
+        std::string text;
+        for (const std::string& arg : command.args)
+            text.append(arg).push_back('\0');
+        text.append(command.workingDir).push_back('\0');
+        return llvm::utohexstr(llvm::xxh3_64bits(text), /*LowerCase=*/true, /*Width=*/16);
+    }
+
     Judgement const_suggestion::aggregate(const std::vector<Judgement>& judgements)
     {
         for (const Verdict verdict : {Verdict::Refuted, Verdict::Indeterminate})
@@ -1032,6 +1041,27 @@ namespace ctrace::stack::analysis
         {
             coretrace::log(coretrace::Level::Debug, "[const-suggestion] {} parameter {}: {}\n",
                            issue.funcName, issue.binding.name, outcome);
+        };
+        // Each unit judged, by its file and its configuration, after T v1's line.
+        const auto traceUnits = [](const ConstParamIssue& issue,
+                                   const std::vector<std::string>& judged,
+                                   const std::vector<Judgement>& judgements)
+        {
+            static constexpr const char* kVerdicts[] = {"verified", "refuted", "indeterminate"};
+            for (std::size_t k = 0; k < judgements.size(); ++k)
+            {
+                const Judgement& judgement = judgements[k];
+                coretrace::log(coretrace::Level::Debug,
+                               "[const-suggestion] {} parameter {}, unit {}: {}{}\n",
+                               issue.funcName, issue.binding.name, judged[k],
+                               kVerdicts[static_cast<std::size_t>(judgement.verdict)],
+                               judgement.reason.empty() ? "" : ": " + judgement.reason);
+            }
+        };
+        const auto label = [](const std::string& file, const UnitCommand* command)
+        {
+            return file + " [" + (command ? const_suggestion::fingerprintOf(*command) : "none") +
+                   "]";
         };
         const auto notChecked = [&](const std::string& why)
         {
@@ -1139,12 +1169,17 @@ namespace ctrace::stack::analysis
             std::vector<Judgement> judgements{checkUnit(command, selfBefore, planned, rewritten,
                                                         symbolsBefore, plan, signature, accepted,
                                                         renamed, timing)};
+            std::vector<std::string> judged{label(canonicalPath(self->filename, config), &command)};
             // Then every other unit that sees a rewritten file or references the function: the
             // analyzed ones and, with a compilation database, every file it lists, analyzed or
             // not. One that cannot be checked leaves the suggestion unchecked, unless another
             // one refutes it.
-            const auto cannotCheck = [&](const std::string& why)
-            { judgements.push_back(indeterminate(why)); };
+            const auto cannotCheck =
+                [&](const std::string& unit, const UnitCommand* known, const std::string& why)
+            {
+                judged.push_back(label(unit, known));
+                judgements.push_back(indeterminate(why));
+            };
             for (const AnalyzedUnit& unit : candidates)
             {
                 if (judgements.front().verdict != Verdict::Verified ||
@@ -1156,7 +1191,10 @@ namespace ctrace::stack::analysis
                 if (unit.language != LanguageType::C && unit.language != LanguageType::CXX)
                 {
                     if (referencing)
-                        cannotCheck(unit.filename + " uses the function but has no source");
+                    {
+                        cannotCheck(canonicalPath(unit.filename, config), nullptr,
+                                    unit.filename + " uses the function but has no source");
+                    }
                     continue;
                 }
                 const std::string key = canonicalPath(unit.filename, config);
@@ -1181,7 +1219,7 @@ namespace ctrace::stack::analysis
                 }
                 if (!known)
                 {
-                    cannotCheck("no compile command for " + unit.filename);
+                    cannotCheck(key, nullptr, "no compile command for " + unit.filename);
                     continue;
                 }
                 const UnitCommand& other = *known;
@@ -1204,7 +1242,7 @@ namespace ctrace::stack::analysis
                 }
                 if (seen.files.empty())
                 {
-                    cannotCheck(unit.filename + " cannot be preprocessed with Clang");
+                    cannotCheck(key, &other, unit.filename + " cannot be preprocessed with Clang");
                     continue;
                 }
                 const bool sees =
@@ -1224,6 +1262,7 @@ namespace ctrace::stack::analysis
                 {
                     judgement.reason = unit.filename + " does not compile with Clang as it is";
                 }
+                judged.push_back(label(key, &other));
                 judgements.push_back(std::move(judgement));
                 for (const std::string& line : otherAccepted)
                 {
@@ -1235,16 +1274,19 @@ namespace ctrace::stack::analysis
             if (verdict.verdict == Verdict::Refuted)
             {
                 trace(issue, "removed, " + verdict.reason);
+                traceUnits(issue, judged, judgements);
                 continue;
             }
             if (verdict.verdict == Verdict::Indeterminate)
             {
                 issue.checkLines.push_back(kNotChecked + verdict.reason);
                 trace(issue, "not checked, " + verdict.reason);
+                traceUnits(issue, judged, judgements);
                 kept.push_back(std::move(issue));
                 continue;
             }
             trace(issue, "checked in " + std::to_string(judgements.size()) + " file(s)");
+            traceUnits(issue, judged, judgements);
             const std::string checked =
                 std::string(config.compilationDatabase ? kCheckedDatabase : kCheckedAnalyzed) +
                 kCheckedResult;
