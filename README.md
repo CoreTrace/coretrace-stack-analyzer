@@ -635,44 +635,79 @@ For test files, `run_test.py` also supports per-file model selection with:
 
 ### Experimental: const parameter suggestions checked with Clang
 
-`ConstParameterNotModified` finds, in the LLVM IR, the pointer and reference parameters through
-which nothing is written. The IR does not show every constraint that C and C++ put on a parameter:
-the suggested `const` type may not compile (a callback of the old type, or `&p` passed as `int**`
-in C++), may only drop a qualifier with a warning (the same `&p` in C), or may compile and select
-other code (an overload, an override, `sizeof`, `if constexpr`, `_Generic`).
+`ConstParameterNotModified` reports pointer and reference parameters for which the LLVM IR
+analysis finds no write. Some suggestions rely on a callee's `const` parameter contract rather
+than an analysis of its body. Neither result establishes that the proposed type is valid C or
+C++: it may break a callback, lose a qualifier, or change overload resolution.
 
-Without `--experimental-const-suggestion-check`, the default, nothing beyond the IR analysis is
-checked: every suggestion is reported as the IR analysis finds it, without a check line, including
-those whose suggested type does not compile, drops a qualifier, or changes the generated code.
+`--experimental-const-suggestion-check` adds a Clang check before suggestions are reported. It
+is **off by default**. The implementation can remove valid suggestions and can mark incorrect
+suggestions as checked; the result needs review before applying a change. See
+[scope and limitations](#scope-and-limitations).
 
-With `--experimental-const-suggestion-check` (or `experimental-const-suggestion-check=true` in a
-config file), each suggestion is checked with Clang before it is reported. The check is
-experimental:
-- it compares the IR that Clang prints before and after the rewrite. A difference its
-  normalizations do not cover removes a suggestion that is valid; several such cases were found
-  and fixed, others may remain;
-- it compiles the files that see the change again, once per suggestion: on this repository's
-  self-analysis, the analysis takes about 19% longer.
+#### Enable the check
 
-The option is a trade-off, not a fix: with it, a valid suggestion can still be removed; without
-it, suggestions whose type does not compile, drops a qualifier, or changes the generated code are
-reported.
+For example, after building this repository with a compilation database:
 
-The check runs these steps:
+```sh
+./build/stack_usage_analyzer \
+  --compile-commands=build/compile_commands.json \
+  --experimental-const-suggestion-check \
+  src/analysis/ConstParamAnalysis.cpp
+```
 
-1. Every declaration of the function that the defining file sees, in that file and its headers,
-   is rewritten in memory with the suggested type:
+To enable it through `--config=.ctrace-analyzer.cfg`, add:
+
+```text
+experimental-const-suggestion-check=true
+```
+
+The check rewrites sources **in memory**; it does not edit source files. These suggestions have
+Info severity, so keep `--warnings-only` disabled to see them.
+
+Without the option, suggestions come from the IR analysis alone and have no Clang check line.
+They can include changes that do not compile or that change the program's behavior.
+
+#### Read the results
+
+| Output with the option | Meaning |
+|---|---|
+| `checked in the analyzed files only, with their compile commands: ...` | The check passed in the affected files supplied to the analysis. |
+| `checked in every file of the compilation database that sees the change, with its compile command: ...` | The check passed in the affected files found through the compilation database. |
+| `not checked with Clang: <reason>` | The suggestion is kept, but Clang could not complete its check. It still rests on the IR analysis. |
+| A suggestion appears without the option but disappears with it | The experimental filter removed it. This can also happen to a valid suggestion. |
+
+Additional lines qualify a checked result:
+
+- `difference: ...` lists each accepted observable difference, described below.
+- `ABI: ...` reports a changed C++ symbol. Code compiled separately must use the updated
+  declaration and be recompiled before it can link to that definition.
+- `the callee's body is not checked: ...` remains relevant even when Clang reports `checked`:
+  checking a type change does not prove that the callee respects its `const` contract.
+
+To investigate a missing suggestion, compare runs with and without the option using the same
+inputs and compilation database. Add `--verbose` to the checked run to see
+`[const-suggestion]` traces, including the reason for a removal. A removal has no public
+diagnostic of its own.
+
+#### What the check does
+
+The check uses the AST to plan edits, then compares diagnostics and generated LLVM IR:
+
+1. It attempts to rewrite every declaration of the function visible to the defining file,
+   including declarations in headers:
    - a type written in a macro argument is rewritten where it is written;
    - a type written by a macro that writes only the parameter gets `const` before the invocation.
 
-   A macro definition is never rewritten.
-2. Every file that sees the change is compiled again with its own compile command, at `-O0`.
+   Declarations written by macro definitions are intended to remain unchecked. Macro rewriting
+   has known limitations, listed below.
+2. It compiles the files that see the change before and after the rewrite, at `-O0`, using each
+   file's selected compile command.
    The files considered are the analyzed ones and, with `--compile-commands`, every C or C++ file
    of the compilation database, analyzed or not. A file sees the change when it reads a rewritten
    file, when its analyzed code references the function, or, for a function outside any class with
-   external linkage, when it names the function after preprocessing. A homonym with internal
-   linkage (`static`, anonymous namespace) in another file is another function.
-3. The suggestion is removed when one of these files:
+   external linkage, when it names the function after preprocessing.
+3. The filter removes the suggestion when one of those compilations:
    - no longer compiles;
    - gains one of these warnings: `incompatible-pointer-types-discards-qualifiers`,
      `incompatible-pointer-types`, `incompatible-function-pointer-types`, `int-conversion`,
@@ -685,8 +720,11 @@ The check runs these steps:
    A file that cannot be preprocessed, or does not compile as it is, cannot be checked: the
    suggestion is then kept as not checked, unless another file refutes it.
 
+#### Generated-code comparison
+
 Generated code is compared function by function and global by global, after these
 normalizations:
+
 - debug information is not generated;
 - two kinds of metadata that do not change what the program does are removed: the source position
   of inline assembly (`!srcloc`), used only to report errors, and annotations (`!annotation`),
@@ -697,47 +735,61 @@ normalizations:
 - attribute groups are compared by contents, not by numbers;
 - values are numbered, not named, and comments of the printed IR are ignored;
 - the symbols the rewrite renames are paired: the function, and what is named or instantiated
-  inside it. A symbol the file only declares is paired only if it is the function itself.
+  inside it. A symbol the file only declares is paired only if it is the function itself;
 - rewritten as `const T&`, a forwarding reference `T&&` deduces `G` instead of `G&` or `const G&`
   for an lvalue argument: a specialization of the rewritten template that changes this way, and
   what is named inside it, is paired when its name without `const` and references is carried by
   exactly one symbol before the rewrite and one after. Its code is then compared like any other.
 
-Two differences that a program can observe are accepted, each only once verified, and the message
-lists them:
+The comparator accepts these two observable differences when it recognizes them, and lists them
+in the message:
+
 - the name that `typeid` gives a type named after the function: it holds the function's mangled
   name;
 - a string constant whose only change is the signature that `__PRETTY_FUNCTION__` prints.
 
-The check covers only:
-- the suggestions it checks. A suggestion marked `not checked with Clang: ...` rests on the IR
-  analysis alone: a declaration written by a macro definition, an LLVM IR input, a file that sees
-  the change but cannot be preprocessed or does not compile as it is;
-- the files that see the change, with their compile commands, and the code those configurations
-  compile. Other configurations, other targets, code that the preprocessor excludes, and files
-  outside both the analysis and the compilation database are not checked.
+Equality after these normalizations is not a general proof of semantic equivalence. In
+particular, the two accepted differences above can be observed by the program.
 
-A CI job that enables the option checks the projects and configurations it analyzes, and nothing
-else: an analysis run without the option, by a user or by another job, is not checked.
+#### Scope and limitations
 
-In this repository, `ci.yml` runs the whole `run_test.py` suite on Linux and macOS. It checks the
-default behavior, and the check's tests with the option: the const-suggestion fixtures declare it
-(`// analyzer-arg:`), and the checks pass it. These tests expect suggestions kept once checked,
-suggestions removed, and suggestions kept as not checked, and analyze the same inputs without the
-option too. They cover these fixtures, with their compile commands and the LLVM 20 of each runner;
-they do not check this repository's sources, other projects or other configurations.
+- **Incorrect checked results.** Known cases include a hidden ABI parameter in a constructor
+  causing the wrong source parameter to be rewritten, and an overload defined in another file
+  colliding with the rewritten function. `checked` does not guarantee that applying the
+  suggestion is correct. Follow the ongoing work in [#217](https://github.com/CoreTrace/coretrace-stack-analyzer/issues/217).
+- **Valid suggestions removed.** Declaration matching and unexplained IR differences can remove
+  valid suggestions, including cases involving operators, inherited constructors, C homonyms with
+  different linkage, and shared macro arguments. Their disappearance is not proof of invalidity.
+- **Macros.** A macro argument can affect several declarations, and continuation lines can be
+  misidentified. A declaration intended to remain unchecked can instead be rewritten and cause
+  a valid suggestion to be removed.
+- **Suggested types and alternatives.** For an rvalue-reference suggestion, only the `const`
+  lvalue-reference alternative is checked; passing by value is not checked. For
+  `PointerConstOnly`, the check retains the pointer's top-level `const`: it checks
+  `const int *const p` even when the diagnostic suggests `const int *p`.
+- **Configurations.** Only the selected command for each file is checked. Multiple commands for
+  the same file are reduced to one by the compilation database loader. Other configurations,
+  targets, preprocessor-excluded code, and files outside both the analysis and the database are
+  not checked.
+- **Build and link compatibility.** The check does not build or link the project. The ABI note
+  still requires updating declarations and rebuilding separately compiled consumers.
+- **Unavailable sources or failed baseline compilations.** LLVM IR inputs (`.ll`, `.bc`),
+  unsupported macro declarations, and affected files that cannot be preprocessed or compiled as
+  they are can leave a suggestion marked `not checked with Clang`.
+- **LLVM dependency.** The comparison relies on printed IR and on name matching. Changing LLVM
+  versions can change a verdict; the check is tested with LLVM 20.
 
-The message says how the suggestion was checked:
-- `checked in the analyzed files only, with their compile commands: ...`, without a compilation
-  database;
-- `checked in every file of the compilation database that sees the change, with its compile
-  command: ...`, with one;
-- `difference: ...`, for each accepted difference;
-- `ABI: ...`, for a C++ function with external linkage: its symbol changes, so code compiled
-  separately must use the updated declaration and be recompiled;
-- `not checked with Clang: ...`, when the check could not run, for example on an LLVM IR input
-  (`.ll`, `.bc`), which has no source, or for a file of the compilation database that cannot be
-  preprocessed. The suggestion then rests on the IR analysis alone.
+#### Cost and CI coverage
+
+The check recompiles affected files for each suggestion. Its overhead depends on the number of
+suggestions and the files they affect; a percentage measured on one project does not predict
+the cost on another. Use `--timing` to measure your workload with and without the option, keeping
+the inputs and configuration the same. No overhead bound is guaranteed.
+
+This repository's `ci.yml` runs the tests on Linux and macOS with LLVM 20. Const-suggestion
+fixtures enable the option through `// analyzer-arg:`, and the checks also exercise the default
+mode. Passing those tests covers those inputs and configurations; enable the option explicitly
+in your own analysis or CI to check your project's suggestions.
 
 ### Example
 
