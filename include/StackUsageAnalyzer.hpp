@@ -22,6 +22,7 @@ namespace llvm
 
 namespace ctrace::stack::analysis
 {
+    struct AnalyzedUnits;
     class CompilationDatabase;
     struct ConstPointeeParamIndex;
     struct GlobalReadBeforeWriteSummaryIndex;
@@ -81,6 +82,9 @@ namespace ctrace::stack
         // Max stacks and recursion over one call graph of the modules analyzed together, which
         // they were prepared for: the pipeline then leaves their IR as it is.
         std::shared_ptr<const analysis::GlobalStackFacts> globalStackFacts;
+        // The inputs analyzed together, for the Clang check of const suggestions (#217). Null:
+        // the suggestions say they were not checked.
+        std::shared_ptr<const analysis::AnalyzedUnits> analyzedUnits;
 
         std::vector<std::string> excludeDirs;
         std::vector<std::string> extraCompileArgs;
@@ -126,7 +130,9 @@ namespace ctrace::stack
         std::uint32_t resourceSummaryMemoryOnly : 1 = 0;
         std::uint32_t warningsOnly : 1 = 0;
         std::uint32_t assumeExternalFrame : 1 = 0;
-        std::uint32_t reservedFlags : 17 = 0;
+        // Experimental: check each const suggestion with Clang before reporting it.
+        std::uint32_t constSuggestionCheck : 1 = 0;
+        std::uint32_t reservedFlags : 16 = 0;
     };
 
     // Per-function result

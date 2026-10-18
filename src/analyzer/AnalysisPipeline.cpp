@@ -12,6 +12,7 @@
 
 #include "analysis/AllocaUsage.hpp"
 #include "analysis/ConstParamAnalysis.hpp"
+#include "analysis/ConstSuggestionCheck.hpp"
 #include "analysis/CommandInjectionAnalysis.hpp"
 #include "analysis/DuplicateIfCondition.hpp"
 #include "analysis/DynamicAlloca.hpp"
@@ -647,9 +648,10 @@ namespace ctrace::stack::analyzer
                              auto shouldAnalyze = [&](const llvm::Function& F) -> bool
                              { return state.prepared->ctx.shouldAnalyze(F); };
                              const auto* otherModules = state.config.constPointeeParamIndex.get();
-                             const std::vector<analysis::ConstParamIssue> issues =
+                             std::vector<analysis::ConstParamIssue> issues =
                                  analysis::analyzeConstParams(state.mod, shouldAnalyze,
                                                               otherModules);
+                             analysis::checkConstSuggestions(state.mod, issues, state.config);
                              appendConstParamDiagnostics(state.result, issues);
                          },
                          kPrepared, kNone, true, ExecutionModel::SubscriberCompatible});
