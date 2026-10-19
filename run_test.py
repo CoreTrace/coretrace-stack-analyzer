@@ -3558,6 +3558,37 @@ def check_const_suggestion_homonyms_across_files() -> bool:
     return ok
 
 
+def check_const_suggestion_header_read_differently() -> bool:
+    """
+    #217: a header can mean other declarations in another file, through a macro that file defines
+    otherwise. Here pair.h declares read_value in def.c, and a global pointer in slot.c: rewriting
+    the type pair.h writes changes that global's type too, although the generated code does not
+    show it. The rewrite reaches beyond the suggestion: it is kept, not checked.
+    """
+    print("=== Testing a const suggestion whose header means other declarations elsewhere ===")
+    sources = {
+        "pair.h": "PAIR(read_value, int*)\n",
+        "def.c": '#define PAIR(name, type) int name(type p);\n#include "pair.h"\n#undef PAIR\n'
+        "int read_value(int* p)\n{\n    return *p;\n}\n",
+        "slot.c": '#define PAIR(name, type) type name##_slot;\n#include "pair.h"\n',
+    }
+    with tempfile.TemporaryDirectory(prefix="ct_const_suggestion_xmacro_") as tmp:
+        root = Path(tmp).resolve()
+        for name, text in sources.items():
+            (root / name).write_text(text)
+        run = _const_suggestion_run([str(root / "def.c"), str(root / "slot.c")])
+        expected = (
+            "not checked with Clang: the rewrite also changes the type of read_value_slot "
+            f"({root / 'pair.h'}:1)"
+        )
+    texts = run[0].get("read_value", []) if run else []
+    good = len(texts) == 1 and expected in texts[0]
+    detail = "" if good else f": {texts}"
+    print(f"  {'✅' if good else '❌'} the global slot.c declares{detail}")
+    print()
+    return good
+
+
 def check_duplicate_if_cross_tu() -> bool:
     """
     #157: a function defined in another file is deterministic when every definition of it is, as
@@ -6517,6 +6548,7 @@ def main() -> int:
         check_const_suggestion_compiles_each_file_once,
         check_const_suggestion_operator_used_elsewhere,
         check_const_suggestion_homonyms_across_files,
+        check_const_suggestion_header_read_differently,
         check_duplicate_if_cross_tu,
         check_global_read_before_write_identity_across_files,
         check_size_minus_one_cross_tu,
