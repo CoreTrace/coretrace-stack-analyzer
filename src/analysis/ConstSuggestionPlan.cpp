@@ -25,6 +25,8 @@ namespace ctrace::stack::analysis
         using const_suggestion::Edit;
         using const_suggestion::MacroDefinitions;
         using const_suggestion::realPath;
+        using const_suggestion::SiteReader;
+        using const_suggestion::SourceLinkage;
         using const_suggestion::SuggestionPlan;
         using const_suggestion::writtenType;
 
@@ -309,6 +311,21 @@ namespace ctrace::stack::analysis
         return type.getCanonicalType().getAsString(policy);
     }
 
+    SourceLinkage const_suggestion::linkageOf(const clang::FunctionDecl& function)
+    {
+        switch (function.getFormalLinkage())
+        {
+        case clang::Linkage::External:
+        case clang::Linkage::Module:
+            return SourceLinkage::External;
+        case clang::Linkage::Internal:
+        case clang::Linkage::UniqueExternal:
+            return SourceLinkage::Internal;
+        default:
+            return SourceLinkage::None;
+        }
+    }
+
     std::unique_ptr<clang::PPCallbacks>
     const_suggestion::recordMacroDefinitions(const clang::SourceManager& sm, MacroDefinitions& out)
     {
@@ -323,6 +340,21 @@ namespace ctrace::stack::analysis
         SuggestionPlan out;
         const auto* method = llvm::dyn_cast<clang::CXXMethodDecl>(&function);
         out.declarableElsewhere = method == nullptr && function.isExternallyVisible();
+        const clang::FunctionDecl* instantiated = function.getTemplateInstantiationPattern();
+        const clang::FunctionDecl* pattern = instantiated ? instantiated : &function;
+        // The source identity (§3): the declarations the plan rewrites, by both positions of
+        // their names, and a specialization's pattern, by its first declaration.
+        SiteReader sites(context.getSourceManager(), nullptr);
+        for (const clang::FunctionDecl* declaration : pattern->redecls())
+        {
+            if (!declaration->isImplicit())
+                out.entity.redeclarations.push_back(sites(declaration->getLocation()));
+        }
+        std::sort(out.entity.redeclarations.begin(), out.entity.redeclarations.end());
+        out.entity.name = function.getDeclName().getAsString();
+        out.entity.linkage = linkageOf(function);
+        if (instantiated)
+            out.entity.templateOrigin = sites(instantiated->getFirstDecl()->getLocation());
         if (!sourceIndex)
         {
             out.indeterminate = "the parameter is not found in the source";
@@ -340,9 +372,6 @@ namespace ctrace::stack::analysis
             out.indeterminate = "the parameter is no pointer or reference";
             return out;
         }
-        const clang::FunctionDecl* pattern = function.getTemplateInstantiationPattern();
-        if (!pattern)
-            pattern = &function;
         Planner planner(context, macros, out);
         for (const clang::FunctionDecl* declaration : pattern->redecls())
         {

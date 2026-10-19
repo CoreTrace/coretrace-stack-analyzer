@@ -33,16 +33,16 @@ namespace ctrace::stack::analysis
 {
     namespace
     {
-        using const_suggestion::Compilation;
-        using const_suggestion::compile;
         using const_suggestion::Diagnostic;
         using const_suggestion::Edit;
-        using const_suggestion::FunctionFacts;
+        using const_suggestion::inspect;
         using const_suggestion::Judgement;
         using const_suggestion::realPath;
         using const_suggestion::scan;
+        using const_suggestion::SourceLinkage;
         using const_suggestion::SuggestionPlan;
         using const_suggestion::Target;
+        using const_suggestion::UnitFacts;
         using const_suggestion::Verdict;
 
         // What the check covers: the analyzed files, or every file of the compilation database.
@@ -142,11 +142,11 @@ namespace ctrace::stack::analysis
         }
 
         // The overrides that each target's inspection recorded, indexed like the targets.
-        std::vector<std::multiset<std::string>> overridesOf(const Compilation& compilation)
+        std::vector<std::multiset<std::string>> overridesOf(const UnitFacts& unit)
         {
             std::vector<std::multiset<std::string>> out;
-            for (const FunctionFacts& facts : compilation.facts)
-                out.push_back(facts.overrides);
+            for (const UnitFacts::Entity& entity : unit.entities)
+                out.push_back(entity.overrides);
             return out;
         }
 
@@ -163,14 +163,8 @@ namespace ctrace::stack::analysis
                 cache[key + '\0' + const_suggestion::fingerprintOf(command)];
             if (out)
                 return out;
-            std::vector<Target> targets = planned;
-            for (Target& target : targets)
-            {
-                target.plan = false;
-                target.expectedType.clear();
-            }
-            Compilation before =
-                compile(command, {}, targets, "const_suggestion.compile.other_before", timing);
+            UnitFacts before = inspect(command, nullptr, {}, planned,
+                                       "const_suggestion.compile.other_before", timing);
             if (!before.failure.empty() || !before.module)
                 return out;
             const analyzer::ScopedHotspot hotspot(timing, "const_suggestion.prepare");
@@ -195,22 +189,13 @@ namespace ctrace::stack::analysis
         Judgement checkUnit(const UnitCommand& command, const std::optional<Original>& before,
                             std::size_t index, const Target& planned,
                             const std::map<std::string, std::string>& rewritten,
-                            const std::set<std::string>& symbolsBefore, const SuggestionPlan& plan,
-                            PrintedSignature& signature, std::vector<std::string>& accepted,
-                            std::string& renamed, bool timing)
+                            const SuggestionPlan& plan, PrintedSignature& signature,
+                            std::vector<std::string>& accepted, std::string& renamed, bool timing)
         {
             if (!before)
                 return indeterminate(kDoesNotCompileAsItIs);
-            std::vector<Target> targets{planned};
-            targets[0].plan = false;
-            targets[0].renamed = renamed;
-            targets[0].expectedType = plan.expectedType;
-            targets[0].paramIndex = plan.sourceIndex;
-            targets[0].symbolsBefore = &symbolsBefore;
-            for (const auto& [path, edits] : plan.edits)
-                targets[0].rewrittenFiles.insert(path);
-            Compilation after =
-                compile(command, rewritten, targets, "const_suggestion.compile.after", timing);
+            UnitFacts after = inspect(command, &plan, rewritten, {planned},
+                                      "const_suggestion.compile.after", timing);
             if (!after.failure.empty())
                 return indeterminate(after.failure);
             // The first diagnostic the rewrite adds, not one the unit had before it.
@@ -226,9 +211,14 @@ namespace ctrace::stack::analysis
             }
             if (!after.module)
                 return refuted("does not compile: " + after.firstDiagnostic);
-            if (renamed.empty())
-                renamed = targets[0].renamed;
-            const FunctionFacts& facts = after.facts.empty() ? FunctionFacts() : after.facts[0];
+            const UnitFacts::Entity& facts =
+                after.entities.empty() ? UnitFacts::Entity() : after.entities[0];
+            // The suggestion's variant after the rewrite.
+            const auto variant =
+                std::find(plan.entity.symbols.begin(), plan.entity.symbols.end(), planned.symbol);
+            const auto k = static_cast<std::size_t>(variant - plan.entity.symbols.begin());
+            if (renamed.empty() && k < facts.symbols.size())
+                renamed = facts.symbols[k];
             if (facts.problem.starts_with("rewritten:"))
                 return indeterminate("the rewritten declaration does not get the suggested type");
             if (!facts.problem.empty())
@@ -359,18 +349,17 @@ namespace ctrace::stack::analysis
             targets[i].symbol = issues[i].funcName;
             if (!issues[i].binding.isArtificial)
                 targets[i].sourceIndex = issues[i].binding.sourceIndex;
-            targets[i].plan = true;
         }
-        Compilation before =
-            compile(command, {}, targets, "const_suggestion.compile.defining_before", timing);
-        if (!before.failure.empty() || !before.module || before.facts.size() != issues.size())
+        UnitFacts before = inspect(command, nullptr, {}, targets,
+                                   "const_suggestion.compile.defining_before", timing);
+        if (!before.failure.empty() || !before.module || before.entities.size() != issues.size())
         {
             notChecked("the file does not compile with Clang as it is");
             return;
         }
-        std::set<std::string> symbolsBefore;
-        for (const llvm::Function& function : *before.module)
-            symbolsBefore.insert(function.getName().str());
+        // The suggestions as planned: what the other compilations look for.
+        for (std::size_t i = 0; i < issues.size(); ++i)
+            targets[i].plan = &before.entities[i].plan;
         std::shared_ptr<const const_suggestion::ModuleText> definingCode;
         {
             const analyzer::ScopedHotspot hotspot(timing, "const_suggestion.prepare");
@@ -408,9 +397,9 @@ namespace ctrace::stack::analysis
         for (std::size_t i = 0; i < issues.size(); ++i)
         {
             ConstParamIssue& issue = issues[i];
-            const FunctionFacts& found = before.facts[i];
+            const UnitFacts::Entity& found = before.entities[i];
             const SuggestionPlan& plan = found.plan;
-            if (found.printedSignature.empty() && !plan.indeterminate)
+            if (!found.found && !plan.indeterminate)
             {
                 issue.checkLines.push_back(kNotChecked +
                                            std::string("the function is not found in the source"));
@@ -431,14 +420,13 @@ namespace ctrace::stack::analysis
                 rewrittenFiles.insert(path);
 
             // The defining unit first: it gives the function's symbol after the rewrite.
-            Target planned = targets[i];
-            planned.plan = false;
+            const Target& planned = targets[i];
             PrintedSignature signature{found.printedSignature, ""};
             std::vector<std::string> accepted;
             std::string renamed;
             std::vector<Judgement> judgements{checkUnit(command, definingBefore, i, planned,
-                                                        rewritten, symbolsBefore, plan, signature,
-                                                        accepted, renamed, timing)};
+                                                        rewritten, plan, signature, accepted,
+                                                        renamed, timing)};
             std::vector<std::string> judged{label(canonicalPath(self->filename, config), &command)};
             // Then every other unit that sees a rewritten file or references the function: the
             // analyzed ones and, with a compilation database, every file it lists, analyzed or
@@ -457,7 +445,10 @@ namespace ctrace::stack::analysis
                 {
                     break;
                 }
-                const bool referencing = unit.module && references(*unit.module, issue.funcName);
+                // Another file references the function only through the linker: one with
+                // internal linkage is another file's homonym (§5.2).
+                const bool referencing = plan.entity.linkage == SourceLinkage::External &&
+                                         unit.module && references(*unit.module, issue.funcName);
                 if (unit.language != LanguageType::C && unit.language != LanguageType::CXX)
                 {
                     if (referencing)
@@ -520,13 +511,13 @@ namespace ctrace::stack::analysis
                     std::any_of(rewrittenFiles.begin(), rewrittenFiles.end(),
                                 [&](const std::string& path) { return seen.files.count(path); }) ||
                     (plan.declarableElsewhere &&
-                     seen.identifiers.count(llvm::xxh3_64bits(planned.name)) != 0);
+                     seen.identifiers.count(llvm::xxh3_64bits(plan.entity.name)) != 0);
                 if (!sees)
                     continue;
                 std::vector<std::string> otherAccepted;
-                Judgement judgement = checkUnit(
-                    other, originalOf(other, key, targets, originals, timing), i, planned,
-                    rewritten, symbolsBefore, plan, signature, otherAccepted, renamed, timing);
+                Judgement judgement =
+                    checkUnit(other, originalOf(other, key, targets, originals, timing), i, planned,
+                              rewritten, plan, signature, otherAccepted, renamed, timing);
                 if (judgement.verdict == Verdict::Indeterminate &&
                     judgement.reason == kDoesNotCompileAsItIs)
                 {

@@ -8,6 +8,7 @@
 #include <set>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <vector>
 
 #include <clang/Basic/SourceLocation.h>
@@ -71,9 +72,54 @@ namespace ctrace::stack::analysis::const_suggestion
         std::string text;
     };
 
+    // A position in a file's original text: after the rewrite, a position in a rewritten file is
+    // mapped back through the plan's edits (§5.4).
+    struct SourcePosition
+    {
+        std::string file; // real path
+        std::size_t offset = 0;
+        bool operator==(const SourcePosition&) const = default;
+        bool operator<(const SourcePosition& other) const
+        {
+            return std::tie(file, offset) < std::tie(other.file, other.offset);
+        }
+    };
+
+    // Where a name is expanded and where it is written: one macro invocation can expand several
+    // names at the same place (ruling 14).
+    struct DeclarationSite
+    {
+        SourcePosition expansion;
+        SourcePosition spelling;
+        bool operator==(const DeclarationSite&) const = default;
+        bool operator<(const DeclarationSite& other) const
+        {
+            return std::tie(expansion, spelling) < std::tie(other.expansion, other.spelling);
+        }
+    };
+
+    enum class SourceLinkage : std::uint8_t
+    {
+        None,
+        Internal,
+        External
+    };
+
+    // The function a suggestion names, as the defining unit's initial compilation shows it (§3).
+    struct EntityIdentity
+    {
+        std::vector<DeclarationSite> redeclarations;   // the declarations the plan rewrites, sorted
+        std::string name;                              // as Clang prints it: dot, operator==, ~A
+        std::optional<DeclarationSite> templateOrigin; // a specialization's pattern, first declared
+        std::vector<std::string> symbols; // every variant's, before the rewrite (CodeGen)
+        SourceLinkage linkage = SourceLinkage::None;
+        std::uint8_t reservedPadding[7] = {};
+    };
+
     // The rewrite of one suggestion, planned on the defining unit's initial compilation (§5.5).
     struct SuggestionPlan
     {
+        EntityIdentity entity;
         std::map<std::string, std::vector<Edit>> edits; // by real path
         std::string expectedType; // the parameter's type once rewritten, written canonically
         std::optional<std::string> indeterminate; // why the plan is not executed
@@ -84,6 +130,28 @@ namespace ctrace::stack::analysis::const_suggestion
         bool declarableElsewhere = false;
         std::uint8_t reservedPadding[3] = {};
     };
+
+    // The sites of one compilation's locations. After the rewrite, a position in a file that
+    // `rewrittenBy` rewrites is mapped back to the original text through its edits.
+    class SiteReader
+    {
+      public:
+        SiteReader(const clang::SourceManager& sm, const SuggestionPlan* rewrittenBy);
+
+        DeclarationSite operator()(clang::SourceLocation location);
+        // The real path of a file, or its buffer's name when it is none.
+        const std::string& fileOf(clang::FileID file);
+
+      private:
+        SourcePosition position(clang::SourceLocation location);
+
+        const clang::SourceManager& sm_;
+        std::map<std::string, std::vector<Edit>> edits_; // by real path, sorted by offset
+        std::map<clang::FileID, std::string> files_;
+    };
+
+    // External for external or module linkage, internal for internal or unique-external.
+    SourceLinkage linkageOf(const clang::FunctionDecl& function);
 
     // A type written canonically, an anonymous type without its location.
     std::string writtenType(const clang::ASTContext& context, clang::QualType type);
@@ -130,32 +198,15 @@ namespace ctrace::stack::analysis::const_suggestion
                                               std::vector<std::string>* accepted,
                                               std::string* renamedTo);
 
-    // What one compilation found about the function a suggestion names.
-    struct FunctionFacts
-    {
-        // Before the rewrite, in the unit that defines it.
-        SuggestionPlan plan;
-        // In every compilation.
-        std::string printedSignature;
-        std::string problem;
-        std::multiset<std::string> overrides;
-    };
-
-    // What to look for in one compilation.
+    // What to look for in one compilation: the function a suggestion names.
     struct Target
     {
-        std::string symbol;  // the function's symbol before the rewrite
-        std::string renamed; // and after, once known
-        std::string name;    // its identifier
-        std::string expectedType;
-        std::set<std::string> rewrittenFiles;
-        const std::set<std::string>* symbolsBefore = nullptr; // to find the renamed function
+        std::string symbol; // the suggestion's symbol, before the rewrite
+        // Its plan; null in the defining unit's initial compilation, which plans it.
+        const SuggestionPlan* plan = nullptr;
         // The parameter's position among those the source declares (P0), none for one it
         // does not declare.
         std::optional<unsigned> sourceIndex;
-        unsigned paramIndex = 0;
-        bool plan = false; // before the rewrite, in the defining unit
-        std::uint8_t reservedPadding[3] = {};
     };
 
     // An error or a checked warning, in the order Clang reports it.
@@ -167,8 +218,21 @@ namespace ctrace::stack::analysis::const_suggestion
         std::uint8_t reservedPadding[7] = {};
     };
 
-    struct Compilation
+    // What one compilation shows (§5.3, §5.6).
+    struct UnitFacts
     {
+        // About the function of one target.
+        struct Entity
+        {
+            SuggestionPlan plan;              // in the compilation that plans
+            std::vector<std::string> symbols; // every variant's, in this compilation
+            std::string printedSignature;     // for __PRETTY_FUNCTION__
+            std::string problem;
+            std::multiset<std::string> overrides;
+            bool found = false; // the compilation declares it
+            std::uint8_t reservedPadding[7] = {};
+        };
+
         bool timing = false;
         std::uint8_t reservedPadding[7] = {};
         std::string failure; // the compilation could not run
@@ -177,15 +241,15 @@ namespace ctrace::stack::analysis::const_suggestion
         std::string firstDiagnostic;
         std::unique_ptr<llvm::LLVMContext> context;
         std::unique_ptr<llvm::Module> module;
-        std::vector<FunctionFacts> facts;
+        std::vector<Entity> entities;              // indexed like the targets
         const_suggestion::MacroDefinitions macros; // read only when the compilation plans
     };
 
-    // Compiles a unit, the files of `rewritten` remapped to their texts, and inspects it for
-    // `targets`.
-    Compilation compile(const UnitCommand& command,
-                        const std::map<std::string, std::string>& rewritten,
-                        std::vector<Target>& targets, std::string_view step, bool timing);
+    // Compiles a unit and inspects it for `targets`. After the rewrite, `rewritten` remaps the
+    // files that the plan `rewrittenBy` rewrites to their texts.
+    UnitFacts inspect(const UnitCommand& command, const SuggestionPlan* rewrittenBy,
+                      const std::map<std::string, std::string>& rewritten,
+                      const std::vector<Target>& targets, std::string_view step, bool timing);
 
     // The files a unit reads and its identifiers, from its preprocessing.
     UnitScan scan(const UnitCommand& command, bool timing);
