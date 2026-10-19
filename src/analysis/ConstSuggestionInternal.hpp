@@ -7,8 +7,10 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <string_view>
 #include <vector>
 
+#include <clang/Basic/SourceLocation.h>
 #include <llvm/ADT/StringRef.h>
 
 #include "analysis/ConstSuggestionCheck.hpp"
@@ -16,7 +18,6 @@
 namespace clang
 {
     class ASTContext;
-    class FileID;
     class FunctionDecl;
     class PPCallbacks;
     class QualType;
@@ -25,6 +26,7 @@ namespace clang
 
 namespace llvm
 {
+    class LLVMContext;
     class Module;
 } // namespace llvm
 
@@ -127,4 +129,64 @@ namespace ctrace::stack::analysis::const_suggestion
                                               const PrintedSignature* signature,
                                               std::vector<std::string>* accepted,
                                               std::string* renamedTo);
+
+    // What one compilation found about the function a suggestion names.
+    struct FunctionFacts
+    {
+        // Before the rewrite, in the unit that defines it.
+        SuggestionPlan plan;
+        // In every compilation.
+        std::string printedSignature;
+        std::string problem;
+        std::multiset<std::string> overrides;
+    };
+
+    // What to look for in one compilation.
+    struct Target
+    {
+        std::string symbol;  // the function's symbol before the rewrite
+        std::string renamed; // and after, once known
+        std::string name;    // its identifier
+        std::string expectedType;
+        std::set<std::string> rewrittenFiles;
+        const std::set<std::string>* symbolsBefore = nullptr; // to find the renamed function
+        // The parameter's position among those the source declares (P0), none for one it
+        // does not declare.
+        std::optional<unsigned> sourceIndex;
+        unsigned paramIndex = 0;
+        bool plan = false; // before the rewrite, in the defining unit
+        std::uint8_t reservedPadding[3] = {};
+    };
+
+    // An error or a checked warning, in the order Clang reports it.
+    struct Diagnostic
+    {
+        std::string key; // place and kind, as `diagnostics` holds it
+        std::string text;
+        bool error = false;
+        std::uint8_t reservedPadding[7] = {};
+    };
+
+    struct Compilation
+    {
+        bool timing = false;
+        std::uint8_t reservedPadding[7] = {};
+        std::string failure; // the compilation could not run
+        std::multiset<std::string> diagnostics;
+        std::vector<Diagnostic> reported;
+        std::string firstDiagnostic;
+        std::unique_ptr<llvm::LLVMContext> context;
+        std::unique_ptr<llvm::Module> module;
+        std::vector<FunctionFacts> facts;
+        const_suggestion::MacroDefinitions macros; // read only when the compilation plans
+    };
+
+    // Compiles a unit, the files of `rewritten` remapped to their texts, and inspects it for
+    // `targets`.
+    Compilation compile(const UnitCommand& command,
+                        const std::map<std::string, std::string>& rewritten,
+                        std::vector<Target>& targets, std::string_view step, bool timing);
+
+    // The files a unit reads and its identifiers, from its preprocessing.
+    UnitScan scan(const UnitCommand& command, bool timing);
 } // namespace ctrace::stack::analysis::const_suggestion
