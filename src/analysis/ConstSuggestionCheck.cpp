@@ -71,6 +71,7 @@ namespace ctrace::stack::analysis
         {
             std::multiset<std::string> diagnostics;
             std::vector<Fact> facts;
+            std::set<std::string> instantiations; // the symbols of those around a fact
             std::vector<std::vector<Fact>> overrides;
             std::map<DeclarationSite, UnitFacts::Written> writtenTypes;
             std::shared_ptr<const const_suggestion::ModuleText> code;
@@ -175,7 +176,10 @@ namespace ctrace::stack::analysis
             if (!before.failure.empty() || !before.module)
                 return out;
             const analyzer::ScopedHotspot hotspot(timing, "const_suggestion.prepare");
-            out = Original{before.diagnostics, std::move(before.facts), overridesOf(before),
+            out = Original{before.diagnostics,
+                           std::move(before.facts),
+                           std::move(before.instantiations),
+                           overridesOf(before),
                            std::move(before.writtenTypes),
                            std::make_shared<const_suggestion::ModuleText>(
                                const_suggestion::prepare(*before.module))};
@@ -199,27 +203,23 @@ namespace ctrace::stack::analysis
             return "the condition at " + place + " becomes " + after.value.front();
         }
 
-        // The facts of one compilation by key; a key it shows twice is left out.
-        std::map<FactKey, const Fact*> byKey(const std::vector<Fact>& facts)
+        // What step 6 finds: the first fact that the rewrite changes, and else, when a site's
+        // facts cannot be compared one to one, why the comparison is incomplete.
+        struct FactComparison
         {
-            std::map<FactKey, const Fact*> out;
-            std::set<FactKey> twice;
-            for (const Fact& fact : facts)
-            {
-                if (!out.emplace(fact.key, &fact).second)
-                    twice.insert(fact.key);
-            }
-            for (const FactKey& key : twice)
-                out.erase(key);
-            return out;
-        }
+            std::optional<std::string> changed;
+            std::optional<std::string> incomplete;
+        };
 
-        // Step 6 (§5.8): the first fact R or K, then O, that the rewrite changes. Facts are
-        // compared through the entity's own symbol pairs: a fact in an instantiation they do not
-        // map to the compilation after the rewrite is left out, and so is a reference whose
-        // targets are specializations or implicit functions on both sides; Task 1.5 pairs them.
-        std::optional<std::string> changedFact(const Original& before, std::size_t index,
-                                               const UnitFacts& after, const SuggestionPlan& plan)
+        // Step 6 (§5.8): the facts R and K, then O, compared key by key, one to one in the order
+        // of the traversal: one key can hold several facts, such as a macro argument expanded
+        // twice. A key with as many facts on both sides is compared completely; one with a
+        // different number, a fact on one side only included, leaves the comparison incomplete.
+        // Keys go through the entity's own symbol pairs: a fact in an instantiation they do not
+        // map is left out, and so is a reference whose targets are specializations or implicit
+        // functions on both sides; Task 1.5 pairs them.
+        FactComparison compareFacts(const Original& before, std::size_t index,
+                                    const UnitFacts& after, const SuggestionPlan& plan)
         {
             std::map<std::string, std::string> renamed; // the entity's symbols, before to after
             std::map<std::string, std::string> back;
@@ -232,7 +232,8 @@ namespace ctrace::stack::analysis
                     back[entity->symbols[k]] = plan.entity.symbols[k];
                 }
             }
-            const auto mapped = [&](FactKey key) -> std::optional<FactKey>
+            // A key before the rewrite, as the compilation after it writes it.
+            const auto forward = [&](FactKey key) -> std::optional<FactKey>
             {
                 for (std::string& context : key.contexts)
                 {
@@ -243,6 +244,13 @@ namespace ctrace::stack::analysis
                         return std::nullopt;
                 }
                 return key;
+            };
+            // Whether a key after the rewrite can have a counterpart before it.
+            const auto known = [&](const FactKey& key)
+            {
+                return std::all_of(
+                    key.contexts.begin(), key.contexts.end(), [&](const std::string& context)
+                    { return back.count(context) || before.instantiations.count(context); });
             };
             const auto mappedBack = [&](std::vector<std::string> value)
             {
@@ -261,41 +269,72 @@ namespace ctrace::stack::analysis
                 return std::all_of(value.begin(), value.end(), [](const std::string& item)
                                    { return item.starts_with("site:"); });
             };
-            const auto first = [&](const std::vector<Fact>& was,
-                                   const std::vector<Fact>& now) -> std::optional<std::string>
+            const auto changed = [&](const Fact& was, const Fact& now)
             {
-                const std::map<FactKey, const Fact*> wasByKey = byKey(was);
-                const std::map<FactKey, const Fact*> nowByKey = byKey(now);
+                if (was.kind != FactKind::Reference)
+                    return mappedBack(now.value) != was.value;
+                // Unchanged when its targets after the rewrite keep every declaration they had
+                // (ruling 4).
+                if (sites(was.value) && sites(now.value))
+                {
+                    return !std::includes(now.value.begin(), now.value.end(), was.value.begin(),
+                                          was.value.end());
+                }
+                return sites(was.value) != sites(now.value);
+            };
+            FactComparison out;
+            const auto compare = [&](const std::vector<Fact>& was, const std::vector<Fact>& now)
+            {
+                std::vector<FactKey> order; // as the traversal first meets each key
+                std::map<FactKey, std::pair<std::vector<const Fact*>, std::vector<const Fact*>>> at;
+                const auto add = [&](const FactKey& key, const Fact& fact, bool rewritten)
+                {
+                    auto [it, added] = at.try_emplace(key);
+                    if (added)
+                        order.push_back(key);
+                    (rewritten ? it->second.second : it->second.first).push_back(&fact);
+                };
                 for (const Fact& fact : was)
                 {
-                    const std::optional<FactKey> key = mapped(fact.key);
-                    const auto found = key ? nowByKey.find(*key) : nowByKey.end();
-                    if (!wasByKey.count(fact.key) || found == nowByKey.end())
-                        continue;
-                    const Fact& other = *found->second;
-                    if (fact.kind == FactKind::Reference)
+                    if (const std::optional<FactKey> key = forward(fact.key))
+                        add(*key, fact, false);
+                }
+                for (const Fact& fact : now)
+                {
+                    if (known(fact.key))
+                        add(fact.key, fact, true);
+                }
+                for (const FactKey& key : order)
+                {
+                    const auto& [wasAt, nowAt] = at.at(key);
+                    if (wasAt.size() != nowAt.size())
                     {
-                        // Unchanged when its targets after the rewrite keep every declaration
-                        // they had (ruling 4).
-                        if (sites(fact.value) && sites(other.value)
-                                ? std::includes(other.value.begin(), other.value.end(),
-                                                fact.value.begin(), fact.value.end())
-                                : !sites(fact.value) && !sites(other.value))
+                        const Fact& one = wasAt.empty() ? *nowAt.front() : *wasAt.front();
+                        if (!out.incomplete)
                         {
-                            continue;
+                            out.incomplete =
+                                "the facts at " + one.key.site.expansion.file + ":" +
+                                std::to_string(one.line) +
+                                " cannot be compared one to one: " + std::to_string(wasAt.size()) +
+                                " before the rewrite, " + std::to_string(nowAt.size()) +
+                                " after it";
+                        }
+                        continue;
+                    }
+                    for (std::size_t k = 0; k < wasAt.size(); ++k)
+                    {
+                        if (changed(*wasAt[k], *nowAt[k]))
+                        {
+                            out.changed = changeOf(*wasAt[k], *nowAt[k]);
+                            return;
                         }
                     }
-                    else if (mappedBack(other.value) == fact.value)
-                    {
-                        continue;
-                    }
-                    return changeOf(fact, other);
                 }
-                return std::nullopt;
             };
-            if (std::optional<std::string> changed = first(before.facts, after.facts))
-                return changed;
-            return first(before.overrides[index], entity ? entity->overrides : std::vector<Fact>());
+            compare(before.facts, after.facts);
+            if (!out.changed)
+                compare(before.overrides[index], entity ? entity->overrides : std::vector<Fact>());
+            return out;
         }
 
         Judgement refuted(std::string why)
@@ -372,10 +411,9 @@ namespace ctrace::stack::analysis
             if (!facts.problem.empty())
                 return refuted(facts.problem);
             // Step 6 (§5.8): a reference, an override or a constant condition that changes.
-            if (const std::optional<std::string> changed = changedFact(*before, index, after, plan))
-            {
-                return refuted(*changed);
-            }
+            const FactComparison compared = compareFacts(*before, index, after, plan);
+            if (compared.changed)
+                return refuted(*compared.changed);
             if (signature.after.empty() && !facts.printedSignature.empty())
                 signature.after = facts.printedSignature;
             std::string renamedTo;
@@ -388,6 +426,9 @@ namespace ctrace::stack::analysis
             }
             if (difference)
                 return refuted("the generated code changes: " + *difference);
+            // Facts that could not be compared one to one leave the unit unverified.
+            if (compared.incomplete)
+                return indeterminate(*compared.incomplete);
             if (renamed.empty() || renamed == planned.symbol)
                 renamed = renamedTo;
             return {};
@@ -517,9 +558,9 @@ namespace ctrace::stack::analysis
             definingCode = std::make_shared<const_suggestion::ModuleText>(
                 const_suggestion::prepare(*before.module));
         }
-        const std::optional<Original> definingBefore =
-            Original{before.diagnostics, std::move(before.facts), overridesOf(before),
-                     std::move(before.writtenTypes), definingCode};
+        const std::optional<Original> definingBefore = Original{
+            before.diagnostics,  std::move(before.facts),        std::move(before.instantiations),
+            overridesOf(before), std::move(before.writtenTypes), definingCode};
         OriginalCache originals;
 
         // The other units a rewrite may reach: the analyzed ones and, with a compilation
