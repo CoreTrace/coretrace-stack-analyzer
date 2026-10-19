@@ -384,7 +384,10 @@ namespace ctrace::stack::analysis
             }
             if (!planner.plan(*declaration, *declaration->getParamDecl(out.sourceIndex)))
                 return out;
+            out.parameters.push_back(
+                sites(declaration->getParamDecl(out.sourceIndex)->getLocation()));
         }
+        std::sort(out.parameters.begin(), out.parameters.end());
         // The plan's scope (§5.5): an edit written in a macro argument serves only the parameter
         // planned.
         if (!planner.inArguments().empty())

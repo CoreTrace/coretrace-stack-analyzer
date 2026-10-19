@@ -33,6 +33,7 @@ namespace ctrace::stack::analysis
 {
     namespace
     {
+        using const_suggestion::DeclarationSite;
         using const_suggestion::Diagnostic;
         using const_suggestion::Edit;
         using const_suggestion::Fact;
@@ -64,12 +65,14 @@ namespace ctrace::stack::analysis
 
         // A unit before the rewrite, prepared once for every suggestion of the module: its
         // diagnostics, its facts R and K, the facts O of each target (indexed like the
-        // targets), and its generated code ready to compare.
+        // targets), the declarations of the rewritten files, and its generated code ready to
+        // compare.
         struct Original
         {
             std::multiset<std::string> diagnostics;
             std::vector<Fact> facts;
             std::vector<std::vector<Fact>> overrides;
+            std::map<DeclarationSite, UnitFacts::Written> writtenTypes;
             std::shared_ptr<const const_suggestion::ModuleText> code;
         };
 
@@ -173,6 +176,7 @@ namespace ctrace::stack::analysis
                 return out;
             const analyzer::ScopedHotspot hotspot(timing, "const_suggestion.prepare");
             out = Original{before.diagnostics, std::move(before.facts), overridesOf(before),
+                           std::move(before.writtenTypes),
                            std::make_shared<const_suggestion::ModuleText>(
                                const_suggestion::prepare(*before.module))};
             return out;
@@ -305,20 +309,48 @@ namespace ctrace::stack::analysis
         }
 
         // Checks one suggestion, the target at `index`, in one unit, against the unit before the
-        // rewrite.
+        // rewrite: the judgement of §5.8, steps 1 to 6, then T v1's comparison of the code.
         Judgement checkUnit(const UnitCommand& command, const std::optional<Original>& before,
                             std::size_t index, const Target& planned,
                             const std::map<std::string, std::string>& rewritten,
                             const SuggestionPlan& plan, PrintedSignature& signature,
                             std::vector<std::string>& accepted, std::string& renamed, bool timing)
         {
+            // Step 1: a unit that cannot be checked.
             if (!before)
                 return indeterminate(kDoesNotCompileAsItIs);
             UnitFacts after = inspect(command, &plan, rewritten, {planned},
                                       "const_suggestion.compile.after", timing);
             if (!after.failure.empty())
                 return indeterminate(after.failure);
-            // The first diagnostic the rewrite adds, not one the unit had before it.
+            // Step 2: after a fatal error, the rest of the unit is not inspected.
+            if (!after.fatal.empty())
+            {
+                return indeterminate("the rewritten code cannot be inspected entirely, a fatal "
+                                     "error stops its compilation: " +
+                                     after.fatal);
+            }
+            const UnitFacts::Entity& facts =
+                after.entities.empty() ? UnitFacts::Entity() : after.entities[0];
+            // Step 3, the plan's scope (§5.6): its parameters have the candidate, and every other
+            // declaration that a rewritten file writes keeps its type.
+            if (facts.withoutCandidate)
+                return indeterminate("the rewritten declaration does not get the suggested type");
+            for (const auto& [site, written] : after.writtenTypes)
+            {
+                const auto was = before->writtenTypes.find(site);
+                if (was == before->writtenTypes.end() || was->second.type == written.type ||
+                    std::binary_search(plan.entity.redeclarations.begin(),
+                                       plan.entity.redeclarations.end(), site) ||
+                    std::binary_search(plan.parameters.begin(), plan.parameters.end(), site))
+                {
+                    continue;
+                }
+                return indeterminate("the rewrite also changes the type of " + written.name + " (" +
+                                     site.expansion.file + ":" + std::to_string(written.line) +
+                                     ")");
+            }
+            // Steps 4 and 5: the first error or checked warning that the rewrite adds.
             for (const Diagnostic& diagnostic : after.reported)
             {
                 if (after.diagnostics.count(diagnostic.key) >
@@ -331,16 +363,12 @@ namespace ctrace::stack::analysis
             }
             if (!after.module)
                 return refuted("does not compile: " + after.firstDiagnostic);
-            const UnitFacts::Entity& facts =
-                after.entities.empty() ? UnitFacts::Entity() : after.entities[0];
             // The suggestion's variant after the rewrite.
             const auto variant =
                 std::find(plan.entity.symbols.begin(), plan.entity.symbols.end(), planned.symbol);
             const auto k = static_cast<std::size_t>(variant - plan.entity.symbols.begin());
             if (renamed.empty() && k < facts.symbols.size())
                 renamed = facts.symbols[k];
-            if (facts.problem.starts_with("rewritten:"))
-                return indeterminate("the rewritten declaration does not get the suggested type");
             if (!facts.problem.empty())
                 return refuted(facts.problem);
             // Step 6 (§5.8): a reference, an override or a constant condition that changes.
@@ -489,8 +517,9 @@ namespace ctrace::stack::analysis
             definingCode = std::make_shared<const_suggestion::ModuleText>(
                 const_suggestion::prepare(*before.module));
         }
-        const std::optional<Original> definingBefore = Original{
-            before.diagnostics, std::move(before.facts), overridesOf(before), definingCode};
+        const std::optional<Original> definingBefore =
+            Original{before.diagnostics, std::move(before.facts), overridesOf(before),
+                     std::move(before.writtenTypes), definingCode};
         OriginalCache originals;
 
         // The other units a rewrite may reach: the analyzed ones and, with a compilation

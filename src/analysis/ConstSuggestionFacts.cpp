@@ -113,6 +113,8 @@ namespace ctrace::stack::analysis
                                          level >= clang::DiagnosticsEngine::Error});
                 if (out_.firstDiagnostic.empty())
                     out_.firstDiagnostic = out_.reported.back().text;
+                if (level == clang::DiagnosticsEngine::Fatal && out_.fatal.empty())
+                    out_.fatal = out_.reported.back().text;
             }
 
           private:
@@ -161,6 +163,29 @@ namespace ctrace::stack::analysis
                         symbol({destructor, clang::Dtor_Base})};
             }
             return {symbol(clang::GlobalDecl(&function))};
+        }
+
+        // Whether a declaration comes from a template instantiation: a specialization the
+        // compilation instantiates, or a declaration inside one.
+        bool instantiated(const clang::Decl* declaration)
+        {
+            while (declaration)
+            {
+                const auto* function = llvm::dyn_cast<clang::FunctionDecl>(declaration);
+                const auto* variable = llvm::dyn_cast<clang::VarDecl>(declaration);
+                const auto* record = llvm::dyn_cast<clang::CXXRecordDecl>(declaration);
+                if ((function && function->isTemplateInstantiation()) ||
+                    (variable &&
+                     clang::isTemplateInstantiation(variable->getTemplateSpecializationKind())) ||
+                    (record &&
+                     clang::isTemplateInstantiation(record->getTemplateSpecializationKind())))
+                {
+                    return true;
+                }
+                const clang::DeclContext* context = declaration->getDeclContext();
+                declaration = context ? clang::Decl::castFromDeclContext(context) : nullptr;
+            }
+            return false;
         }
 
         // A site, as an R or O value holds it.
@@ -227,6 +252,16 @@ namespace ctrace::stack::analysis
                     for (const DeclarationSite& site : identity(i).redeclarations)
                         declarationFiles_.insert(site.expansion.file);
                 }
+                // The files that a plan rewrites: after the rewrite, those of its plan.
+                for (std::size_t i = 0; i < targets_.size(); ++i)
+                {
+                    const SuggestionPlan& plan =
+                        targets_[i].plan ? *targets_[i].plan : out_.entities[i].plan;
+                    if (rewrittenBy_ && &plan != rewrittenBy_)
+                        continue;
+                    for (const auto& [path, edits] : plan.edits)
+                        rewrittenFiles_.insert(path);
+                }
                 const analyzer::ScopedHotspot hotspot(out_.timing, "const_suggestion.inspect");
                 TraverseDecl(context.getTranslationUnitDecl());
                 for (std::size_t i = 0; i < targets_.size(); ++i)
@@ -283,6 +318,19 @@ namespace ctrace::stack::analysis
                     reference ? llvm::dyn_cast<clang::FunctionDecl>(reference->getDecl()) : nullptr;
                 if (function)
                     casts_.push_back(function->getCanonicalDecl());
+                return true;
+            }
+
+            // §5.6: the type of each declaration that a rewritten file writes, by its site.
+            bool VisitDeclaratorDecl(clang::DeclaratorDecl* declaration)
+            {
+                written(*declaration, declaration->getType());
+                return true;
+            }
+
+            bool VisitTypedefNameDecl(clang::TypedefNameDecl* declaration)
+            {
+                written(*declaration, declaration->getUnderlyingType());
                 return true;
             }
 
@@ -388,6 +436,27 @@ namespace ctrace::stack::analysis
                 std::sort(value.begin(), value.end());
                 value.erase(std::unique(value.begin(), value.end()), value.end());
                 return value;
+            }
+
+            // Neither implicit nor instantiated; an invalid declaration is left to the error
+            // that makes it so (§5.8, step 4).
+            void written(const clang::NamedDecl& declaration, clang::QualType type)
+            {
+                const clang::SourceLocation at = declaration.getLocation();
+                if (rewrittenFiles_.empty() || at.isInvalid() || declaration.isImplicit() ||
+                    declaration.isInvalidDecl() || instantiated(&declaration))
+                {
+                    return;
+                }
+                const clang::SourceManager& sm = context_->getSourceManager();
+                if (!rewrittenFiles_.count(sites_->fileOf(sm.getFileID(sm.getExpansionLoc(at)))))
+                    return;
+                std::string name = declaration.getNameAsString();
+                out_.writtenTypes.emplace(
+                    (*sites_)(at),
+                    UnitFacts::Written{writtenType(*context_, type),
+                                       name.empty() ? "an unnamed declaration" : std::move(name),
+                                       lineOf(at)});
             }
 
             unsigned lineOf(clang::SourceLocation at) const
@@ -535,7 +604,7 @@ namespace ctrace::stack::analysis
                 {
                     for (const clang::FunctionDecl* declaration : function->redecls())
                     {
-                        if (!facts.problem.empty() || declaration->isDependentContext() ||
+                        if (declaration->isDependentContext() ||
                             target.plan->sourceIndex >= declaration->getNumParams())
                         {
                             continue;
@@ -548,12 +617,16 @@ namespace ctrace::stack::analysis
                         const clang::SourceLocation at =
                             sm.getExpansionLoc(declaration->getLocation());
                         const std::string& file = sites_->fileOf(sm.getFileID(at));
-                        facts.problem = target.plan->edits.count(file)
-                                            ? "rewritten:" + type
-                                            : "declared in " +
-                                                  llvm::sys::path::filename(file).str() + ":" +
-                                                  std::to_string(sm.getExpansionLineNumber(at)) +
-                                                  " with type " + type;
+                        // A planned parameter must have the candidate (§5.6, step 3); one that
+                        // another file declares stays with its type (T v1, Task 1.6).
+                        if (target.plan->edits.count(file))
+                            facts.withoutCandidate = true;
+                        else if (facts.problem.empty())
+                        {
+                            facts.problem = "declared in " + llvm::sys::path::filename(file).str() +
+                                            ":" + std::to_string(sm.getExpansionLineNumber(at)) +
+                                            " with type " + type;
+                        }
                     }
                 }
                 if (facts.problem.empty() &&
@@ -574,6 +647,7 @@ namespace ctrace::stack::analysis
             clang::CodeGenerator* generator_ = nullptr;
             std::optional<const_suggestion::SiteReader> sites_;
             std::set<std::string> declarationFiles_;
+            std::set<std::string> rewrittenFiles_;
             std::map<void*, std::string> names_;
             std::vector<const clang::FunctionDecl*> located_;
             std::vector<std::vector<const clang::FunctionDecl*>> atSites_; // with one of its sites
@@ -704,6 +778,9 @@ namespace ctrace::stack::analysis
                 // No "N warnings generated" on the analyzer's output.
                 diagnostics.ShowCarets = false;
                 diagnostics.IgnoreWarnings = false;
+                // No error limit: "too many errors" is fatal, and would leave unchecked a rewrite
+                // that its errors refute (ruling 12).
+                diagnostics.ErrorLimit = 0;
                 for (const char* warning : kCheckedWarnings)
                     diagnostics.Warnings.push_back(warning);
                 out.diagnostics.clear();

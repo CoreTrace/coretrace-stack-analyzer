@@ -156,6 +156,7 @@ namespace ctrace::stack::analysis::const_suggestion
     struct SuggestionPlan
     {
         EntityIdentity entity;
+        std::vector<DeclarationSite> parameters;        // the parameters it rewrites, sorted
         std::map<std::string, std::vector<Edit>> edits; // by real path
         std::string expectedType; // the parameter's type once rewritten, written canonically
         std::optional<std::string> indeterminate; // why the plan is not executed
@@ -266,7 +267,18 @@ namespace ctrace::stack::analysis::const_suggestion
             std::string problem;
             std::vector<Fact> overrides; // O, for the methods named like it
             bool found = false;          // the compilation declares it
-            std::uint8_t reservedPadding[7] = {};
+            // After the rewrite, a declaration in a rewritten file without the candidate.
+            bool withoutCandidate = false;
+            std::uint8_t reservedPadding[6] = {};
+        };
+
+        // A declaration that a rewritten file writes (§5.6).
+        struct Written
+        {
+            std::string type; // written canonically
+            std::string name;
+            unsigned line = 0; // where Clang expands it
+            std::uint8_t reservedPadding[4] = {};
         };
 
         bool timing = false;
@@ -275,6 +287,8 @@ namespace ctrace::stack::analysis::const_suggestion
         std::multiset<std::string> diagnostics;
         std::vector<Diagnostic> reported;
         std::string firstDiagnostic;
+        std::string fatal; // the first fatal error: the AST lacks the rest of the unit
+        std::map<DeclarationSite, Written> writtenTypes; // in the rewritten files, by site
         std::unique_ptr<llvm::LLVMContext> context;
         std::unique_ptr<llvm::Module> module;
         std::vector<Fact> facts;                   // R and K, in the order of the traversal
