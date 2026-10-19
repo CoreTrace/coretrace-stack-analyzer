@@ -438,13 +438,13 @@ namespace ctrace::stack::analysis
                 return value;
             }
 
-            // Neither implicit nor instantiated; an invalid declaration is left to the error
-            // that makes it so (§5.8, step 4).
+            // Neither implicit nor instantiated, valid or not: a declaration that the rewrite
+            // makes invalid outside the plan is still one that it changes.
             void written(const clang::NamedDecl& declaration, clang::QualType type)
             {
                 const clang::SourceLocation at = declaration.getLocation();
                 if (rewrittenFiles_.empty() || at.isInvalid() || declaration.isImplicit() ||
-                    declaration.isInvalidDecl() || instantiated(&declaration))
+                    instantiated(&declaration))
                 {
                     return;
                 }
@@ -452,11 +452,9 @@ namespace ctrace::stack::analysis
                 if (!rewrittenFiles_.count(sites_->fileOf(sm.getFileID(sm.getExpansionLoc(at)))))
                     return;
                 std::string name = declaration.getNameAsString();
-                out_.writtenTypes.emplace(
-                    (*sites_)(at),
-                    UnitFacts::Written{writtenType(*context_, type),
-                                       name.empty() ? "an unnamed declaration" : std::move(name),
-                                       lineOf(at)});
+                out_.writtenTypes[(*sites_)(at)].push_back(UnitFacts::Written{
+                    writtenType(*context_, type),
+                    name.empty() ? "an unnamed declaration" : std::move(name), lineOf(at)});
             }
 
             unsigned lineOf(clang::SourceLocation at) const

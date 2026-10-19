@@ -73,7 +73,7 @@ namespace ctrace::stack::analysis
             std::vector<Fact> facts;
             std::set<std::string> instantiations; // the symbols of those around a fact
             std::vector<std::vector<Fact>> overrides;
-            std::map<DeclarationSite, UnitFacts::Written> writtenTypes;
+            std::map<DeclarationSite, std::vector<UnitFacts::Written>> writtenTypes;
             std::shared_ptr<const const_suggestion::ModuleText> code;
         };
 
@@ -337,6 +337,68 @@ namespace ctrace::stack::analysis
             return out;
         }
 
+        // Step 3 (§5.6): a declaration that a rewritten file writes outside the plan and whose
+        // type the rewrite changes, valid or not after it; and else, when a site's declarations
+        // cannot be compared one to one, why the comparison is incomplete.
+        std::optional<std::string> outsideThePlan(const Original& before, const UnitFacts& after,
+                                                  const SuggestionPlan& plan)
+        {
+            using Declarations = std::vector<UnitFacts::Written>;
+            const auto planned = [&](const DeclarationSite& site)
+            {
+                return !plan.edits.count(site.expansion.file) ||
+                       std::binary_search(plan.entity.redeclarations.begin(),
+                                          plan.entity.redeclarations.end(), site) ||
+                       std::binary_search(plan.parameters.begin(), plan.parameters.end(), site);
+            };
+            std::optional<std::string> incomplete;
+            const Declarations none;
+            const auto compare = [&](const DeclarationSite& site, const Declarations& was,
+                                     const Declarations& now) -> std::optional<std::string>
+            {
+                if (was.size() != now.size())
+                {
+                    const UnitFacts::Written& one = was.empty() ? now.front() : was.front();
+                    if (!incomplete)
+                    {
+                        incomplete = "the declarations at " + site.expansion.file + ":" +
+                                     std::to_string(one.line) + " cannot be compared one to one: " +
+                                     std::to_string(was.size()) + " before the rewrite, " +
+                                     std::to_string(now.size()) + " after it";
+                    }
+                    return std::nullopt;
+                }
+                for (std::size_t k = 0; k < was.size(); ++k)
+                {
+                    if (was[k].type != now[k].type)
+                    {
+                        return "the rewrite also changes the type of " + now[k].name + " (" +
+                               site.expansion.file + ":" + std::to_string(now[k].line) + ")";
+                    }
+                }
+                return std::nullopt;
+            };
+            for (const auto& [site, now] : after.writtenTypes)
+            {
+                if (planned(site))
+                    continue;
+                const auto was = before.writtenTypes.find(site);
+                if (std::optional<std::string> changed =
+                        compare(site, was == before.writtenTypes.end() ? none : was->second, now))
+                {
+                    return changed;
+                }
+            }
+            for (const auto& [site, was] : before.writtenTypes)
+            {
+                if (planned(site) || after.writtenTypes.count(site))
+                    continue;
+                if (std::optional<std::string> changed = compare(site, was, none))
+                    return changed;
+            }
+            return incomplete;
+        }
+
         Judgement refuted(std::string why)
         {
             return {std::move(why), Verdict::Refuted};
@@ -375,20 +437,8 @@ namespace ctrace::stack::analysis
             // declaration that a rewritten file writes keeps its type.
             if (facts.withoutCandidate)
                 return indeterminate("the rewritten declaration does not get the suggested type");
-            for (const auto& [site, written] : after.writtenTypes)
-            {
-                const auto was = before->writtenTypes.find(site);
-                if (was == before->writtenTypes.end() || was->second.type == written.type ||
-                    std::binary_search(plan.entity.redeclarations.begin(),
-                                       plan.entity.redeclarations.end(), site) ||
-                    std::binary_search(plan.parameters.begin(), plan.parameters.end(), site))
-                {
-                    continue;
-                }
-                return indeterminate("the rewrite also changes the type of " + written.name + " (" +
-                                     site.expansion.file + ":" + std::to_string(written.line) +
-                                     ")");
-            }
+            if (const std::optional<std::string> outside = outsideThePlan(*before, after, plan))
+                return indeterminate(*outside);
             // Steps 4 and 5: the first error or checked warning that the rewrite adds.
             for (const Diagnostic& diagnostic : after.reported)
             {

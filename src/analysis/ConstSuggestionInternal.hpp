@@ -288,7 +288,9 @@ namespace ctrace::stack::analysis::const_suggestion
         std::vector<Diagnostic> reported;
         std::string firstDiagnostic;
         std::string fatal; // the first fatal error: the AST lacks the rest of the unit
-        std::map<DeclarationSite, Written> writtenTypes; // in the rewritten files, by site
+        // In the rewritten files, by site; one site can hold several, in the order of the
+        // traversal, such as a macro argument expanded twice.
+        std::map<DeclarationSite, std::vector<Written>> writtenTypes;
         std::unique_ptr<llvm::LLVMContext> context;
         std::unique_ptr<llvm::Module> module;
         std::vector<Fact> facts;                   // R and K, in the order of the traversal
