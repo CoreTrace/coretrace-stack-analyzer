@@ -116,6 +116,42 @@ namespace ctrace::stack::analysis::const_suggestion
         std::uint8_t reservedPadding[7] = {};
     };
 
+    // R, O and K (§5.4).
+    enum class FactKind : std::uint8_t
+    {
+        Reference,
+        Override,
+        Constant
+    };
+
+    // Where a fact is: the instantiations around it, by their symbols, outermost first, and its
+    // site.
+    struct FactKey
+    {
+        std::vector<std::string> contexts;
+        DeclarationSite site;
+        bool operator==(const FactKey&) const = default;
+        bool operator<(const FactKey& other) const
+        {
+            return std::tie(contexts, site) < std::tie(other.contexts, other.site);
+        }
+    };
+
+    // What one compilation shows at a key, and what a reason names when it changes (Texts).
+    struct Fact
+    {
+        FactKey key;
+        // Sorted. R: the target's declaration sites, or the symbol of a specialization or an
+        // implicit function (ruling 4); O: each overridden method, the same way; K: true, false
+        // or the selected association.
+        std::vector<std::string> value;
+        std::string subject; // O: the method; K: _Generic for a selection
+        std::string shown;   // the value, as a reason names it
+        unsigned line = 0;   // the site's, where Clang expands it
+        FactKind kind = FactKind::Reference;
+        std::uint8_t reservedPadding[3] = {};
+    };
+
     // The rewrite of one suggestion, planned on the defining unit's initial compilation (§5.5).
     struct SuggestionPlan
     {
@@ -228,8 +264,8 @@ namespace ctrace::stack::analysis::const_suggestion
             std::vector<std::string> symbols; // every variant's, in this compilation
             std::string printedSignature;     // for __PRETTY_FUNCTION__
             std::string problem;
-            std::multiset<std::string> overrides;
-            bool found = false; // the compilation declares it
+            std::vector<Fact> overrides; // O, for the methods named like it
+            bool found = false;          // the compilation declares it
             std::uint8_t reservedPadding[7] = {};
         };
 
@@ -241,6 +277,8 @@ namespace ctrace::stack::analysis::const_suggestion
         std::string firstDiagnostic;
         std::unique_ptr<llvm::LLVMContext> context;
         std::unique_ptr<llvm::Module> module;
+        std::vector<Fact> facts;                   // R and K, in the order of the traversal
+        std::set<std::string> instantiations;      // the symbols of those around a fact
         std::vector<Entity> entities;              // indexed like the targets
         const_suggestion::MacroDefinitions macros; // read only when the compilation plans
     };

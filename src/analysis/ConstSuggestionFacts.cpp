@@ -22,8 +22,10 @@
 #include <clang/AST/Decl.h>
 #include <clang/AST/DeclCXX.h>
 #include <clang/AST/Expr.h>
+#include <clang/AST/ExprCXX.h>
 #include <clang/AST/GlobalDecl.h>
 #include <clang/AST/RecursiveASTVisitor.h>
+#include <clang/AST/Stmt.h>
 #include <clang/Basic/Diagnostic.h>
 #include <clang/Basic/DiagnosticIDs.h>
 #include <clang/Basic/SourceManager.h>
@@ -37,6 +39,7 @@
 #include <clang/Lex/Preprocessor.h>
 #include <clang/Lex/PreprocessorOptions.h>
 #include <llvm/ADT/StringExtras.h>
+#include <llvm/Demangle/Demangle.h>
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
 #include <llvm/Support/MemoryBuffer.h>
@@ -52,6 +55,8 @@ namespace ctrace::stack::analysis
         using const_suggestion::DeclarationSite;
         using const_suggestion::Edit;
         using const_suggestion::EntityIdentity;
+        using const_suggestion::Fact;
+        using const_suggestion::FactKind;
         using const_suggestion::linkageOf;
         using const_suggestion::realPath;
         using const_suggestion::SourceLinkage;
@@ -158,8 +163,15 @@ namespace ctrace::stack::analysis
             return {symbol(clang::GlobalDecl(&function))};
         }
 
+        // A site, as an R or O value holds it.
+        std::string textOf(const DeclarationSite& site)
+        {
+            return site.expansion.file + ":" + std::to_string(site.expansion.offset) + "|" +
+                   site.spelling.file + ":" + std::to_string(site.spelling.offset);
+        }
+
         // Each target's function, found by its declarations (§3, §5.5), the explicit casts of its
-        // address, and what each method of its name overrides.
+        // address, and the facts R, O and K (§5.4).
         class Inspector : public clang::ASTConsumer, public clang::RecursiveASTVisitor<Inspector>
         {
           public:
@@ -174,10 +186,31 @@ namespace ctrace::stack::analysis
                 return true;
             }
 
+            // The instantiations around a fact, by their symbols.
+            bool TraverseDecl(clang::Decl* declaration)
+            {
+                const auto* function = llvm::dyn_cast_or_null<clang::FunctionDecl>(declaration);
+                const bool instantiation = collectFacts_ && function &&
+                                           function->isTemplateInstantiation() &&
+                                           !symbolsOf(*function).empty();
+                if (instantiation)
+                {
+                    contexts_.push_back(symbolsOf(*function).front());
+                    out_.instantiations.insert(contexts_.back());
+                }
+                const bool traversed =
+                    clang::RecursiveASTVisitor<Inspector>::TraverseDecl(declaration);
+                if (instantiation)
+                    contexts_.pop_back();
+                return traversed;
+            }
+
             void HandleTranslationUnit(clang::ASTContext& context) override
             {
                 context_ = &context;
                 generator_ = action_.getCodeGenerator();
+                // After an error, the rewrite is refuted by it (§5.8, step 4): no fact is needed.
+                collectFacts_ = generator_ && !context.getDiagnostics().hasErrorOccurred();
                 sites_.emplace(context.getSourceManager(), rewrittenBy_);
                 out_.entities.resize(targets_.size());
                 located_.assign(targets_.size(), nullptr);
@@ -228,8 +261,8 @@ namespace ctrace::stack::analysis
                         }
                     }
                     const auto* method = llvm::dyn_cast<clang::CXXMethodDecl>(function);
-                    if (method && name == entity.name)
-                        recordOverrides(out_.entities[i], *method);
+                    if (collectFacts_ && method && method->isFirstDecl() && name == entity.name)
+                        out_.entities[i].overrides.push_back(overridesOf(*method));
                 }
                 return true;
             }
@@ -253,15 +286,160 @@ namespace ctrace::stack::analysis
                 return true;
             }
 
-          private:
-            void recordOverrides(UnitFacts::Entity& facts, const clang::CXXMethodDecl& method)
+            // R: what a call or a reference targets, unevaluated operands and instantiations
+            // included.
+            bool VisitDeclRefExpr(clang::DeclRefExpr* expression)
             {
-                std::vector<std::string> overridden;
+                reference(expression->getDecl(), expression->getLocation());
+                return true;
+            }
+
+            bool VisitMemberExpr(clang::MemberExpr* expression)
+            {
+                reference(expression->getMemberDecl(), expression->getMemberLoc());
+                return true;
+            }
+
+            bool VisitCXXConstructExpr(clang::CXXConstructExpr* expression)
+            {
+                reference(expression->getConstructor(), expression->getLocation());
+                return true;
+            }
+
+            bool VisitCXXNewExpr(clang::CXXNewExpr* expression)
+            {
+                reference(expression->getOperatorNew(), expression->getBeginLoc());
+                return true;
+            }
+
+            bool VisitCXXDeleteExpr(clang::CXXDeleteExpr* expression)
+            {
+                reference(expression->getOperatorDelete(), expression->getBeginLoc());
+                return true;
+            }
+
+            // K: each if constexpr condition, and the association each _Generic selects.
+            bool VisitIfStmt(clang::IfStmt* statement)
+            {
+                const clang::Expr* condition = statement->getCond();
+                bool value = false;
+                if (collectFacts_ && statement->isConstexpr() && condition &&
+                    !condition->isValueDependent() &&
+                    condition->EvaluateAsBooleanCondition(value, *context_))
+                {
+                    constant(statement->getIfLoc(), value ? "true" : "false", "");
+                }
+                return true;
+            }
+
+            bool VisitGenericSelectionExpr(clang::GenericSelectionExpr* selection)
+            {
+                if (collectFacts_ && !selection->isResultDependent())
+                {
+                    constant(selection->getGenericLoc(),
+                             std::to_string(selection->getResultIndex()), "_Generic");
+                }
+                return true;
+            }
+
+          private:
+            // A symbol, cached by declaration.
+            const std::vector<std::string>& symbolsOf(const clang::FunctionDecl& function)
+            {
+                const clang::FunctionDecl* canonical = function.getCanonicalDecl();
+                auto [it, added] = symbols_.try_emplace(canonical);
+                if (added)
+                    it->second = variantSymbols(*generator_, *canonical);
+                return it->second;
+            }
+
+            // A function, as a reason names it.
+            const std::string& shownOf(const clang::FunctionDecl& function)
+            {
+                const clang::FunctionDecl* canonical = function.getCanonicalDecl();
+                auto [it, added] = shown_.try_emplace(canonical);
+                if (added)
+                {
+                    const std::vector<std::string>& symbols = symbolsOf(*canonical);
+                    it->second = symbols.empty() ? canonical->getQualifiedNameAsString()
+                                                 : llvm::demangle(symbols.front());
+                }
+                return it->second;
+            }
+
+            // An R value (ruling 4): the target's declaration sites; a specialization or an
+            // implicit function, which has none of its own, by its symbol.
+            const std::vector<std::string>& valueOf(const clang::FunctionDecl& target)
+            {
+                const clang::FunctionDecl* canonical = target.getCanonicalDecl();
+                auto [it, added] = values_.try_emplace(canonical);
+                std::vector<std::string>& value = it->second;
+                if (!added)
+                    return value;
+                if (canonical->isImplicit() || canonical->isTemplateInstantiation())
+                {
+                    const std::vector<std::string>& symbols = symbolsOf(*canonical);
+                    if (!symbols.empty())
+                        value.push_back("symbol:" + symbols.front());
+                    return value;
+                }
+                for (const clang::FunctionDecl* declaration : canonical->redecls())
+                    value.push_back("site:" + textOf((*sites_)(declaration->getLocation())));
+                std::sort(value.begin(), value.end());
+                value.erase(std::unique(value.begin(), value.end()), value.end());
+                return value;
+            }
+
+            unsigned lineOf(clang::SourceLocation at) const
+            {
+                return context_->getSourceManager().getExpansionLineNumber(at);
+            }
+
+            void reference(const clang::ValueDecl* declaration, clang::SourceLocation at)
+            {
+                const auto* target = llvm::dyn_cast_or_null<clang::FunctionDecl>(declaration);
+                if (!collectFacts_ || !target || at.isInvalid())
+                    return;
+                const std::vector<std::string>& value = valueOf(*target);
+                if (value.empty())
+                    return;
+                out_.facts.push_back({{contexts_, (*sites_)(at)},
+                                      value,
+                                      "",
+                                      shownOf(*target),
+                                      lineOf(at),
+                                      FactKind::Reference});
+            }
+
+            void constant(clang::SourceLocation at, std::string value, std::string subject)
+            {
+                out_.facts.push_back({{contexts_, (*sites_)(at)},
+                                      {std::move(value)},
+                                      std::move(subject),
+                                      "",
+                                      lineOf(at),
+                                      FactKind::Constant});
+            }
+
+            // O: the methods that a method of the entity's name overrides.
+            Fact overridesOf(const clang::CXXMethodDecl& method)
+            {
+                Fact out{{contexts_, (*sites_)(method.getLocation())},
+                         {},
+                         shownOf(method),
+                         "",
+                         lineOf(method.getLocation()),
+                         FactKind::Override};
+                std::vector<std::string> shown;
                 for (const clang::CXXMethodDecl* base : method.overridden_methods())
-                    overridden.push_back(base->getQualifiedNameAsString());
-                std::sort(overridden.begin(), overridden.end());
-                facts.overrides.insert(method.getQualifiedNameAsString() + " -> " +
-                                       llvm::join(overridden, ", "));
+                {
+                    out.value.push_back(llvm::join(valueOf(*base), ";"));
+                    shown.push_back("'" + shownOf(*base) + "'");
+                }
+                std::sort(out.value.begin(), out.value.end());
+                std::sort(shown.begin(), shown.end());
+                out.shown = shown.empty() ? "nothing" : llvm::join(shown, ", ");
+                return out;
             }
 
             const std::string& nameOf(clang::DeclarationName name)
@@ -312,7 +490,7 @@ namespace ctrace::stack::analysis
                 };
                 const auto named = [&](const clang::FunctionDecl* function)
                 {
-                    const std::vector<std::string> symbols = variantSymbols(*generator_, *function);
+                    const std::vector<std::string>& symbols = symbolsOf(*function);
                     return std::find_first_of(symbols.begin(), symbols.end(),
                                               entity.symbols.begin(),
                                               entity.symbols.end()) != symbols.end();
@@ -347,7 +525,7 @@ namespace ctrace::stack::analysis
                 facts.found = !found.empty();
                 if (!facts.found)
                     return;
-                facts.symbols = variantSymbols(*generator_, *found.front());
+                facts.symbols = symbolsOf(*found.front());
                 facts.printedSignature = clang::PredefinedExpr::ComputeName(
                     clang::PredefinedIdentKind::PrettyFunction, found.front());
                 if (!target.plan || target.plan != rewrittenBy_)
@@ -386,7 +564,8 @@ namespace ctrace::stack::analysis
                 }
             }
 
-            std::uint8_t reservedPadding_[7] = {};
+            bool collectFacts_ = false;
+            std::uint8_t reservedPadding_[6] = {};
             clang::CodeGenAction& action_;
             const std::vector<Target>& targets_;
             const SuggestionPlan* rewrittenBy_;
@@ -400,6 +579,10 @@ namespace ctrace::stack::analysis
             std::vector<std::vector<const clang::FunctionDecl*>> atSites_; // with one of its sites
             std::vector<std::vector<const clang::FunctionDecl*>> linked_;  // and the linker's
             std::vector<const clang::FunctionDecl*> casts_;                // explicitly cast
+            std::vector<std::string> contexts_; // the instantiations around, outermost first
+            std::map<const clang::FunctionDecl*, std::vector<std::string>> symbols_;
+            std::map<const clang::FunctionDecl*, std::vector<std::string>> values_;
+            std::map<const clang::FunctionDecl*, std::string> shown_;
         };
 
         class InspectAction : public clang::EmitLLVMOnlyAction

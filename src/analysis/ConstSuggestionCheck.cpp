@@ -35,6 +35,9 @@ namespace ctrace::stack::analysis
     {
         using const_suggestion::Diagnostic;
         using const_suggestion::Edit;
+        using const_suggestion::Fact;
+        using const_suggestion::FactKey;
+        using const_suggestion::FactKind;
         using const_suggestion::inspect;
         using const_suggestion::Judgement;
         using const_suggestion::realPath;
@@ -60,12 +63,13 @@ namespace ctrace::stack::analysis
         constexpr const char* kDoesNotCompileAsItIs = "a file does not compile with Clang as it is";
 
         // A unit before the rewrite, prepared once for every suggestion of the module: its
-        // diagnostics, what the methods of each function's name override (indexed like the
+        // diagnostics, its facts R and K, the facts O of each target (indexed like the
         // targets), and its generated code ready to compare.
         struct Original
         {
             std::multiset<std::string> diagnostics;
-            std::vector<std::multiset<std::string>> overrides;
+            std::vector<Fact> facts;
+            std::vector<std::vector<Fact>> overrides;
             std::shared_ptr<const const_suggestion::ModuleText> code;
         };
 
@@ -141,10 +145,10 @@ namespace ctrace::stack::analysis
             return out;
         }
 
-        // The overrides that each target's inspection recorded, indexed like the targets.
-        std::vector<std::multiset<std::string>> overridesOf(const UnitFacts& unit)
+        // The facts O that each target's inspection recorded, indexed like the targets.
+        std::vector<std::vector<Fact>> overridesOf(const UnitFacts& unit)
         {
-            std::vector<std::multiset<std::string>> out;
+            std::vector<std::vector<Fact>> out;
             for (const UnitFacts::Entity& entity : unit.entities)
                 out.push_back(entity.overrides);
             return out;
@@ -168,10 +172,126 @@ namespace ctrace::stack::analysis
             if (!before.failure.empty() || !before.module)
                 return out;
             const analyzer::ScopedHotspot hotspot(timing, "const_suggestion.prepare");
-            out = Original{before.diagnostics, overridesOf(before),
+            out = Original{before.diagnostics, std::move(before.facts), overridesOf(before),
                            std::make_shared<const_suggestion::ModuleText>(
                                const_suggestion::prepare(*before.module))};
             return out;
+        }
+
+        // The reason a fact gives once the rewrite changes it (Texts).
+        std::string changeOf(const Fact& before, const Fact& after)
+        {
+            const std::string place =
+                before.key.site.expansion.file + ":" + std::to_string(before.line);
+            if (before.kind == FactKind::Reference)
+                return place + " refers to '" + after.shown + "' instead of '" + before.shown + "'";
+            if (before.kind == FactKind::Override)
+            {
+                return "'" + before.subject + "' overrides " + after.shown + " instead of " +
+                       before.shown;
+            }
+            if (before.subject == "_Generic")
+                return "the _Generic selection at " + place + " chooses another association";
+            return "the condition at " + place + " becomes " + after.value.front();
+        }
+
+        // The facts of one compilation by key; a key it shows twice is left out.
+        std::map<FactKey, const Fact*> byKey(const std::vector<Fact>& facts)
+        {
+            std::map<FactKey, const Fact*> out;
+            std::set<FactKey> twice;
+            for (const Fact& fact : facts)
+            {
+                if (!out.emplace(fact.key, &fact).second)
+                    twice.insert(fact.key);
+            }
+            for (const FactKey& key : twice)
+                out.erase(key);
+            return out;
+        }
+
+        // Step 6 (§5.8): the first fact R or K, then O, that the rewrite changes. Facts are
+        // compared through the entity's own symbol pairs: a fact in an instantiation they do not
+        // map to the compilation after the rewrite is left out, and so is a reference whose
+        // targets are specializations or implicit functions on both sides; Task 1.5 pairs them.
+        std::optional<std::string> changedFact(const Original& before, std::size_t index,
+                                               const UnitFacts& after, const SuggestionPlan& plan)
+        {
+            std::map<std::string, std::string> renamed; // the entity's symbols, before to after
+            std::map<std::string, std::string> back;
+            const UnitFacts::Entity* entity = after.entities.empty() ? nullptr : &after.entities[0];
+            if (entity && entity->found && entity->symbols.size() == plan.entity.symbols.size())
+            {
+                for (std::size_t k = 0; k < entity->symbols.size(); ++k)
+                {
+                    renamed[plan.entity.symbols[k]] = entity->symbols[k];
+                    back[entity->symbols[k]] = plan.entity.symbols[k];
+                }
+            }
+            const auto mapped = [&](FactKey key) -> std::optional<FactKey>
+            {
+                for (std::string& context : key.contexts)
+                {
+                    const auto pair = renamed.find(context);
+                    if (pair != renamed.end())
+                        context = pair->second;
+                    else if (!after.instantiations.count(context))
+                        return std::nullopt;
+                }
+                return key;
+            };
+            const auto mappedBack = [&](std::vector<std::string> value)
+            {
+                for (std::string& item : value)
+                {
+                    const auto pair =
+                        item.starts_with("symbol:") ? back.find(item.substr(7)) : back.end();
+                    if (pair != back.end())
+                        item = "symbol:" + pair->second;
+                }
+                std::sort(value.begin(), value.end());
+                return value;
+            };
+            const auto sites = [](const std::vector<std::string>& value)
+            {
+                return std::all_of(value.begin(), value.end(), [](const std::string& item)
+                                   { return item.starts_with("site:"); });
+            };
+            const auto first = [&](const std::vector<Fact>& was,
+                                   const std::vector<Fact>& now) -> std::optional<std::string>
+            {
+                const std::map<FactKey, const Fact*> wasByKey = byKey(was);
+                const std::map<FactKey, const Fact*> nowByKey = byKey(now);
+                for (const Fact& fact : was)
+                {
+                    const std::optional<FactKey> key = mapped(fact.key);
+                    const auto found = key ? nowByKey.find(*key) : nowByKey.end();
+                    if (!wasByKey.count(fact.key) || found == nowByKey.end())
+                        continue;
+                    const Fact& other = *found->second;
+                    if (fact.kind == FactKind::Reference)
+                    {
+                        // Unchanged when its targets after the rewrite keep every declaration
+                        // they had (ruling 4).
+                        if (sites(fact.value) && sites(other.value)
+                                ? std::includes(other.value.begin(), other.value.end(),
+                                                fact.value.begin(), fact.value.end())
+                                : !sites(fact.value) && !sites(other.value))
+                        {
+                            continue;
+                        }
+                    }
+                    else if (mappedBack(other.value) == fact.value)
+                    {
+                        continue;
+                    }
+                    return changeOf(fact, other);
+                }
+                return std::nullopt;
+            };
+            if (std::optional<std::string> changed = first(before.facts, after.facts))
+                return changed;
+            return first(before.overrides[index], entity ? entity->overrides : std::vector<Fact>());
         }
 
         Judgement refuted(std::string why)
@@ -223,8 +343,11 @@ namespace ctrace::stack::analysis
                 return indeterminate("the rewritten declaration does not get the suggested type");
             if (!facts.problem.empty())
                 return refuted(facts.problem);
-            if (before->overrides[index] != facts.overrides)
-                return refuted("the methods it overrides change");
+            // Step 6 (§5.8): a reference, an override or a constant condition that changes.
+            if (const std::optional<std::string> changed = changedFact(*before, index, after, plan))
+            {
+                return refuted(*changed);
+            }
             if (signature.after.empty() && !facts.printedSignature.empty())
                 signature.after = facts.printedSignature;
             std::string renamedTo;
@@ -366,8 +489,8 @@ namespace ctrace::stack::analysis
             definingCode = std::make_shared<const_suggestion::ModuleText>(
                 const_suggestion::prepare(*before.module));
         }
-        const std::optional<Original> definingBefore =
-            Original{before.diagnostics, overridesOf(before), definingCode};
+        const std::optional<Original> definingBefore = Original{
+            before.diagnostics, std::move(before.facts), overridesOf(before), definingCode};
         OriginalCache originals;
 
         // The other units a rewrite may reach: the analyzed ones and, with a compilation
