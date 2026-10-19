@@ -3516,6 +3516,48 @@ def check_const_suggestion_operator_used_elsewhere() -> bool:
     return ok
 
 
+def check_const_suggestion_homonyms_across_files() -> bool:
+    """
+    #217: in C, a function with internal linkage and a function of the same name with external
+    linkage in another file are two functions: neither file declares the other's. Whichever of the
+    two gets the suggestion, the other file does not refute it, and it is checked.
+    """
+    print("=== Testing const suggestions for C homonyms with internal and external linkage ===")
+    sources = {
+        "static-reads.c": "static int helper(int* p)\n{\n    return *p;\n}\n"
+        "int use_helper(void)\n{\n    int v = 1;\n    return helper(&v);\n}\n",
+        "external-writes.c": "int helper(int* p)\n{\n    *p = 2;\n    return 0;\n}\n",
+        "external-reads.c": "int reader(int* p)\n{\n    return *p;\n}\n",
+        "static-writes.c": "static int reader(int* p)\n{\n    *p = 3;\n    return 0;\n}\n"
+        "int use_reader(void)\n{\n    int v = 1;\n    return reader(&v);\n}\n",
+    }
+    checked = "checked in the analyzed files only"
+    ok = True
+    with tempfile.TemporaryDirectory(prefix="ct_const_suggestion_homonyms_") as tmp:
+        root = Path(tmp).resolve()
+        for name, text in sources.items():
+            (root / name).write_text(text)
+        for label, files, function in (
+            (
+                "a static reader, an external writer",
+                ["static-reads.c", "external-writes.c"],
+                "helper",
+            ),
+            (
+                "an external reader, a static writer",
+                ["external-reads.c", "static-writes.c"],
+                "reader",
+            ),
+        ):
+            run = _const_suggestion_run([str(root / f) for f in files])
+            texts = run[0].get(function, []) if run else []
+            good = len(texts) == 1 and checked in texts[0]
+            print(f"  {'✅' if good else '❌'} {label}" + ("" if good else f": {texts}"))
+            ok = ok and good
+    print()
+    return ok
+
+
 def check_duplicate_if_cross_tu() -> bool:
     """
     #157: a function defined in another file is deterministic when every definition of it is, as
@@ -6474,6 +6516,7 @@ def main() -> int:
         check_const_suggestion_one_configuration_per_file,
         check_const_suggestion_compiles_each_file_once,
         check_const_suggestion_operator_used_elsewhere,
+        check_const_suggestion_homonyms_across_files,
         check_duplicate_if_cross_tu,
         check_global_read_before_write_identity_across_files,
         check_size_minus_one_cross_tu,
