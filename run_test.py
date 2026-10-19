@@ -3477,6 +3477,45 @@ def check_const_suggestion_compiles_each_file_once() -> bool:
     return ok
 
 
+def check_const_suggestion_operator_used_elsewhere() -> bool:
+    """
+    #217: a function is found by its declaration in every file that sees the change, not by its
+    name: an operator has no identifier. Here a member operator and a method, declared in a header,
+    defined in one file and called in another: both suggestions are checked in both files.
+    """
+    print("=== Testing const suggestions for a member operator used in another file ===")
+    sources = {
+        "vec.hpp": "struct Vec\n{\n    int x;\n    bool operator==(Vec& o) const;\n"
+        "    int dot(Vec& o) const;\n};\n",
+        "vec.cpp": '#include "vec.hpp"\n'
+        "bool Vec::operator==(Vec& o) const\n{\n    return x == o.x;\n}\n"
+        "int Vec::dot(Vec& o) const\n{\n    return x * o.x;\n}\n",
+        "use.cpp": '#include "vec.hpp"\n'
+        "int use(Vec a, Vec b)\n{\n    return (a == b) + a.dot(b);\n}\n",
+    }
+    checked = "checked in the analyzed files only"
+    with tempfile.TemporaryDirectory(prefix="ct_const_suggestion_operator_") as tmp:
+        root = Path(tmp).resolve()
+        for name, text in sources.items():
+            (root / name).write_text(text)
+        run = _const_suggestion_run([str(root / "vec.cpp"), str(root / "use.cpp")])
+    if run is None:
+        return fail_check("the analysis did not run")
+    messages, trace, _ = run
+    ok = True
+    for label, function in (("operator==", "_ZNK3VeceqERS_"), ("dot", "_ZNK3Vec3dotERS_")):
+        texts = messages.get(function, [])
+        good = (
+            len(texts) == 1
+            and checked in texts[0]
+            and f"{function} parameter o: checked in 2 file(s)" in trace
+        )
+        print(f"  {'✅' if good else '❌'} {label}" + ("" if good else f": {texts}"))
+        ok = ok and good
+    print()
+    return ok
+
+
 def check_duplicate_if_cross_tu() -> bool:
     """
     #157: a function defined in another file is deterministic when every definition of it is, as
@@ -6434,6 +6473,7 @@ def main() -> int:
         check_const_suggestion_both_modes,
         check_const_suggestion_one_configuration_per_file,
         check_const_suggestion_compiles_each_file_once,
+        check_const_suggestion_operator_used_elsewhere,
         check_duplicate_if_cross_tu,
         check_global_read_before_write_identity_across_files,
         check_size_minus_one_cross_tu,
