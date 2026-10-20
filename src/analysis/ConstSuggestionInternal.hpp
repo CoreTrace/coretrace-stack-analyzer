@@ -315,6 +315,12 @@ namespace ctrace::stack::analysis::const_suggestion
         const_suggestion::MacroDefinitions macros; // read only when the compilation plans
     };
 
+    // The pairs established between a unit's initial and modified compilations for the entity
+    // at `entity` of `before` and the one of `after` (§5.7). `missing` receives the first reason
+    // a correspondence could not be established.
+    std::vector<SymbolPair> correspond(const UnitFacts& before, std::size_t entity,
+                                       const UnitFacts& after, std::string& missing);
+
     // Compiles a unit and inspects it for `targets`. After the rewrite, `rewritten` remaps the
     // files that the plan `rewrittenBy` rewrites to their texts.
     UnitFacts inspect(const UnitCommand& command, const SuggestionPlan* rewrittenBy,

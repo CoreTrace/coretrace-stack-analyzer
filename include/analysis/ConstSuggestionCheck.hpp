@@ -61,6 +61,14 @@ namespace ctrace::stack::analysis
     std::shared_ptr<const AnalyzedUnits> analyzedUnitOf(const std::string& filename,
                                                         const llvm::Module& module);
 
+    // A symbol of a unit's compilation before a rewrite, and its counterpart after it, as the
+    // compilation facts establish them (#217, §5.7).
+    struct SymbolPair
+    {
+        std::string before;
+        std::string after;
+    };
+
     // What __PRETTY_FUNCTION__ prints for the rewritten function, before and after the rewrite.
     struct PrintedSignature
     {

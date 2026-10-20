@@ -79,6 +79,7 @@ set(STACK_ANALYZER_SOURCES
     src/analysis/ConstSuggestionCheck.cpp
     src/analysis/ConstSuggestionCode.cpp
     src/analysis/ConstSuggestionFacts.cpp
+    src/analysis/ConstSuggestionMatch.cpp
     src/analysis/ConstSuggestionPlan.cpp
     src/analysis/CommandInjectionAnalysis.cpp
     src/analysis/DuplicateIfCondition.cpp
