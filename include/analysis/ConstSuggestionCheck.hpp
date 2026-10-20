@@ -76,25 +76,22 @@ namespace ctrace::stack::analysis
         std::string after;
     };
 
-    // Compares the code generated for one unit before and after the declarations of the function
-    // `rewritten` (its symbol before the rewrite) are rewritten. Returns the first difference, or
-    // nullopt when the code matches once normalized:
+    // Compares the code generated for one unit before and after a rewrite. Returns the first
+    // difference, or nullopt when the code matches once normalized:
     // - debug information is left out;
     // - metadata are compared by the order in which each function or global uses them, not by
     //   their numbers or contents;
     // - attribute groups are compared by contents, not by numbers;
-    // - the symbols the rewrite renames (the function, and what is named or instantiated inside
-    //   it) are paired. A symbol the unit only declares is paired only if it is the function.
+    // - the symbols the rewrite renames are paired by `established`, the pairs that the rewrite's
+    //   correspondences establish, and by them only: a symbol that only one side has, and that no
+    //   pair covers, is a difference.
     // Two differences that a run can observe are accepted, each only when verified, and described
     // in `accepted`: the name of a type renamed with the function (_ZTS<T> holds the mangled name
     // of T), and a string constant whose only change is the function's printed signature, from
-    // `signature` (null: none is accepted). `renamedTo` receives the function's symbol after the
-    // rewrite.
-    std::optional<std::string> rewrittenCodeDifference(llvm::Module& before, llvm::Module& after,
-                                                       llvm::StringRef rewritten,
-                                                       const PrintedSignature* signature = nullptr,
-                                                       std::vector<std::string>* accepted = nullptr,
-                                                       std::string* renamedTo = nullptr);
+    // `signature` (null: none is accepted).
+    std::optional<std::string> rewrittenCodeDifference(
+        llvm::Module& before, llvm::Module& after, const std::vector<SymbolPair>& established,
+        const PrintedSignature* signature = nullptr, std::vector<std::string>* accepted = nullptr);
 
     // Checks the suggestions made for `mod` with Clang (#217): rewrites every declaration of the
     // parameter with the suggested type, recompiles every analyzed unit that sees a rewritten file

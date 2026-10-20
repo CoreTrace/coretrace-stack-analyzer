@@ -375,97 +375,7 @@ namespace ctrace::stack::analysis
             const std::string now = i < b.size() ? b[i].trim().str() : "(end)";
             return "'" + was.substr(0, 160) + "' became '" + now.substr(0, 160) + "'";
         }
-
-        // The function template `symbol` is a specialization of, as demangled names write it
-        // ("ns::f<"), or "" for a symbol that is no function template specialization.
-        std::string templateOf(const std::string& symbol)
-        {
-            llvm::ItaniumPartialDemangler demangler;
-            if (demangler.partialDemangle(symbol.c_str()) || !demangler.isFunction())
-                return "";
-            const auto text = [](char* buffer)
-            {
-                std::string out = buffer ? buffer : "";
-                std::free(buffer);
-                return out;
-            };
-            std::size_t size = 0;
-            const std::string base = text(demangler.getFunctionBaseName(nullptr, &size));
-            const std::string scope = text(demangler.getFunctionDeclContextName(nullptr, &size));
-            const std::string name = text(demangler.getFunctionName(nullptr, &size));
-            const std::string qualified = scope.empty() ? base : scope + "::" + base;
-            if (base.empty() || !llvm::StringRef(name).starts_with(qualified + "<"))
-                return "";
-            return qualified + "<";
-        }
-
-        // Whether the demangled `symbol` names `templateName` ("ns::f<") as a whole name.
-        bool namesTemplate(const std::string& symbol, const std::string& templateName)
-        {
-            const std::string text = llvm::demangle(symbol);
-            for (std::size_t at = text.find(templateName); at != std::string::npos;
-                 at = text.find(templateName, at + 1))
-            {
-                if (at == 0 || (!std::isalnum(static_cast<unsigned char>(text[at - 1])) &&
-                                text[at - 1] != '_'))
-                {
-                    return true;
-                }
-            }
-            return false;
-        }
     } // namespace
-
-    std::string const_suggestion::withoutConst(const std::string& symbol)
-    {
-        const std::string text = llvm::demangle(symbol);
-        std::string out;
-        // An identifier is made of letters, digits and underscores: const_iterator is no
-        // qualifier.
-        const auto inWord = [&](std::size_t i)
-        { return std::isalnum(static_cast<unsigned char>(text[i])) || text[i] == '_'; };
-        for (std::size_t i = 0; i < text.size();)
-        {
-            const bool wordStart = i == 0 || !inWord(i - 1);
-            if (wordStart && text.compare(i, 5, "const") == 0 &&
-                (i + 5 == text.size() || !inWord(i + 5)))
-            {
-                i += 5;
-                continue;
-            }
-            if (text[i] != ' ')
-                out += text[i];
-            ++i;
-        }
-        std::size_t pos = 0;
-        while ((pos = out.find("&&", pos)) != std::string::npos)
-            out.replace(pos, 2, "&");
-        return out;
-    }
-
-    std::string const_suggestion::variantOf(const std::string& symbol)
-    {
-        std::string variant;
-        for (std::size_t i = 1; i + 1 < symbol.size(); ++i)
-        {
-            const char kind = symbol[i];
-            const char digit = symbol[i + 1];
-            const bool afterName =
-                std::isalnum(static_cast<unsigned char>(symbol[i - 1])) || symbol[i - 1] == '_';
-            const bool next =
-                i + 2 == symbol.size() || std::isupper(static_cast<unsigned char>(symbol[i + 2]));
-            if (afterName && next &&
-                ((kind == 'C' && digit >= '1' && digit <= '5') ||
-                 (kind == 'D' && digit >= '0' && digit <= '5')))
-            {
-                variant += symbol.substr(i, 2);
-            }
-        }
-        const std::string demangled = llvm::demangle(symbol);
-        if (llvm::StringRef(demangled).rtrim().ends_with(" const"))
-            variant += "|const";
-        return variant;
-    }
 
     const_suggestion::ModuleText const_suggestion::prepare(llvm::Module& module)
     {
@@ -473,22 +383,18 @@ namespace ctrace::stack::analysis
     }
 
     std::optional<std::string> rewrittenCodeDifference(llvm::Module& before, llvm::Module& after,
-                                                       llvm::StringRef rewritten,
+                                                       const std::vector<SymbolPair>& established,
                                                        const PrintedSignature* signature,
-                                                       std::vector<std::string>* accepted,
-                                                       std::string* renamedTo)
+                                                       std::vector<std::string>* accepted)
     {
-        return const_suggestion::codeDifference(textOf(before), textOf(after), rewritten, signature,
-                                                accepted, renamedTo);
+        return const_suggestion::codeDifference(textOf(before), textOf(after), established,
+                                                signature, accepted);
     }
 
-    std::optional<std::string>
-    const_suggestion::codeDifference(const ModuleText& was, const ModuleText& now,
-                                     llvm::StringRef rewritten, const PrintedSignature* signature,
-                                     std::vector<std::string>* accepted, std::string* renamedTo)
+    std::optional<std::string> const_suggestion::codeDifference(
+        const ModuleText& was, const ModuleText& now, const std::vector<SymbolPair>& established,
+        const PrintedSignature* signature, std::vector<std::string>* accepted)
     {
-        const std::string function = rewritten.str();
-
         std::vector<std::string> removed;
         std::vector<std::string> added;
         for (const auto& [name, text] : was.globals)
@@ -502,140 +408,25 @@ namespace ctrace::stack::analysis
                 added.push_back(name);
         }
 
-        // The rewritten function and what is named inside it change their mangled names: pair
-        // them by their names with the function's encoding masked, then by their demangled names
-        // without const.
-        const std::string functionKey = withoutConst(function);
-        std::vector<std::string> encodings;
-        if (rewritten.starts_with("_Z"))
-            encodings.push_back(function.substr(2));
-        for (const std::string& name : added)
-        {
-            if (name.starts_with("_Z") && withoutConst(name) == functionKey)
-                encodings.push_back(name.substr(2));
-        }
-        std::sort(encodings.begin(), encodings.end(),
-                  [](const std::string& a, const std::string& b) { return a.size() > b.size(); });
-        const auto masked = [&](std::string name)
-        {
-            for (const std::string& encoding : encodings)
-            {
-                for (std::size_t at = name.find(encoding); at != std::string::npos;
-                     at = name.find(encoding, at + 3))
-                {
-                    name.replace(at, encoding.size(), "@F@");
-                }
-            }
-            // Substitution indices (S_, S0_, ...) depend on what precedes them.
-            std::string out;
-            for (std::size_t i = 0; i < name.size(); ++i)
-            {
-                if (name[i] == 'S')
-                {
-                    std::size_t end = i + 1;
-                    while (end < name.size() &&
-                           (std::isdigit(static_cast<unsigned char>(name[end])) ||
-                            std::isupper(static_cast<unsigned char>(name[end]))))
-                        ++end;
-                    if (end < name.size() && name[end] == '_')
-                    {
-                        out += "S_";
-                        i = end;
-                        continue;
-                    }
-                }
-                out += name[i];
-            }
-            return out;
-        };
-
-        std::map<std::string, std::set<std::string>> byMasked;
-        std::map<std::string, std::set<std::string>> byDemangled;
-        for (const std::string& name : added)
-        {
-            byMasked[masked(name)].insert(name);
-            byDemangled[withoutConst(name)].insert(name);
-        }
+        // The symbols the rewrite renames, by the pairs its correspondences established and by
+        // them only (§5.9): a symbol that only one side has and no pair covers is a difference.
         std::map<std::string, std::string> rename;
         std::set<std::string> taken;
+        for (const SymbolPair& pair : established)
+        {
+            if (std::binary_search(removed.begin(), removed.end(), pair.before) &&
+                std::binary_search(added.begin(), added.end(), pair.after))
+            {
+                rename[pair.before] = pair.after;
+                taken.insert(pair.after);
+            }
+        }
         std::vector<std::string> unpaired;
         for (const std::string& name : removed)
         {
-            bool paired = false;
-            for (const auto* table : {&byMasked, &byDemangled})
-            {
-                const auto found =
-                    table->find(table == &byMasked ? masked(name) : withoutConst(name));
-                if (found == table->end())
-                    continue;
-                std::vector<std::string> candidates;
-                for (const std::string& candidate : found->second)
-                {
-                    if (!taken.count(candidate))
-                        candidates.push_back(candidate);
-                }
-                if (candidates.size() > 1)
-                {
-                    std::erase_if(candidates, [&](const std::string& candidate)
-                                  { return variantOf(candidate) != variantOf(name); });
-                }
-                if (candidates.size() != 1)
-                    continue;
-                // A symbol the unit only declares has no code to compare: it may be paired only
-                // if it is the rewritten function itself.
-                const bool itself = name == function || withoutConst(name) == functionKey ||
-                                    masked(name) == "_Z@F@";
-                if (!itself && (!was.defined.count(name) || !now.defined.count(candidates[0])))
-                    break;
-                rename[name] = candidates[0];
-                taken.insert(candidates[0]);
-                paired = true;
-                break;
-            }
-            if (!paired)
+            if (!rename.count(name))
                 unpaired.push_back(name);
         }
-
-        // Rewritten as const T&, a forwarding reference T&& deduces G instead of G& or const G&
-        // for an lvalue argument: the specializations of the rewritten template that change this
-        // way, and what is named inside them, change their names beyond const. One is paired
-        // when its demangled name without const and references is carried by exactly one symbol
-        // before the rewrite and one after, both with code to compare.
-        const std::string templateName = templateOf(function);
-        if (!templateName.empty())
-        {
-            const auto loose = [](const std::string& name)
-            {
-                std::string key = withoutConst(name);
-                std::erase(key, '&');
-                return key + "|" + variantOf(name);
-            };
-            std::map<std::string, std::vector<std::string>> before;
-            std::map<std::string, std::vector<std::string>> after;
-            for (const std::string& name : unpaired)
-            {
-                if (namesTemplate(name, templateName))
-                    before[loose(name)].push_back(name);
-            }
-            for (const std::string& name : added)
-            {
-                if (!taken.count(name) && namesTemplate(name, templateName))
-                    after[loose(name)].push_back(name);
-            }
-            for (const auto& [key, names] : before)
-            {
-                const auto other = after.find(key);
-                if (names.size() != 1 || other == after.end() || other->second.size() != 1 ||
-                    !was.defined.count(names[0]) || !now.defined.count(other->second[0]))
-                {
-                    continue;
-                }
-                rename[names[0]] = other->second[0];
-                taken.insert(other->second[0]);
-                std::erase(unpaired, names[0]);
-            }
-        }
-
         std::vector<std::string> unexpected;
         for (const std::string& name : added)
         {
@@ -648,11 +439,6 @@ namespace ctrace::stack::analysis
             { return names.empty() ? std::string("none") : llvm::join(names, ", "); };
             return "symbols no longer used: " + list(unpaired) +
                    "; symbols used only after the rewrite: " + list(unexpected);
-        }
-        if (renamedTo)
-        {
-            const auto found = rename.find(function);
-            *renamedTo = found == rename.end() ? function : found->second;
         }
 
         if (was.types != now.types)

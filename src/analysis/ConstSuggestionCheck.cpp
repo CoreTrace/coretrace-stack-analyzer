@@ -63,19 +63,23 @@ namespace ctrace::stack::analysis
         constexpr const char* kNotChecked = "not checked with Clang: ";
         constexpr const char* kDoesNotCompileAsItIs = "a file does not compile with Clang as it is";
 
-        // A unit before the rewrite, prepared once for every suggestion of the module: its
-        // diagnostics, its facts R and K, the facts O of each target (indexed like the
-        // targets), the declarations of the rewritten files, and its generated code ready to
-        // compare.
+        // A unit before the rewrite, prepared once for every suggestion of the module: what its
+        // compilation shows, its module released, and its generated code ready to compare.
         struct Original
         {
-            std::multiset<std::string> diagnostics;
-            std::vector<Fact> facts;
-            std::set<std::string> instantiations; // the symbols of those around a fact
-            std::vector<std::vector<Fact>> overrides;
-            std::map<DeclarationSite, std::vector<UnitFacts::Written>> writtenTypes;
+            UnitFacts unit;
             std::shared_ptr<const const_suggestion::ModuleText> code;
         };
+
+        Original originalFrom(UnitFacts unit, bool timing)
+        {
+            const analyzer::ScopedHotspot hotspot(timing, "const_suggestion.prepare");
+            auto code = std::make_shared<const const_suggestion::ModuleText>(
+                const_suggestion::prepare(*unit.module));
+            unit.module.reset();
+            unit.context.reset();
+            return {std::move(unit), std::move(code)};
+        }
 
         bool commandFor(const AnalyzedUnit& unit, const AnalysisConfig& config, UnitCommand& out,
                         std::string& error)
@@ -149,15 +153,6 @@ namespace ctrace::stack::analysis
             return out;
         }
 
-        // The facts O that each target's inspection recorded, indexed like the targets.
-        std::vector<std::vector<Fact>> overridesOf(const UnitFacts& unit)
-        {
-            std::vector<std::vector<Fact>> out;
-            for (const UnitFacts::Entity& entity : unit.entities)
-                out.push_back(entity.overrides);
-            return out;
-        }
-
         // A unit before the rewrite, by its file and its configuration: compiled once for every
         // suggestion of the module (#217, §5, step 3).
         using OriginalCache = std::map<std::string, std::optional<Original>>;
@@ -175,14 +170,7 @@ namespace ctrace::stack::analysis
                                        "const_suggestion.compile.other_before", timing);
             if (!before.failure.empty() || !before.module)
                 return out;
-            const analyzer::ScopedHotspot hotspot(timing, "const_suggestion.prepare");
-            out = Original{before.diagnostics,
-                           std::move(before.facts),
-                           std::move(before.instantiations),
-                           overridesOf(before),
-                           std::move(before.writtenTypes),
-                           std::make_shared<const_suggestion::ModuleText>(
-                               const_suggestion::prepare(*before.module))};
+            out = originalFrom(std::move(before), timing);
             return out;
         }
 
@@ -218,20 +206,17 @@ namespace ctrace::stack::analysis
         // Keys go through the entity's own symbol pairs: a fact in an instantiation they do not
         // map is left out, and so is a reference whose targets are specializations or implicit
         // functions on both sides; Task 1.5 pairs them.
-        FactComparison compareFacts(const Original& before, std::size_t index,
-                                    const UnitFacts& after, const SuggestionPlan& plan)
+        FactComparison compareFacts(const UnitFacts& before, std::size_t index,
+                                    const UnitFacts& after, const std::vector<SymbolPair>& pairs)
         {
-            std::map<std::string, std::string> renamed; // the entity's symbols, before to after
+            std::map<std::string, std::string> renamed; // the established pairs, before to after
             std::map<std::string, std::string> back;
-            const UnitFacts::Entity* entity = after.entities.empty() ? nullptr : &after.entities[0];
-            if (entity && entity->found && entity->symbols.size() == plan.entity.symbols.size())
+            for (const SymbolPair& pair : pairs)
             {
-                for (std::size_t k = 0; k < entity->symbols.size(); ++k)
-                {
-                    renamed[plan.entity.symbols[k]] = entity->symbols[k];
-                    back[entity->symbols[k]] = plan.entity.symbols[k];
-                }
+                renamed[pair.before] = pair.after;
+                back[pair.after] = pair.before;
             }
+            const UnitFacts::Entity* entity = after.entities.empty() ? nullptr : &after.entities[0];
             // A key before the rewrite, as the compilation after it writes it.
             const auto forward = [&](FactKey key) -> std::optional<FactKey>
             {
@@ -280,7 +265,16 @@ namespace ctrace::stack::analysis
                     return !std::includes(now.value.begin(), now.value.end(), was.value.begin(),
                                           was.value.end());
                 }
-                return sites(was.value) != sites(now.value);
+                if (sites(was.value) != sites(now.value))
+                    return true;
+                // Two symbols: the same target through the pairs; else a change only between two
+                // templates, or between a specialization and a function of no template. Two
+                // specializations of one template are the correspondences' to pair (§5.7).
+                if (mappedBack(now.value) == was.value)
+                    return false;
+                const std::string wasTemplate = const_suggestion::itemOf(was.value, "template:");
+                const std::string nowTemplate = const_suggestion::itemOf(now.value, "template:");
+                return wasTemplate.empty() != nowTemplate.empty() || wasTemplate != nowTemplate;
             };
             FactComparison out;
             const auto compare = [&](const std::vector<Fact>& was, const std::vector<Fact>& now)
@@ -332,15 +326,18 @@ namespace ctrace::stack::analysis
                 }
             };
             compare(before.facts, after.facts);
-            if (!out.changed)
-                compare(before.overrides[index], entity ? entity->overrides : std::vector<Fact>());
+            if (!out.changed && index < before.entities.size())
+            {
+                compare(before.entities[index].overrides,
+                        entity ? entity->overrides : std::vector<Fact>());
+            }
             return out;
         }
 
         // Step 3 (§5.6): a declaration that a rewritten file writes outside the plan and whose
         // type the rewrite changes, valid or not after it; and else, when a site's declarations
         // cannot be compared one to one, why the comparison is incomplete.
-        std::optional<std::string> outsideThePlan(const Original& before, const UnitFacts& after,
+        std::optional<std::string> outsideThePlan(const UnitFacts& before, const UnitFacts& after,
                                                   const SuggestionPlan& plan)
         {
             using Declarations = std::vector<UnitFacts::Written>;
@@ -410,7 +407,7 @@ namespace ctrace::stack::analysis
         }
 
         // Checks one suggestion, the target at `index`, in one unit, against the unit before the
-        // rewrite: the judgement of §5.8, steps 1 to 6, then T v1's comparison of the code.
+        // rewrite: the judgement of §5.8.
         Judgement checkUnit(const UnitCommand& command, const std::optional<Original>& before,
                             std::size_t index, const Target& planned,
                             const std::map<std::string, std::string>& rewritten,
@@ -437,13 +434,14 @@ namespace ctrace::stack::analysis
             // declaration that a rewritten file writes keeps its type.
             if (facts.withoutCandidate)
                 return indeterminate("the rewritten declaration does not get the suggested type");
-            if (const std::optional<std::string> outside = outsideThePlan(*before, after, plan))
+            if (const std::optional<std::string> outside =
+                    outsideThePlan(before->unit, after, plan))
                 return indeterminate(*outside);
             // Steps 4 and 5: the first error or checked warning that the rewrite adds.
             for (const Diagnostic& diagnostic : after.reported)
             {
                 if (after.diagnostics.count(diagnostic.key) >
-                    before->diagnostics.count(diagnostic.key))
+                    before->unit.diagnostics.count(diagnostic.key))
                 {
                     return refuted(
                         (diagnostic.error ? "does not compile: " : "gains a checked warning: ") +
@@ -452,35 +450,46 @@ namespace ctrace::stack::analysis
             }
             if (!after.module)
                 return refuted("does not compile: " + after.firstDiagnostic);
-            // The suggestion's variant after the rewrite.
-            const auto variant =
-                std::find(plan.entity.symbols.begin(), plan.entity.symbols.end(), planned.symbol);
-            const auto k = static_cast<std::size_t>(variant - plan.entity.symbols.begin());
-            if (renamed.empty() && k < facts.symbols.size())
-                renamed = facts.symbols[k];
+            // The correspondences of the rewrite (§5.7), from the facts of both compilations; the
+            // ABI line names the suggestion's own symbol after it.
+            std::string missing;
+            const std::vector<SymbolPair> pairs =
+                const_suggestion::correspond(before->unit, index, after, missing);
+            for (const SymbolPair& pair : pairs)
+            {
+                if (renamed.empty() && pair.before == planned.symbol)
+                    renamed = pair.after;
+            }
             if (!facts.problem.empty())
                 return refuted(facts.problem);
-            // Step 6 (§5.8): a reference, an override or a constant condition that changes.
-            const FactComparison compared = compareFacts(*before, index, after, plan);
+            // Step 6: a reference, an override or a constant condition that changes, compared
+            // through the pairs; facts that cannot be compared one to one leave the unit
+            // unverified, and so does a correspondence that is not one to one.
+            const FactComparison compared = compareFacts(before->unit, index, after, pairs);
             if (compared.changed)
                 return refuted(*compared.changed);
+            if (compared.incomplete)
+                return indeterminate(*compared.incomplete);
+            if (!missing.empty())
+                return indeterminate(missing);
             if (signature.after.empty() && !facts.printedSignature.empty())
                 signature.after = facts.printedSignature;
-            std::string renamedTo;
+            // Step 7: the generated code, compared through the pairs. A difference that no
+            // reference, override or constant condition explains leaves the unit unverified: it
+            // never refutes.
             std::optional<std::string> difference;
             {
                 const analyzer::ScopedHotspot hotspot(timing, "const_suggestion.compare");
                 const const_suggestion::ModuleText now = const_suggestion::prepare(*after.module);
-                difference = const_suggestion::codeDifference(*before->code, now, planned.symbol,
-                                                              &signature, &accepted, &renamedTo);
+                difference = const_suggestion::codeDifference(*before->code, now, pairs, &signature,
+                                                              &accepted);
             }
             if (difference)
-                return refuted("the generated code changes: " + *difference);
-            // Facts that could not be compared one to one leave the unit unverified.
-            if (compared.incomplete)
-                return indeterminate(*compared.incomplete);
-            if (renamed.empty() || renamed == planned.symbol)
-                renamed = renamedTo;
+            {
+                return indeterminate("the generated code changes, and no reference, override or "
+                                     "constant condition explains it: " +
+                                     *difference);
+            }
             return {};
         }
     } // namespace
@@ -592,25 +601,19 @@ namespace ctrace::stack::analysis
             if (!issues[i].binding.isArtificial)
                 targets[i].sourceIndex = issues[i].binding.sourceIndex;
         }
-        UnitFacts before = inspect(command, nullptr, {}, targets,
-                                   "const_suggestion.compile.defining_before", timing);
-        if (!before.failure.empty() || !before.module || before.entities.size() != issues.size())
+        UnitFacts inspected = inspect(command, nullptr, {}, targets,
+                                      "const_suggestion.compile.defining_before", timing);
+        if (!inspected.failure.empty() || !inspected.module ||
+            inspected.entities.size() != issues.size())
         {
             notChecked("the file does not compile with Clang as it is");
             return;
         }
+        const std::optional<Original> definingBefore = originalFrom(std::move(inspected), timing);
+        const UnitFacts& before = definingBefore->unit;
         // The suggestions as planned: what the other compilations look for.
         for (std::size_t i = 0; i < issues.size(); ++i)
             targets[i].plan = &before.entities[i].plan;
-        std::shared_ptr<const const_suggestion::ModuleText> definingCode;
-        {
-            const analyzer::ScopedHotspot hotspot(timing, "const_suggestion.prepare");
-            definingCode = std::make_shared<const_suggestion::ModuleText>(
-                const_suggestion::prepare(*before.module));
-        }
-        const std::optional<Original> definingBefore = Original{
-            before.diagnostics,  std::move(before.facts),        std::move(before.instantiations),
-            overridesOf(before), std::move(before.writtenTypes), definingCode};
         OriginalCache originals;
 
         // The other units a rewrite may reach: the analyzed ones and, with a compilation

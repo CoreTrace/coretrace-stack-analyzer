@@ -207,13 +207,6 @@ namespace ctrace::stack::analysis::const_suggestion
     SuggestionPlan plan(clang::ASTContext& context, const MacroDefinitions& macros,
                         const clang::FunctionDecl& function, std::optional<unsigned> sourceIndex);
 
-    // The demangled form of a symbol without const and spaces, with && written &: the rewritten
-    // function, and what is named inside it, keep this form across the rewrite.
-    std::string withoutConst(const std::string& symbol);
-
-    // The constructor or destructor variant a symbol names, and whether it names a const method.
-    std::string variantOf(const std::string& symbol);
-
     // The generated code of one module, ready to compare: what carries no meaning removed, and
     // each piece keyed by what it defines.
     struct ModuleText
@@ -231,10 +224,9 @@ namespace ctrace::stack::analysis::const_suggestion
 
     // rewrittenCodeDifference, with the code before the rewrite already prepared.
     std::optional<std::string> codeDifference(const ModuleText& was, const ModuleText& now,
-                                              llvm::StringRef rewritten,
+                                              const std::vector<SymbolPair>& established,
                                               const PrintedSignature* signature,
-                                              std::vector<std::string>* accepted,
-                                              std::string* renamedTo);
+                                              std::vector<std::string>* accepted);
 
     // What to look for in one compilation: the function a suggestion names.
     struct Target
@@ -270,9 +262,8 @@ namespace ctrace::stack::analysis::const_suggestion
         // About the function of one target.
         struct Entity
         {
-            SuggestionPlan plan;              // in the compilation that plans
-            std::vector<std::string> symbols; // every variant's, in this compilation
-            std::string printedSignature;     // for __PRETTY_FUNCTION__
+            SuggestionPlan plan;          // in the compilation that plans
+            std::string printedSignature; // for __PRETTY_FUNCTION__
             std::string problem;
             std::vector<Fact> overrides; // O, for the methods named like it
             std::vector<Named> variants; // the entity's: C1, C2, D0... or "" for a function
@@ -314,6 +305,9 @@ namespace ctrace::stack::analysis::const_suggestion
         std::vector<Entity> entities;              // indexed like the targets
         const_suggestion::MacroDefinitions macros; // read only when the compilation plans
     };
+
+    // The item of an R value that starts with `prefix`, without it; "" when it has none.
+    std::string itemOf(const std::vector<std::string>& value, std::string_view prefix);
 
     // The pairs established between a unit's initial and modified compilations for the entity
     // at `entity` of `before` and the one of `after` (§5.7). `missing` receives the first reason

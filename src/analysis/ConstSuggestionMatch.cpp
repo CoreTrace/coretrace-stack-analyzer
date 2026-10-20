@@ -21,19 +21,9 @@ namespace ctrace::stack::analysis
         using const_suggestion::Fact;
         using const_suggestion::FactKey;
         using const_suggestion::FactKind;
+        using const_suggestion::itemOf;
         using const_suggestion::Named;
         using const_suggestion::UnitFacts;
-
-        // The item of an R value that starts with `prefix`, without it; "" when it has none.
-        std::string itemOf(const std::vector<std::string>& value, std::string_view prefix)
-        {
-            for (const std::string& item : value)
-            {
-                if (item.starts_with(prefix))
-                    return item.substr(prefix.size());
-            }
-            return "";
-        }
 
         // Appends `item` once, in the order items come.
         void addOnce(std::vector<std::string>& items, const std::string& item)
@@ -42,6 +32,17 @@ namespace ctrace::stack::analysis
                 items.push_back(item);
         }
     } // namespace
+
+    std::string const_suggestion::itemOf(const std::vector<std::string>& value,
+                                         std::string_view prefix)
+    {
+        for (const std::string& item : value)
+        {
+            if (item.starts_with(prefix))
+                return item.substr(prefix.size());
+        }
+        return "";
+    }
 
     std::vector<SymbolPair> const_suggestion::correspond(const UnitFacts& before,
                                                          std::size_t entity, const UnitFacts& after,

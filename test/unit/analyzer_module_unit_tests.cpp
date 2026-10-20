@@ -750,26 +750,14 @@ namespace
         return report.failures == 0;
     }
 
-    /// #217: a symbol's demangled name without const keeps the identifiers that contain "const":
-    /// get_const(int*) and get_(int*) are two functions.
-    bool testConstSuggestionWithoutConstKeepsIdentifiers(TestReport& report)
-    {
-        using ctrace::stack::analysis::const_suggestion::withoutConst;
-        report.expect(withoutConst("_Z9get_constPi") != withoutConst("_Z4get_Pi"),
-                      "ConstSuggestionCode: get_const(int*) and get_(int*) stay distinct");
-        report.expect(withoutConst("_Z14const_iteratorPKi") == "const_iterator(int*)",
-                      "ConstSuggestionCode: const_iterator keeps its name, the qualifier goes");
-        report.expect(withoutConst("_Z1fPKi") == withoutConst("_Z1fPi"),
-                      "ConstSuggestionCode: f(const int*) and f(int*) have the same key");
-        return report.failures == 0;
-    }
-
     /// #217: the code generated before and after a const rewrite is compared once the symbols
-    /// the rewrite renames are paired. A symbol the unit only declares has no code to compare: it
-    /// is paired only if it is the rewritten function itself.
+    /// the rewrite renames are paired, by the pairs its correspondences established and by them
+    /// only: a symbol renamed without a pair, even one whose name differs only by const, is a
+    /// difference.
     bool testConstSuggestionCodeComparison(TestReport& report)
     {
         using ctrace::stack::analysis::rewrittenCodeDifference;
+        using ctrace::stack::analysis::SymbolPair;
         llvm::LLVMContext context;
         llvm::SMDiagnostic error;
         const auto parse =
@@ -815,11 +803,15 @@ namespace
             report.expect(false, "ConstSuggestionCode setup: the IR does not parse");
             return false;
         }
-        report.expect(!rewrittenCodeDifference(*calledBefore, *calledAfter, "_Z1fPi"),
+        const std::vector<SymbolPair> function = {{"_Z1fPi", "_Z1fPKi"}};
+        report.expect(!rewrittenCodeDifference(*calledBefore, *calledAfter, function),
                       "ConstSuggestionCode: the rewritten function and its caller are renamed "
                       "together");
-        report.expect(rewrittenCodeDifference(*thrownBefore, *thrownAfter, "_Z1fPi").has_value(),
-                      "ConstSuggestionCode: typeinfo for int* and for int const*, only declared, "
+        report.expect(rewrittenCodeDifference(*calledBefore, *calledAfter, {}).has_value(),
+                      "ConstSuggestionCode: a function renamed without an established pair is a "
+                      "difference");
+        report.expect(rewrittenCodeDifference(*thrownBefore, *thrownAfter, function).has_value(),
+                      "ConstSuggestionCode: typeinfo for int* and for int const*, without a pair, "
                       "are not paired");
         return report.failures == 0;
     }
@@ -840,7 +832,7 @@ namespace
                 llvm::parseAssemblyString(after, error, context);
             if (!was || !now)
                 return std::optional<bool>();
-            return std::optional<bool>(rewrittenCodeDifference(*was, *now, "f").has_value());
+            return std::optional<bool>(rewrittenCodeDifference(*was, *now, {}).has_value());
         };
         const auto replaced = [](std::string text, const std::string& from, const std::string& to)
         {
@@ -2893,7 +2885,6 @@ int main(int argc, char** argv)
     (void)testSarifSecuritySeverity(report);
     (void)testAnalysisIncompleteNotesHaveTheirOwnRules(report);
     (void)testConstSuggestionCodeComparison(report);
-    (void)testConstSuggestionWithoutConstKeepsIdentifiers(report);
     (void)testConstSuggestionNormalizations(report);
     (void)testUnresolvedCallsMarkStackUnknown(repoRoot, report);
     (void)testAssumeExternalFrameReplacesUnknown(repoRoot, report);

@@ -845,10 +845,10 @@ namespace ctrace::stack::analysis
                 facts.found = !found.empty();
                 if (!facts.found)
                     return;
-                facts.symbols = symbolsOf(*found.front());
+                const std::vector<std::string>& symbols = symbolsOf(*found.front());
                 const std::vector<std::string> keys = variantKeys(*found.front());
-                for (std::size_t k = 0; k < facts.symbols.size() && k < keys.size(); ++k)
-                    facts.variants.push_back({facts.symbols[k], keys[k], ""});
+                for (std::size_t k = 0; k < symbols.size() && k < keys.size(); ++k)
+                    facts.variants.push_back({symbols[k], keys[k], ""});
                 facts.printedSignature = clang::PredefinedExpr::ComputeName(
                     clang::PredefinedIdentKind::PrettyFunction, found.front());
                 if (!target.plan || target.plan != rewrittenBy_)
