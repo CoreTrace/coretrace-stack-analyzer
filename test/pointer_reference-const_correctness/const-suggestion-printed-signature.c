@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // #217: __PRETTY_FUNCTION__ prints the function's signature, which the suggested type changes. The
 // suggestion is kept, and the message says what the program prints differently. Any other use of
-// that text, such as its size, is a change of the generated code.
+// that text, such as its size, changes the generated code in a way that no reference, override or
+// constant condition explains: that suggestion is kept, not checked.
 
 // strict-expectation-details: true
-// not contains: parameter 'p' in function 'signature_size'
 // not contains: ↳ ABI:
 #include <stdio.h>
 
@@ -20,6 +20,11 @@ int print_and_read(int* p)
     return *p;
 }
 
+// at line 28, column 0
+// [ !Info! ] ConstParameterNotModified.Pointer: parameter 'p' in function 'signature_size' is never used to modify the pointed object
+// ↳ current type: int *p
+// ↳ suggested type: const int *p
+// ↳ not checked with Clang: the generated code changes, and no reference, override or constant condition explains it: code changed in signature_size:
 int signature_size(int* p)
 {
     return *p ? (int)sizeof(__PRETTY_FUNCTION__) : 0;
