@@ -3729,6 +3729,45 @@ def check_const_suggestion_merged_declaration() -> bool:
     return good
 
 
+def check_const_suggestion_strong_and_weak_definitions() -> bool:
+    """
+    #217: rewritten, f(int*) takes the symbol of the overload f(const int*) that another file
+    defines, and one of the two definitions is weak. Linked together, the files keep the strong
+    definition and ignore the weak one, without an error: the suggestion is kept, not checked, and
+    the reason names the definition kept and the one ignored, whether the weak one is the other
+    file's or the suggested function's. The other file reads no rewritten file and does not
+    declare f(int*): only the symbol that the rewrite gives f(int*) leads to its definition.
+    """
+    print("=== Testing a const suggestion whose symbol a strong and a weak definition share ===")
+    weak = "__attribute__((weak)) "
+    ok = True
+    for label, entity, other, kept, ignored in (
+        ("the other file's definition is weak", "", weak, "a.cpp", "b.cpp"),
+        ("the suggested function's definition is weak", weak, "", "b.cpp", "a.cpp"),
+    ):
+        with tempfile.TemporaryDirectory(prefix="ct_const_suggestion_weak_") as tmp:
+            root = Path(tmp).resolve()
+            (root / "a.cpp").write_text(entity + "int f(int* p)\n{\n    return *p;\n}\n")
+            (root / "b.cpp").write_text(other + "int f(const int* p)\n{\n    return *p + 1;\n}\n")
+            run = _const_suggestion_run([str(root / "a.cpp"), str(root / "b.cpp")])
+            expected = (
+                f"not checked with Clang: _Z1fPKi is also defined in {root / 'b.cpp'}; if "
+                f"{root / 'a.cpp'} and {root / 'b.cpp'} are linked together, the strong "
+                f"definition, in {root / kept}, is used and the weak one, in {root / ignored}, "
+                "is ignored"
+            )
+        texts = run[0].get("_Z1fPi", []) if run else []
+        good = (
+            len(texts) == 1
+            and expected in texts[0]
+            and "checked in the analyzed files only" not in texts[0]
+        )
+        print(f"  {'✅' if good else '❌'} {label}" + ("" if good else f": {texts}"))
+        ok = ok and good
+    print()
+    return ok
+
+
 def check_duplicate_if_cross_tu() -> bool:
     """
     #157: a function defined in another file is deterministic when every definition of it is, as
@@ -6692,6 +6731,7 @@ def main() -> int:
         check_const_suggestion_overload_defined_elsewhere,
         check_const_suggestion_inline_in_a_header,
         check_const_suggestion_merged_declaration,
+        check_const_suggestion_strong_and_weak_definitions,
         check_duplicate_if_cross_tu,
         check_global_read_before_write_identity_across_files,
         check_size_minus_one_cross_tu,
