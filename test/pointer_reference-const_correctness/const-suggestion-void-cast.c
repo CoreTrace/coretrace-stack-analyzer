@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // #217: `(void)read_value` converts the function to no other function type: the suggestion is
-// checked and kept. An explicit cast to another function type removes it
+// checked and kept. An explicit cast to another function type keeps it, not checked
 // (cross-tu-const-suggestion-cast.c).
 
 // strict-expectation-details: true
