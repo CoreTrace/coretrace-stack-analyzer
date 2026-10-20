@@ -409,13 +409,13 @@ namespace ctrace::stack::analysis
 
         // Checks one suggestion, the target at `index`, in one unit, against the unit before the
         // rewrite: the judgement of §5.8. `after` receives the unit's compilation after the
-        // rewrite, with the collisions it finds (§5.10).
+        // rewrite, with the collisions it finds (§5.10); `definingFile` names the defining unit.
         Judgement checkUnit(const UnitCommand& command, const std::optional<Original>& before,
                             std::size_t index, const Target& planned,
                             const std::map<std::string, std::string>& rewritten,
-                            const SuggestionPlan& plan, PrintedSignature& signature,
-                            std::vector<std::string>& accepted, std::string& renamed,
-                            UnitFacts& after, bool timing)
+                            const SuggestionPlan& plan, const std::string& definingFile,
+                            PrintedSignature& signature, std::vector<std::string>& accepted,
+                            std::string& renamed, UnitFacts& after, bool timing)
         {
             // Step 1: a unit that cannot be checked.
             if (!before)
@@ -488,6 +488,17 @@ namespace ctrace::stack::analysis
                 return refuted(*compared.changed);
             if (compared.incomplete)
                 return indeterminate(*compared.incomplete);
+            // A unit that declares the entity for the linker only, with its current type: whether
+            // that declaration matters depends on how the files are linked (D17).
+            if (facts.stale)
+            {
+                return indeterminate(after.file + " declares " +
+                                     formatFunctionNameForMessage(planned.symbol) +
+                                     " with its current type and does not see the rewrite: if " +
+                                     definingFile + " and " + after.file +
+                                     " are linked together, that declaration no longer matches "
+                                     "the rewritten definition");
+            }
             if (!missing.empty())
                 return indeterminate(missing);
             if (signature.after.empty() && !facts.printedSignature.empty())
@@ -697,9 +708,9 @@ namespace ctrace::stack::analysis
                 unit.context.reset();
             };
             const std::string definingFile = canonicalPath(self->filename, config);
-            std::vector<Judgement> judgements{checkUnit(command, definingBefore, i, planned,
-                                                        rewritten, plan, signature, accepted,
-                                                        renamed, inspected.back(), timing)};
+            std::vector<Judgement> judgements{
+                checkUnit(command, definingBefore, i, planned, rewritten, plan, definingFile,
+                          signature, accepted, renamed, inspected.back(), timing)};
             release(inspected.back());
             std::vector<std::string> judged{label(definingFile, &command)};
             // The other units look for the symbols the entity takes after the rewrite, as the
@@ -797,9 +808,10 @@ namespace ctrace::stack::analysis
                 if (!sees)
                     continue;
                 std::vector<std::string> otherAccepted;
-                Judgement judgement = checkUnit(
-                    other, originalOf(other, key, targets, originals, timing), i, others, rewritten,
-                    plan, signature, otherAccepted, renamed, inspected.emplace_back(), timing);
+                Judgement judgement =
+                    checkUnit(other, originalOf(other, key, targets, originals, timing), i, others,
+                              rewritten, plan, definingFile, signature, otherAccepted, renamed,
+                              inspected.emplace_back(), timing);
                 release(inspected.back());
                 if (judgement.verdict == Verdict::Indeterminate &&
                     judgement.reason == kDoesNotCompileAsItIs)

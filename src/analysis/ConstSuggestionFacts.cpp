@@ -46,7 +46,6 @@
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
 #include <llvm/Support/MemoryBuffer.h>
-#include <llvm/Support/Path.h>
 #include <llvm/Support/TargetSelect.h>
 #include <llvm/Support/VirtualFileSystem.h>
 #include <llvm/Support/raw_ostream.h>
@@ -931,16 +930,14 @@ namespace ctrace::stack::analysis
                         const clang::SourceLocation at =
                             sm.getExpansionLoc(declaration->getLocation());
                         const std::string& file = sites_->fileOf(sm.getFileID(at));
-                        // A planned parameter must have the candidate (§5.6, step 3); one that
-                        // another file declares stays with its type (T v1, Task 1.6).
+                        // A planned parameter must have the candidate (§5.6, step 3). A declaration
+                        // in a file that the plan does not rewrite, through which the unit declares
+                        // the entity for the linker only, keeps its type: the unit does not see the
+                        // rewrite (D17).
                         if (target.plan->edits.count(file))
                             facts.withoutCandidate = true;
-                        else if (facts.problem.empty())
-                        {
-                            facts.problem = "declared in " + llvm::sys::path::filename(file).str() +
-                                            ":" + std::to_string(sm.getExpansionLineNumber(at)) +
-                                            " with type " + type;
-                        }
+                        else
+                            facts.stale = true;
                     }
                 }
                 if (facts.problem.empty() &&

@@ -298,7 +298,10 @@ namespace ctrace::stack::analysis::const_suggestion
             bool found = false; // the compilation declares it
             // After the rewrite, a declaration in a rewritten file without the candidate.
             bool withoutCandidate = false;
-            std::uint8_t reservedPadding[6] = {};
+            // After the rewrite, a declaration in a file it does not rewrite, without the
+            // candidate: the unit declares the entity only for the linker (D17).
+            bool stale = false;
+            std::uint8_t reservedPadding[5] = {};
         };
 
         // A declaration that a rewritten file writes (§5.6).
