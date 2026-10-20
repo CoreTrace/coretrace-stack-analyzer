@@ -2875,10 +2875,11 @@ def check_const_suggestion_cross_tu() -> bool:
     """
     #217: a suggested const type is reported only if every analyzed file still compiles with it,
     once every declaration the defining file sees is rewritten. Another analyzed file that stores
-    the function where a non-const parameter is expected, declares it itself, or converts its
-    address with an explicit cast, removes the suggestion; a homonym with internal linkage in
-    another file does not. A file that is not analyzed is not checked. The callback and cast files
-    sort before the definition, the redeclaration after it.
+    the function where a non-const parameter is expected, or converts its address with an explicit
+    cast, removes the suggestion. One that declares it itself, without the header, keeps it, not
+    checked: whether that matters depends on how the files are linked. A homonym with internal
+    linkage in another file does not change it. A file that is not analyzed is not checked. The
+    callback and cast files sort before the definition, the redeclaration after it.
     """
     return _check_cross_tu_rule(
         "suggested const types checked in every analyzed file",
@@ -2889,7 +2890,7 @@ def check_const_suggestion_cross_tu() -> bool:
             ("def alone", ["def.c"], ["read_value"]),
             ("def and a caller", ["def.c", "caller.c"], ["read_value"]),
             ("def and a callback of the old type", ["def.c", "callback.c"], []),
-            ("def and a redeclaration", ["def.c", "redecl.c"], []),
+            ("def and a redeclaration", ["def.c", "redecl.c"], ["read_value"]),
             ("def and an explicit cast", ["def.c", "cast.c"], []),
             # Another file's homonym with internal linkage is another function.
             (
@@ -2966,13 +2967,14 @@ def check_const_suggestion_compilation_database() -> bool:
     """
     #217: with a compilation database, a suggested const type is checked in every file the
     database lists that sees the change, analyzed or not, with its own compile command. A file
-    that is not analyzed and stores the function where a non-const parameter is expected, declares
-    it itself without the header, or converts its address with an explicit cast, removes the
-    suggestion, even listed after a file that cannot be checked. So does a file that takes the
-    address of a method with the old type: it sees the change through the header alone. A file
-    that sees the change but does not compile as it is, or cannot be preprocessed, keeps the
-    suggestion as not checked, without the claim of the check. A file that does not see the change
-    is not compiled.
+    that is not analyzed and stores the function where a non-const parameter is expected, or
+    converts its address with an explicit cast, removes the suggestion, even listed after a file
+    that cannot be checked. So does a file that takes the address of a method with the old type: it
+    sees the change through the header alone. A file that declares the function itself, without
+    the header, keeps the suggestion as not checked, and the reason names it and the link it
+    assumes. A file that sees the change but does not compile as it is, or cannot be preprocessed,
+    keeps the suggestion as not checked, without the claim of the check. A file that does not see
+    the change is not compiled.
     """
     print("=== Testing const suggestions checked in the compilation database ===")
     # Absolute: a compilation database names absolute directories.
@@ -3050,7 +3052,16 @@ def check_const_suggestion_compilation_database() -> bool:
                 None,
             ),
             # Without the header: only the name of the function shows that it sees the change.
-            ("a redeclaration, not analyzed", ["def.c", "redecl.c"], "read_value", None),
+            (
+                "a redeclaration, not analyzed",
+                ["def.c", "redecl.c"],
+                "read_value",
+                "not checked with Clang: " + str(fixtures / f"{prefix}redecl.c")
+                + " declares read_value with its current type and does not see the rewrite: if "
+                + str(fixtures / f"{prefix}def.c") + " and " + str(fixtures / f"{prefix}redecl.c")
+                + " are linked together, that declaration no longer matches the rewritten "
+                "definition",
+            ),
             ("an explicit cast, not analyzed", ["def.c", "cast.c"], "read_value", None),
             ("a method alone", ["method.cpp"], method, checked),
             (
