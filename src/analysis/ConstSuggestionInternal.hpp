@@ -13,6 +13,7 @@
 
 #include <clang/Basic/SourceLocation.h>
 #include <llvm/ADT/StringRef.h>
+#include <llvm/IR/GlobalValue.h>
 
 #include "analysis/ConstSuggestionCheck.hpp"
 
@@ -237,6 +238,9 @@ namespace ctrace::stack::analysis::const_suggestion
         // The parameter's position among those the source declares (P0), none for one it
         // does not declare.
         std::optional<unsigned> sourceIndex;
+        // After the rewrite, the symbols the entity takes, as the defining unit's compilation
+        // names them: another unit can define one without declaring the entity (§5.10).
+        std::vector<std::string> takes;
     };
 
     // An error or a checked warning, in the order Clang reports it.
@@ -262,9 +266,27 @@ namespace ctrace::stack::analysis::const_suggestion
         // About the function of one target.
         struct Entity
         {
+            // After the rewrite: a symbol the entity takes that another entity defines here, or
+            // another entity's declaration merged into it (ruling 3).
+            struct Collision
+            {
+                std::string symbol;
+                DeclarationSite site; // the other entity's definition, or declaration
+                std::optional<llvm::GlobalValue::LinkageTypes> linkage; // none for a declaration
+                unsigned line = 0; // the site's, where Clang expands it
+                std::uint8_t reservedPadding[4] = {};
+            };
+
             SuggestionPlan plan;          // in the compilation that plans
             std::string printedSignature; // for __PRETTY_FUNCTION__
             std::string problem;
+            std::vector<Collision> collisions;
+            // After the rewrite, the IR linkage of the first symbol it takes that this
+            // compilation defines: in the defining unit, the entity's own (§5.10).
+            std::optional<llvm::GlobalValue::LinkageTypes> linkage;
+            // Its declarations' sites, each with the line where Clang expands it: those that the
+            // rewrite adds are other entities' declarations that merge into it (ruling 3).
+            std::map<DeclarationSite, unsigned> declarations;
             std::vector<Fact> overrides; // O, for the methods named like it
             std::vector<Named> variants; // the entity's: C1, C2, D0... or "" for a function
             // The constructors inheriting it, or a specialization of its template: by derived
@@ -291,6 +313,7 @@ namespace ctrace::stack::analysis::const_suggestion
         bool timing = false;
         std::uint8_t reservedPadding[7] = {};
         std::string failure; // the compilation could not run
+        std::string file;    // its main file's real path
         std::multiset<std::string> diagnostics;
         std::vector<Diagnostic> reported;
         std::string firstDiagnostic;
@@ -314,6 +337,12 @@ namespace ctrace::stack::analysis::const_suggestion
     // a correspondence could not be established.
     std::vector<SymbolPair> correspond(const UnitFacts& before, std::size_t entity,
                                        const UnitFacts& after, std::string& missing);
+
+    // §5.10: the verdict of the collisions that the units' compilations after the rewrite found,
+    // once none of the units refutes: `definingFile` names the defining unit, `function` the
+    // entity as the diagnostic shows it.
+    Judgement judgeCollisions(const std::vector<const UnitFacts*>& units, std::size_t entity,
+                              const std::string& definingFile, const std::string& function);
 
     // Compiles a unit and inspects it for `targets`. After the rewrite, `rewritten` remaps the
     // files that the plan `rewrittenBy` rewrites to their texts.

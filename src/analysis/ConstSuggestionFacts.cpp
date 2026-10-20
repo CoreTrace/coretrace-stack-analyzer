@@ -293,6 +293,7 @@ namespace ctrace::stack::analysis
                 // After an error, the rewrite is refuted by it (§5.8, step 4): no fact is needed.
                 collectFacts_ = generator_ && !context.getDiagnostics().hasErrorOccurred();
                 sites_.emplace(context.getSourceManager(), rewrittenBy_);
+                out_.file = sites_->fileOf(context.getSourceManager().getMainFileID());
                 out_.entities.resize(targets_.size());
                 located_.assign(targets_.size(), nullptr);
                 atSites_.assign(targets_.size(), {});
@@ -772,6 +773,41 @@ namespace ctrace::stack::analysis
                 return targets_[i].plan ? targets_[i].plan->entity : out_.entities[i].plan.entity;
             }
 
+            // §5.10, after the rewrite: each symbol the entity of target i takes that this
+            // compilation defines. Another entity's definition is a collision, with its IR
+            // linkage; the entity's own, such as the inline function of a rewritten header that
+            // several files define, is none.
+            void definitions(std::size_t i)
+            {
+                UnitFacts::Entity& facts = out_.entities[i];
+                const llvm::Module* module = generator_->GetModule();
+                std::vector<std::string> takes = targets_[i].takes;
+                for (const const_suggestion::Named& variant : facts.variants)
+                {
+                    if (std::find(takes.begin(), takes.end(), variant.symbol) == takes.end())
+                        takes.push_back(variant.symbol);
+                }
+                for (const std::string& symbol : takes)
+                {
+                    const llvm::GlobalValue* value =
+                        module ? module->getNamedValue(symbol) : nullptr;
+                    if (!value || value->isDeclaration())
+                        continue;
+                    if (!facts.linkage)
+                        facts.linkage = value->getLinkage();
+                    const auto* function = llvm::dyn_cast_or_null<clang::FunctionDecl>(
+                        generator_->GetDeclForMangledName(symbol));
+                    const clang::FunctionDecl* definition =
+                        function ? function->getDefinition() : nullptr;
+                    if (definition && atSites(i, *definition))
+                        continue;
+                    const clang::SourceLocation at =
+                        definition ? definition->getLocation() : clang::SourceLocation();
+                    facts.collisions.push_back({symbol, (*sites_)(at), value->getLinkage(),
+                                                at.isValid() ? lineOf(at) : 0});
+                }
+            }
+
             // In the defining unit's initial compilation, the function is the one CodeGen emits
             // under the suggestion's symbol.
             void planAt(std::size_t i)
@@ -854,15 +890,28 @@ namespace ctrace::stack::analysis
                     }
                 }
                 facts.found = !found.empty();
-                if (!facts.found)
-                    return;
-                const std::vector<std::string>& symbols = symbolsOf(*found.front());
-                const std::vector<std::string> keys = variantKeys(*found.front());
-                for (std::size_t k = 0; k < symbols.size() && k < keys.size(); ++k)
-                    facts.variants.push_back({symbols[k], keys[k], ""});
-                facts.printedSignature = clang::PredefinedExpr::ComputeName(
-                    clang::PredefinedIdentKind::PrettyFunction, found.front());
+                if (facts.found)
+                {
+                    const std::vector<std::string>& symbols = symbolsOf(*found.front());
+                    const std::vector<std::string> keys = variantKeys(*found.front());
+                    for (std::size_t k = 0; k < symbols.size() && k < keys.size(); ++k)
+                        facts.variants.push_back({symbols[k], keys[k], ""});
+                    facts.printedSignature = clang::PredefinedExpr::ComputeName(
+                        clang::PredefinedIdentKind::PrettyFunction, found.front());
+                    for (const clang::FunctionDecl* function : found)
+                    {
+                        for (const clang::FunctionDecl* declaration : function->redecls())
+                        {
+                            const clang::SourceLocation at = declaration->getLocation();
+                            if (at.isValid())
+                                facts.declarations.emplace((*sites_)(at), lineOf(at));
+                        }
+                    }
+                }
                 if (!target.plan || target.plan != rewrittenBy_)
+                    return;
+                definitions(i);
+                if (!facts.found)
                     return;
                 const clang::SourceManager& sm = context_->getSourceManager();
                 for (const clang::FunctionDecl* function : found)

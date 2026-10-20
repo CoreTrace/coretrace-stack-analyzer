@@ -22,8 +22,10 @@ namespace ctrace::stack::analysis
         using const_suggestion::FactKey;
         using const_suggestion::FactKind;
         using const_suggestion::itemOf;
+        using const_suggestion::Judgement;
         using const_suggestion::Named;
         using const_suggestion::UnitFacts;
+        using const_suggestion::Verdict;
 
         // Appends `item` once, in the order items come.
         void addOnce(std::vector<std::string>& items, const std::string& item)
@@ -213,5 +215,77 @@ namespace ctrace::stack::analysis
                 out.push_back({wasSymbol, nowSymbol});
         }
         return out;
+    }
+
+    Judgement const_suggestion::judgeCollisions(const std::vector<const UnitFacts*>& units,
+                                                std::size_t entity, const std::string& definingFile,
+                                                const std::string& function)
+    {
+        using llvm::GlobalValue;
+        const auto indeterminate = [](std::string why)
+        { return Judgement{std::move(why), Verdict::Indeterminate}; };
+        // Strong: external; weak: weak or linkonce, ODR or not. Any other linkage, local above
+        // all, has no scope across files.
+        const auto strong = [](GlobalValue::LinkageTypes linkage)
+        { return GlobalValue::isExternalLinkage(linkage); };
+        const auto weak = [](GlobalValue::LinkageTypes linkage)
+        { return GlobalValue::isWeakLinkage(linkage) || GlobalValue::isLinkOnceLinkage(linkage); };
+        // The entity's own linkage, as the defining unit defines it; strong if it shows none.
+        GlobalValue::LinkageTypes own = GlobalValue::ExternalLinkage;
+        for (const UnitFacts* unit : units)
+        {
+            if (unit->file == definingFile && entity < unit->entities.size() &&
+                unit->entities[entity].linkage)
+            {
+                own = *unit->entities[entity].linkage;
+            }
+        }
+        if (!strong(own) && !weak(own))
+            return {};
+        // A definition first, then a declaration (ruling 1), in the order the units are judged.
+        for (const UnitFacts* unit : units)
+        {
+            if (entity >= unit->entities.size())
+                continue;
+            for (const UnitFacts::Entity::Collision& collision : unit->entities[entity].collisions)
+            {
+                if (!collision.linkage ||
+                    (!strong(*collision.linkage) && !weak(*collision.linkage)))
+                    continue;
+                const std::string assumption = collision.symbol + " is also defined in " +
+                                               unit->file + "; if " + definingFile + " and " +
+                                               unit->file + " are linked together, ";
+                if (strong(own) && strong(*collision.linkage))
+                    return indeterminate(assumption + "the two definitions collide");
+                if (weak(own) && weak(*collision.linkage))
+                {
+                    return indeterminate(
+                        assumption + "the linker keeps one of the two weak definitions, and the "
+                                     "check establishes neither which one nor that they are "
+                                     "equivalent");
+                }
+                const bool ownIsStrong = strong(own);
+                return indeterminate(assumption + "the strong definition, in " +
+                                     (ownIsStrong ? definingFile : unit->file) +
+                                     ", is used and the weak one, in " +
+                                     (ownIsStrong ? unit->file : definingFile) + ", is ignored");
+            }
+        }
+        for (const UnitFacts* unit : units)
+        {
+            if (entity >= unit->entities.size())
+                continue;
+            for (const UnitFacts::Entity::Collision& collision : unit->entities[entity].collisions)
+            {
+                if (collision.linkage)
+                    continue;
+                return indeterminate("the rewrite gives " + function +
+                                     " the symbol of another declaration (" +
+                                     collision.site.expansion.file + ":" +
+                                     std::to_string(collision.line) + "); if a file linked with " +
+                                     definingFile + " defines it, the two definitions collide");
+            }
+        }
+        return {};
     }
 } // namespace ctrace::stack::analysis

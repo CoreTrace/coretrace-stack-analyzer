@@ -5,6 +5,7 @@
 #include "analysis/ConstSuggestionCheck.hpp"
 
 #include "ConstSuggestionInternal.hpp"
+#include "analysis/AnalyzerUtils.hpp"
 #include "analysis/CompileCommands.hpp"
 #include "analysis/InputPipeline.hpp"
 #include "analyzer/HotspotProfiler.hpp"
@@ -407,18 +408,20 @@ namespace ctrace::stack::analysis
         }
 
         // Checks one suggestion, the target at `index`, in one unit, against the unit before the
-        // rewrite: the judgement of §5.8.
+        // rewrite: the judgement of §5.8. `after` receives the unit's compilation after the
+        // rewrite, with the collisions it finds (§5.10).
         Judgement checkUnit(const UnitCommand& command, const std::optional<Original>& before,
                             std::size_t index, const Target& planned,
                             const std::map<std::string, std::string>& rewritten,
                             const SuggestionPlan& plan, PrintedSignature& signature,
-                            std::vector<std::string>& accepted, std::string& renamed, bool timing)
+                            std::vector<std::string>& accepted, std::string& renamed,
+                            UnitFacts& after, bool timing)
         {
             // Step 1: a unit that cannot be checked.
             if (!before)
                 return indeterminate(kDoesNotCompileAsItIs);
-            UnitFacts after = inspect(command, &plan, rewritten, {planned},
-                                      "const_suggestion.compile.after", timing);
+            after = inspect(command, &plan, rewritten, {planned}, "const_suggestion.compile.after",
+                            timing);
             if (!after.failure.empty())
                 return indeterminate(after.failure);
             // Step 2: after a fatal error, the rest of the unit is not inspected.
@@ -450,6 +453,21 @@ namespace ctrace::stack::analysis
             }
             if (!after.module)
                 return refuted("does not compile: " + after.firstDiagnostic);
+            // Another entity's declaration that the rewrite merges into the entity: a declaration
+            // it has after the rewrite only (ruling 3).
+            if (!after.entities.empty() && index < before->unit.entities.size())
+            {
+                UnitFacts::Entity& entity = after.entities[0];
+                for (const auto& [site, line] : entity.declarations)
+                {
+                    if (!before->unit.entities[index].declarations.count(site))
+                    {
+                        entity.collisions.push_back(
+                            {entity.variants.empty() ? planned.symbol : entity.variants[0].symbol,
+                             site, std::nullopt, line});
+                    }
+                }
+            }
             // The correspondences of the rewrite (§5.7), from the facts of both compilations; the
             // ABI line names the suggestion's own symbol after it.
             std::string missing;
@@ -670,10 +688,28 @@ namespace ctrace::stack::analysis
             PrintedSignature signature{found.printedSignature, ""};
             std::vector<std::string> accepted;
             std::string renamed;
+            // Each unit judged, as its compilation after the rewrite shows it: its collisions
+            // are judged once none of the units refutes (§5.10). Its module is not kept.
+            std::vector<UnitFacts> inspected(1);
+            const auto release = [](UnitFacts& unit)
+            {
+                unit.module.reset();
+                unit.context.reset();
+            };
+            const std::string definingFile = canonicalPath(self->filename, config);
             std::vector<Judgement> judgements{checkUnit(command, definingBefore, i, planned,
                                                         rewritten, plan, signature, accepted,
-                                                        renamed, timing)};
-            std::vector<std::string> judged{label(canonicalPath(self->filename, config), &command)};
+                                                        renamed, inspected.back(), timing)};
+            release(inspected.back());
+            std::vector<std::string> judged{label(definingFile, &command)};
+            // The other units look for the symbols the entity takes after the rewrite, as the
+            // defining unit names them.
+            Target others = planned;
+            if (!inspected.back().entities.empty())
+            {
+                for (const const_suggestion::Named& variant : inspected.back().entities[0].variants)
+                    others.takes.push_back(variant.symbol);
+            }
             // Then every other unit that sees a rewritten file or references the function: the
             // analyzed ones and, with a compilation database, every file it lists, analyzed or
             // not. One that cannot be checked leaves the suggestion unchecked, unless another
@@ -761,9 +797,10 @@ namespace ctrace::stack::analysis
                 if (!sees)
                     continue;
                 std::vector<std::string> otherAccepted;
-                Judgement judgement =
-                    checkUnit(other, originalOf(other, key, targets, originals, timing), i, planned,
-                              rewritten, plan, signature, otherAccepted, renamed, timing);
+                Judgement judgement = checkUnit(
+                    other, originalOf(other, key, targets, originals, timing), i, others, rewritten,
+                    plan, signature, otherAccepted, renamed, inspected.emplace_back(), timing);
+                release(inspected.back());
                 if (judgement.verdict == Verdict::Indeterminate &&
                     judgement.reason == kDoesNotCompileAsItIs)
                 {
@@ -777,7 +814,15 @@ namespace ctrace::stack::analysis
                         accepted.push_back(line);
                 }
             }
-            const Judgement verdict = const_suggestion::aggregate(judgements);
+            Judgement verdict = const_suggestion::aggregate(judgements);
+            if (verdict.verdict == Verdict::Verified)
+            {
+                std::vector<const UnitFacts*> units;
+                for (const UnitFacts& unit : inspected)
+                    units.push_back(&unit);
+                verdict = const_suggestion::judgeCollisions(
+                    units, 0, definingFile, formatFunctionNameForMessage(issue.funcName));
+            }
             if (verdict.verdict == Verdict::Refuted)
             {
                 trace(issue, "removed, " + verdict.reason);
