@@ -478,8 +478,6 @@ namespace ctrace::stack::analysis
                 if (renamed.empty() && pair.before == planned.symbol)
                     renamed = pair.after;
             }
-            if (!facts.problem.empty())
-                return refuted(facts.problem);
             // Step 6: a reference, an override or a constant condition that changes, compared
             // through the pairs; facts that cannot be compared one to one leave the unit
             // unverified, and so does a correspondence that is not one to one.
@@ -498,6 +496,17 @@ namespace ctrace::stack::analysis
                                      definingFile + " and " + after.file +
                                      " are linked together, that declaration no longer matches "
                                      "the rewritten definition");
+            }
+            // An explicit cast of its address, other than to void: what it hides may change with
+            // the rewrite, and neither the errors nor the facts tell (D15). Alone, it leaves the
+            // unit unverified; the steps above still refute.
+            if (!facts.casts.empty())
+            {
+                const UnitFacts::Entity::Cast& cast = facts.casts.front();
+                return indeterminate(cast.site.expansion.file + ":" + std::to_string(cast.line) +
+                                     " converts the address of " +
+                                     formatFunctionNameForMessage(planned.symbol) +
+                                     " with an explicit cast");
             }
             if (!missing.empty())
                 return indeterminate(missing);

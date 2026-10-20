@@ -277,9 +277,17 @@ namespace ctrace::stack::analysis::const_suggestion
                 std::uint8_t reservedPadding[4] = {};
             };
 
+            // After the rewrite, an explicit cast of its address, other than to void (D15).
+            struct Cast
+            {
+                DeclarationSite site;
+                unsigned line = 0; // the site's, where Clang expands it
+                std::uint8_t reservedPadding[4] = {};
+            };
+
             SuggestionPlan plan;          // in the compilation that plans
             std::string printedSignature; // for __PRETTY_FUNCTION__
-            std::string problem;
+            std::vector<Cast> casts;      // in source order
             std::vector<Collision> collisions;
             // After the rewrite, the IR linkage of the first symbol it takes that this
             // compilation defines: in the defining unit, the entity's own (§5.10).

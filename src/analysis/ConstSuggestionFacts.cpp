@@ -372,8 +372,8 @@ namespace ctrace::stack::analysis
                 const auto* reference = llvm::dyn_cast<clang::DeclRefExpr>(operand);
                 const auto* function =
                     reference ? llvm::dyn_cast<clang::FunctionDecl>(reference->getDecl()) : nullptr;
-                if (function)
-                    casts_.push_back(function->getCanonicalDecl());
+                if (function && cast->getBeginLoc().isValid())
+                    casts_.push_back({function->getCanonicalDecl(), cast->getBeginLoc()});
                 return true;
             }
 
@@ -940,12 +940,18 @@ namespace ctrace::stack::analysis
                             facts.stale = true;
                     }
                 }
-                if (facts.problem.empty() &&
-                    std::find_first_of(casts_.begin(), casts_.end(), found.begin(), found.end()) !=
-                        casts_.end())
+                // The explicit casts of its address, in source order (D15).
+                std::vector<clang::SourceLocation> places;
+                for (const auto& [function, at] : casts_)
                 {
-                    facts.problem = "its address is converted by an explicit cast";
+                    if (std::find(found.begin(), found.end(), function) != found.end())
+                        places.push_back(sm.getExpansionLoc(at));
                 }
+                std::stable_sort(places.begin(), places.end(),
+                                 [&](clang::SourceLocation a, clang::SourceLocation b)
+                                 { return sm.isBeforeInTranslationUnit(a, b); });
+                for (const clang::SourceLocation at : places)
+                    facts.casts.push_back({(*sites_)(at), lineOf(at)});
             }
 
             bool collectFacts_ = false;
@@ -964,7 +970,8 @@ namespace ctrace::stack::analysis
             std::vector<const clang::FunctionDecl*> located_;
             std::vector<std::vector<const clang::FunctionDecl*>> atSites_; // with one of its sites
             std::vector<std::vector<const clang::FunctionDecl*>> linked_;  // and the linker's
-            std::vector<const clang::FunctionDecl*> casts_;                // explicitly cast
+            // The functions whose address is cast explicitly, other than to void, and where.
+            std::vector<std::pair<const clang::FunctionDecl*, clang::SourceLocation>> casts_;
             std::vector<std::string> contexts_; // the instantiations around, outermost first
             std::map<const clang::FunctionDecl*, std::vector<std::string>> symbols_;
             std::map<const clang::FunctionDecl*, std::vector<std::string>> values_;
