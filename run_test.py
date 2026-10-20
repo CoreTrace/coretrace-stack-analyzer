@@ -3775,6 +3775,37 @@ def check_const_suggestion_strong_and_weak_definitions() -> bool:
     return ok
 
 
+def check_const_suggestion_cast_in_the_defining_file() -> bool:
+    """
+    #217: the defining file converts the function's address with an explicit cast, which alone
+    leaves the suggestion unchecked, and another analyzed file stores the function where a
+    non-const parameter is expected, which the rewrite breaks. That file is still checked, and its
+    error removes the suggestion: a cast never hides an error, a checked warning or a changed fact.
+    """
+    print("=== Testing a const suggestion cast in its own file and broken in another ===")
+    fixtures = (RUN_CONFIG.test_dir / "pointer_reference-const_correctness").resolve()
+    header = fixtures / "cross-tu-const-suggestion-api.h"
+    callback = fixtures / "cross-tu-const-suggestion-callback.c"
+    with tempfile.TemporaryDirectory(prefix="ct_const_suggestion_cast_") as tmp:
+        definition = Path(tmp).resolve() / "def-with-cast.c"
+        definition.write_text(
+            f'#include "{header}"\n\ntypedef int (*erased_reader)(void*);\n\n'
+            "int read_value(int* p)\n{\n    return *p;\n}\n\n"
+            "erased_reader erase_reader(void)\n{\n    return (erased_reader)read_value;\n}\n"
+        )
+        run = _const_suggestion_run([str(definition), str(callback)])
+    removed = f"read_value parameter p: removed, does not compile: {callback}:"
+    good = (
+        run is not None
+        and "read_value" not in run[0]
+        and any(line.startswith(removed) for line in run[1])
+    )
+    detail = run[1] if run else "the analysis did not run"
+    print(f"  {'✅' if good else '❌'} removed by the callback" + ("" if good else f": {detail}"))
+    print()
+    return good
+
+
 def check_duplicate_if_cross_tu() -> bool:
     """
     #157: a function defined in another file is deterministic when every definition of it is, as
@@ -6739,6 +6770,7 @@ def main() -> int:
         check_const_suggestion_inline_in_a_header,
         check_const_suggestion_merged_declaration,
         check_const_suggestion_strong_and_weak_definitions,
+        check_const_suggestion_cast_in_the_defining_file,
         check_duplicate_if_cross_tu,
         check_global_read_before_write_identity_across_files,
         check_size_minus_one_cross_tu,
