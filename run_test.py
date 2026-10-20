@@ -3696,6 +3696,39 @@ def check_const_suggestion_inline_in_a_header() -> bool:
     return ok
 
 
+def check_const_suggestion_merged_declaration() -> bool:
+    """
+    #217: rewritten, f(int*) takes the symbol of the overload f(const int*) that the header also
+    declares: the two declarations become one function, which a file linked with this one may
+    define. The check does not know how the files are linked: the suggestion is kept, not checked,
+    and the reason names the declaration and that assumption (ruling 3).
+    """
+    print("=== Testing a const suggestion whose rewrite merges another declaration ===")
+    sources = {
+        "api.hpp": "int f(int* p);\nint f(const int* p);\n",
+        "a.cpp": '#include "api.hpp"\nint f(int* p)\n{\n    return *p;\n}\n',
+    }
+    with tempfile.TemporaryDirectory(prefix="ct_const_suggestion_merged_") as tmp:
+        root = Path(tmp).resolve()
+        for name, text in sources.items():
+            (root / name).write_text(text)
+        run = _const_suggestion_run([str(root / "a.cpp")])
+        expected = (
+            "not checked with Clang: the rewrite gives f(int*) the symbol of another declaration "
+            f"({root / 'api.hpp'}:2); if a file linked with {root / 'a.cpp'} defines it, the two "
+            "definitions collide"
+        )
+    texts = run[0].get("_Z1fPi", []) if run else []
+    good = (
+        len(texts) == 1
+        and expected in texts[0]
+        and "checked in the analyzed files only" not in texts[0]
+    )
+    print(f"  {'✅' if good else '❌'} a.cpp alone" + ("" if good else f": {texts}"))
+    print()
+    return good
+
+
 def check_duplicate_if_cross_tu() -> bool:
     """
     #157: a function defined in another file is deterministic when every definition of it is, as
@@ -6658,6 +6691,7 @@ def main() -> int:
         check_const_suggestion_header_read_differently,
         check_const_suggestion_overload_defined_elsewhere,
         check_const_suggestion_inline_in_a_header,
+        check_const_suggestion_merged_declaration,
         check_duplicate_if_cross_tu,
         check_global_read_before_write_identity_across_files,
         check_size_minus_one_cross_tu,
