@@ -3646,6 +3646,45 @@ def check_const_suggestion_overload_defined_elsewhere() -> bool:
     return ok
 
 
+def check_const_suggestion_inline_in_a_header() -> bool:
+    """
+    #217: a function defined in a header that two analyzed files include is defined in both: a C
+    `static inline` function, one function in each file, and a C++ `inline` function, one function
+    that both files define. Neither definition collides with the other: each suggestion is checked.
+    """
+    print("=== Testing const suggestions for functions defined in a shared header ===")
+    sources = {
+        "peek.h": "static inline int peek_c(int* p)\n{\n    return *p;\n}\n",
+        "one.c": '#include "peek.h"\n'
+        "int use_one(void)\n{\n    int v = 1;\n    return peek_c(&v);\n}\n",
+        "two.c": '#include "peek.h"\n'
+        "int use_two(void)\n{\n    int v = 2;\n    return peek_c(&v);\n}\n",
+        "peek.hpp": "inline int peek_cpp(int* p)\n{\n    return *p;\n}\n",
+        "three.cpp": '#include "peek.hpp"\n'
+        "int use_three()\n{\n    int v = 3;\n    return peek_cpp(&v);\n}\n",
+        "four.cpp": '#include "peek.hpp"\n'
+        "int use_four()\n{\n    int v = 4;\n    return peek_cpp(&v);\n}\n",
+    }
+    checked = "checked in the analyzed files only"
+    ok = True
+    with tempfile.TemporaryDirectory(prefix="ct_const_suggestion_inline_") as tmp:
+        root = Path(tmp).resolve()
+        for name, text in sources.items():
+            (root / name).write_text(text)
+        for label, files, function in (
+            ("C, static inline", ["one.c", "two.c"], "peek_c"),
+            ("C++, inline", ["three.cpp", "four.cpp"], "_Z8peek_cppPi"),
+        ):
+            run = _const_suggestion_run([str(root / f) for f in files])
+            texts = run[0].get(function, []) if run else []
+            # One suggestion for the definition in each file.
+            good = len(texts) == 2 and all(checked in text for text in texts)
+            print(f"  {'✅' if good else '❌'} {label}" + ("" if good else f": {texts}"))
+            ok = ok and good
+    print()
+    return ok
+
+
 def check_duplicate_if_cross_tu() -> bool:
     """
     #157: a function defined in another file is deterministic when every definition of it is, as
@@ -6607,6 +6646,7 @@ def main() -> int:
         check_const_suggestion_homonyms_across_files,
         check_const_suggestion_header_read_differently,
         check_const_suggestion_overload_defined_elsewhere,
+        check_const_suggestion_inline_in_a_header,
         check_duplicate_if_cross_tu,
         check_global_read_before_write_identity_across_files,
         check_size_minus_one_cross_tu,
