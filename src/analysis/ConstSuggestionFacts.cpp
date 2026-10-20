@@ -743,6 +743,10 @@ namespace ctrace::stack::analysis
                     const std::string arguments = argumentsOf(*context_, *inherited);
                     const std::vector<std::string>& symbols = symbolsOf(*constructor);
                     const std::vector<std::string> keys = variantKeys(*constructor);
+                    // The specialization it inherits too: only its implicit code calls it, so no
+                    // reference pairs it.
+                    const std::vector<std::string>& inheritedSymbols = symbolsOf(*inherited);
+                    const std::vector<std::string> inheritedKeys = variantKeys(*inherited);
                     for (std::size_t i = 0; i < targets_.size(); ++i)
                     {
                         if (!atSites(i, *inherited))
@@ -751,6 +755,13 @@ namespace ctrace::stack::analysis
                         {
                             out_.entities[i].inheriting.push_back(
                                 {symbols[k], derived + "|" + arguments + "|" + keys[k], ""});
+                        }
+                        for (std::size_t k = 0;
+                             k < inheritedSymbols.size() && k < inheritedKeys.size(); ++k)
+                        {
+                            out_.entities[i].inheriting.push_back(
+                                {inheritedSymbols[k],
+                                 "inherited|" + arguments + "|" + inheritedKeys[k], ""});
                         }
                     }
                 }
