@@ -890,6 +890,8 @@ Reasons of an indeterminate verdict, after `not checked with Clang: ` (shown in 
 | `the parameter's type is written in a macro argument that writes other parameters too` | 1.3 | D5: the text an edit rewrites writes another parameter |
 | `the rewritten code cannot be inspected entirely, a fatal error stops its compilation: <file>:<line>: <message>` | 1.4 | step 2 |
 | `the rewrite also changes the type of <name> (<file>:<line>)` | 1.4 | step 3 |
+| `the declarations at <file>:<line> cannot be compared one to one: <N> before the rewrite, <M> after it` | 1.4 | step 3: a site of a rewritten file, outside the plan, whose declarations differ in number before and after the rewrite, a site on one side only included |
+| `the facts at <file>:<line> cannot be compared one to one: <N> before the rewrite, <M> after it` | 1.4 | step 6: a key whose facts differ in number before and after the rewrite, a fact on one side only included; in Task 1.4, once T v1's comparison of the code, which refutes first, finds no difference |
 | `the generated code changes, and no reference, override or constant condition explains it: <difference>` | 1.5 | step 7 (D16); `<difference>` is the comparator's text |
 | `'<a>' and '<b>' both become '<c>': their correspondence is not one to one` | 1.5 | §5.7, D14 |
 | `'<a>' becomes both '<b>' and '<c>': their correspondence is not one to one` | 1.5 | §5.7 |
