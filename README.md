@@ -670,8 +670,9 @@ The check runs these steps:
    The files considered are the analyzed ones and, with `--compile-commands`, every C or C++ file
    of the compilation database, analyzed or not. A file sees the change when it reads a rewritten
    file, when its analyzed code references the function, or, for a function outside any class with
-   external linkage, when it names the function after preprocessing. A homonym with internal
-   linkage (`static`, anonymous namespace) in another file is another function.
+   external linkage, when it names the function after preprocessing. A function with internal
+   linkage (`static`, anonymous namespace) and a function of the same name in another file are two
+   functions, whichever of them has internal linkage.
 3. The suggestion is removed when one of these files:
    - no longer compiles;
    - gains one of these warnings: `incompatible-pointer-types-discards-qualifiers`,
