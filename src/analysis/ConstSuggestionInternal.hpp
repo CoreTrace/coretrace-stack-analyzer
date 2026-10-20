@@ -112,6 +112,7 @@ namespace ctrace::stack::analysis::const_suggestion
         std::string name;                              // as Clang prints it: dot, operator==, ~A
         std::optional<DeclarationSite> templateOrigin; // a specialization's pattern, first declared
         std::vector<std::string> symbols; // every variant's, before the rewrite (CodeGen)
+        std::string templateArguments;    // a specialization's, written canonically (ruling 7)
         SourceLinkage linkage = SourceLinkage::None;
         std::uint8_t reservedPadding[7] = {};
     };
@@ -255,6 +256,14 @@ namespace ctrace::stack::analysis::const_suggestion
         std::uint8_t reservedPadding[7] = {};
     };
 
+    // A symbol that the rewrite may rename with the entity, and what pairs it (§5.7).
+    struct Named
+    {
+        std::string symbol;
+        std::string key;       // its kind or variant, and what it belongs to
+        std::string enclosing; // a nested symbol's: the symbol of the function around it
+    };
+
     // What one compilation shows (§5.3, §5.6).
     struct UnitFacts
     {
@@ -266,7 +275,14 @@ namespace ctrace::stack::analysis::const_suggestion
             std::string printedSignature;     // for __PRETTY_FUNCTION__
             std::string problem;
             std::vector<Fact> overrides; // O, for the methods named like it
-            bool found = false;          // the compilation declares it
+            std::vector<Named> variants; // the entity's: C1, C2, D0... or "" for a function
+            // The constructors inheriting it, or a specialization of its template: by derived
+            // class, inherited specialization and variant (ruling 7).
+            std::vector<Named> inheriting;
+            // Lambdas, local classes (methods, _ZTI, _ZTS, _ZTV), static locals and their guards,
+            // in the entity or in a specialization of its template: by kind and site.
+            std::vector<Named> nested;
+            bool found = false; // the compilation declares it
             // After the rewrite, a declaration in a rewritten file without the candidate.
             bool withoutCandidate = false;
             std::uint8_t reservedPadding[6] = {};

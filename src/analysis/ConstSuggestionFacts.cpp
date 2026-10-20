@@ -21,11 +21,14 @@
 #include <clang/AST/ASTContext.h>
 #include <clang/AST/Decl.h>
 #include <clang/AST/DeclCXX.h>
+#include <clang/AST/DeclTemplate.h>
 #include <clang/AST/Expr.h>
 #include <clang/AST/ExprCXX.h>
 #include <clang/AST/GlobalDecl.h>
+#include <clang/AST/Mangle.h>
 #include <clang/AST/RecursiveASTVisitor.h>
 #include <clang/AST/Stmt.h>
+#include <clang/AST/TemplateBase.h>
 #include <clang/Basic/Diagnostic.h>
 #include <clang/Basic/DiagnosticIDs.h>
 #include <clang/Basic/SourceManager.h>
@@ -46,6 +49,7 @@
 #include <llvm/Support/Path.h>
 #include <llvm/Support/TargetSelect.h>
 #include <llvm/Support/VirtualFileSystem.h>
+#include <llvm/Support/raw_ostream.h>
 #include <llvm/Support/xxhash.h>
 
 namespace ctrace::stack::analysis
@@ -165,6 +169,57 @@ namespace ctrace::stack::analysis
             return {symbol(clang::GlobalDecl(&function))};
         }
 
+        // The variant each of variantSymbols names, in the same order.
+        std::vector<std::string> variantKeys(const clang::FunctionDecl& function)
+        {
+            if (function.isDependentContext())
+                return {};
+            if (llvm::isa<clang::CXXConstructorDecl>(function))
+                return {"C1", "C2"};
+            if (llvm::isa<clang::CXXDestructorDecl>(function))
+                return {"D0", "D1", "D2"};
+            return {""};
+        }
+
+        // A specialization's template arguments, its class's then its own, each type written
+        // canonically (ruling 7); "" for a function that is no specialization.
+        std::string argumentsOf(const clang::ASTContext& context,
+                                const clang::FunctionDecl& function)
+        {
+            clang::PrintingPolicy policy(context.getLangOpts());
+            policy.AnonymousTagLocations = false;
+            std::string out;
+            const auto add = [&](llvm::ArrayRef<clang::TemplateArgument> arguments)
+            {
+                out += "<";
+                for (const clang::TemplateArgument& argument : arguments)
+                {
+                    if (argument.getKind() == clang::TemplateArgument::Type)
+                    {
+                        out += writtenType(context, argument.getAsType());
+                    }
+                    else
+                    {
+                        llvm::raw_string_ostream text(out);
+                        argument.print(policy, text, /*IncludeType=*/true);
+                    }
+                    out += ",";
+                }
+                out += ">";
+            };
+            if (const auto* record = llvm::dyn_cast<clang::ClassTemplateSpecializationDecl>(
+                    function.getDeclContext()))
+            {
+                add(record->getTemplateArgs().asArray());
+            }
+            if (const clang::TemplateArgumentList* arguments =
+                    function.getTemplateSpecializationArgs())
+            {
+                add(arguments->asArray());
+            }
+            return out;
+        }
+
         // Whether a declaration comes from a template instantiation: a specialization the
         // compilation instantiates, or a declaration inside one.
         bool instantiated(const clang::Decl* declaration)
@@ -234,6 +289,7 @@ namespace ctrace::stack::analysis
             {
                 context_ = &context;
                 generator_ = action_.getCodeGenerator();
+                mangle_.reset(context.createMangleContext());
                 // After an error, the rewrite is refuted by it (§5.8, step 4): no fact is needed.
                 collectFacts_ = generator_ && !context.getDiagnostics().hasErrorOccurred();
                 sites_.emplace(context.getSourceManager(), rewrittenBy_);
@@ -318,6 +374,85 @@ namespace ctrace::stack::analysis
                     reference ? llvm::dyn_cast<clang::FunctionDecl>(reference->getDecl()) : nullptr;
                 if (function)
                     casts_.push_back(function->getCanonicalDecl());
+                return true;
+            }
+
+            // Nested symbols (§5.7), which the rewrite renames with the function around them: a
+            // lambda's call operator, a local class's methods and type information, a static
+            // local variable and its guard.
+            bool VisitLambdaExpr(clang::LambdaExpr* lambda)
+            {
+                const clang::CXXMethodDecl* call = lambda->getCallOperator();
+                if (!collectFacts_ || !call || call->isDependentContext())
+                    return true;
+                const std::vector<std::string>& symbols = symbolsOf(*call);
+                if (!symbols.empty())
+                {
+                    nested(lambda->getLambdaClass()->getDeclContext(), lambda->getBeginLoc(),
+                           {{symbols.front(), "lambda"}});
+                }
+                return true;
+            }
+
+            bool VisitCXXRecordDecl(clang::CXXRecordDecl* record)
+            {
+                if (!collectFacts_ || record->isDependentType() ||
+                    !record->isThisDeclarationADefinition())
+                {
+                    return true;
+                }
+                inheritingIn(*record);
+                if (!record->isLocalClass() || record->isLambda())
+                    return true;
+                const clang::QualType type = context_->getRecordType(record);
+                std::string information;
+                std::string name;
+                {
+                    llvm::raw_string_ostream out(information);
+                    mangle_->mangleCXXRTTI(type, out);
+                }
+                {
+                    llvm::raw_string_ostream out(name);
+                    mangle_->mangleCXXRTTIName(type, out);
+                }
+                std::vector<std::pair<std::string, std::string>> symbols = {
+                    {information, "type information"}, {name, "type name"}};
+                auto* itanium = llvm::dyn_cast<clang::ItaniumMangleContext>(mangle_.get());
+                if (itanium && record->isDynamicClass())
+                {
+                    std::string table;
+                    llvm::raw_string_ostream out(table);
+                    itanium->mangleCXXVTable(record, out);
+                    symbols.push_back({table, "virtual table"});
+                }
+                nested(record->getDeclContext(), record->getLocation(), symbols);
+                for (const clang::CXXMethodDecl* method : record->methods())
+                {
+                    const std::vector<std::string>& variants = symbolsOf(*method);
+                    const std::vector<std::string> keys = variantKeys(*method);
+                    std::vector<std::pair<std::string, std::string>> methods;
+                    for (std::size_t k = 0; k < variants.size() && k < keys.size(); ++k)
+                        methods.push_back({variants[k], "method " + keys[k]});
+                    nested(record->getDeclContext(), method->getLocation(), methods);
+                }
+                return true;
+            }
+
+            bool VisitVarDecl(clang::VarDecl* variable)
+            {
+                if (!collectFacts_ || !variable->isStaticLocal() ||
+                    variable->getDeclContext()->isDependentContext())
+                {
+                    return true;
+                }
+                std::string guard;
+                {
+                    llvm::raw_string_ostream out(guard);
+                    mangle_->mangleStaticGuardVariable(variable, out);
+                }
+                nested(variable->getDeclContext(), variable->getLocation(),
+                       {{generator_->GetMangledName(clang::GlobalDecl(variable)).str(), "static"},
+                        {guard, "guard"}});
                 return true;
             }
 
@@ -427,8 +562,17 @@ namespace ctrace::stack::analysis
                 if (canonical->isImplicit() || canonical->isTemplateInstantiation())
                 {
                     const std::vector<std::string>& symbols = symbolsOf(*canonical);
-                    if (!symbols.empty())
-                        value.push_back("symbol:" + symbols.front());
+                    if (symbols.empty())
+                        return value;
+                    value.push_back("symbol:" + symbols.front());
+                    // A specialization also names its template: two specializations of one
+                    // template may correspond (§5.7).
+                    if (const clang::FunctionDecl* pattern =
+                            canonical->getTemplateInstantiationPattern(/*ForDefinition=*/false))
+                    {
+                        value.push_back("template:" +
+                                        textOf((*sites_)(pattern->getFirstDecl()->getLocation())));
+                    }
                     return value;
                 }
                 for (const clang::FunctionDecl* declaration : canonical->redecls())
@@ -517,6 +661,101 @@ namespace ctrace::stack::analysis
                 return it->second;
             }
 
+            // Whether a function has one of the sites of the entity of target i: it is one of
+            // its declarations, or a specialization of its template.
+            bool atSites(std::size_t i, const clang::FunctionDecl& function)
+            {
+                const clang::SourceLocation location = function.getLocation();
+                if (location.isInvalid())
+                    return false;
+                const clang::SourceManager& sm = context_->getSourceManager();
+                if (!declarationFiles_.count(
+                        sites_->fileOf(sm.getFileID(sm.getExpansionLoc(location)))))
+                {
+                    return false;
+                }
+                const EntityIdentity& entity = identity(i);
+                return std::binary_search(entity.redeclarations.begin(),
+                                          entity.redeclarations.end(), (*sites_)(location));
+            }
+
+            // The symbol of the function around a nested declaration, when its outermost
+            // function, through lambdas and local classes, is the entity of target i or a
+            // specialization of its template; "" otherwise.
+            std::string enclosingSymbol(std::size_t i, const clang::DeclContext* context)
+            {
+                const clang::FunctionDecl* immediate = nullptr;
+                for (const clang::DeclContext* at = context; at; at = at->getParent())
+                {
+                    const auto* function = llvm::dyn_cast<clang::FunctionDecl>(at);
+                    if (!function)
+                        continue;
+                    if (!immediate)
+                        immediate = function;
+                    const auto* method = llvm::dyn_cast<clang::CXXMethodDecl>(function);
+                    if (method &&
+                        (method->getParent()->isLambda() || method->getParent()->isLocalClass()))
+                    {
+                        continue;
+                    }
+                    if (function->isDependentContext() || !atSites(i, *function))
+                        return "";
+                    const std::vector<std::string>& symbols = symbolsOf(*immediate);
+                    return symbols.empty() ? "" : symbols.front();
+                }
+                return "";
+            }
+
+            // Records nested symbols, each with its kind, for the targets whose entity they lie in.
+            void nested(const clang::DeclContext* context, clang::SourceLocation at,
+                        const std::vector<std::pair<std::string, std::string>>& symbols)
+            {
+                if (at.isInvalid())
+                    return;
+                for (std::size_t i = 0; i < targets_.size(); ++i)
+                {
+                    const std::string enclosing = enclosingSymbol(i, context);
+                    if (enclosing.empty())
+                        continue;
+                    const std::string site = textOf((*sites_)(at));
+                    for (const auto& [symbol, kind] : symbols)
+                        out_.entities[i].nested.push_back({symbol, kind + "|" + site, enclosing});
+                }
+            }
+
+            // The constructors that inherit the entity of a target, or a specialization of its
+            // template (ruling 7): by derived class, inherited specialization and variant.
+            void inheritingIn(const clang::CXXRecordDecl& record)
+            {
+                for (const clang::CXXConstructorDecl* constructor : record.ctors())
+                {
+                    if (!constructor->isInheritingConstructor())
+                        continue;
+                    const clang::CXXConstructorDecl* inherited =
+                        constructor->getInheritedConstructor().getConstructor();
+                    if (!inherited)
+                        continue;
+                    std::string derived;
+                    {
+                        llvm::raw_string_ostream out(derived);
+                        mangle_->mangleCanonicalTypeName(context_->getRecordType(&record), out);
+                    }
+                    const std::string arguments = argumentsOf(*context_, *inherited);
+                    const std::vector<std::string>& symbols = symbolsOf(*constructor);
+                    const std::vector<std::string> keys = variantKeys(*constructor);
+                    for (std::size_t i = 0; i < targets_.size(); ++i)
+                    {
+                        if (!atSites(i, *inherited))
+                            continue;
+                        for (std::size_t k = 0; k < symbols.size() && k < keys.size(); ++k)
+                        {
+                            out_.entities[i].inheriting.push_back(
+                                {symbols[k], derived + "|" + arguments + "|" + keys[k], ""});
+                        }
+                    }
+                }
+            }
+
             const EntityIdentity& identity(std::size_t i) const
             {
                 return targets_[i].plan ? targets_[i].plan->entity : out_.entities[i].plan.entity;
@@ -537,6 +776,7 @@ namespace ctrace::stack::analysis
                 facts.plan = const_suggestion::plan(*context_, out_.macros, *function,
                                                     targets_[i].sourceIndex);
                 facts.plan.entity.symbols = variantSymbols(*generator_, *function);
+                facts.plan.entity.templateArguments = argumentsOf(*context_, *function);
             }
 
             // The target's function in this compilation, and after the rewrite T v1's checks of
@@ -570,15 +810,28 @@ namespace ctrace::stack::analysis
                 else if (!atSites_[i].empty())
                 {
                     // Its declarations have its sites. A specialization has its pattern's, as the
-                    // other specializations of its template: it is the one with its symbol.
+                    // other specializations of its template: it is the one with its symbol, or
+                    // once the rewrite renames it, the only one with its template arguments
+                    // (ruling 7).
+                    std::vector<const clang::FunctionDecl*> sameArguments;
                     for (const clang::FunctionDecl* function : atSites_[i])
                     {
-                        if (!function->isDependentContext() &&
-                            (!entity.templateOrigin || named(function)))
+                        if (function->isDependentContext())
+                            continue;
+                        if (!entity.templateOrigin || named(function))
                         {
                             add(function);
                         }
+                        else if (!entity.templateArguments.empty() &&
+                                 argumentsOf(*context_, *function) == entity.templateArguments &&
+                                 std::find(sameArguments.begin(), sameArguments.end(),
+                                           function->getCanonicalDecl()) == sameArguments.end())
+                        {
+                            sameArguments.push_back(function->getCanonicalDecl());
+                        }
                     }
+                    if (found.empty() && sameArguments.size() == 1)
+                        add(sameArguments.front());
                 }
                 else
                 {
@@ -593,6 +846,9 @@ namespace ctrace::stack::analysis
                 if (!facts.found)
                     return;
                 facts.symbols = symbolsOf(*found.front());
+                const std::vector<std::string> keys = variantKeys(*found.front());
+                for (std::size_t k = 0; k < facts.symbols.size() && k < keys.size(); ++k)
+                    facts.variants.push_back({facts.symbols[k], keys[k], ""});
                 facts.printedSignature = clang::PredefinedExpr::ComputeName(
                     clang::PredefinedIdentKind::PrettyFunction, found.front());
                 if (!target.plan || target.plan != rewrittenBy_)
@@ -644,6 +900,7 @@ namespace ctrace::stack::analysis
             clang::ASTContext* context_ = nullptr;
             clang::CodeGenerator* generator_ = nullptr;
             std::optional<const_suggestion::SiteReader> sites_;
+            std::unique_ptr<clang::MangleContext> mangle_; // for what CodeGen does not name
             std::set<std::string> declarationFiles_;
             std::set<std::string> rewrittenFiles_;
             std::map<void*, std::string> names_;
