@@ -1,15 +1,30 @@
 // SPDX-License-Identifier: Apache-2.0
 // #217: specializations of the rewritten template whose deduced type changes are paired only when
-// the correspondence is unique, and their code is still compared.
+// the correspondence is one to one, and what they select is still compared.
 // - call: g passes G& and h passes const G&; after the rewrite both deduce G, so two
-//   specializations become one. No unique correspondence: both suggestions are removed. The
-//   lambdas are noexcept, so that all three specializations get the same attributes: only the
-//   correspondence tells them apart.
-// - pick: the lvalue's specialization is paired, but its code changes with what F deduces.
+//   specializations become one. Without a one-to-one correspondence, nothing shows that the
+//   rewrite keeps or changes what they do: both suggestions are kept, not checked, and the reason
+//   names the specializations. The lambdas are noexcept, so that all three specializations get
+//   the same attributes: only the correspondence tells them apart.
+// - pick: the lvalue's specialization is paired, and the condition of its `if constexpr` changes
+//   with what F deduces: the suggestion is removed.
 
-// not contains: in function 'int call<
+// strict-expectation-details: true
 // not contains: in function 'int pick<
 
+// at line 28, column 0
+// [ !Info! ] ConstParameterNotModified.ReferenceRvaluePreferValue: parameter 'f' in function 'int call<from_temporary()::$_0>(from_temporary()::$_0&&)' is an rvalue reference and is only read, or passed where a reference to const is expected
+// ↳ consider passing by value (<anonymous type> f) or const reference (const <anonymous type> &f)
+// ↳ current type: <anonymous type> &&f
+// ↳ the callee's body is not checked: it may still modify the referred object through a cast
+// ↳ not checked with Clang: 'int call<from_lvalues()::$_0&>(from_lvalues()::$_0&)' and 'int call<from_lvalues()::$_0 const&>(from_lvalues()::$_0 const&)' both become 'int call<from_lvalues()::$_0>(from_lvalues()::$_0 const&)': their correspondence is not one to one
+
+// at line 28, column 0
+// [ !Info! ] ConstParameterNotModified.Reference: parameter 'f' in function 'int call<from_lvalues()::$_0&>(from_lvalues()::$_0&)' is only read, or passed where a reference to const is expected
+// ↳ current type: <anonymous type> &f
+// ↳ suggested type: const <anonymous type> &f
+// ↳ the callee's body is not checked: it may still modify the referred object through a cast
+// ↳ not checked with Clang: 'int call<from_lvalues()::$_0&>(from_lvalues()::$_0&)' and 'int call<from_lvalues()::$_0 const&>(from_lvalues()::$_0 const&)' both become 'int call<from_lvalues()::$_0>(from_lvalues()::$_0 const&)': their correspondence is not one to one
 template <typename F> int call(F&& f)
 {
     return f(1);
