@@ -3589,6 +3589,63 @@ def check_const_suggestion_header_read_differently() -> bool:
     return good
 
 
+def check_const_suggestion_overload_defined_elsewhere() -> bool:
+    """
+    #217: rewritten, f(int*) takes the symbol of the overload f(const int*), which another file
+    defines. The two definitions collide only if the files are linked together, which the check
+    does not know: the suggestion is kept, not checked, and the reason states that assumption,
+    whether the other file is analyzed or only listed in the compilation database.
+    """
+    print("=== Testing a const suggestion that takes the symbol of another file's overload ===")
+    sources = {
+        "api.hpp": "int f(int* p);\nint f(const int* p);\n",
+        "a.cpp": '#include "api.hpp"\nint f(int* p)\n{\n    return *p;\n}\n',
+        "b.cpp": '#include "api.hpp"\nint f(const int* p)\n{\n    return *p + 1;\n}\n',
+    }
+    claims = ("checked in the analyzed files only", "checked in every file of the compilation")
+    ok = True
+    with tempfile.TemporaryDirectory(prefix="ct_const_suggestion_overload_") as tmp:
+        root = Path(tmp).resolve()
+        for name, text in sources.items():
+            (root / name).write_text(text)
+        database = root / "compile_commands.json"
+        database.write_text(
+            json.dumps(
+                [
+                    {
+                        "directory": str(root),
+                        "file": str(root / f),
+                        "arguments": ["clang++", "-std=c++17", "-c", str(root / f)],
+                    }
+                    for f in ("a.cpp", "b.cpp")
+                ]
+            )
+        )
+        expected = (
+            f"not checked with Clang: _Z1fPKi is also defined in {root / 'b.cpp'}; if "
+            f"{root / 'a.cpp'} and {root / 'b.cpp'} are linked together, the two definitions "
+            "collide"
+        )
+        for label, args in (
+            ("both files analyzed", [str(root / "a.cpp"), str(root / "b.cpp")]),
+            (
+                "the other file only in the compilation database",
+                [str(root / "a.cpp"), f"--compile-commands={database}"],
+            ),
+        ):
+            run = _const_suggestion_run(args)
+            texts = run[0].get("_Z1fPi", []) if run else []
+            good = (
+                len(texts) == 1
+                and expected in texts[0]
+                and not any(claim in texts[0] for claim in claims)
+            )
+            print(f"  {'✅' if good else '❌'} {label}" + ("" if good else f": {texts}"))
+            ok = ok and good
+    print()
+    return ok
+
+
 def check_duplicate_if_cross_tu() -> bool:
     """
     #157: a function defined in another file is deterministic when every definition of it is, as
@@ -6549,6 +6606,7 @@ def main() -> int:
         check_const_suggestion_operator_used_elsewhere,
         check_const_suggestion_homonyms_across_files,
         check_const_suggestion_header_read_differently,
+        check_const_suggestion_overload_defined_elsewhere,
         check_duplicate_if_cross_tu,
         check_global_read_before_write_identity_across_files,
         check_size_minus_one_cross_tu,
