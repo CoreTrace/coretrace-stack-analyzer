@@ -732,8 +732,9 @@ namespace ctrace::stack::analysis
             }
             // Then every other unit that sees a rewritten file or references the function: the
             // analyzed ones and, with a compilation database, every file it lists, analyzed or
-            // not. One that cannot be checked leaves the suggestion unchecked, unless another
-            // one refutes it.
+            // not. One that is not verified, the defining one included, leaves the suggestion
+            // unchecked, unless another one refutes it: only a refutation stops the judgement
+            // (§5.10).
             const auto cannotCheck =
                 [&](const std::string& unit, const UnitCommand* known, const std::string& why)
             {
@@ -742,11 +743,8 @@ namespace ctrace::stack::analysis
             };
             for (const AnalyzedUnit& unit : candidates)
             {
-                if (judgements.front().verdict != Verdict::Verified ||
-                    judgements.back().verdict == Verdict::Refuted)
-                {
+                if (judgements.back().verdict == Verdict::Refuted)
                     break;
-                }
                 // Another file references the function only through the linker: one with
                 // internal linkage is another file's homonym (§5.2).
                 const bool referencing = plan.entity.linkage == SourceLinkage::External &&
