@@ -3873,6 +3873,33 @@ def check_const_suggestion_trace() -> bool:
     return ok
 
 
+def check_const_suggestion_werror_on_a_tracked_group() -> bool:
+    """
+    #217 (Review Focus 5): a compile command that turns one tracked warning group into errors,
+    not every warning (-Werror=incompatible-pointer-types-discards-qualifiers), does not change
+    what the check sees: the group stays a warning in both compilations, and a rewrite that adds
+    such a warning is removed for that warning, not for an error.
+    """
+    print("=== Testing a tracked warning group that the compile command turns into errors ===")
+    with tempfile.TemporaryDirectory(prefix="ct_const_suggestion_werror_") as tmp:
+        path = Path(tmp).resolve() / "keep.c"
+        path.write_text("void keep(int* p)\n{\n    int* q = p;\n    (void)q;\n}\n")
+        run = _const_suggestion_run(
+            [str(path), "--compile-arg=-Werror=incompatible-pointer-types-discards-qualifiers"]
+        )
+    if run is None:
+        return fail_check("the analysis did not run")
+    messages, trace, _ = run
+    removed = (
+        f"keep parameter p: removed, gains a checked warning: {path}:3: initializing 'int *' "
+        "with an expression of type 'const int *' discards qualifiers"
+    )
+    good = "keep" not in messages and any(line.startswith(removed) for line in trace)
+    print(f"  {'✅' if good else '❌'} removed for the warning" + ("" if good else f": {trace}"))
+    print()
+    return good
+
+
 def check_duplicate_if_cross_tu() -> bool:
     """
     #157: a function defined in another file is deterministic when every definition of it is, as
@@ -6839,6 +6866,7 @@ def main() -> int:
         check_const_suggestion_strong_and_weak_definitions,
         check_const_suggestion_cast_in_the_defining_file,
         check_const_suggestion_trace,
+        check_const_suggestion_werror_on_a_tracked_group,
         check_duplicate_if_cross_tu,
         check_global_read_before_write_identity_across_files,
         check_size_minus_one_cross_tu,
