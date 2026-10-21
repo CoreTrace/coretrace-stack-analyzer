@@ -21,6 +21,7 @@
 #include "analyzer/DiagnosticEmitter.hpp"
 #include "analyzer/LocationResolver.hpp"
 #include "analyzer/ModulePreparationService.hpp"
+#include "mangle.hpp"
 
 #include <algorithm>
 #include <cstdio>
@@ -2484,6 +2485,32 @@ namespace
         return report.failures == 0;
     }
 
+    /// A symbol is recognized as mangled and shown demangled when a demangler reads it, whatever
+    /// the C++ runtime: one that predates a mangling, such as a C++23 explicit object member's
+    /// (macOS 14, GCC 11), leaves it to LLVM's (#240). A name that neither reads stays as it is.
+    bool testSymbolDemangling(TestReport& report)
+    {
+        using ctrace::stack::analysis::formatFunctionNameForMessage;
+        const std::string explicitObject = "_ZNH6Reader4peekERKS_Pi";
+        const std::string shown = "Reader::peek(this Reader const&, int*)";
+        report.expect(ctrace_tools::isMangled(explicitObject),
+                      "Demangling: an explicit object member's symbol is a mangled name");
+        report.expect(ctrace_tools::demangle(explicitObject.c_str()) == shown,
+                      "Demangling: an explicit object member's symbol is shown demangled");
+        report.expect(formatFunctionNameForMessage(explicitObject) == shown,
+                      "Demangling: a message names an explicit object member demangled");
+        report.expect(ctrace_tools::isMangled("_ZN6Reader4peekEPi") &&
+                          ctrace_tools::demangle("_ZN6Reader4peekEPi") == "Reader::peek(int*)",
+                      "Demangling: a member's symbol is recognized and shown demangled");
+        report.expect(!ctrace_tools::isMangled("read_value") &&
+                          formatFunctionNameForMessage("read_value") == "read_value",
+                      "Demangling: a C function's name is no mangled name");
+        report.expect(!ctrace_tools::isMangled("_Z_not_a_symbol") &&
+                          ctrace_tools::demangle("_Z_not_a_symbol") == "_Z_not_a_symbol",
+                      "Demangling: a name that no demangler reads stays as it is");
+        return report.failures == 0;
+    }
+
     /// resolveParameterDebugBinding: each parameter gets its own type, and its position among the
     /// parameters the source declares. The others are artificial: `this`, the vtt that the
     /// base-object constructor (C2) of a class with a virtual base takes, is_most_derived under the
@@ -2688,6 +2715,7 @@ int main(int argc, char** argv)
     (void)testOwnershipCollectorExceptions(repoRoot, report);
     (void)testOwnershipSummaryIndex(repoRoot, report);
     (void)testCompileIRCacheWithoutCompilerRevision(report);
+    (void)testSymbolDemangling(report);
 
     if (report.failures == 0)
     {
