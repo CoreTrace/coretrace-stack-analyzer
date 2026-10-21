@@ -10,7 +10,7 @@
 
 **Spec:** `docs/superpowers/specs/2026-10-16-const-suggestion-check-v2-design.md`, approved at `8b283a8`.
 
-**Level of detail.** P0 is planned step by step with its code, validated in a throwaway prototype (evidence below). Stages 1 to 3 and the final phase are planned to the level of tasks, files, interfaces, tests and validation criteria. The step-level code of a stage is added to this plan when that stage starts: P0 and the updated `main` are integrated first, and they change the code these stages modify. A stage starts only once the previous one is validated. Stage 1's detail was written at its start, once Task I.1 was validated.
+**Level of detail.** P0 is planned step by step with its code, validated in a throwaway prototype (evidence below). Stages 1 to 3 and the final phase are planned to the level of tasks, files, interfaces, tests and validation criteria. The step-level code of a stage is added to this plan when that stage starts: P0 and the updated `main` are integrated first, and they change the code these stages modify. A stage starts only once the previous one is validated. Stage 1's detail was written at its start, once Task I.1 was validated; stage 2's at its start, once stage 1 was validated.
 
 **Evidence:** `coretrace-stack-analyzer-evidence/217/p0/` (`repro/`, `harness/`, `fixture/`, `effect/`, `prototype-v1.diff`, `prototype-v2.diff`, `prototype-v3.diff`, `ir/`, `variadic/`, `review-v3/`).
 
@@ -57,7 +57,7 @@ Commands (macOS):
 2. **C++23 explicit object parameter.** Clang marks `self` an object pointer, not artificial, and the source declares it: in `pick(this const Picker& self, int* p)`, `p` has source index 1, and T rewrites `p`. Pinned in Task P0.1 (unit test) and Task 1.2 (`const-suggestion-explicit-object.cpp` unchanged).
 3. **A function defined in a header that several analyzed files include** (`static inline` in C, `inline` in C++): one entity in each unit, never a collision with itself, verified when each unit verifies it. Pinned in Task 1.6 (new `run_test.py` check).
 4. **A file that the compilation database lists twice, with different commands.** The loader keeps one; T checks only that configuration, never claims the other, and the trace names it. Pinned in Task 1.1 (new `run_test.py` check).
-5. **`-Werror=<group>` on a tracked group**, not plain `-Werror`: the group stays a warning in both compilations, and an introduced warning still refutes. Pinned in Task 2.1 (fixture variant).
+5. **`-Werror=<group>` on a tracked group**, not plain `-Werror`: the group stays a warning in both compilations, and an introduced warning still refutes. Pinned in Task 2.1 (a `run_test.py` check, stage 2, ruling 2).
 
 ---
 
@@ -2641,25 +2641,243 @@ check_const_suggestion_trace: FAIL
 
 Both target `main`, and neither is merged; #221 stays the draft of T v1. From then on, each stage's validation also runs on #239: CI green, code scanning compared with `main`, the triage summarized in the description, which states what remains. Task F.3 keeps the description up to date instead of opening the pull request.
 
-## Stage 2 — D6, D8, D10, D12, D13
+## Stage 2 — D6, D8, D10, D12, D13, D18
 
-### Task 2.1: warning policy (D6)
-**Work:** `-W<group>` then `-Wno-error=<group>` for each tracked group, in both compilations.
-**Tests:** D6, a new fixture (t5) with `// analyzer-arg: --compile-arg=-Werror` and a tracked group disabled, verified; Review Focus 5, a variant with `--compile-arg=-Werror=incompatible-pointer-types-discards-qualifiers` where an introduced warning still refutes.
+Detailed at the stage's start, on `4fd0dae` (2026-10-22). Stage 1 is validated at that head on macOS, Linux arm64 and Linux x86_64: built without warning, unit and ownership tests passed, suite 2645/2645 on each. The CI of #239 is green there, macOS 14 included. Catalogue: D6, D8, D10, D12, D13, and D18, found while detailing the stage and added to Task 2.2 by the user (spec §6); Review Focus 5. Evidence: `coretrace-stack-analyzer-evidence/217/stage2/`.
 
-### Task 2.2: the unit's language (D8)
-**Work:** the targeted redeclarations compared with the candidate in the language of each unit.
-**Tests:** D8, a new `run_test.py` check (t4: C definition, C++ user through an `extern "C"` header, verified; the C witness unchanged).
+The stage runs in four batches, one per task, in this order: 2.1, 2.2, 2.4, 2.3 (ruling 4). Each batch's tests are written out with their failure at the batch's base, and are authorized before they are added. Batch 2.1's are written out below; the others' are written out when their batch starts.
 
-### Task 2.3: typedef with a qualifier (D10)
-**Work:** a pointer typedef receives the printed candidate, a separately written qualifier is folded in; one written by a macro gives indeterminate.
-**Tests:** D10, new fixtures in C and C++ (t3/t.c, t3/t.cpp: verified with `const int *const`).
+### Texts
+
+A new reason of an indeterminate verdict, after `not checked with Clang: `:
+
+| Reason | Task | When |
+|---|---|---|
+| `the qualifier of the parameter's typedef is written by a macro` | 2.3 | D10: a qualifier written apart from a pointer typedef, by a macro |
+
+The type displayed (Task 2.4, ruling 3). This applies to a `ReferenceRvaluePreferValue` or `PointerConstOnly` suggestion whose plan has a candidate, whatever its verdict. `<candidate>` is the plan's candidate, written with the analyzer's labels:
+- **`ReferenceRvaluePreferValue`, the advice.** `consider passing by value (<value>) or const reference (<const reference>)` becomes `consider passing by const reference (<candidate>)`.
+- **`ReferenceRvaluePreferValue`, the "checked" line of a verified suggestion:**
+  ```text
+  checked in the analyzed files only, with their compile commands: they compile with the suggested const reference, and their generated code matches, metadata included, once debug information, diagnostic metadata, descriptive names and renamed symbols are set aside; passing by value is not checked
+  ```
+  The database variant keeps its own opening, `checked in every file of the compilation database that sees the change, with its compile command: `.
+- **`PointerConstOnly`.** `consider '<candidate>' for API const-correctness` and `suggested type: <candidate>`, for example `const int *const p` where the rule writes `const int *p`.
+
+The other rules keep their lines. Without the option, nothing changes.
+
+### Rulings
+
+1. **The tracked groups as Clang reports them by default** (Task 2.1). Validated by the user on 2026-10-22; spec §5.3 updated.
+   - The plan and §5.3 wrote `-W<group>` then `-Wno-error=<group>`. But `-Wno-error=` also turns into warnings the diagnostics that Clang reports as errors by default. With Clang 20, in C, these are the diagnostics of `incompatible-function-pointer-types` and `int-conversion` (`stage2/batch-2.1/diagtool-groups-llvm20.txt`).
+   - Trial 1 (`batch-2.1/trial-fix.diff`) shows the effect. Three tests of T then read "gains a checked warning" instead of "does not compile", and 42 of the 45 pass:
+     - `check_const_suggestion_removal_reason`;
+     - the refuted case of `check_const_suggestion_trace`;
+     - `check_const_suggestion_cast_in_the_defining_file`.
+   - The policy therefore adds `-Werror=<group>`, after those flags, for each tracked group whose diagnostics are all errors by default. Clang's `DiagnosticIDs` gives these levels (`getDiagnosticsInGroup`, `isDefaultMappingAsError`). With Clang 20, every default error of a tracked group belongs to such a group.
+   - Trial 2 (`batch-2.1/trial2-fix.diff`) passes the two new tests, and the 45 checks and fixtures of T.
+   - Cost if wrong: such a refutation would say "does not compile" where it should say "gains a checked warning". The verdict is the same.
+2. **Review Focus 5 is a check, not a fixture variant** (Task 2.1). Validated by the user on 2026-10-22. Under `-Werror=<group>`, the suggestion is removed both before and after the change. Only the reason shows that the group stayed a warning, and only the trace gives it. Cost if wrong: none.
+3. **The type displayed is the plan's candidate** (Task 2.4). Revised as the user asked on 2026-10-22.
+   - For `ReferenceRvaluePreferValue` and `PointerConstOnly`, once a suggestion has a candidate, the type displayed is written from `SuggestionPlan::candidate`. It replaces the rule's proposal, so no other definition of the proposed type is displayed.
+   - Where Clang's labels differ from those of the analyzer's other lines, the planner writes the analyzer's:
+     - a type without a name is `<anonymous type>`, which Clang writes `(lambda)`;
+     - a C tag type has no keyword: `foo`, which Clang writes `struct foo`.
+
+     The trace keeps Clang's writing.
+   - Both rules take the same path. The D13 fixture, where the rule's proposal (`const int *p`) differs from the candidate, therefore pins that path for both. For `ReferenceRvaluePreferValue`, no fixture could: with these labels, the rule's const reference and the candidate write the same text in every case found (`stage2/observations/rvalue-spelling/`).
+   - Cost if wrong: a label that differs from Clang's and is not listed here is displayed as Clang writes it.
+4. **Task 2.4 runs before Task 2.3.** Validated by the user on 2026-10-22. t3's suggestions are `PointerConstOnly` (`const IntPtr p` is `int *const p`), and Task 2.4 changes how that rule is displayed. In this order, the D10 fixtures are written once, with the candidate displayed. Cost if wrong: none.
+
+### Task 2.1: warning policy (D6, Review Focus 5)
+
+**Files:** `src/analysis/ConstSuggestionFacts.cpp` (`inspect`), `README.md`, `run_test.py`, `test/pointer_reference-const_correctness/const-suggestion-werror.c` (new).
+
+**Decision logic.** Both compilations, before and after the rewrite, go through `inspect`. For each tracked group, `-W<group>` and `-Wno-error=<group>`. Then `-Werror=<group>` for each tracked group whose diagnostics are all errors by default (ruling 1).
+
+**Tests.** For D6 (t5), a new fixture:
+
+```c
+// SPDX-License-Identifier: Apache-2.0
+// #217 (D6): the project turns its warnings into errors (-Werror) and disables a warning group
+// that the check tracks, which this file triggers: strip returns a pointer to const as a plain
+// pointer. The check keeps each tracked group a warning in both of its compilations: the file
+// compiles as it is, and the suggestion for read_value is checked.
+
+// strict-expectation-details: true
+
+// at line 20, column 0
+// [ !Info! ] ConstParameterNotModified.Pointer: parameter 'p' in function 'read_value' is never used to modify the pointed object
+// ↳ current type: int *p
+// ↳ suggested type: const int *p
+// ↳ checked in the analyzed files only, with their compile commands: they compile with the suggested type, and their generated code matches, metadata included, once debug information, diagnostic metadata, descriptive names and renamed symbols are set aside
+
+// The project's compile command, which both the analysis and the check use.
+// analyzer-arg: --compile-arg=-Werror
+// analyzer-arg: --compile-arg=-Wno-incompatible-pointer-types-discards-qualifiers
+// analyzer-arg: --experimental-const-suggestion-check
+
+int read_value(int* p)
+{
+    return *p;
+}
+
+char* strip(const char* s)
+{
+    return s;
+}
+```
+
+For Review Focus 5 (ruling 2), a new check, placed after `check_const_suggestion_trace` and registered after it:
+
+```python
+def check_const_suggestion_werror_on_a_tracked_group() -> bool:
+    """
+    #217 (Review Focus 5): a compile command that turns one tracked warning group into errors,
+    not every warning (-Werror=incompatible-pointer-types-discards-qualifiers), does not change
+    what the check sees: the group stays a warning in both compilations, and a rewrite that adds
+    such a warning is removed for that warning, not for an error.
+    """
+    print("=== Testing a tracked warning group that the compile command turns into errors ===")
+    with tempfile.TemporaryDirectory(prefix="ct_const_suggestion_werror_") as tmp:
+        path = Path(tmp).resolve() / "keep.c"
+        path.write_text("void keep(int* p)\n{\n    int* q = p;\n    (void)q;\n}\n")
+        run = _const_suggestion_run(
+            [str(path), "--compile-arg=-Werror=incompatible-pointer-types-discards-qualifiers"]
+        )
+    if run is None:
+        return fail_check("the analysis did not run")
+    messages, trace, _ = run
+    removed = (
+        f"keep parameter p: removed, gains a checked warning: {path}:3: initializing 'int *' "
+        "with an expression of type 'const int *' discards qualifiers"
+    )
+    good = "keep" not in messages and any(line.startswith(removed) for line in trace)
+    print(f"  {'✅' if good else '❌'} removed for the warning" + ("" if good else f": {trace}"))
+    print()
+    return good
+```
+
+Failure at `4fd0dae`, on macOS (`batch-2.1/red-rerun-4fd0dae-macos.txt`):
+- **The fixture.** In both passes, default and smt-z3, the expected block is missing. The suggestion reads `not checked with Clang: the file does not compile with Clang as it is`. Only the two strict diagnostic counts pass, 2 of the 4 checks.
+- **The check.** It reads `keep parameter p: removed, does not compile: …/keep.c:3: initializing 'int *' with an expression of type 'const int *' discards qualifiers`.
+
+With trial 2 applied, both pass, the fixture 4/4 (`batch-2.1/green-trial2-rerun-macos.txt`).
+
+- [ ] **Step 1: The fixture.** Add `const-suggestion-werror.c` and run it. Expected: FAIL in both passes, as above.
+  Commit: `test(const-param): check a suggestion despite -Werror and a disabled tracked group`.
+- [ ] **Step 2: The check.** Add `check_const_suggestion_werror_on_a_tracked_group` and run it. Expected: FAIL, as above.
+  Commit: `test(const-param): a tracked group made an error stays a warning for the check`.
+- [ ] **Step 3: The policy (ruling 1)**, in `inspect`, where the tracked groups are enabled:
+  ```cpp
+  // D6: each tracked group as Clang reports it by default, whatever the command
+  // says: enabled, a warning under -Werror, and an error when its diagnostics are
+  // errors by default (incompatible-function-pointer-types, int-conversion in C).
+  const clang::DiagnosticIDs& ids = *options.Diags->getDiagnosticIDs();
+  std::vector<std::string> errors;
+  for (const char* warning : kCheckedWarnings)
+  {
+      diagnostics.Warnings.push_back(warning);
+      diagnostics.Warnings.push_back(std::string("no-error=") + warning);
+      llvm::SmallVector<clang::diag::kind, 32> members;
+      if (!ids.getDiagnosticsInGroup(clang::diag::Flavor::WarningOrError, warning,
+                                     members) &&
+          std::all_of(members.begin(), members.end(), [&](clang::diag::kind id)
+                      { return ids.isDefaultMappingAsError(id); }))
+      {
+          errors.push_back(std::string("error=") + warning);
+      }
+  }
+  diagnostics.Warnings.insert(diagnostics.Warnings.end(), errors.begin(),
+                              errors.end());
+  ```
+  README:
+  - the judgement's step on errors and tracked warnings says that the tracked groups keep the level Clang gives them by default;
+  - the limit of a `-Werror` command that disables a tracked group goes.
+
+  Run: both tests, then the tests of T. Expected:
+  - both tests PASS;
+  - `check_const_suggestion_removal_reason`, `check_const_suggestion_trace` and `check_const_suggestion_cast_in_the_defining_file` pass unchanged.
+
+  Commit: `fix(const-param): keep the tracked warning groups as Clang reports them by default`.
+- [ ] **Step 4: Task tests.** As Task 1.1, Step 6.
+
+### Task 2.2: each declaration's candidate, in its unit's language (D8, D18)
+
+**Files:** `src/analysis/ConstSuggestionInternal.hpp`, `src/analysis/ConstSuggestionFacts.cpp`, `src/analysis/ConstSuggestionCheck.cpp`, `run_test.py`.
+
+**Problem.** After the rewrite, step 3 compares each rewritten declaration with a single type: the plan's `expectedType`. That is the candidate of the defining declaration's parameter, as the defining unit writes it.
+- **D8 (t4).** A C function takes a `struct foo *`, and a C++ file declares it through an `extern "C"` header.
+  - The defining unit writes the candidate `const struct foo *`; the C++ unit writes the same type `const foo *`.
+  - The C++ unit's declaration therefore "does not get the suggested type", and the suggestion is not checked.
+  - The C witness (`user2.c`) is verified.
+- **D18.** A parameter's top-level qualifier is not part of the function's type, so its declarations may differ in it: `int f(int *p);` then `int f(int *const p) {…}`, or the other way round.
+  - The rewrite gives each declaration the candidate of its own type: `const int *p`, `const int *const p`.
+  - Only the defining declaration matches `expectedType`, so in both directions the suggestion is not checked (`stage2/observations/toplevel-qualifier/`).
+
+**Interfaces.**
+- `UnitFacts::Entity::expected`, recorded in each compilation before the rewrite. For each declaration of the entity, by site, it holds the candidate of that declaration's own parameter type, top-level qualifiers included. It is written canonically in that unit's language (`writtenType` of `candidateOf`).
+  - The defining unit records it once it has planned the entity.
+  - The other units record it with the plan that their targets carry.
+- `Target::expected`: the unit's `expected`, passed to its compilation after the rewrite.
+
+**Decision logic.** Step 3 compares each rewritten declaration with the expected type of its own site.
+
+**Tests (batch 2.2).** Two new checks, written out with their failures when the batch starts:
+- **D8, over t4.** The C++ user is verified. The C witness is verified, as at the batch's base.
+- **D18, in both directions.** `f` is declared without the top-level `const` and defined with it; `g` is declared with it and defined without it. Both are verified.
+
+The checks read the verdicts in the trace, which Task 2.4 does not change.
+
+Expected failures at the batch's base: `not checked with Clang: the rewritten declaration does not get the suggested type`, for the C++ user of t4, for `f` and for `g`.
 
 ### Task 2.4: one candidate, displayed (D12, D13)
-**Work:** the displayed type and the "checked" line name the candidate: `const T &` for `ReferenceRvaluePreferValue` (passing by value is not checked), `const int *const p` for `PointerConstOnly`.
-**Tests:** D12, changed expectations of the two `ReferenceRvaluePreferValue` blocks of `const-suggestion-deduction-kept.cpp`, and of the one D14 adds to `const-suggestion-deduction-refused.cpp` (stage 1, ruling 10); D13, a new fixture that enables T (t15: `int* const p` only read, displayed and verified as `const int *const p`), presented with its failure evidence; no T v1 fixture covers `PointerConstOnly`, and the existing test without the option stays unchanged.
 
-**Validation of stage 2:** as stage 1, for D6, D8, D10, D12, D13 and Review Focus 5.
+**Files:**
+- `src/analysis/ConstSuggestionPlan.cpp`: the candidate written with the analyzer's labels;
+- `src/analysis/ConstSuggestionCheck.cpp`: the type displayed, and the "checked" line;
+- `src/analyzer/DiagnosticEmitter.cpp`: the advice that names the const reference alone;
+- the fixtures `const-suggestion-deduction-kept.cpp` and `const-suggestion-deduction-refused.cpp` (changed), and one new fixture.
+
+**Decision logic.** Take each `ReferenceRvaluePreferValue` or `PointerConstOnly` suggestion that T keeps and whose plan has a candidate. Its displayed type becomes that candidate, as the planner writes it with the analyzer's labels (ruling 3); the rule's own proposal is no longer displayed.
+- **`ReferenceRvaluePreferValue` (D12).** The advice names the const reference alone. A verified suggestion's "checked" line says that passing by value is not checked (Texts).
+- **`PointerConstOnly` (D13).** The advice and the "suggested type" line name the candidate, `const int *const p`.
+
+A suggestion without a candidate keeps the rule's proposal (§4). Without the option, nothing changes.
+
+**Tests (batch 2.4).**
+- **D12, changed expectations:**
+  - the two `ReferenceRvaluePreferValue` blocks of `const-suggestion-deduction-kept.cpp`, advice and "checked" line;
+  - the block that D14 adds to `const-suggestion-deduction-refused.cpp`, advice only (stage 1, ruling 10).
+- **D13.** A new fixture that enables T (t15: `int *const p`, only read), displayed and verified as `const int *const p`.
+- The existing test without the option, and every other expectation of T, stay unchanged.
+
+Expected failures at the batch's base: the two alternatives and the old "checked" line (D12), and the displayed `const int *p` (D13).
+
+### Task 2.3: typedef with a qualifier (D10)
+
+**Files:** `src/analysis/ConstSuggestionPlan.cpp` (`Planner::plan`), new fixtures in C and C++.
+
+**Problem (t3).** In `const IntPtr p`, a pointer typedef carries a `const` written before it.
+- The planner replaces only `IntPtr`, with `const int *`, which gives `const const int * p`: the pointer loses its own `const`.
+- The candidate, `const int *const p`, is therefore not met, and the suggestion is not checked.
+
+**Decision logic.**
+- The edit replaces the whole written type with the printed candidate of that declaration's type, `const int *const`. The written type runs from its first qualifier to the typedef's name, or to the last qualifier when one follows the name. The qualifiers written apart are thus folded into the candidate.
+- A qualifier written by a macro leaves the plan indeterminate, with the new reason (Texts).
+- A typedef without a separate qualifier (`IntPtr p`) keeps T v1's edit, `const int *`.
+
+**Tests (batch 2.3).**
+- New fixtures in C and C++ (t3: `t.c`, `t.cpp`), verified with `const int *const p`.
+- The C fixture also has a qualifier written by a macro, indeterminate with the new reason.
+
+Expected failure at the batch's base: in all three cases, `not checked with Clang: the rewritten declaration does not get the suggested type`.
+
+**Validation of stage 2.** As for stage 1, for D6, D8, D10, D12, D13, D18 and Review Focus 5:
+- their tests pass, and every other test of T passes unchanged;
+- the suite passes on macOS, Linux arm64 and Linux x86_64;
+- the review cases t3, t4, t5 and t15 give the verdicts of §6;
+- the CI of #239 is green, and code scanning is triaged.
 
 ## Stage 3 — measured costs, one Clang invocation
 
