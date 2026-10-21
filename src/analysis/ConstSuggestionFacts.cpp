@@ -1100,8 +1100,26 @@ namespace ctrace::stack::analysis
                 // No error limit: "too many errors" is fatal, and would leave unchecked a rewrite
                 // that its errors refute (ruling 12).
                 diagnostics.ErrorLimit = 0;
+                // D6: each tracked group as Clang reports it by default, whatever the command
+                // says: enabled, a warning under -Werror, and an error when its diagnostics are
+                // errors by default (incompatible-function-pointer-types, int-conversion in C).
+                const clang::DiagnosticIDs& ids = *options.Diags->getDiagnosticIDs();
+                std::vector<std::string> errors;
                 for (const char* warning : kCheckedWarnings)
+                {
                     diagnostics.Warnings.push_back(warning);
+                    diagnostics.Warnings.push_back(std::string("no-error=") + warning);
+                    llvm::SmallVector<clang::diag::kind, 32> members;
+                    if (!ids.getDiagnosticsInGroup(clang::diag::Flavor::WarningOrError, warning,
+                                                   members) &&
+                        std::all_of(members.begin(), members.end(), [&](clang::diag::kind id)
+                                    { return ids.isDefaultMappingAsError(id); }))
+                    {
+                        errors.push_back(std::string("error=") + warning);
+                    }
+                }
+                diagnostics.Warnings.insert(diagnostics.Warnings.end(), errors.begin(),
+                                            errors.end());
                 out.diagnostics.clear();
                 out.reported.clear();
                 out.firstDiagnostic.clear();

@@ -696,7 +696,9 @@ The check runs these steps:
      tried, or another declaration of a rewritten file whose type changes, leaves it not checked;
    - an error, or one of these warnings, that the rewrite adds: refuted. The tracked warnings are
      `incompatible-pointer-types-discards-qualifiers`, `incompatible-pointer-types`,
-     `incompatible-function-pointer-types`, `int-conversion` and `overloaded-virtual`;
+     `incompatible-function-pointer-types`, `int-conversion` and `overloaded-virtual`. Whatever the
+     compile command says, the check enables them and keeps the level Clang gives them by default:
+     a warning stays a warning under `-Werror`, and an error stays an error;
    - a call or a reference that targets another function, a method of that name that overrides
      other methods, an `if constexpr` condition or a `_Generic` selection that changes: refuted.
      Facts that cannot be compared one to one leave the file not checked;
@@ -754,8 +756,6 @@ Its limits:
 - the type shown can differ from the type checked. For a `T *const p` parameter, the message shows
   `const T *p`, and the check tries `const T *const p`. For an rvalue reference `T &&r`, the message
   suggests passing by value, and the check tries `const T &r` only. The trace names the type tried;
-- a compile command with `-Werror` that disables a tracked warning group leaves a file that warns in
-  that group not checked: the check enables the group, and the file then does not compile as it is;
 - the type tried is compared as each file's language writes it: a C function that a C++ file
   declares through a shared header (`extern "C"`) is not checked when C++ writes the parameter's
   type differently, `foo *` for C's `struct foo *`;
