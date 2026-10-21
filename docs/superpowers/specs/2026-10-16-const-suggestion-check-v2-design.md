@@ -1,7 +1,7 @@
 # Vérification des suggestions const par Clang, version 2 (#217)
 
 Statut : validée à `8b283a8`, puis complétée à la relecture du plan d'implémentation (D17, fixture
-de D13), et au détail de l'étape 1 (mutualisation limitée au module, §5 et §10). N'autorise ni le code ni la modification des tests : chaque lot présentera ses
+de D13), au détail de l'étape 1 (mutualisation limitée au module, §5 et §10), et à celui de l'étape 2 (erreurs natives de Clang conservées, §5.3 ; D18, §5.6 et §6). N'autorise ni le code ni la modification des tests : chaque lot présentera ses
 tests, avec leurs preuves d'échec, avant de les ajouter. La fusion n'est pas autorisée.
 Issue : #217. Liens : #221 (T v1, référence conservée), #167 (faits et contrat const), #197
 (identité d'un global entre fichiers).
@@ -44,7 +44,7 @@ configurations effectivement vérifiées.
 - identités explicites, plan séparé de son exécution, unité définie par un fichier et une
   configuration, faits R, O et K, correspondances établies, collisions, verdicts à trois états,
   trace ;
-- étape 2 : D6, D8, D10, D12 et D13 (§6) ;
+- étape 2 : D6, D8, D10, D12, D13 et D18 (§6) ;
 - étape 3 : les coûts évitables mesurés et une seule construction de l'invocation Clang.
 
 **Hors périmètre :**
@@ -152,8 +152,14 @@ sert au plan. Elle relève :
 
 Les groupes d'avertissements suivis sont activés explicitement par `-W<groupe>`, puis maintenus comme
 avertissements par `-Wno-error=<groupe>`, avec la même politique dans les compilations initiale et
-modifiée. Une commande de projet qui désactive un groupe (`-Wno-<groupe>`) ou promeut les
-avertissements en erreurs (`-Werror`) ne change donc ni leur relevé ni leur nature (D6).
+modifiée. Les erreurs natives de Clang restent des erreurs. `-Wno-error=<groupe>` rétrograderait
+aussi les diagnostics que Clang traite comme des erreurs par défaut. Chaque groupe suivi dont tous
+les diagnostics sont des erreurs par défaut, d'après les niveaux que Clang leur donne, est donc
+ensuite remis en erreur par `-Werror=<groupe>`. Avec Clang 20, ce sont, en C,
+`incompatible-function-pointer-types` et `int-conversion`, et chaque erreur par défaut d'un groupe
+suivi appartient à l'un d'eux. Une commande de projet qui désactive un groupe (`-Wno-<groupe>`), ou
+qui promeut en erreurs les avertissements (`-Werror`) ou un seul groupe (`-Werror=<groupe>`), ne
+change donc ni leur relevé ni leur nature (D6).
 
 ### 5.4 Faits R, O et K
 
@@ -199,7 +205,8 @@ dans chaque unité :
   signatures instanciées (spécialisations de gabarits) qui changent avec la réécriture ne relèvent
   pas de cet invariant : elles sont examinées par les correspondances (5.7), comme dans
   `const-suggestion-deduction-kept.cpp` ;
-- les redéclarations visées ont le type du candidat, comparé dans la langue de l'unité (D8).
+- chaque redéclaration visée a le candidat de son propre type, qualificatifs de premier niveau
+  compris (D18), comparé dans la langue de son unité (D8).
 
 Si les déclarations nécessaires n'ont pas pu être inspectées (erreur fatale, unité incomplète), la
 portée est inconnue.
@@ -302,6 +309,7 @@ suggestion valide.
 | D10 | `const` écrit devant un typedef de pointeur (t3/t.c, t3/t.cpp) | réécrit en `const const int *` ; « not checked » | vérifiée (`const int *const`) ; indéterminée si le qualificatif vient d'une macro | fixtures C et C++ | 2 |
 | D12 | alternative de `ReferenceRvaluePreferValue` | seul `const T &` est vérifié ; la ligne dit « the suggested type » | vérifiée ; le type affiché et la ligne nomment `const T &`, le passage par valeur n'est pas vérifié | attentes modifiées (`const-suggestion-deduction-kept.cpp` et autres) | 2 |
 | D13 | `PointerConstOnly` (t15) | affiche `const int *p`, vérifie `const int *const p` | vérifiée ; le type affiché et la ligne nomment `const int *const p` | nouvelle fixture qui active T, aucune fixture de T v1 ne couvrant `PointerConstOnly` ; le test existant sans l'option reste inchangé | 2 |
+| D18 | redéclaration qui diffère de la définition par un qualificatif de premier niveau du paramètre (`int f(int *p);` puis `int f(int *const p) {…}`, et l'inverse), observée à `4fd0dae` (`stage2/observations/toplevel-qualifier/`) | « not checked: the rewritten declaration does not get the suggested type » | vérifiée (VP), dans les deux sens | contrôle run_test.py, deux sens | 2 |
 
 **Non retenus :**
 - le cache « avant » indexé par l'identifiant (point 9 de la revue) : non reproduit (t12) ; les
@@ -343,7 +351,7 @@ acceptation d'un dépassement.
 3. **Étape 1** : flux, identités, plan et portée, faits R, O et K, correspondances, paires établies
    pour le comparateur, collisions, trace ; D1 (partie T), D2, D3, D4, D5, D7, D11, D14, D15, D16
    et D17.
-4. **Étape 2** : D6, D8, D10, D12 et D13.
+4. **Étape 2** : D6, D8, D10, D12, D13 et D18.
 5. **Étape 3** : les coûts mesurés et l'invocation Clang construite en un seul endroit.
 6. **Comparaison des corpus, mesure du coût et README** ; une PR en brouillon. La revue finale porte
    sur la base actualisée.
