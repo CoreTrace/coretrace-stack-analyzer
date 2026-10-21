@@ -946,6 +946,7 @@ The spec leaves these open. The user confirmed them on 2026-10-17, ruling 2 prov
 14. **A declaration is known by where it is expanded and where it is written.** One macro invocation can declare several functions, whose names it expands at the same place: a `DeclarationSite` holds both positions, for the identity of the entity and for the scope after the rewrite. `const-suggestion-macro-two-functions.c` pins it: it passes at `64ed37e`, where T v1 finds a function by its symbol, and its failure is shown on a mutant of Task 1.4 that keeps only the expansion position.
 15. **The comparator's unit tests are adapted in Task 1.5**, as changed tests submitted with the task: `testConstSuggestionCodeComparison` and `testConstSuggestionNormalizations` pass the established pairs, and keep their guarantees; `testConstSuggestionWithoutConstKeepsIdentifiers` goes with `withoutConst`, its guarantee (two functions whose names differ by `const` are not paired) now held by a case where a renamed symbol without a pair is a difference.
 16. **At planning, the scope of D5 covers the parameters only.** Another declaration whose type a macro argument shares with the parameter, such as a variable that the same invocation declares, is caught after the rewrite by the scope of Task 1.4 (step 3, `the rewrite also changes the type of <name> (<file>:<line>)`), which `check_const_suggestion_header_read_differently` pins; at planning, no test would reach it. Cost if wrong: that case gets the step-3 reason.
+17. **Only a refutation stops the judgement of the units** (§5.10: refuted if one unit refutes; otherwise indeterminate if one unit or one collision is). T v1 also stopped once the defining unit was not verified; after Task 1.7, a cast in the defining file made it indeterminate, and the error of another file that the rewrite breaks went unseen (`check_const_suggestion_cast_in_the_defining_file`). The user confirmed on 2026-10-21 that every unit that sees the change is judged until one refutes, whatever the defining unit's verdict (`a60a1b4`). Cost: when the defining unit is not verified, the other units are compiled too; a verdict can only move from indeterminate to refuted.
 
 ### Shared types
 
@@ -1192,7 +1193,7 @@ check_const_suggestion_compiles_each_file_once: FAIL
       return {};
   }
   ```
-  `checkUnit` returns a `Judgement` instead of its `bool` and its `removed` and `notChecked` strings: T v1's `removed` text is a refutation's reason, its `notChecked` text an indeterminate one's, and a unit that passes is verified. The loop over the units keeps T v1's order and stops at the first refutation, as T v1 does. The outcome maps onto T v1's report: refuted removes the suggestion (`removed, <reason>`), indeterminate adds `kNotChecked + reason` (`not checked, <reason>`), verified adds the "checked" line and the ABI line, unchanged.
+  `checkUnit` returns a `Judgement` instead of its `bool` and its `removed` and `notChecked` strings: T v1's `removed` text is a refutation's reason, its `notChecked` text an indeterminate one's, and a unit that passes is verified. The loop over the units keeps T v1's order and stops at the first refutation only (ruling 17); T v1 also stopped once the defining unit was not verified. The outcome maps onto T v1's report: refuted removes the suggestion (`removed, <reason>`), indeterminate adds `kNotChecked + reason` (`not checked, <reason>`), verified adds the "checked" line and the ABI line, unchanged.
   Commit: `refactor(const-param): judge each unit and aggregate three verdicts`.
 - [ ] **Step 4: Units and their configuration.** A unit is a `UnitConfiguration`: the file's real path (`canonicalPath`), its `UnitCommand` (`commandFor`, cached as T v1 caches it in `AnalyzedUnits::commands`), and `fingerprintOf(command)`:
   ```cpp
@@ -2528,6 +2529,8 @@ check_const_suggestion_compilation_database: FAIL
 - [ ] **Step 3: Task tests.** As Task 1.1, Step 6.
 
 **Validation:** both checks pass with their new expectations.
+
+**Follow-up (ruling 17, confirmed by the user on 2026-10-21).** A cast in the defining file left that unit indeterminate, which stopped the judgement of the other units: the error of a file that the rewrite breaks went unseen. `check_const_suggestion_cast_in_the_defining_file` (`7534472`) analyzes a defining file that casts the function's address with the callback of the old type (`cross-tu-const-suggestion-callback.c`), and expects the suggestion removed, `removed, does not compile: <callback>:`. Failure at `af99724`: `not checked, <def-with-cast.c>:12 converts the address of read_value with an explicit cast`. The loop then stops at a refutation only (`a60a1b4`). The comment of `const-suggestion-void-cast.c` now says that a cast to another function type keeps the suggestion, not checked (`1f81438`); its expectations are unchanged.
 
 ### Task 1.8: trace and README
 
