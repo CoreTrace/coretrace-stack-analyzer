@@ -457,13 +457,13 @@ namespace ctrace::stack::analysis
             }
 
             // §5.6: the type of each declaration that a rewritten file writes, by its site.
-            bool VisitDeclaratorDecl(clang::DeclaratorDecl* declaration)
+            bool VisitDeclaratorDecl(const clang::DeclaratorDecl* declaration)
             {
                 written(*declaration, declaration->getType());
                 return true;
             }
 
-            bool VisitTypedefNameDecl(clang::TypedefNameDecl* declaration)
+            bool VisitTypedefNameDecl(const clang::TypedefNameDecl* declaration)
             {
                 written(*declaration, declaration->getUnderlyingType());
                 return true;
@@ -477,25 +477,25 @@ namespace ctrace::stack::analysis
                 return true;
             }
 
-            bool VisitMemberExpr(clang::MemberExpr* expression)
+            bool VisitMemberExpr(const clang::MemberExpr* expression)
             {
                 reference(expression->getMemberDecl(), expression->getMemberLoc());
                 return true;
             }
 
-            bool VisitCXXConstructExpr(clang::CXXConstructExpr* expression)
+            bool VisitCXXConstructExpr(const clang::CXXConstructExpr* expression)
             {
                 reference(expression->getConstructor(), expression->getLocation());
                 return true;
             }
 
-            bool VisitCXXNewExpr(clang::CXXNewExpr* expression)
+            bool VisitCXXNewExpr(const clang::CXXNewExpr* expression)
             {
                 reference(expression->getOperatorNew(), expression->getBeginLoc());
                 return true;
             }
 
-            bool VisitCXXDeleteExpr(clang::CXXDeleteExpr* expression)
+            bool VisitCXXDeleteExpr(const clang::CXXDeleteExpr* expression)
             {
                 reference(expression->getOperatorDelete(), expression->getBeginLoc());
                 return true;
@@ -515,7 +515,7 @@ namespace ctrace::stack::analysis
                 return true;
             }
 
-            bool VisitGenericSelectionExpr(clang::GenericSelectionExpr* selection)
+            bool VisitGenericSelectionExpr(const clang::GenericSelectionExpr* selection)
             {
                 if (collectFacts_ && !selection->isResultDependent())
                 {

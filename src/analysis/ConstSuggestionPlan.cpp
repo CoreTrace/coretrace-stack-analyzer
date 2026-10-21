@@ -244,7 +244,7 @@ namespace ctrace::stack::analysis
             {
             }
 
-            bool VisitParmVarDecl(clang::ParmVarDecl* parameter)
+            bool VisitParmVarDecl(const clang::ParmVarDecl* parameter)
             {
                 if (!shared && !planned_.count(parameter))
                     shared = writtenAtAnEdit(parameter->getTypeSourceInfo());
