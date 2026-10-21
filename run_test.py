@@ -3806,6 +3806,73 @@ def check_const_suggestion_cast_in_the_defining_file() -> bool:
     return good
 
 
+def check_const_suggestion_trace() -> bool:
+    """
+    #217: with --verbose, the trace gives each verdict's grounds after the line of its outcome: the
+    suggestion (rule, function, the parameter's index among the source's parameters), the
+    transformation (current type, candidate, alternative) and where it is written, each unit
+    checked with its configuration and its verdict, then the verdict and its reason. Here one
+    suggestion verified, one refuted and one not checked.
+    """
+    print("=== Testing the trace of const suggestion verdicts ===")
+    source = (
+        "int read_value(int* p)\n{\n    return *p;\n}\n"
+        "static int read_slot(int* slot)\n{\n    return *slot;\n}\n"
+        "int (*const stored)(int*) = read_slot;\n"
+        "#define DECLARE(name) int name(int* q)\n"
+        "DECLARE(read_macro)\n{\n    return *q;\n}\n"
+    )
+    with tempfile.TemporaryDirectory(prefix="ct_const_suggestion_trace_") as tmp:
+        path = Path(tmp).resolve() / "verdicts.c"
+        path.write_text(source)
+        run = _const_suggestion_run([str(path)])
+    if run is None:
+        return fail_check("the analysis did not run")
+    _, trace, _ = run
+    file = re.escape(str(path))
+    unit = rf"unit {file} \[[0-9a-f]+\]"
+    rule = r"ConstParameterNotModified\.Pointer"
+    expected = {
+        "verified": [
+            r"read_value parameter p: checked in 1 file\(s\)",
+            rf"read_value parameter p, suggestion: {rule} on read_value, source index 0",
+            r"read_value parameter p, transformation: int \*p becomes const int \*p "
+            r"\(pointer to const\)",
+            rf"read_value parameter p, rewritten at: {file}:1",
+            rf"read_value parameter p, {unit}: verified",
+            r"read_value parameter p, verdict: verified",
+        ],
+        "refuted": [
+            rf"read_slot parameter slot: removed, does not compile: {file}:9:",
+            rf"read_slot parameter slot, suggestion: {rule} on read_slot, source index 0",
+            r"read_slot parameter slot, transformation: int \*slot becomes const int \*slot "
+            r"\(pointer to const\)",
+            rf"read_slot parameter slot, rewritten at: {file}:5",
+            rf"read_slot parameter slot, {unit}: refuted: does not compile: {file}:9:",
+            rf"read_slot parameter slot, verdict: refuted: does not compile: {file}:9:",
+        ],
+        "not checked": [
+            r"read_macro parameter q: not checked, the declaration is written by a macro "
+            r"definition",
+            rf"read_macro parameter q, suggestion: {rule} on read_macro, source index 0",
+            r"read_macro parameter q, transformation: int \*q becomes const int \*q "
+            r"\(pointer to const\)",
+            r"read_macro parameter q, verdict: indeterminate: the declaration is written by a "
+            r"macro definition",
+        ],
+    }
+    ok = True
+    for label, patterns in expected.items():
+        missing = [p for p in patterns if not any(re.match(p, line) for line in trace)]
+        good = not missing
+        print(f"  {'✅' if good else '❌'} {label}" + ("" if good else f": missing {missing}"))
+        ok = ok and good
+    if not ok:
+        print("     trace:\n" + "\n".join(f"       {line}" for line in trace))
+    print()
+    return ok
+
+
 def check_duplicate_if_cross_tu() -> bool:
     """
     #157: a function defined in another file is deterministic when every definition of it is, as
@@ -6771,6 +6838,7 @@ def main() -> int:
         check_const_suggestion_merged_declaration,
         check_const_suggestion_strong_and_weak_definitions,
         check_const_suggestion_cast_in_the_defining_file,
+        check_const_suggestion_trace,
         check_duplicate_if_cross_tu,
         check_global_read_before_write_identity_across_files,
         check_size_minus_one_cross_tu,
