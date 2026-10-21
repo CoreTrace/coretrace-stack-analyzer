@@ -71,6 +71,17 @@ namespace ctrace::stack::analysis::const_suggestion
         std::size_t offset = 0;
         std::size_t length = 0;
         std::string text;
+        unsigned line = 0; // the offset's, in the original text
+        std::uint8_t reservedPadding[4] = {};
+    };
+
+    // The type a suggestion tries (§3), as the trace shows it: the parameter's current type and
+    // the candidate, each written with the parameter's name, and the alternative it stands for.
+    struct Candidate
+    {
+        std::string current;
+        std::string type;
+        std::string alternative;
     };
 
     // A position in a file's original text: after the rewrite, a position in a rewritten file is
@@ -160,8 +171,9 @@ namespace ctrace::stack::analysis::const_suggestion
         EntityIdentity entity;
         std::vector<DeclarationSite> parameters;        // the parameters it rewrites, sorted
         std::map<std::string, std::vector<Edit>> edits; // by real path
-        std::string expectedType; // the parameter's type once rewritten, written canonically
-        std::optional<std::string> indeterminate; // why the plan is not executed
+        Candidate candidate;                            // the type the rewrite gives the parameter
+        std::string expectedType;                       // the candidate, written canonically
+        std::optional<std::string> indeterminate;       // why the plan is not executed
         unsigned sourceIndex = 0;
         // A free function with external linkage can be declared by a file that reads none of the
         // rewritten files; a method only where its class is defined. One with internal linkage

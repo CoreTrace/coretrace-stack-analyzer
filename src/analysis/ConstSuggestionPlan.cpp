@@ -17,6 +17,7 @@
 #include <clang/Lex/Lexer.h>
 #include <clang/Lex/MacroInfo.h>
 #include <clang/Lex/PPCallbacks.h>
+#include <llvm/Support/raw_ostream.h>
 
 namespace ctrace::stack::analysis
 {
@@ -208,7 +209,7 @@ namespace ctrace::stack::analysis
                 const bool seen = std::any_of(edits.begin(), edits.end(), [&](const Edit& edit)
                                               { return edit.offset == offset; });
                 if (!seen)
-                    edits.push_back({offset, length, text});
+                    edits.push_back({offset, length, text, sm_.getLineNumber(file, offset)});
                 if (inArgument)
                     inArguments_.push_back(at);
                 return true;
@@ -278,25 +279,43 @@ namespace ctrace::stack::analysis
             const std::set<const clang::ParmVarDecl*>& planned_;
         };
 
-        // The type the parameter must have once rewritten, written canonically.
-        std::string expectedType(clang::ASTContext& context, clang::QualType type)
+        // The type the parameter has once rewritten, which the edits write (§3): a pointer to
+        // const, its top-level qualifiers kept; a reference to const, for an rvalue reference
+        // too. Null for another type.
+        clang::QualType candidateOf(clang::ASTContext& context, clang::QualType type)
         {
-            clang::QualType out;
             if (const auto* pointer = type->getAs<clang::PointerType>())
             {
-                out = context.getQualifiedType(
+                return context.getQualifiedType(
                     context.getPointerType(pointer->getPointeeType().withConst()),
                     type.getQualifiers());
             }
-            else if (type->isReferenceType())
-            {
-                out = context.getLValueReferenceType(type.getNonReferenceType().withConst());
-            }
-            else
-            {
-                return "";
-            }
-            return writtenType(context, out);
+            if (type->isReferenceType())
+                return context.getLValueReferenceType(type.getNonReferenceType().withConst());
+            return {};
+        }
+
+        // A type as a declaration of `name` writes it.
+        std::string declaring(const clang::ASTContext& context, clang::QualType type,
+                              llvm::StringRef name)
+        {
+            clang::PrintingPolicy policy(context.getLangOpts());
+            policy.AnonymousTagLocations = false;
+            std::string out;
+            llvm::raw_string_ostream text(out);
+            type.print(text, policy, name);
+            return out;
+        }
+
+        // What the candidate stands for, as the trace names it (Texts).
+        const char* alternativeOf(clang::QualType type)
+        {
+            if (type->isRValueReferenceType())
+                return "reference to const; passing by value is not checked";
+            if (type->isReferenceType())
+                return "reference to const";
+            return type.isConstQualified() ? "pointer to const, top-level const kept"
+                                           : "pointer to const";
         }
     } // namespace
 
@@ -366,12 +385,17 @@ namespace ctrace::stack::analysis
             out.indeterminate = "the parameter is not found in the source";
             return out;
         }
-        out.expectedType = expectedType(context, function.getParamDecl(out.sourceIndex)->getType());
-        if (out.expectedType.empty())
+        const clang::ParmVarDecl& param = *function.getParamDecl(out.sourceIndex);
+        const clang::QualType candidate = candidateOf(context, param.getType());
+        if (candidate.isNull())
         {
             out.indeterminate = "the parameter is no pointer or reference";
             return out;
         }
+        out.expectedType = writtenType(context, candidate);
+        out.candidate = {declaring(context, param.getType(), param.getName()),
+                         declaring(context, candidate, param.getName()),
+                         alternativeOf(param.getType())};
         Planner planner(context, macros, out);
         for (const clang::FunctionDecl* declaration : pattern->redecls())
         {

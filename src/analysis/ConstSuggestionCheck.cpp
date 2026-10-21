@@ -407,6 +407,17 @@ namespace ctrace::stack::analysis
             return {std::move(why), Verdict::Indeterminate};
         }
 
+        // The rule of a suggestion, as its diagnostic names it.
+        std::string ruleOf(const ConstParamIssue& issue)
+        {
+            const char* rule = "Pointer";
+            if (issue.pointerConstOnly)
+                rule = "PointerConstOnly";
+            else if (issue.isReference)
+                rule = issue.isRvalueRef ? "ReferenceRvaluePreferValue" : "Reference";
+            return std::string("ConstParameterNotModified.") + rule;
+        }
+
         // Checks one suggestion, the target at `index`, in one unit, against the unit before the
         // rewrite: the judgement of §5.8. `after` receives the unit's compilation after the
         // rewrite, with the collisions it finds (§5.10); `definingFile` names the defining unit.
@@ -589,21 +600,44 @@ namespace ctrace::stack::analysis
             coretrace::log(coretrace::Level::Debug, "[const-suggestion] {} parameter {}: {}\n",
                            issue.funcName, issue.binding.name, outcome);
         };
-        // Each unit judged, by its file and its configuration, after T v1's line.
-        const auto traceUnits = [](const ConstParamIssue& issue,
-                                   const std::vector<std::string>& judged,
-                                   const std::vector<Judgement>& judgements)
+        // The verdict's grounds, after T v1's line (§4): the suggestion, the type it tries, where
+        // the rewrite writes it, each unit judged with its configuration, then the verdict. A
+        // suggestion whose plan is not executed has no rewrite and no unit.
+        const auto grounds = [](const ConstParamIssue& issue, const SuggestionPlan* plan,
+                                const std::vector<std::string>& judged,
+                                const std::vector<Judgement>& judgements, const Judgement& verdict)
         {
             static constexpr const char* kVerdicts[] = {"verified", "refuted", "indeterminate"};
-            for (std::size_t k = 0; k < judgements.size(); ++k)
+            static const std::map<std::string, std::vector<Edit>> kNoEdits;
+            const auto line = [&](const std::string& text)
             {
-                const Judgement& judgement = judgements[k];
-                coretrace::log(coretrace::Level::Debug,
-                               "[const-suggestion] {} parameter {}, unit {}: {}{}\n",
-                               issue.funcName, issue.binding.name, judged[k],
-                               kVerdicts[static_cast<std::size_t>(judgement.verdict)],
-                               judgement.reason.empty() ? "" : ": " + judgement.reason);
+                coretrace::log(coretrace::Level::Debug, "[const-suggestion] {} parameter {}, {}\n",
+                               issue.funcName, issue.binding.name, text);
+            };
+            const auto outcome = [](const Judgement& judgement)
+            {
+                return kVerdicts[static_cast<std::size_t>(judgement.verdict)] +
+                       (judgement.reason.empty() ? std::string() : ": " + judgement.reason);
+            };
+            line("suggestion: " + ruleOf(issue) + " on " +
+                 formatFunctionNameForMessage(issue.funcName) + ", source index " +
+                 (issue.binding.sourceIndex ? std::to_string(*issue.binding.sourceIndex) : "none"));
+            if (plan && !plan->candidate.type.empty())
+            {
+                line("transformation: " + plan->candidate.current + " becomes " +
+                     plan->candidate.type + " (" + plan->candidate.alternative + ")");
             }
+            for (const auto& [path, edits] : plan && !plan->indeterminate ? plan->edits : kNoEdits)
+            {
+                std::vector<Edit> sorted = edits;
+                std::sort(sorted.begin(), sorted.end(),
+                          [](const Edit& a, const Edit& b) { return a.offset < b.offset; });
+                for (const Edit& edit : sorted)
+                    line("rewritten at: " + path + ":" + std::to_string(edit.line));
+            }
+            for (std::size_t k = 0; k < judgements.size(); ++k)
+                line("unit " + judged[k] + ": " + outcome(judgements[k]));
+            line("verdict: " + outcome(verdict));
         };
         const auto label = [](const std::string& file, const UnitCommand* command)
         {
@@ -616,6 +650,7 @@ namespace ctrace::stack::analysis
             {
                 issue.checkLines.push_back(kNotChecked + why);
                 trace(issue, "not checked, " + why);
+                grounds(issue, nullptr, {}, {}, indeterminate(why));
             }
         };
         if (!self || (self->language != LanguageType::C && self->language != LanguageType::CXX))
@@ -688,6 +723,8 @@ namespace ctrace::stack::analysis
                 issue.checkLines.push_back(kNotChecked +
                                            std::string("the function is not found in the source"));
                 trace(issue, "not checked, the function is not found in the source");
+                grounds(issue, &plan, {}, {},
+                        indeterminate("the function is not found in the source"));
                 kept.push_back(std::move(issue));
                 continue;
             }
@@ -695,6 +732,7 @@ namespace ctrace::stack::analysis
             {
                 issue.checkLines.push_back(kNotChecked + *plan.indeterminate);
                 trace(issue, "not checked, " + *plan.indeterminate);
+                grounds(issue, &plan, {}, {}, indeterminate(*plan.indeterminate));
                 kept.push_back(std::move(issue));
                 continue;
             }
@@ -845,19 +883,19 @@ namespace ctrace::stack::analysis
             if (verdict.verdict == Verdict::Refuted)
             {
                 trace(issue, "removed, " + verdict.reason);
-                traceUnits(issue, judged, judgements);
+                grounds(issue, &plan, judged, judgements, verdict);
                 continue;
             }
             if (verdict.verdict == Verdict::Indeterminate)
             {
                 issue.checkLines.push_back(kNotChecked + verdict.reason);
                 trace(issue, "not checked, " + verdict.reason);
-                traceUnits(issue, judged, judgements);
+                grounds(issue, &plan, judged, judgements, verdict);
                 kept.push_back(std::move(issue));
                 continue;
             }
             trace(issue, "checked in " + std::to_string(judgements.size()) + " file(s)");
-            traceUnits(issue, judged, judgements);
+            grounds(issue, &plan, judged, judgements, verdict);
             const std::string checked =
                 std::string(config.compilationDatabase ? kCheckedDatabase : kCheckedAnalyzed) +
                 kCheckedResult;
