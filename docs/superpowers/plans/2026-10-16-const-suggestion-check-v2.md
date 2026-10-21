@@ -2635,6 +2635,12 @@ check_const_suggestion_trace: FAIL
 
 **Validation of stage 1:** the catalogue tests D1 (T), D2, D3, D4, D5, D7, D11, D14, D15, D16, D17, Review Focus 2 to 4, the tests that rulings 6, 11, 12, 13 and 14 add, and the unit tests that ruling 15 adapts, pass; every T v1 test passes, except the changed expectations of D14, D15, D16 and D17; the suite without and with the option, the unit tests, on macOS and Linux; the review cases t1 to t15 give the verdicts of §6 for the stage-1 IDs; CI green and code scanning triaged.
 
+**Pull requests opened after stage 1 (the user, 2026-10-21).** For CI and code scanning, the user had both branches published once stage 1 passed locally, ahead of the spec's calendar (§9, step 6, which opens the draft at the end):
+- #238, draft, `237-parameter-binding-abi` at `d711321`, `Fixes #237`;
+- #239, draft, `217-t-v2` at `00a21b7`, part of #217; it carries `d711321`.
+
+Both target `main`, and neither is merged; #221 stays the draft of T v1. From then on, each stage's validation also runs on #239: CI green, code scanning compared with `main`, the triage summarized in the description, which states what remains. Task F.3 keeps the description up to date instead of opening the pull request.
+
 ## Stage 2 — D6, D8, D10, D12, D13
 
 ### Task 2.1: warning policy (D6)
@@ -2674,6 +2680,6 @@ check_const_suggestion_trace: FAIL
 **Work:** the protocol of §8. The criterion is +10 % on the self-analysis.
 
 ### Task F.3: delivery
-**Work:** README; a draft pull request after the user's go; CI; code scanning triaged; final review on the updated base. No merge.
+**Work:** README; the description of the draft #239, opened after stage 1, brought up to date; CI; code scanning triaged; final review on the updated base. No merge.
 
 **Validation of the final phase:** every classification explained; cost reported against the criterion; CI green; triage summarized.
