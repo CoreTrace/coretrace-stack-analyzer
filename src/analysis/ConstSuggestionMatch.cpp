@@ -88,6 +88,41 @@ namespace ctrace::stack::analysis
         // target becomes another specialization of the same template, proposes that pair; the
         // proposals of every reference are checked together, and each new pair maps more
         // instantiations, until none is added.
+        // The references at each key, in the order of the traversal (Task 3.2, O1): those after
+        // the rewrite, and those before it at a key without instantiation context, which no pair
+        // changes, are grouped once; the others go through each round's pairs.
+        struct At
+        {
+            std::size_t first = 0; // the position of its first reference before the rewrite
+            FactKey key;
+            std::vector<const Fact*> facts;
+        };
+        std::map<FactKey, std::vector<const Fact*>> nowAt;
+        for (const Fact& fact : after.facts)
+        {
+            if (fact.kind == FactKind::Reference)
+                nowAt[fact.key].push_back(&fact);
+        }
+        std::vector<At> fixed;
+        std::vector<std::pair<std::size_t, const Fact*>> contextual;
+        {
+            std::map<FactKey, std::size_t> slot;
+            for (std::size_t i = 0; i < before.facts.size(); ++i)
+            {
+                const Fact& fact = before.facts[i];
+                if (fact.kind != FactKind::Reference)
+                    continue;
+                if (!fact.key.contexts.empty())
+                {
+                    contextual.emplace_back(i, &fact);
+                    continue;
+                }
+                const auto [it, added] = slot.try_emplace(fact.key, fixed.size());
+                if (added)
+                    fixed.push_back({i, fact.key, {}});
+                fixed[it->second].facts.push_back(&fact);
+            }
+        }
         for (bool added = true; added;)
         {
             added = false;
@@ -103,33 +138,39 @@ namespace ctrace::stack::analysis
                 }
                 return key;
             };
-            std::vector<FactKey> order;
-            std::map<FactKey, std::vector<const Fact*>> wasAt;
-            std::map<FactKey, std::vector<const Fact*>> nowAt;
-            for (const Fact& fact : before.facts)
+            std::vector<At> moving;
             {
-                if (fact.kind != FactKind::Reference)
-                    continue;
-                if (const std::optional<FactKey> key = forward(fact.key))
+                std::map<FactKey, std::size_t> slot;
+                for (const auto& [i, fact] : contextual)
                 {
-                    if (!wasAt.count(*key))
-                        order.push_back(*key);
-                    wasAt[*key].push_back(&fact);
+                    if (const std::optional<FactKey> key = forward(fact->key))
+                    {
+                        const auto [it, added] = slot.try_emplace(*key, moving.size());
+                        if (added)
+                            moving.push_back({i, *key, {}});
+                        moving[it->second].facts.push_back(fact);
+                    }
                 }
             }
-            for (const Fact& fact : after.facts)
+            // Both, merged in the order of their first references: a key with contexts never
+            // equals one without.
+            std::vector<const At*> order;
+            order.reserve(fixed.size() + moving.size());
+            for (std::size_t a = 0, b = 0; a < fixed.size() || b < moving.size();)
             {
-                if (fact.kind == FactKind::Reference)
-                    nowAt[fact.key].push_back(&fact);
+                if (b == moving.size() || (a < fixed.size() && fixed[a].first < moving[b].first))
+                    order.push_back(&fixed[a++]);
+                else
+                    order.push_back(&moving[b++]);
             }
             std::vector<std::string> proposing;                   // in the order of the facts
             std::map<std::string, std::vector<std::string>> to;   // before to after
             std::map<std::string, std::vector<std::string>> from; // after to before
             std::map<std::string, std::string> shown;
-            for (const FactKey& key : order)
+            for (const At* at : order)
             {
-                const std::vector<const Fact*>& wasFacts = wasAt[key];
-                const auto nowFacts = nowAt.find(key);
+                const std::vector<const Fact*>& wasFacts = at->facts;
+                const auto nowFacts = nowAt.find(at->key);
                 if (nowFacts == nowAt.end() || nowFacts->second.size() != wasFacts.size())
                     continue;
                 for (std::size_t k = 0; k < wasFacts.size(); ++k)
