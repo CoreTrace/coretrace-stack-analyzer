@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "StackUsageAnalyzer.hpp"
 #include "analysis/AnalyzerUtils.hpp"
+#include "analysis/ConstSuggestionCheck.hpp"
+#include "analysis/ConstSuggestionInternal.hpp"
 #include "app/CrossTUSummaryDriver.hpp"
 #include "app/AnalyzerApp.hpp"
 #include "cli/ArgParser.hpp"
@@ -21,6 +23,7 @@
 #include "analyzer/DiagnosticEmitter.hpp"
 #include "analyzer/LocationResolver.hpp"
 #include "analyzer/ModulePreparationService.hpp"
+#include "mangle.hpp"
 
 #include <algorithm>
 #include <cstdio>
@@ -745,6 +748,266 @@ namespace
         report.expect(linkerSymbolName(*elf->getFunction("_ZN5probe4peekEPNSt3__13tagE")) !=
                           linkerSymbolName(*elf->getFunction("_ZN5probe4peekEPNSt7__cxx113tagE")),
                       "LinkerSymbolName: std::__1 and std::__cxx11 symbols stay distinct");
+        return report.failures == 0;
+    }
+
+    /// #217: the code generated before and after a const rewrite is compared once the symbols
+    /// the rewrite renames are paired, by the pairs its correspondences established and by them
+    /// only: a symbol renamed without a pair, even one whose name differs only by const, is a
+    /// difference.
+    bool testConstSuggestionCodeComparison(TestReport& report)
+    {
+        using ctrace::stack::analysis::rewrittenCodeDifference;
+        using ctrace::stack::analysis::SymbolPair;
+        llvm::LLVMContext context;
+        llvm::SMDiagnostic error;
+        const auto parse =
+            [&](std::string text, const std::string& function, const std::string& typeInfo)
+        {
+            for (const auto& [from, to] : {std::pair{std::string("@F"), "@" + function},
+                                           std::pair{std::string("@TI"), "@" + typeInfo}})
+            {
+                for (std::size_t at = text.find(from); at != std::string::npos;
+                     at = text.find(from, at + to.size()))
+                {
+                    text.replace(at, from.size(), to);
+                }
+            }
+            return llvm::parseAssemblyString(text, error, context);
+        };
+        // The rewritten function and its caller.
+        const std::string called = "define i32 @F(ptr %p) {\n"
+                                   "  %v = load i32, ptr %p\n"
+                                   "  ret i32 %v\n"
+                                   "}\n"
+                                   "define i32 @_Z3usePi(ptr %p) {\n"
+                                   "  %r = call i32 @F(ptr %p)\n"
+                                   "  ret i32 %r\n"
+                                   "}\n";
+        // The rewritten function throws its parameter: the thrown type changes with it, and a
+        // handler `catch (int*)` elsewhere no longer catches it.
+        const std::string thrown = "@TI = external constant ptr\n"
+                                   "declare ptr @__cxa_allocate_exception(i64)\n"
+                                   "declare void @__cxa_throw(ptr, ptr, ptr)\n"
+                                   "define void @F(ptr %p) {\n"
+                                   "  %e = call ptr @__cxa_allocate_exception(i64 8)\n"
+                                   "  store ptr %p, ptr %e\n"
+                                   "  call void @__cxa_throw(ptr %e, ptr @TI, ptr null)\n"
+                                   "  unreachable\n"
+                                   "}\n";
+        const std::unique_ptr<llvm::Module> calledBefore = parse(called, "_Z1fPi", "");
+        const std::unique_ptr<llvm::Module> calledAfter = parse(called, "_Z1fPKi", "");
+        const std::unique_ptr<llvm::Module> thrownBefore = parse(thrown, "_Z1fPi", "_ZTIPi");
+        const std::unique_ptr<llvm::Module> thrownAfter = parse(thrown, "_Z1fPKi", "_ZTIPKi");
+        if (!calledBefore || !calledAfter || !thrownBefore || !thrownAfter)
+        {
+            report.expect(false, "ConstSuggestionCode setup: the IR does not parse");
+            return false;
+        }
+        const std::vector<SymbolPair> function = {{"_Z1fPi", "_Z1fPKi"}};
+        report.expect(!rewrittenCodeDifference(*calledBefore, *calledAfter, function),
+                      "ConstSuggestionCode: the rewritten function and its caller are renamed "
+                      "together");
+        report.expect(rewrittenCodeDifference(*calledBefore, *calledAfter, {}).has_value(),
+                      "ConstSuggestionCode: a function renamed without an established pair is a "
+                      "difference");
+        report.expect(rewrittenCodeDifference(*thrownBefore, *thrownAfter, function).has_value(),
+                      "ConstSuggestionCode: typeinfo for int* and for int const*, without a pair, "
+                      "are not paired");
+        return report.failures == 0;
+    }
+
+    /// #217: the code comparison sets aside what carries no meaning for an execution: debug
+    /// information, diagnostic metadata, the descriptive names of alias scopes, the numbers of
+    /// metadata and the comments of the printed IR. Every other metadata is compared by contents.
+    bool testConstSuggestionNormalizations(TestReport& report)
+    {
+        using ctrace::stack::analysis::rewrittenCodeDifference;
+        llvm::LLVMContext context;
+        llvm::SMDiagnostic error;
+        const auto differ = [&](const std::string& before, const std::string& after)
+        {
+            const std::unique_ptr<llvm::Module> was =
+                llvm::parseAssemblyString(before, error, context);
+            const std::unique_ptr<llvm::Module> now =
+                llvm::parseAssemblyString(after, error, context);
+            if (!was || !now)
+                return std::optional<bool>();
+            return std::optional<bool>(rewrittenCodeDifference(*was, *now, {}).has_value());
+        };
+        const auto replaced = [](std::string text, const std::string& from, const std::string& to)
+        {
+            text.replace(text.find(from), from.size(), to);
+            return text;
+        };
+        const std::string range = "define i32 @f(ptr %p) {\n"
+                                  "  %v = load i32, ptr %p, !range !0\n"
+                                  "  ret i32 %v\n"
+                                  "}\n"
+                                  "!0 = !{i32 0, i32 10}\n";
+        const std::string debug =
+            "define i32 @f(ptr %p) !dbg !3 {\n"
+            "  %v = load i32, ptr %p, !dbg !6\n"
+            "  ret i32 %v, !dbg !6\n"
+            "}\n"
+            "!llvm.dbg.cu = !{!0}\n"
+            "!llvm.module.flags = !{!2}\n"
+            "!0 = distinct !DICompileUnit(language: DW_LANG_C11, file: !1, emissionKind: "
+            "FullDebug)\n"
+            "!1 = !DIFile(filename: \"a.c\", directory: \"/\")\n"
+            "!2 = !{i32 2, !\"Debug Info Version\", i32 3}\n"
+            "!3 = distinct !DISubprogram(name: \"f\", scope: !1, file: !1, line: 1, type: !4, "
+            "spFlags: DISPFlagDefinition, unit: !0)\n"
+            "!4 = !DISubroutineType(types: !5)\n"
+            "!5 = !{}\n"
+            "!6 = !DILocation(line: 2, column: 3, scope: !3)\n";
+        const std::string srcloc = "define void @f() {\n"
+                                   "  call void asm sideeffect \"nop\", \"\"(), !srcloc !0\n"
+                                   "  ret void\n"
+                                   "}\n"
+                                   "!0 = !{i64 100}\n";
+        const std::string annotation = "define void @f() {\n"
+                                       "  %a = alloca i32, align 4, !annotation !0\n"
+                                       "  ret void\n"
+                                       "}\n"
+                                       "!0 = !{!\"auto-init\"}\n";
+        const std::string scopes =
+            "declare void @llvm.experimental.noalias.scope.decl(metadata)\n"
+            "define void @f(ptr %p, ptr %q) {\n"
+            "  call void @llvm.experimental.noalias.scope.decl(metadata !2)\n"
+            "  %v = load i32, ptr %p, align 4, !alias.scope !2, !noalias !3\n"
+            "  store i32 %v, ptr %q, align 4, !alias.scope !3, !noalias !2\n"
+            "  ret void\n"
+            "}\n"
+            "!0 = distinct !{!0, !\"domain of f(int*)\"}\n"
+            "!1 = distinct !{!1, !0, !\"f(int*): %p\"}\n"
+            "!4 = distinct !{!4, !0, !\"f(int*): %q\"}\n"
+            "!2 = !{!1}\n"
+            "!3 = !{!4}\n";
+        const std::string flags = "define void @f() {\n"
+                                  "  ret void\n"
+                                  "}\n"
+                                  "!llvm.module.flags = !{!0}\n"
+                                  "!0 = !{i32 1, !\"wchar_size\", i32 4}\n";
+        // The same two functions, defined in the other order: the printer numbers their loop
+        // metadata in the other order.
+        const std::string loopF = "define void @f() {\n"
+                                  "entry:\n"
+                                  "  br label %a\n"
+                                  "a:\n"
+                                  "  br label %a, !llvm.loop !0\n"
+                                  "}\n";
+        const std::string loopG = "define void @g() {\n"
+                                  "entry:\n"
+                                  "  br label %b\n"
+                                  "b:\n"
+                                  "  br label %b, !llvm.loop !1\n"
+                                  "}\n";
+        const std::string loops = "!0 = distinct !{!0, !2}\n"
+                                  "!1 = distinct !{!1, !3}\n"
+                                  "!2 = !{!\"llvm.loop.mustprogress\"}\n"
+                                  "!3 = !{!\"llvm.loop.unroll.disable\"}\n";
+        const std::optional<bool> orderChanged =
+            differ(loopF + loopG + loops, loopG + loopF + loops);
+        // The same code, its join block's predecessors listed in the other order: only the
+        // "; preds" comment of the printed IR changes.
+        const std::string join = "define i32 @f(i1 %c) {\n"
+                                 "entry:\n"
+                                 "  br i1 %c, label %a, label %b\n"
+                                 "a:\n"
+                                 "  br label %join\n"
+                                 "b:\n"
+                                 "  br label %join\n"
+                                 "join:\n"
+                                 "  %v = phi i32 [ 1, %a ], [ 2, %b ]\n"
+                                 "  ret i32 %v\n"
+                                 "}\n";
+        const std::optional<bool> predecessorsChanged =
+            differ(join, replaced(join, "  ret i32 %v\n",
+                                  "  ret i32 %v\n  uselistorder label %join, { 1, 0 }\n"));
+        const std::optional<bool> rangeChanged =
+            differ(range, replaced(range, "i32 0, i32 10", "i32 0, i32 5"));
+        const std::optional<bool> debugChanged =
+            differ(debug, replaced(debug, "column: 3", "column: 9"));
+        const std::optional<bool> srclocChanged =
+            differ(srcloc, replaced(srcloc, "i64 100", "i64 200"));
+        const std::optional<bool> annotationChanged =
+            differ(annotation, replaced(annotation, "auto-init", "other"));
+        const std::optional<bool> namesChanged = differ(
+            scopes,
+            replaced(replaced(replaced(scopes, "domain of f(int*)", "domain of f(const int*)"),
+                              "f(int*): %p", "f(const int*): %p"),
+                     "f(int*): %q", "f(const int*): %q"));
+        const std::optional<bool> scopesChanged =
+            differ(scopes, replaced(scopes, "!alias.scope !3, !noalias !2",
+                                    "!alias.scope !2, !noalias !2"));
+        const std::optional<bool> flagsChanged = differ(flags, replaced(flags, "i32 4}", "i32 2}"));
+        if (!orderChanged || !predecessorsChanged || !rangeChanged || !debugChanged ||
+            !srclocChanged || !annotationChanged || !namesChanged || !scopesChanged ||
+            !flagsChanged)
+        {
+            report.expect(false, "ConstSuggestionMetadata setup: the IR does not parse: " +
+                                     error.getMessage().str());
+            return false;
+        }
+        report.expect(!*orderChanged,
+                      "ConstSuggestionMetadata: metadata numbered in another order are the same");
+        report.expect(!*predecessorsChanged,
+                      "ConstSuggestionCode: predecessors listed in another order are the same");
+        report.expect(*rangeChanged, "ConstSuggestionMetadata: another !range is a difference");
+        report.expect(!*debugChanged, "ConstSuggestionMetadata: debug information is not compared");
+        report.expect(!*srclocChanged,
+                      "ConstSuggestionMetadata: the source position of inline assembly is not "
+                      "compared");
+        report.expect(!*annotationChanged, "ConstSuggestionMetadata: annotations are not compared");
+        report.expect(!*namesChanged,
+                      "ConstSuggestionMetadata: the descriptive names of alias scopes are not "
+                      "compared");
+        report.expect(*scopesChanged,
+                      "ConstSuggestionMetadata: another alias scope on an access is a difference");
+        report.expect(*flagsChanged,
+                      "ConstSuggestionMetadata: another module flag is a difference");
+        return report.failures == 0;
+    }
+
+    /// #217 (D10, D18): step 3 detects a rewrite that loses the parameter's own top-level const.
+    /// The plan of read_only(int *const p) is executed with an edit that writes `const int *`
+    /// instead of `const int *const`: the declaration does not get the candidate of its type,
+    /// whatever the planner's later edits are.
+    bool testConstSuggestionTopLevelQualifierLost(TestReport& report)
+    {
+        namespace cs = ctrace::stack::analysis::const_suggestion;
+        const std::filesystem::path dir =
+            std::filesystem::temp_directory_path() / "ct_const_suggestion_top_level_lost";
+        std::filesystem::create_directories(dir);
+        const std::filesystem::path file = dir / "k.c";
+        const std::string text = "int read_only(int *const p) { return *p; }\n";
+        std::ofstream(file) << text;
+        const ctrace::stack::analysis::UnitCommand command{{"clang", "-c", file.string()},
+                                                           dir.string()};
+        std::vector<cs::Target> targets(1);
+        targets[0].symbol = "read_only";
+        targets[0].sourceIndex = 0;
+        const cs::UnitFacts before = cs::inspect(command, nullptr, {}, targets, "test", false);
+        if (before.entities.size() != 1 || before.entities[0].plan.edits.size() != 1)
+        {
+            report.expect(false, "ConstSuggestionTopLevel setup: read_only is not planned");
+            return false;
+        }
+        cs::SuggestionPlan lost = before.entities[0].plan;
+        const std::string written = "int *const";
+        const std::size_t at = text.find(written);
+        lost.edits.begin()->second = {{at, written.size(), "const int *", 1}};
+        std::string rewritten = text;
+        rewritten.replace(at, written.size(), "const int *");
+        cs::Target target = targets[0];
+        target.plan = &lost;
+        target.expected = before.entities[0].expected;
+        const cs::UnitFacts after = cs::inspect(
+            command, &lost, {{lost.edits.begin()->first, rewritten}}, {target}, "test", false);
+        report.expect(after.entities.size() == 1 && after.entities[0].withoutCandidate,
+                      "ConstSuggestionTopLevel: a rewrite that loses the pointer's own const does "
+                      "not get the candidate");
         return report.failures == 0;
     }
 
@@ -2484,6 +2747,32 @@ namespace
         return report.failures == 0;
     }
 
+    /// A symbol is recognized as mangled and shown demangled when a demangler reads it, whatever
+    /// the C++ runtime: one that predates a mangling, such as a C++23 explicit object member's
+    /// (macOS 14, GCC 11), leaves it to LLVM's (#240). A name that neither reads stays as it is.
+    bool testSymbolDemangling(TestReport& report)
+    {
+        using ctrace::stack::analysis::formatFunctionNameForMessage;
+        const std::string explicitObject = "_ZNH6Reader4peekERKS_Pi";
+        const std::string shown = "Reader::peek(this Reader const&, int*)";
+        report.expect(ctrace_tools::isMangled(explicitObject),
+                      "Demangling: an explicit object member's symbol is a mangled name");
+        report.expect(ctrace_tools::demangle(explicitObject.c_str()) == shown,
+                      "Demangling: an explicit object member's symbol is shown demangled");
+        report.expect(formatFunctionNameForMessage(explicitObject) == shown,
+                      "Demangling: a message names an explicit object member demangled");
+        report.expect(ctrace_tools::isMangled("_ZN6Reader4peekEPi") &&
+                          ctrace_tools::demangle("_ZN6Reader4peekEPi") == "Reader::peek(int*)",
+                      "Demangling: a member's symbol is recognized and shown demangled");
+        report.expect(!ctrace_tools::isMangled("read_value") &&
+                          formatFunctionNameForMessage("read_value") == "read_value",
+                      "Demangling: a C function's name is no mangled name");
+        report.expect(!ctrace_tools::isMangled("_Z_not_a_symbol") &&
+                          ctrace_tools::demangle("_Z_not_a_symbol") == "_Z_not_a_symbol",
+                      "Demangling: a name that no demangler reads stays as it is");
+        return report.failures == 0;
+    }
+
     /// resolveParameterDebugBinding: each parameter gets its own type, and its position among the
     /// parameters the source declares. The others are artificial: `this`, the vtt that the
     /// base-object constructor (C2) of a class with a virtual base takes, is_most_derived under the
@@ -2521,6 +2810,9 @@ namespace
             }
             return parameters;
         };
+        // The arguments' bindings, in order. An expected entry written "?name: binding" is the
+        // parameter of an argument that only some ABIs pass: absent, or at that place with that
+        // binding, its IR name the parameter's or derived from it (tag.coerce).
         const auto check = [&](const LoadedModule& loaded, const char* symbol,
                                const std::vector<std::string>& expected)
         {
@@ -2529,7 +2821,28 @@ namespace
             std::string text;
             for (const std::string& parameter : actual)
                 text += " [" + parameter + "]";
-            report.expect(actual == expected,
+            const auto passes = [](const std::string& parameter, const std::string& optional)
+            {
+                const std::size_t colon = optional.find(':');
+                const std::string name = optional.substr(1, colon - 1);
+                return parameter == optional.substr(1) ||
+                       (parameter.starts_with(name + ".") &&
+                        parameter.substr(parameter.find(':')) == optional.substr(colon));
+            };
+            std::size_t next = 0;
+            bool matches = true;
+            for (const std::string& entry : expected)
+            {
+                if (entry.starts_with("?"))
+                {
+                    if (next < actual.size() && passes(actual[next], entry))
+                        ++next;
+                    continue;
+                }
+                matches = matches && next < actual.size() && actual[next] == entry;
+                ++next;
+            }
+            report.expect(matches && next == actual.size(),
                           std::string("ParameterDebugBinding: ") + symbol + text);
         };
         const auto load =
@@ -2574,7 +2887,8 @@ namespace
               {".block_descriptor: artificial, source none", "x: int *, source 0",
                "y: double *, source 1"});
         // A variadic function's debug type ends with a null entry for `...`, which no parameter
-        // takes; an empty parameter takes no IR argument, but keeps its debug declaration.
+        // takes; an empty parameter keeps its debug declaration, and takes an IR argument only on
+        // some ABIs (an i8 under AAPCS64 on Linux, none on x86-64 or Apple arm64).
         check(itanium, "_ZN7VarargsC2EPiPdz",
               {"this: artificial, source none", "vtt: artificial, source none",
                "x: int *, source 0", "y: double *, source 1"});
@@ -2583,7 +2897,7 @@ namespace
                "x: int *, source 0", "y: double *, source 1"});
         check(itanium, "_ZN6TaggedC2EPi3Tag",
               {"this: artificial, source none", "vtt: artificial, source none",
-               "x: int *, source 0"});
+               "x: int *, source 0", "?tag: Tag, source 1"});
         check(itanium, "_Z8make_bigPiz",
               {"agg.result: artificial, source none", "p: int *, source 0"});
 
@@ -2598,7 +2912,7 @@ namespace
         // The empty parameter comes first: x is the second parameter the source declares.
         check(itanium, "_ZN8TagFirstC2E3TagPi",
               {"this: artificial, source none", "vtt: artificial, source none",
-               "x: int *, source 1"});
+               "?tag: Tag, source 0", "x: int *, source 1"});
 
         // Optimized code spills nothing: each argument is bound through its own debug records.
         check(optimized, "_ZN8VariadicC2EPiPdz",
@@ -2663,6 +2977,9 @@ int main(int argc, char** argv)
     (void)testSarifRuleCweTags(report);
     (void)testSarifSecuritySeverity(report);
     (void)testAnalysisIncompleteNotesHaveTheirOwnRules(report);
+    (void)testConstSuggestionCodeComparison(report);
+    (void)testConstSuggestionNormalizations(report);
+    (void)testConstSuggestionTopLevelQualifierLost(report);
     (void)testUnresolvedCallsMarkStackUnknown(repoRoot, report);
     (void)testAssumeExternalFrameReplacesUnknown(repoRoot, report);
     (void)testUninitializedFixpointBudgetIsExplicit(repoRoot, report);
@@ -2688,6 +3005,7 @@ int main(int argc, char** argv)
     (void)testOwnershipCollectorExceptions(repoRoot, report);
     (void)testOwnershipSummaryIndex(repoRoot, report);
     (void)testCompileIRCacheWithoutCompilerRevision(report);
+    (void)testSymbolDemangling(report);
 
     if (report.failures == 0)
     {

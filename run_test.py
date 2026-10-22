@@ -99,6 +99,8 @@ _RE_STACK_LIMIT = re.compile(r"//\s*stack-limit\s*[:=]\s*(\S+)", re.IGNORECASE)
 _RE_RESOURCE_MODEL = re.compile(r"//\s*resource-model\s*[:=]\s*(\S+)", re.IGNORECASE)
 _RE_ESCAPE_MODEL = re.compile(r"//\s*escape-model\s*[:=]\s*(\S+)", re.IGNORECASE)
 _RE_BUFFER_MODEL = re.compile(r"//\s*buffer-model\s*[:=]\s*(\S+)", re.IGNORECASE)
+# `// analyzer-arg: <arg>`: one more analyzer argument for both passes of the fixture.
+_RE_ANALYZER_ARG = re.compile(r"//\s*analyzer-arg\s*[:=]\s*(\S+)", re.IGNORECASE)
 _RE_STRICT_DIAG = re.compile(r"//\s*strict-diagnostic-count\s*[:=]\s*(\S+)", re.IGNORECASE)
 _RE_STRICT_DETAILS = re.compile(r"//\s*strict-expectation-details\s*[:=]\s*(\S+)", re.IGNORECASE)
 # `// [smt-z3] not contains: ...` or `// [default] at line ...`: an expectation for one pass.
@@ -361,6 +363,7 @@ def extract_expectations(c_path: Path):
     resource_model = None
     escape_model = None
     buffer_model = None
+    analyzer_args = []
     strict_diag_count = None
     strict_details = None
     lines = c_path.read_text().splitlines()
@@ -397,6 +400,11 @@ def extract_expectations(c_path: Path):
         buffer_match = _RE_BUFFER_MODEL.match(stripped)
         if buffer_match:
             buffer_model = buffer_match.group(1)
+            i += 1
+            continue
+        analyzer_arg_match = _RE_ANALYZER_ARG.match(stripped)
+        if analyzer_arg_match:
+            analyzer_args.append(analyzer_arg_match.group(1))
             i += 1
             continue
         strict_match = _RE_STRICT_DIAG.match(stripped)
@@ -467,6 +475,7 @@ def extract_expectations(c_path: Path):
         strict_diag_count,
         strict_details,
         unknown_scopes,
+        analyzer_args,
     )
 
 
@@ -1008,15 +1017,17 @@ def parse_human_diagnostic_messages(output: str):
 def _check_human_vs_json_parity_sample(sample: Path):
     lines = []
     sample_ok = True
+    # The arguments the fixture declares with `// analyzer-arg:`, as check_file passes them.
+    *_, fixture_args = extract_expectations(sample)
 
-    human = run_analyzer([str(sample)])
+    human = run_analyzer([str(sample), *fixture_args])
     if human.returncode != 0:
         lines.append(f"  ❌ human run failed for {sample} (code {human.returncode})")
         lines.append(human.stdout or "")
         lines.append(human.stderr or "")
         return False, "\n".join(lines).rstrip() + "\n"
 
-    structured = run_analyzer([str(sample), "--format=json"])
+    structured = run_analyzer([str(sample), "--format=json", *fixture_args])
     if structured.returncode != 0:
         lines.append(f"  ❌ json run failed for {sample} (code {structured.returncode})")
         lines.append(structured.stdout or "")
@@ -2765,11 +2776,12 @@ def _check_cross_tu_rule(
     rule_id: str,
     cases: list[tuple[str, list[str], list[str]]],
     copied_cases: list[tuple[str, list[str], list[str]]],
+    extra_args: tuple[str, ...] = (),
 ) -> bool:
     """
     Runs each case in both passes: the analyzer over its fixtures, then the functions reported
     under rule_id. The analyzer sorts its inputs: copied_cases run on copies named so that the
-    files keep the listed order.
+    files keep the listed order. extra_args go to every run.
     """
     print(f"=== Testing {title} ===")
     fixtures = RUN_CONFIG.test_dir / directory
@@ -2811,7 +2823,7 @@ def _check_cross_tu_rule(
                 runs.append((f"{pass_name}, {label}", files, pass_args, expected))
 
         for label, files, extra, expected in runs:
-            found = reported(files, extra)
+            found = reported(files, [*extra, *extra_args])
             if found == expected:
                 print(f"  ✅ {label}: {found}")
             else:
@@ -2857,6 +2869,1099 @@ def check_const_param_contract_message_across_files() -> bool:
     print("  ✅ use: reported for the contract of bump, and says so")
     print()
     return True
+
+
+def check_const_suggestion_cross_tu() -> bool:
+    """
+    #217: a suggested const type is reported only if every analyzed file still compiles with it,
+    once every declaration the defining file sees is rewritten. Another analyzed file that stores
+    the function where a non-const parameter is expected removes the suggestion. One that declares
+    it itself, without the header, or converts its address with an explicit cast, keeps it, not
+    checked: whether that matters depends on how the files are linked, or on what the cast hides.
+    A homonym with internal linkage in another file does not change it. A file that is not
+    analyzed is not checked. The callback and cast files sort before the definition, the
+    redeclaration after it.
+    """
+    return _check_cross_tu_rule(
+        "suggested const types checked in every analyzed file",
+        "pointer_reference-const_correctness",
+        "cross-tu-const-suggestion-",
+        "ConstParameterNotModified.Pointer",
+        [
+            ("def alone", ["def.c"], ["read_value"]),
+            ("def and a caller", ["def.c", "caller.c"], ["read_value"]),
+            ("def and a callback of the old type", ["def.c", "callback.c"], []),
+            ("def and a redeclaration", ["def.c", "redecl.c"], ["read_value"]),
+            ("def and an explicit cast", ["def.c", "cast.c"], ["read_value"]),
+            # Another file's homonym with internal linkage is another function.
+            (
+                "a static function and a static homonym",
+                ["static-read.c", "static-write.c"],
+                ["helper"],
+            ),
+            (
+                "an anonymous namespace's function and its homonym",
+                ["anonymous-read.cpp", "anonymous-write.cpp"],
+                ["_ZN12_GLOBAL__N_16helperEPi"],
+            ),
+        ],
+        [],
+        ("--experimental-const-suggestion-check",),
+    )
+
+
+def check_const_suggestion_without_source() -> bool:
+    """
+    #217: a suggestion made on LLVM IR, with no source to rewrite, is kept and says that the
+    suggested type was not checked with Clang. So is a suggestion for a function that an analyzed
+    IR input uses: that input cannot be recompiled. Neither claims the Clang check.
+    """
+    print("=== Testing const suggestions without source ===")
+    fixtures = RUN_CONFIG.test_dir / "pointer_reference-const_correctness"
+    checked = "checked in the analyzed files only"
+
+    def message(files: list[Path], function: str) -> Optional[str]:
+        result = run_analyzer(
+            [*map(str, files), "--format=json", "--experimental-const-suggestion-check"]
+        )
+        try:
+            diagnostics = json.loads(result.stdout or "").get("diagnostics", [])
+        except json.JSONDecodeError:
+            return None
+        for d in diagnostics:
+            if str(d.get("ruleId", "")).startswith("ConstParameterNotModified") and str(
+                d.get("location", {}).get("function", "")
+            ) == function:
+                return str(d.get("details", {}).get("message", ""))
+        return None
+
+    ok = True
+    for label, files, function, expected in (
+        (
+            "IR input alone",
+            [fixtures / "const-suggestion-ir-input.ll"],
+            "read_value_ir",
+            "not checked with Clang: no source file, so whether the suggested type compiles "
+            "was not verified",
+        ),
+        (
+            "source function used by an IR input",
+            [
+                fixtures / "cross-tu-const-suggestion-def.c",
+                fixtures / "cross-tu-const-suggestion-ir-caller.ll",
+            ],
+            "read_value",
+            "cross-tu-const-suggestion-ir-caller.ll uses the function but has no source",
+        ),
+    ):
+        text = message(files, function)
+        if text is not None and expected in text and checked not in text:
+            print(f"  ✅ {label}")
+        else:
+            print(f"  ❌ {label}: {text!r}")
+            ok = False
+    print()
+    return ok
+
+
+def check_const_suggestion_compilation_database() -> bool:
+    """
+    #217: with a compilation database, a suggested const type is checked in every file the
+    database lists that sees the change, analyzed or not, with its own compile command. A file
+    that is not analyzed and stores the function where a non-const parameter is expected removes
+    the suggestion, even listed after a file that cannot be checked. So does a file that takes the
+    address of a method with the old type: it sees the change through the header alone. A file
+    that declares the function itself, without the header, keeps the suggestion as not checked,
+    and the reason names it and the link it assumes; so does a file that converts the function's
+    address with an explicit cast, and the reason names the cast. A file that sees the change but
+    does not compile as it is, or cannot be preprocessed, keeps the suggestion as not checked,
+    without the claim of the check. A file that does not see the change is not compiled.
+    """
+    print("=== Testing const suggestions checked in the compilation database ===")
+    # Absolute: a compilation database names absolute directories.
+    fixtures = (RUN_CONFIG.test_dir / "pointer_reference-const_correctness").resolve()
+    prefix = "cross-tu-const-suggestion-"
+    checked = "checked in every file of the compilation database that sees the change"
+    method = "_ZNK6Reader4readEPi"
+    generated = {
+        "broken.c": f'#include "{prefix}api.h"\nint broken(void) {{ return read_value(0) }}\n',
+        "missing.c": '#include "no-such-header.h"\n',
+        "unrelated.c": "int unrelated(void) { return 0 }\n",
+        # The database lists its files sorted: this callback comes after broken.c.
+        "stores-reader.c": f'#include "{prefix}api.h"\n'
+        "int (*const stored_reader)(int*) = read_value;\n",
+        "method.hpp": "struct Reader\n{\n    int read(int* p) const;\n};\n",
+        "method.cpp": '#include "method.hpp"\n'
+        "int Reader::read(int* p) const\n{\n    return *p;\n}\n",
+        "member-pointer.cpp": '#include "method.hpp"\n'
+        "int (Reader::*const stored)(int*) const = &Reader::read;\n",
+    }
+    ok = True
+    with tempfile.TemporaryDirectory(prefix="ct_const_suggestion_database_") as tmp:
+        # Resolved: the analyzer names files by their real path.
+        root = Path(tmp).resolve()
+        for name, text in generated.items():
+            (root / name).write_text(text)
+
+        def message(label: str, listed: list[str], function: str) -> tuple[bool, Optional[str]]:
+            """Whether the analysis ran, and the message of the suggestion, if it is reported."""
+            files = [root / f if f in generated else fixtures / f"{prefix}{f}" for f in listed]
+            database = root / label.replace(" ", "-").replace("'", "") / "compile_commands.json"
+            database.parent.mkdir()
+            database.write_text(
+                json.dumps(
+                    [
+                        {
+                            "directory": str(fixtures),
+                            "file": str(f),
+                            "arguments": (
+                                ["clang++", "-std=c++17"] if f.suffix == ".cpp" else ["clang"]
+                            )
+                            + ["-I", str(fixtures), "-c", str(f)],
+                        }
+                        for f in files
+                    ]
+                )
+            )
+            # The database is an input the cache key does not cover.
+            result = run_analyzer_uncached(
+                [
+                    str(files[0]),
+                    f"--compile-commands={database}",
+                    "--format=json",
+                    "--experimental-const-suggestion-check",
+                ]
+            )
+            try:
+                diagnostics = json.loads(result.stdout or "").get("diagnostics", [])
+            except json.JSONDecodeError:
+                return False, None
+            ran = result.returncode == 0
+            for d in diagnostics:
+                if str(d.get("ruleId", "")).startswith("ConstParameterNotModified") and str(
+                    d.get("location", {}).get("function", "")
+                ) == function:
+                    return ran, str(d.get("details", {}).get("message", ""))
+            return ran, None
+
+        for label, listed, function, expected in (
+            ("a caller", ["def.c", "caller.c"], "read_value", checked),
+            (
+                "a callback of the old type, not analyzed",
+                ["def.c", "callback.c"],
+                "read_value",
+                None,
+            ),
+            # Without the header: only the name of the function shows that it sees the change.
+            (
+                "a redeclaration, not analyzed",
+                ["def.c", "redecl.c"],
+                "read_value",
+                "not checked with Clang: " + str(fixtures / f"{prefix}redecl.c")
+                + " declares read_value with its current type and does not see the rewrite: if "
+                + str(fixtures / f"{prefix}def.c") + " and " + str(fixtures / f"{prefix}redecl.c")
+                + " are linked together, that declaration no longer matches the rewritten "
+                "definition",
+            ),
+            (
+                "an explicit cast, not analyzed",
+                ["def.c", "cast.c"],
+                "read_value",
+                "not checked with Clang: " + str(fixtures / f"{prefix}cast.c")
+                + ":10 converts the address of read_value with an explicit cast",
+            ),
+            ("a method alone", ["method.cpp"], method, checked),
+            (
+                "a method's address of the old type, not analyzed",
+                ["method.cpp", "member-pointer.cpp"],
+                method,
+                None,
+            ),
+            (
+                "a file that does not compile as it is",
+                ["def.c", "broken.c"],
+                "read_value",
+                "not checked with Clang: " + str(root / "broken.c")
+                + " does not compile with Clang as it is",
+            ),
+            (
+                "a file that cannot be preprocessed",
+                ["def.c", "missing.c"],
+                "read_value",
+                "not checked with Clang: " + str(root / "missing.c")
+                + " cannot be preprocessed with Clang",
+            ),
+            (
+                "a file that cannot be checked, then a callback",
+                ["def.c", "broken.c", "stores-reader.c"],
+                "read_value",
+                None,
+            ),
+            (
+                "a file that does not see the change",
+                ["def.c", "unrelated.c"],
+                "read_value",
+                checked,
+            ),
+        ):
+            ran, text = message(label, listed, function)
+            if not ran:
+                good = False
+            elif expected is None:
+                good = text is None
+            else:
+                good = text is not None and expected in text
+                if expected != checked:
+                    good = good and checked not in text
+            detail = f": {text!r}" if ran else ": the analysis did not run"
+            print(f"  {'✅' if good else '❌'} {label}" + ("" if good else detail))
+            ok = ok and good
+    print()
+    return ok
+
+
+def check_const_suggestion_check_is_opt_in() -> bool:
+    """
+    #217: the Clang check of const suggestions is experimental and off by default. Without
+    --experimental-const-suggestion-check, the suggestions are reported as the IR analysis finds
+    them: one whose suggested type does not compile is still reported, and no line says how a
+    suggestion was checked. With the option, that suggestion is removed, and the one that compiles
+    says how it was checked.
+    """
+    print("=== Testing the Clang check of const suggestions as an opt-in ===")
+    fixture = (
+        RUN_CONFIG.test_dir
+        / "pointer_reference-const_correctness"
+        / "const-suggestion-must-compile.c"
+    )
+
+    def messages(extra: list[str]) -> Optional[dict[str, str]]:
+        result = run_analyzer([str(fixture), "--format=json", *extra])
+        if result.returncode != 0:
+            return None
+        try:
+            diagnostics = json.loads(result.stdout or "").get("diagnostics", [])
+        except json.JSONDecodeError:
+            return None
+        return {
+            str(d.get("location", {}).get("function", "")): str(
+                d.get("details", {}).get("message", "")
+            )
+            for d in diagnostics
+            if str(d.get("ruleId", "")).startswith("ConstParameterNotModified")
+        }
+
+    without = messages([])
+    checked = messages(["--experimental-const-suggestion-check"])
+    claims = ("checked in the", "not checked with Clang")
+    ok = True
+    for label, good in (
+        (
+            "without the option, a suggested type that does not compile is reported",
+            without is not None and "writer" in without and "read_slot" in without,
+        ),
+        (
+            "without the option, no suggestion says how it was checked",
+            without is not None
+            and not any(claim in text for text in without.values() for claim in claims),
+        ),
+        (
+            "with the option, the suggested types that do not compile are removed",
+            checked is not None and "writer" not in checked and "read_slot" not in checked,
+        ),
+        (
+            "with the option, the suggestion that compiles says how it was checked",
+            checked is not None
+            and "checked in the analyzed files only" in checked.get("read_value", ""),
+        ),
+    ):
+        print(f"  {'✅' if good else '❌'} {label}")
+        ok = ok and good
+    print()
+    return ok
+
+
+def check_const_suggestion_line_endings() -> bool:
+    """
+    #217: a type written on a continuation line of a #define is in the macro definition, whether
+    the file ends its lines with LF or CRLF, or puts spaces between the backslash and the line
+    break, which Clang accepts with a warning: rewriting it would change every expansion of the
+    macro, here a function that writes through p. The suggestion is kept as not checked in each
+    case.
+    """
+    print("=== Testing a macro definition's continuation lines, with LF, CRLF and spaces ===")
+    source = (
+        "#define PARAM(type) type p\n"
+        "#define DECLARE(name) \\\n"
+        "    int name(PARAM(int*))\n"
+        "DECLARE(read_first) { return *p; }\n"
+        "DECLARE(write_second) { *p = 1; return 0; }\n"
+    )
+    expected = "not checked with Clang: the declaration is written by a macro definition"
+    ok = True
+    with tempfile.TemporaryDirectory(prefix="ct_const_suggestion_line_endings_") as tmp:
+        for label, contents in (
+            ("LF", source),
+            ("CRLF", source.replace("\n", "\r\n")),
+            ("spaces after the backslash", source.replace("\\\n", "\\  \n")),
+        ):
+            path = Path(tmp).resolve() / f"reader-{label.lower().replace(' ', '-')}.c"
+            path.write_bytes(contents.encode("utf-8"))
+            # The file's bytes are an input the cache key does not cover.
+            result = run_analyzer_uncached(
+                [str(path), "--format=json", "--experimental-const-suggestion-check"]
+            )
+            text = None
+            try:
+                for d in json.loads(result.stdout or "").get("diagnostics", []):
+                    if str(d.get("ruleId", "")).startswith("ConstParameterNotModified") and str(
+                        d.get("location", {}).get("function", "")
+                    ) == "read_first":
+                        text = str(d.get("details", {}).get("message", ""))
+            except json.JSONDecodeError:
+                pass
+            good = result.returncode == 0 and text is not None and expected in text
+            print(f"  {'✅' if good else '❌'} {label}" + ("" if good else f": {text!r}"))
+            ok = ok and good
+    print()
+    return ok
+
+
+def check_const_suggestion_removal_reason() -> bool:
+    """
+    #217: the trace of a removed suggestion names the first diagnostic that the rewrite adds, not
+    one the file had before it, and says whether it is an error or a checked warning: in C, a
+    qualifier lost in a nested pointer type is a warning, and the code still compiles.
+    """
+    print("=== Testing the reason given for a removed const suggestion ===")
+    trace = re.compile(r"\[const-suggestion\] (\S+) parameter (\S+): (.*)")
+
+    def reasons(path: Path) -> dict[str, str]:
+        result = run_analyzer_uncached(
+            [str(path), "--experimental-const-suggestion-check", "--verbose"]
+        )
+        out = {}
+        for line in (result.stdout + result.stderr).splitlines():
+            match = trace.search(line)
+            if match:
+                out[f"{match.group(1)}/{match.group(2)}"] = match.group(3)
+        return out
+
+    fixture = (
+        RUN_CONFIG.test_dir
+        / "pointer_reference-const_correctness"
+        / "const-suggestion-must-compile.c"
+    ).resolve()
+    ok = True
+    with tempfile.TemporaryDirectory(prefix="ct_const_suggestion_reason_") as tmp:
+        before = Path(tmp).resolve() / "warning-before.c"
+        before.write_text(
+            "static int read_value(int* p) { return *p; }\n"
+            "int* drop_const(const int* q) { return q; }\n"
+            "int (*const reader)(int*) = read_value;\n"
+        )
+        fixture_reasons = reasons(fixture)
+        before_reasons = reasons(before)
+        for label, text, expected in (
+            (
+                "a qualifier lost in a nested pointer type is a checked warning",
+                fixture_reasons.get("address_to_int_pp/p", ""),
+                f"removed, gains a checked warning: {fixture}:46:",
+            ),
+            (
+                "a function pointer of the old type is an error",
+                fixture_reasons.get("read_slot/slot", ""),
+                f"removed, does not compile: {fixture}:36:",
+            ),
+            (
+                "the diagnostic the file had before the rewrite is not the reason",
+                before_reasons.get("read_value/p", ""),
+                f"removed, does not compile: {before}:3:",
+            ),
+        ):
+            good = text.startswith(expected)
+            print(f"  {'✅' if good else '❌'} {label}" + ("" if good else f": {text!r}"))
+            ok = ok and good
+    print()
+    return ok
+
+
+def check_const_suggestion_both_modes() -> bool:
+    """
+    #217: each const-suggestion fixture, and the IR input, analyzed without and with
+    --experimental-const-suggestion-check. Without the option, no suggestion says how it was
+    checked. With it, no suggestion appears that the IR analysis did not report, and each one kept
+    says how it was checked. Across these inputs, the option removes suggestions, keeps checked
+    ones, and keeps ones it could not check.
+    """
+    print("=== Testing const suggestions without and with the experimental check ===")
+    directory = RUN_CONFIG.test_dir / "pointer_reference-const_correctness"
+    inputs = sorted(
+        p for p in directory.glob("const-suggestion-*") if p.suffix in (".c", ".cpp", ".ll")
+    )
+    checked = "↳ checked in the"
+    not_checked = "↳ not checked with Clang"
+    claims = (checked, not_checked, "↳ ABI:", "↳ difference:")
+    parameter = re.compile(r"parameter '([^']+)' in function")
+
+    def suggestions(path: Path, extra: list[str]) -> Optional[dict[tuple[str, str], str]]:
+        result = run_analyzer([str(path), "--format=json", *extra])
+        if result.returncode != 0:
+            return None
+        try:
+            diagnostics = json.loads(result.stdout or "").get("diagnostics", [])
+        except json.JSONDecodeError:
+            return None
+        out = {}
+        for d in diagnostics:
+            if not str(d.get("ruleId", "")).startswith("ConstParameterNotModified"):
+                continue
+            message = str(d.get("details", {}).get("message", ""))
+            match = parameter.search(message)
+            function = str(d.get("location", {}).get("function", ""))
+            out[(function, match.group(1) if match else "")] = message
+        return out
+
+    option = "--experimental-const-suggestion-check"
+    ok = True
+    outcomes = {"removed": 0, "kept, checked": 0, "kept, not checked": 0}
+    for path in inputs:
+        # The fixture's other arguments (`// analyzer-arg:`), in both runs.
+        *_, declared = extract_expectations(path)
+        others = [arg for arg in declared if arg != option]
+        without = suggestions(path, others)
+        with_option = suggestions(path, [*others, option])
+        problems = []
+        if without is None or with_option is None:
+            problems.append("the analysis did not run")
+        else:
+            for key, text in without.items():
+                if any(claim in text for claim in claims):
+                    problems.append(f"without the option, {key} says how it was checked")
+            for key, text in with_option.items():
+                if key not in without:
+                    problems.append(f"{key} is reported only with the option")
+                elif not_checked in text:
+                    outcomes["kept, not checked"] += 1
+                elif checked in text:
+                    outcomes["kept, checked"] += 1
+                else:
+                    problems.append(f"with the option, {key} does not say how it was checked")
+            outcomes["removed"] += sum(1 for key in without if key not in with_option)
+        print(f"  {'❌' if problems else '✅'} {path.name}")
+        for problem in problems:
+            print(f"     {problem}")
+        ok = ok and not problems
+    for outcome, count in outcomes.items():
+        good = count > 0
+        print(f"  {'✅' if good else '❌'} the option has suggestions {outcome}: {count}")
+        ok = ok and good
+    print()
+    return ok
+
+
+def _const_suggestion_run(
+    args: list[str], env_overrides: Optional[dict[str, str]] = None
+) -> Optional[tuple[dict[str, list[str]], list[str], str]]:
+    """
+    #217: runs the analyzer with the Clang check of const suggestions and its trace (--verbose), on
+    inputs the cache key does not cover. Returns the messages of the const suggestions by function
+    (a function reported twice, such as a constructor's two variants, has two), the trace's lines
+    without their "[const-suggestion] " prefix, and the whole output; None when the analysis did
+    not run.
+    """
+    result = run_analyzer_uncached(
+        [*args, "--format=json", "--experimental-const-suggestion-check", "--verbose"],
+        env_overrides,
+    )
+    if result.returncode != 0:
+        return None
+    try:
+        diagnostics = json.loads(result.stdout or "").get("diagnostics", [])
+    except json.JSONDecodeError:
+        return None
+    messages: dict[str, list[str]] = {}
+    for d in diagnostics:
+        if str(d.get("ruleId", "")).startswith("ConstParameterNotModified"):
+            function = str(d.get("location", {}).get("function", ""))
+            messages.setdefault(function, []).append(str(d.get("details", {}).get("message", "")))
+    output = (result.stdout or "") + (result.stderr or "")
+    trace = [
+        line.split("[const-suggestion] ", 1)[1]
+        for line in output.splitlines()
+        if "[const-suggestion] " in line
+    ]
+    return messages, trace, output
+
+
+def check_const_suggestion_one_configuration_per_file() -> bool:
+    """
+    #217: a compilation database can list a file twice, with different commands. The analysis
+    loads one command per file, and the Clang check of const suggestions compiles each file with
+    that one only: its trace names one configuration for each file, here the defining file,
+    analyzed, and a caller that only the database lists.
+    """
+    print("=== Testing const suggestions with files the compilation database lists twice ===")
+    fixtures = (RUN_CONFIG.test_dir / "pointer_reference-const_correctness").resolve()
+    definition = fixtures / "cross-tu-const-suggestion-def.c"
+    caller = fixtures / "cross-tu-const-suggestion-caller.c"
+    unit = re.compile(r"read_value parameter p, unit (\S+) \[([0-9a-f]+)\]: ")
+    with tempfile.TemporaryDirectory(prefix="ct_const_suggestion_twice_") as tmp:
+        database = Path(tmp).resolve() / "compile_commands.json"
+        # A macro the files do not use: the two commands differ, the code does not.
+        database.write_text(
+            json.dumps(
+                [
+                    {
+                        "directory": str(fixtures),
+                        "file": str(f),
+                        "arguments": ["clang", *extra, "-I", str(fixtures), "-c", str(f)],
+                    }
+                    for f in (definition, caller)
+                    for extra in ([], ["-DLISTED_TWICE"])
+                ]
+            )
+        )
+        run = _const_suggestion_run([str(definition), f"--compile-commands={database}"])
+    if run is None:
+        return fail_check("the analysis did not run")
+    messages, trace, _ = run
+    configurations: dict[str, set[str]] = {}
+    for line in trace:
+        match = unit.match(line)
+        if match:
+            configurations.setdefault(match.group(1), set()).add(match.group(2))
+    checked = "checked in every file of the compilation database that sees the change"
+    ok = True
+    for label, good in (
+        (
+            "the suggestion is checked in the compilation database",
+            any(checked in text for text in messages.get("read_value", [])),
+        ),
+        (
+            "one configuration of the defining file",
+            len(configurations.get(str(definition), ())) == 1,
+        ),
+        ("one configuration of the caller", len(configurations.get(str(caller), ())) == 1),
+    ):
+        print(f"  {'✅' if good else '❌'} {label}" + ("" if good else f": {configurations}"))
+        ok = ok and good
+    print()
+    return ok
+
+
+def check_const_suggestion_compiles_each_file_once() -> bool:
+    """
+    #217: the Clang check compiles each file that sees a change once as it is, for all the
+    suggestions it checks there: here two functions, defined in one file and called in another.
+    Each file is compiled once before the rewrites (`--timing`), and both suggestions are checked.
+    """
+    print("=== Testing that each file is compiled once as it is for several const suggestions ===")
+    sources = {
+        "readers.h": "int read_a(int* p);\nint read_b(int* q);\n",
+        "readers.c": '#include "readers.h"\n'
+        "int read_a(int* p)\n{\n    return *p;\n}\n"
+        "int read_b(int* q)\n{\n    return *q + 1;\n}\n",
+        "user.c": '#include "readers.h"\n'
+        "int use_both(void)\n{\n    int v = 1;\n    return read_a(&v) + read_b(&v);\n}\n",
+    }
+    calls = re.compile(r"const_suggestion\.compile\.(\w+) .*\bcalls=(\d+)")
+    with tempfile.TemporaryDirectory(prefix="ct_const_suggestion_once_") as tmp:
+        root = Path(tmp).resolve()
+        for name, text in sources.items():
+            (root / name).write_text(text)
+        # Every hotspot, not the 20 longest.
+        run = _const_suggestion_run(
+            [str(root / "readers.c"), str(root / "user.c"), "--timing"],
+            {"CTRACE_HOTSPOT_TOP": "200"},
+        )
+    if run is None:
+        return fail_check("the analysis did not run")
+    messages, _, output = run
+    compiled = {m.group(1): int(m.group(2)) for m in calls.finditer(output)}
+    checked = "checked in the analyzed files only"
+    ok = True
+    for label, good in (
+        (
+            "both suggestions are checked",
+            all(any(checked in t for t in messages.get(f, [])) for f in ("read_a", "read_b")),
+        ),
+        ("the defining file is compiled once as it is", compiled.get("defining_before") == 1),
+        ("the other file is compiled once as it is", compiled.get("other_before") == 1),
+    ):
+        print(f"  {'✅' if good else '❌'} {label}" + ("" if good else f": {compiled}"))
+        ok = ok and good
+    print()
+    return ok
+
+
+def check_const_suggestion_operator_used_elsewhere() -> bool:
+    """
+    #217: a function is found by its declaration in every file that sees the change, not by its
+    name: an operator has no identifier. Here a member operator and a method, declared in a header,
+    defined in one file and called in another: both suggestions are checked in both files.
+    """
+    print("=== Testing const suggestions for a member operator used in another file ===")
+    sources = {
+        "vec.hpp": "struct Vec\n{\n    int x;\n    bool operator==(Vec& o) const;\n"
+        "    int dot(Vec& o) const;\n};\n",
+        "vec.cpp": '#include "vec.hpp"\n'
+        "bool Vec::operator==(Vec& o) const\n{\n    return x == o.x;\n}\n"
+        "int Vec::dot(Vec& o) const\n{\n    return x * o.x;\n}\n",
+        "use.cpp": '#include "vec.hpp"\n'
+        "int use(Vec a, Vec b)\n{\n    return (a == b) + a.dot(b);\n}\n",
+    }
+    checked = "checked in the analyzed files only"
+    with tempfile.TemporaryDirectory(prefix="ct_const_suggestion_operator_") as tmp:
+        root = Path(tmp).resolve()
+        for name, text in sources.items():
+            (root / name).write_text(text)
+        run = _const_suggestion_run([str(root / "vec.cpp"), str(root / "use.cpp")])
+    if run is None:
+        return fail_check("the analysis did not run")
+    messages, trace, _ = run
+    ok = True
+    for label, function in (("operator==", "_ZNK3VeceqERS_"), ("dot", "_ZNK3Vec3dotERS_")):
+        texts = messages.get(function, [])
+        good = (
+            len(texts) == 1
+            and checked in texts[0]
+            and f"{function} parameter o: checked in 2 file(s)" in trace
+        )
+        print(f"  {'✅' if good else '❌'} {label}" + ("" if good else f": {texts}"))
+        ok = ok and good
+    print()
+    return ok
+
+
+def check_const_suggestion_homonyms_across_files() -> bool:
+    """
+    #217: in C, a function with internal linkage and a function of the same name with external
+    linkage in another file are two functions: neither file declares the other's. Whichever of the
+    two gets the suggestion, the other file does not refute it, and it is checked.
+    """
+    print("=== Testing const suggestions for C homonyms with internal and external linkage ===")
+    sources = {
+        "static-reads.c": "static int helper(int* p)\n{\n    return *p;\n}\n"
+        "int use_helper(void)\n{\n    int v = 1;\n    return helper(&v);\n}\n",
+        "external-writes.c": "int helper(int* p)\n{\n    *p = 2;\n    return 0;\n}\n",
+        "external-reads.c": "int reader(int* p)\n{\n    return *p;\n}\n",
+        "static-writes.c": "static int reader(int* p)\n{\n    *p = 3;\n    return 0;\n}\n"
+        "int use_reader(void)\n{\n    int v = 1;\n    return reader(&v);\n}\n",
+    }
+    checked = "checked in the analyzed files only"
+    ok = True
+    with tempfile.TemporaryDirectory(prefix="ct_const_suggestion_homonyms_") as tmp:
+        root = Path(tmp).resolve()
+        for name, text in sources.items():
+            (root / name).write_text(text)
+        for label, files, function in (
+            (
+                "a static reader, an external writer",
+                ["static-reads.c", "external-writes.c"],
+                "helper",
+            ),
+            (
+                "an external reader, a static writer",
+                ["external-reads.c", "static-writes.c"],
+                "reader",
+            ),
+        ):
+            run = _const_suggestion_run([str(root / f) for f in files])
+            texts = run[0].get(function, []) if run else []
+            good = len(texts) == 1 and checked in texts[0]
+            print(f"  {'✅' if good else '❌'} {label}" + ("" if good else f": {texts}"))
+            ok = ok and good
+    print()
+    return ok
+
+
+def check_const_suggestion_header_read_differently() -> bool:
+    """
+    #217: a header can mean other declarations in another file, through a macro that file defines
+    otherwise. Here pair.h declares read_value in def.c, and a global pointer in slot.c: rewriting
+    the type pair.h writes changes that global's type too, although the generated code does not
+    show it. The rewrite reaches beyond the suggestion: it is kept, not checked.
+    """
+    print("=== Testing a const suggestion whose header means other declarations elsewhere ===")
+    sources = {
+        "pair.h": "PAIR(read_value, int*)\n",
+        "def.c": '#define PAIR(name, type) int name(type p);\n#include "pair.h"\n#undef PAIR\n'
+        "int read_value(int* p)\n{\n    return *p;\n}\n",
+        "slot.c": '#define PAIR(name, type) type name##_slot;\n#include "pair.h"\n',
+    }
+    with tempfile.TemporaryDirectory(prefix="ct_const_suggestion_xmacro_") as tmp:
+        root = Path(tmp).resolve()
+        for name, text in sources.items():
+            (root / name).write_text(text)
+        run = _const_suggestion_run([str(root / "def.c"), str(root / "slot.c")])
+        expected = (
+            "not checked with Clang: the rewrite also changes the type of read_value_slot "
+            f"({root / 'pair.h'}:1)"
+        )
+    texts = run[0].get("read_value", []) if run else []
+    good = len(texts) == 1 and expected in texts[0]
+    detail = "" if good else f": {texts}"
+    print(f"  {'✅' if good else '❌'} the global slot.c declares{detail}")
+    print()
+    return good
+
+
+def check_const_suggestion_overload_defined_elsewhere() -> bool:
+    """
+    #217: rewritten, f(int*) takes the symbol of the overload f(const int*), which another file
+    defines. The two definitions collide only if the files are linked together, which the check
+    does not know: the suggestion is kept, not checked, and the reason states that assumption,
+    whether the other file is analyzed or only listed in the compilation database.
+    """
+    print("=== Testing a const suggestion that takes the symbol of another file's overload ===")
+    sources = {
+        "api.hpp": "int f(int* p);\nint f(const int* p);\n",
+        "a.cpp": '#include "api.hpp"\nint f(int* p)\n{\n    return *p;\n}\n',
+        "b.cpp": '#include "api.hpp"\nint f(const int* p)\n{\n    return *p + 1;\n}\n',
+    }
+    claims = ("checked in the analyzed files only", "checked in every file of the compilation")
+    ok = True
+    with tempfile.TemporaryDirectory(prefix="ct_const_suggestion_overload_") as tmp:
+        root = Path(tmp).resolve()
+        for name, text in sources.items():
+            (root / name).write_text(text)
+        database = root / "compile_commands.json"
+        database.write_text(
+            json.dumps(
+                [
+                    {
+                        "directory": str(root),
+                        "file": str(root / f),
+                        "arguments": ["clang++", "-std=c++17", "-c", str(root / f)],
+                    }
+                    for f in ("a.cpp", "b.cpp")
+                ]
+            )
+        )
+        expected = (
+            f"not checked with Clang: _Z1fPKi is also defined in {root / 'b.cpp'}; if "
+            f"{root / 'a.cpp'} and {root / 'b.cpp'} are linked together, the two definitions "
+            "collide"
+        )
+        for label, args in (
+            ("both files analyzed", [str(root / "a.cpp"), str(root / "b.cpp")]),
+            (
+                "the other file only in the compilation database",
+                [str(root / "a.cpp"), f"--compile-commands={database}"],
+            ),
+        ):
+            run = _const_suggestion_run(args)
+            texts = run[0].get("_Z1fPi", []) if run else []
+            good = (
+                len(texts) == 1
+                and expected in texts[0]
+                and not any(claim in texts[0] for claim in claims)
+            )
+            print(f"  {'✅' if good else '❌'} {label}" + ("" if good else f": {texts}"))
+            ok = ok and good
+    print()
+    return ok
+
+
+def check_const_suggestion_inline_in_a_header() -> bool:
+    """
+    #217: a function defined in a header that two analyzed files include is defined in both: a C
+    `static inline` function, one function in each file, and a C++ `inline` function, one function
+    that both files define. Neither definition collides with the other: each suggestion is checked.
+    """
+    print("=== Testing const suggestions for functions defined in a shared header ===")
+    sources = {
+        "peek.h": "static inline int peek_c(int* p)\n{\n    return *p;\n}\n",
+        "one.c": '#include "peek.h"\n'
+        "int use_one(void)\n{\n    int v = 1;\n    return peek_c(&v);\n}\n",
+        "two.c": '#include "peek.h"\n'
+        "int use_two(void)\n{\n    int v = 2;\n    return peek_c(&v);\n}\n",
+        "peek.hpp": "inline int peek_cpp(int* p)\n{\n    return *p;\n}\n",
+        "three.cpp": '#include "peek.hpp"\n'
+        "int use_three()\n{\n    int v = 3;\n    return peek_cpp(&v);\n}\n",
+        "four.cpp": '#include "peek.hpp"\n'
+        "int use_four()\n{\n    int v = 4;\n    return peek_cpp(&v);\n}\n",
+    }
+    checked = "checked in the analyzed files only"
+    ok = True
+    with tempfile.TemporaryDirectory(prefix="ct_const_suggestion_inline_") as tmp:
+        root = Path(tmp).resolve()
+        for name, text in sources.items():
+            (root / name).write_text(text)
+        for label, files, function in (
+            ("C, static inline", ["one.c", "two.c"], "peek_c"),
+            ("C++, inline", ["three.cpp", "four.cpp"], "_Z8peek_cppPi"),
+        ):
+            run = _const_suggestion_run([str(root / f) for f in files])
+            texts = run[0].get(function, []) if run else []
+            # One suggestion for the definition in each file.
+            good = len(texts) == 2 and all(checked in text for text in texts)
+            print(f"  {'✅' if good else '❌'} {label}" + ("" if good else f": {texts}"))
+            ok = ok and good
+    print()
+    return ok
+
+
+def check_const_suggestion_merged_declaration() -> bool:
+    """
+    #217: rewritten, f(int*) takes the symbol of the overload f(const int*) that the header also
+    declares: the two declarations become one function, which a file linked with this one may
+    define. The check does not know how the files are linked: the suggestion is kept, not checked,
+    and the reason names the declaration and that assumption (ruling 3).
+    """
+    print("=== Testing a const suggestion whose rewrite merges another declaration ===")
+    sources = {
+        "api.hpp": "int f(int* p);\nint f(const int* p);\n",
+        "a.cpp": '#include "api.hpp"\nint f(int* p)\n{\n    return *p;\n}\n',
+    }
+    with tempfile.TemporaryDirectory(prefix="ct_const_suggestion_merged_") as tmp:
+        root = Path(tmp).resolve()
+        for name, text in sources.items():
+            (root / name).write_text(text)
+        run = _const_suggestion_run([str(root / "a.cpp")])
+        expected = (
+            "not checked with Clang: the rewrite gives f(int*) the symbol of another declaration "
+            f"({root / 'api.hpp'}:2); if a file linked with {root / 'a.cpp'} defines it, the two "
+            "definitions collide"
+        )
+    texts = run[0].get("_Z1fPi", []) if run else []
+    good = (
+        len(texts) == 1
+        and expected in texts[0]
+        and "checked in the analyzed files only" not in texts[0]
+    )
+    print(f"  {'✅' if good else '❌'} a.cpp alone" + ("" if good else f": {texts}"))
+    print()
+    return good
+
+
+def check_const_suggestion_strong_and_weak_definitions() -> bool:
+    """
+    #217: rewritten, f(int*) takes the symbol of the overload f(const int*) that another file
+    defines, and one of the two definitions is weak. Linked together, the files keep the strong
+    definition and ignore the weak one, without an error: the suggestion is kept, not checked, and
+    the reason names the definition kept and the one ignored, whether the weak one is the other
+    file's or the suggested function's. The other file reads no rewritten file and does not
+    declare f(int*): only the symbol that the rewrite gives f(int*) leads to its definition.
+    """
+    print("=== Testing a const suggestion whose symbol a strong and a weak definition share ===")
+    weak = "__attribute__((weak)) "
+    ok = True
+    for label, entity, other, kept, ignored in (
+        ("the other file's definition is weak", "", weak, "a.cpp", "b.cpp"),
+        ("the suggested function's definition is weak", weak, "", "b.cpp", "a.cpp"),
+    ):
+        with tempfile.TemporaryDirectory(prefix="ct_const_suggestion_weak_") as tmp:
+            root = Path(tmp).resolve()
+            (root / "a.cpp").write_text(entity + "int f(int* p)\n{\n    return *p;\n}\n")
+            (root / "b.cpp").write_text(other + "int f(const int* p)\n{\n    return *p + 1;\n}\n")
+            run = _const_suggestion_run([str(root / "a.cpp"), str(root / "b.cpp")])
+            expected = (
+                f"not checked with Clang: _Z1fPKi is also defined in {root / 'b.cpp'}; if "
+                f"{root / 'a.cpp'} and {root / 'b.cpp'} are linked together, the strong "
+                f"definition, in {root / kept}, is used and the weak one, in {root / ignored}, "
+                "is ignored"
+            )
+        texts = run[0].get("_Z1fPi", []) if run else []
+        good = (
+            len(texts) == 1
+            and expected in texts[0]
+            and "checked in the analyzed files only" not in texts[0]
+        )
+        print(f"  {'✅' if good else '❌'} {label}" + ("" if good else f": {texts}"))
+        ok = ok and good
+    print()
+    return ok
+
+
+def check_const_suggestion_cast_in_the_defining_file() -> bool:
+    """
+    #217: the defining file converts the function's address with an explicit cast, which alone
+    leaves the suggestion unchecked, and another analyzed file stores the function where a
+    non-const parameter is expected, which the rewrite breaks. That file is still checked, and its
+    error removes the suggestion: a cast never hides an error, a checked warning or a changed fact.
+    """
+    print("=== Testing a const suggestion cast in its own file and broken in another ===")
+    fixtures = (RUN_CONFIG.test_dir / "pointer_reference-const_correctness").resolve()
+    header = fixtures / "cross-tu-const-suggestion-api.h"
+    callback = fixtures / "cross-tu-const-suggestion-callback.c"
+    with tempfile.TemporaryDirectory(prefix="ct_const_suggestion_cast_") as tmp:
+        definition = Path(tmp).resolve() / "def-with-cast.c"
+        definition.write_text(
+            f'#include "{header}"\n\ntypedef int (*erased_reader)(void*);\n\n'
+            "int read_value(int* p)\n{\n    return *p;\n}\n\n"
+            "erased_reader erase_reader(void)\n{\n    return (erased_reader)read_value;\n}\n"
+        )
+        run = _const_suggestion_run([str(definition), str(callback)])
+    removed = f"read_value parameter p: removed, does not compile: {callback}:"
+    good = (
+        run is not None
+        and "read_value" not in run[0]
+        and any(line.startswith(removed) for line in run[1])
+    )
+    detail = run[1] if run else "the analysis did not run"
+    print(f"  {'✅' if good else '❌'} removed by the callback" + ("" if good else f": {detail}"))
+    print()
+    return good
+
+
+def check_const_suggestion_trace() -> bool:
+    """
+    #217: with --verbose, the trace gives each verdict's grounds after the line of its outcome: the
+    suggestion (rule, function, the parameter's index among the source's parameters), the
+    transformation (current type, candidate, alternative) and where it is written, each unit
+    checked with its configuration and its verdict, then the verdict and its reason. Here one
+    suggestion verified, one refuted and one not checked.
+    """
+    print("=== Testing the trace of const suggestion verdicts ===")
+    source = (
+        "int read_value(int* p)\n{\n    return *p;\n}\n"
+        "static int read_slot(int* slot)\n{\n    return *slot;\n}\n"
+        "int (*const stored)(int*) = read_slot;\n"
+        "#define DECLARE(name) int name(int* q)\n"
+        "DECLARE(read_macro)\n{\n    return *q;\n}\n"
+    )
+    with tempfile.TemporaryDirectory(prefix="ct_const_suggestion_trace_") as tmp:
+        path = Path(tmp).resolve() / "verdicts.c"
+        path.write_text(source)
+        run = _const_suggestion_run([str(path)])
+    if run is None:
+        return fail_check("the analysis did not run")
+    _, trace, _ = run
+    file = re.escape(str(path))
+    unit = rf"unit {file} \[[0-9a-f]+\]"
+    rule = r"ConstParameterNotModified\.Pointer"
+    expected = {
+        "verified": [
+            r"read_value parameter p: checked in 1 file\(s\)",
+            rf"read_value parameter p, suggestion: {rule} on read_value, source index 0",
+            r"read_value parameter p, transformation: int \*p becomes const int \*p "
+            r"\(pointer to const\)",
+            rf"read_value parameter p, rewritten at: {file}:1",
+            rf"read_value parameter p, {unit}: verified",
+            r"read_value parameter p, verdict: verified",
+        ],
+        "refuted": [
+            rf"read_slot parameter slot: removed, does not compile: {file}:9:",
+            rf"read_slot parameter slot, suggestion: {rule} on read_slot, source index 0",
+            r"read_slot parameter slot, transformation: int \*slot becomes const int \*slot "
+            r"\(pointer to const\)",
+            rf"read_slot parameter slot, rewritten at: {file}:5",
+            rf"read_slot parameter slot, {unit}: refuted: does not compile: {file}:9:",
+            rf"read_slot parameter slot, verdict: refuted: does not compile: {file}:9:",
+        ],
+        "not checked": [
+            r"read_macro parameter q: not checked, the declaration is written by a macro "
+            r"definition",
+            rf"read_macro parameter q, suggestion: {rule} on read_macro, source index 0",
+            r"read_macro parameter q, transformation: int \*q becomes const int \*q "
+            r"\(pointer to const\)",
+            r"read_macro parameter q, verdict: indeterminate: the declaration is written by a "
+            r"macro definition",
+        ],
+    }
+    ok = True
+    for label, patterns in expected.items():
+        missing = [p for p in patterns if not any(re.match(p, line) for line in trace)]
+        good = not missing
+        print(f"  {'✅' if good else '❌'} {label}" + ("" if good else f": missing {missing}"))
+        ok = ok and good
+    if not ok:
+        print("     trace:\n" + "\n".join(f"       {line}" for line in trace))
+    print()
+    return ok
+
+
+def check_const_suggestion_werror_on_a_tracked_group() -> bool:
+    """
+    #217 (Review Focus 5): a compile command that turns one tracked warning group into errors,
+    not every warning (-Werror=incompatible-pointer-types-discards-qualifiers), does not change
+    what the check sees: the group stays a warning in both compilations, and a rewrite that adds
+    such a warning is removed for that warning, not for an error.
+    """
+    print("=== Testing a tracked warning group that the compile command turns into errors ===")
+    with tempfile.TemporaryDirectory(prefix="ct_const_suggestion_werror_") as tmp:
+        path = Path(tmp).resolve() / "keep.c"
+        path.write_text("void keep(int* p)\n{\n    int* q = p;\n    (void)q;\n}\n")
+        run = _const_suggestion_run(
+            [str(path), "--compile-arg=-Werror=incompatible-pointer-types-discards-qualifiers"]
+        )
+    if run is None:
+        return fail_check("the analysis did not run")
+    messages, trace, _ = run
+    removed = (
+        f"keep parameter p: removed, gains a checked warning: {path}:3: initializing 'int *' "
+        "with an expression of type 'const int *' discards qualifiers"
+    )
+    good = "keep" not in messages and any(line.startswith(removed) for line in trace)
+    print(f"  {'✅' if good else '❌'} removed for the warning" + ("" if good else f": {trace}"))
+    print()
+    return good
+
+
+def check_const_suggestion_extern_c_user() -> bool:
+    """
+    #217 (D8): a C function that a C++ file declares through a shared header (extern "C"). Each
+    file writes the parameter's type in its own language, struct foo * in C and foo * in C++, and
+    each rewritten declaration is compared with the candidate as its own file writes it: the
+    suggestion is checked with the C++ user, as with a C user.
+    """
+    print('=== Testing a C function that a C++ file declares through an extern "C" header ===')
+    sources = {
+        "api.h": '#ifdef __cplusplus\nextern "C" {\n#endif\nstruct foo { int x; };\n'
+        "int rd(struct foo* f);\n#ifdef __cplusplus\n}\n#endif\n",
+        "def.c": '#include "api.h"\nint rd(struct foo* f) { return f->x; }\n',
+        "user.cpp": '#include "api.h"\nint user(foo* f) { return rd(f); }\n',
+        "user2.c": '#include "api.h"\nint user2(struct foo* f) { return rd(f); }\n',
+    }
+    ok = True
+    with tempfile.TemporaryDirectory(prefix="ct_const_suggestion_extern_c_") as tmp:
+        root = Path(tmp).resolve()
+        for name, text in sources.items():
+            (root / name).write_text(text)
+        for label, user in (("a C++ user", "user.cpp"), ("a C user", "user2.c")):
+            run = _const_suggestion_run([str(root / "def.c"), str(root / user)])
+            messages, trace, _ = run if run else ({}, [], "")
+            verdicts = [line for line in trace if line.startswith("rd parameter f, verdict: ")]
+            good = "rd" in messages and verdicts == ["rd parameter f, verdict: verified"]
+            print(f"  {'✅' if good else '❌'} {label}" + ("" if good else f": {verdicts}"))
+            ok = ok and good
+    print()
+    return ok
+
+
+def check_const_suggestion_top_level_qualifier() -> bool:
+    """
+    #217 (D18): a parameter's top-level qualifier is not part of the function's type, so a
+    declaration and the definition can differ in it. The rewrite gives each declaration the
+    candidate of its own type, and each is compared with that candidate: in both directions, the
+    suggestion is checked.
+    """
+    print("=== Testing declarations that differ from the definition in a top-level qualifier ===")
+    source = (
+        "int f(int* p);\nint f(int* const p)\n{\n    return *p;\n}\n"
+        "int g(int* const p);\nint g(int* p)\n{\n    return *p;\n}\n"
+    )
+    with tempfile.TemporaryDirectory(prefix="ct_const_suggestion_top_level_") as tmp:
+        path = Path(tmp).resolve() / "decls.c"
+        path.write_text(source)
+        run = _const_suggestion_run([str(path)])
+    if run is None:
+        return fail_check("the analysis did not run")
+    messages, trace, _ = run
+    ok = True
+    for label, function in (
+        ("declared without the top-level const, defined with it", "f"),
+        ("declared with the top-level const, defined without it", "g"),
+    ):
+        verdicts = [line for line in trace if line.startswith(f"{function} parameter p, verdict: ")]
+        good = function in messages and verdicts == [f"{function} parameter p, verdict: verified"]
+        print(f"  {'✅' if good else '❌'} {label}" + ("" if good else f": {verdicts}"))
+        ok = ok and good
+    print()
+    return ok
+
 
 def check_duplicate_if_cross_tu() -> bool:
     """
@@ -5562,6 +6667,7 @@ def check_file(c_path: Path):
         strict_diag_count,
         strict_details,
         unknown_scopes,
+        analyzer_args,
     ) = extract_expectations(c_path)
     if unknown_scopes:
         known = ", ".join(f"[{p}]" for p in _EXPECTATION_PASSES)
@@ -5700,6 +6806,7 @@ def check_file(c_path: Path):
         resource_model=resource_model,
         escape_model=escape_model,
         buffer_model=buffer_model,
+        extra_args=tuple(analyzer_args),
     )
     # With runner-level --smt args this run is neither the default pass nor the smt-z3 one:
     # only unscoped expectations describe it.
@@ -5721,6 +6828,7 @@ def check_file(c_path: Path):
             escape_model=escape_model,
             buffer_model=buffer_model,
             extra_args=(
+                *analyzer_args,
                 "--smt=on",
                 "--smt-backend=z3",
                 "--smt-mode=single",
@@ -5803,6 +6911,27 @@ def main() -> int:
         check_uninitialized_cross_tu_no_effect,
         check_const_param_cross_tu,
         check_const_param_contract_message_across_files,
+        check_const_suggestion_cross_tu,
+        check_const_suggestion_without_source,
+        check_const_suggestion_compilation_database,
+        check_const_suggestion_check_is_opt_in,
+        check_const_suggestion_line_endings,
+        check_const_suggestion_removal_reason,
+        check_const_suggestion_both_modes,
+        check_const_suggestion_one_configuration_per_file,
+        check_const_suggestion_compiles_each_file_once,
+        check_const_suggestion_operator_used_elsewhere,
+        check_const_suggestion_homonyms_across_files,
+        check_const_suggestion_header_read_differently,
+        check_const_suggestion_overload_defined_elsewhere,
+        check_const_suggestion_inline_in_a_header,
+        check_const_suggestion_merged_declaration,
+        check_const_suggestion_strong_and_weak_definitions,
+        check_const_suggestion_cast_in_the_defining_file,
+        check_const_suggestion_trace,
+        check_const_suggestion_werror_on_a_tracked_group,
+        check_const_suggestion_extern_c_user,
+        check_const_suggestion_top_level_qualifier,
         check_duplicate_if_cross_tu,
         check_global_read_before_write_identity_across_files,
         check_size_minus_one_cross_tu,
