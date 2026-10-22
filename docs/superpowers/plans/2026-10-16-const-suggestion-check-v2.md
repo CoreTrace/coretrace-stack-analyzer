@@ -2655,7 +2655,7 @@ A new reason of an indeterminate verdict, after `not checked with Clang: `:
 |---|---|---|
 | `the qualifier of the parameter's typedef is written by a macro` | 2.3 | D10: a qualifier written apart from a pointer typedef, by a macro |
 
-The type displayed (Task 2.4, ruling 3). This applies to a `ReferenceRvaluePreferValue` or `PointerConstOnly` suggestion whose plan has a candidate, whatever its verdict. `<candidate>` is the plan's candidate, written with the analyzer's labels:
+The type displayed (Task 2.4, ruling 3). This applies to a `ReferenceRvaluePreferValue` or `PointerConstOnly` suggestion whose plan has a candidate, whatever its verdict. `<candidate>` is the plan's candidate, written as ruling 3 says:
 - **`ReferenceRvaluePreferValue`, the advice.** `consider passing by value (<value>) or const reference (<const reference>)` becomes `consider passing by const reference (<candidate>)`.
 - **`ReferenceRvaluePreferValue`, the "checked" line of a verified suggestion:**
   ```text
@@ -2678,15 +2678,11 @@ The other rules keep their lines. Without the option, nothing changes.
    - Trial 2 (`batch-2.1/trial2-fix.diff`) passes the two new tests, and the 45 checks and fixtures of T.
    - Cost if wrong: such a refutation would say "does not compile" where it should say "gains a checked warning". The verdict is the same.
 2. **Review Focus 5 is a check, not a fixture variant** (Task 2.1). Validated by the user on 2026-10-22. Under `-Werror=<group>`, the suggestion is removed both before and after the change. Only the reason shows that the group stayed a warning, and only the trace gives it. Cost if wrong: none.
-3. **The type displayed is the plan's candidate** (Task 2.4). Revised as the user asked on 2026-10-22.
+3. **The type displayed is the plan's candidate** (Task 2.4). Revised as the user asked on 2026-10-22, then validated by the user with C's tag keywords kept.
    - For `ReferenceRvaluePreferValue` and `PointerConstOnly`, once a suggestion has a candidate, the type displayed is written from `SuggestionPlan::candidate`. It replaces the rule's proposal, so no other definition of the proposed type is displayed.
-   - Where Clang's labels differ from those of the analyzer's other lines, the planner writes the analyzer's:
-     - a type without a name is `<anonymous type>`, which Clang writes `(lambda)`;
-     - a C tag type has no keyword: `foo`, which Clang writes `struct foo`.
-
-     The trace keeps Clang's writing.
-   - Both rules take the same path. The D13 fixture, where the rule's proposal (`const int *p`) differs from the candidate, therefore pins that path for both. For `ReferenceRvaluePreferValue`, no fixture could: with these labels, the rule's const reference and the candidate write the same text in every case found (`stage2/observations/rvalue-spelling/`).
-   - Cost if wrong: a label that differs from Clang's and is not listed here is displayed as Clang writes it.
+   - The planner writes it as Clang does, with `struct`, `union` and `enum` where C needs them. Only a type without a name takes the analyzer's label, `<anonymous type>`, which Clang writes `(lambda)`: it reads better beside the rule's other lines. The trace keeps Clang's writing.
+   - Both rules take the same path. The D13 fixture, where the rule's proposal (`const int *p`) differs from the candidate, therefore pins that path for both. For `ReferenceRvaluePreferValue`, no fixture could: with the anonymous label, the rule's const reference and the candidate write the same text in every case found (`stage2/observations/rvalue-spelling/`).
+   - Cost if wrong: beside the rule's `current type` line, the displayed candidate can write a type otherwise, `struct foo` where the rule writes `foo`.
 4. **Task 2.4 runs before Task 2.3.** Validated by the user on 2026-10-22. t3's suggestions are `PointerConstOnly` (`const IntPtr p` is `int *const p`), and Task 2.4 changes how that rule is displayed. In this order, the D10 fixtures are written once, with the candidate displayed. Cost if wrong: none.
 
 ### Task 2.1: warning policy (D6, Review Focus 5)
@@ -2821,25 +2817,112 @@ With trial 2 applied, both pass, the fixture 4/4 (`batch-2.1/green-trial2-rerun-
   - The other units record it with the plan that their targets carry.
 - `Target::expected`: the unit's `expected`, passed to its compilation after the rewrite.
 
-**Decision logic.** Step 3 compares each rewritten declaration with the expected type of its own site.
+**Decision logic.** Step 3 compares each rewritten declaration with the expected type of its own site, in its unit; a declaration without one does not get it. No comparison ignores the top-level qualifiers, as the user asked on 2026-10-22: the definition's own belong to its candidate, which D10 needs (`const IntPtr p` must become `const int *const p`). `SuggestionPlan::expectedType`, which only that comparison read, goes.
 
-**Tests (batch 2.2).** Two new checks, written out with their failures when the batch starts:
-- **D8, over t4.** The C++ user is verified. The C witness is verified, as at the batch's base.
-- **D18, in both directions.** `f` is declared without the top-level `const` and defined with it; `g` is declared with it and defined without it. Both are verified.
+**Tests.** Two new checks, placed after `check_const_suggestion_werror_on_a_tracked_group` and registered after it. They read the verdicts in the trace, which Task 2.4 does not change.
 
-The checks read the verdicts in the trace, which Task 2.4 does not change.
+```python
+def check_const_suggestion_extern_c_user() -> bool:
+    """
+    #217 (D8): a C function that a C++ file declares through a shared header (extern "C"). Each
+    file writes the parameter's type in its own language, struct foo * in C and foo * in C++, and
+    each rewritten declaration is compared with the candidate as its own file writes it: the
+    suggestion is checked with the C++ user, as with a C user.
+    """
+    print('=== Testing a C function that a C++ file declares through an extern "C" header ===')
+    sources = {
+        "api.h": '#ifdef __cplusplus\nextern "C" {\n#endif\nstruct foo { int x; };\n'
+        "int rd(struct foo* f);\n#ifdef __cplusplus\n}\n#endif\n",
+        "def.c": '#include "api.h"\nint rd(struct foo* f) { return f->x; }\n',
+        "user.cpp": '#include "api.h"\nint user(foo* f) { return rd(f); }\n',
+        "user2.c": '#include "api.h"\nint user2(struct foo* f) { return rd(f); }\n',
+    }
+    ok = True
+    with tempfile.TemporaryDirectory(prefix="ct_const_suggestion_extern_c_") as tmp:
+        root = Path(tmp).resolve()
+        for name, text in sources.items():
+            (root / name).write_text(text)
+        for label, user in (("a C++ user", "user.cpp"), ("a C user", "user2.c")):
+            run = _const_suggestion_run([str(root / "def.c"), str(root / user)])
+            messages, trace, _ = run if run else ({}, [], "")
+            verdicts = [line for line in trace if line.startswith("rd parameter f, verdict: ")]
+            good = "rd" in messages and verdicts == ["rd parameter f, verdict: verified"]
+            print(f"  {'✅' if good else '❌'} {label}" + ("" if good else f": {verdicts}"))
+            ok = ok and good
+    print()
+    return ok
 
-Expected failures at the batch's base: `not checked with Clang: the rewritten declaration does not get the suggested type`, for the C++ user of t4, for `f` and for `g`.
+
+def check_const_suggestion_top_level_qualifier() -> bool:
+    """
+    #217 (D18): a parameter's top-level qualifier is not part of the function's type, so a
+    declaration and the definition can differ in it. The rewrite gives each declaration the
+    candidate of its own type, and each is compared with that candidate: in both directions, the
+    suggestion is checked.
+    """
+    print("=== Testing declarations that differ from the definition in a top-level qualifier ===")
+    source = (
+        "int f(int* p);\nint f(int* const p)\n{\n    return *p;\n}\n"
+        "int g(int* const p);\nint g(int* p)\n{\n    return *p;\n}\n"
+    )
+    with tempfile.TemporaryDirectory(prefix="ct_const_suggestion_top_level_") as tmp:
+        path = Path(tmp).resolve() / "decls.c"
+        path.write_text(source)
+        run = _const_suggestion_run([str(path)])
+    if run is None:
+        return fail_check("the analysis did not run")
+    messages, trace, _ = run
+    ok = True
+    for label, function in (
+        ("declared without the top-level const, defined with it", "f"),
+        ("declared with the top-level const, defined without it", "g"),
+    ):
+        verdicts = [line for line in trace if line.startswith(f"{function} parameter p, verdict: ")]
+        good = function in messages and verdicts == [f"{function} parameter p, verdict: verified"]
+        print(f"  {'✅' if good else '❌'} {label}" + ("" if good else f": {verdicts}"))
+        ok = ok and good
+    print()
+    return ok
+```
+
+Failure at `5b74b31`, on macOS (`batch-2.2/red-5b74b31-macos.txt`):
+
+```text
+##### check_const_suggestion_extern_c_user: FAIL
+  ❌ a C++ user: ['rd parameter f, verdict: indeterminate: the rewritten declaration does not get the suggested type']
+  ✅ a C user
+##### check_const_suggestion_top_level_qualifier: FAIL
+  ❌ declared without the top-level const, defined with it: ['f parameter p, verdict: indeterminate: the rewritten declaration does not get the suggested type']
+  ❌ declared with the top-level const, defined without it: ['g parameter p, verdict: indeterminate: the rewritten declaration does not get the suggested type']
+```
+
+- [ ] **Step 1: The D8 check.** Add `check_const_suggestion_extern_c_user` and run it. Expected: FAIL for the C++ user, as above; the C user passes.
+  Commit: `test(const-param): check a C function that a C++ file declares through extern "C"`.
+- [ ] **Step 2: The D18 check.** Add `check_const_suggestion_top_level_qualifier` and run it. Expected: FAIL for `f` and `g`, as above.
+  Commit: `test(const-param): check declarations that differ in a top-level qualifier`.
+- [ ] **Step 3: Each declaration's expected type.**
+  - `candidateOf` is shared through `ConstSuggestionInternal.hpp`.
+  - `resolve` records `UnitFacts::Entity::expected` in each compilation before the rewrite.
+  - `checkUnit` passes the unit's own to its compilation after the rewrite, through `Target::expected`, and step 3 compares with it.
+  - README: the limit of a C function that C++ declares through an `extern "C"` header goes.
+
+  Run: both checks, then the tests of T. Expected: PASS.
+  Before the task closes, as the user asked on 2026-10-22:
+  - t3's C and C++ cases (the review cases `t3/t.c` and `t3/t.cpp`) stay `not checked with Clang: the rewritten declaration does not get the suggested type`, until Task 2.3 corrects their rewrite;
+  - a mutant whose comparison ignores the top-level qualifiers makes them verified, so this replay detects it.
+
+  Commit: `fix(const-param): expect each declaration's own candidate, in its unit's language`.
+- [ ] **Step 4: Task tests.** As Task 1.1, Step 6.
 
 ### Task 2.4: one candidate, displayed (D12, D13)
 
 **Files:**
-- `src/analysis/ConstSuggestionPlan.cpp`: the candidate written with the analyzer's labels;
+- `src/analysis/ConstSuggestionPlan.cpp`: the candidate written for display, an anonymous type as `<anonymous type>`;
 - `src/analysis/ConstSuggestionCheck.cpp`: the type displayed, and the "checked" line;
 - `src/analyzer/DiagnosticEmitter.cpp`: the advice that names the const reference alone;
 - the fixtures `const-suggestion-deduction-kept.cpp` and `const-suggestion-deduction-refused.cpp` (changed), and one new fixture.
 
-**Decision logic.** Take each `ReferenceRvaluePreferValue` or `PointerConstOnly` suggestion that T keeps and whose plan has a candidate. Its displayed type becomes that candidate, as the planner writes it with the analyzer's labels (ruling 3); the rule's own proposal is no longer displayed.
+**Decision logic.** Take each `ReferenceRvaluePreferValue` or `PointerConstOnly` suggestion that T keeps and whose plan has a candidate. Its displayed type becomes that candidate, written as ruling 3 says; the rule's own proposal is no longer displayed.
 - **`ReferenceRvaluePreferValue` (D12).** The advice names the const reference alone. A verified suggestion's "checked" line says that passing by value is not checked (Texts).
 - **`PointerConstOnly` (D13).** The advice and the "suggested type" line name the candidate, `const int *const p`.
 
