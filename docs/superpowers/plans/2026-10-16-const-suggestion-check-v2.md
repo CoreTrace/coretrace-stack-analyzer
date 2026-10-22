@@ -2817,7 +2817,7 @@ With trial 2 applied, both pass, the fixture 4/4 (`batch-2.1/green-trial2-rerun-
   - The other units record it with the plan that their targets carry.
 - `Target::expected`: the unit's `expected`, passed to its compilation after the rewrite.
 
-**Decision logic.** Step 3 compares each rewritten declaration with the expected type of its own site, in its unit; a declaration without one does not get it. No comparison ignores the top-level qualifiers, as the user asked on 2026-10-22: the definition's own belong to its candidate, which D10 needs (`const IntPtr p` must become `const int *const p`). `SuggestionPlan::expectedType`, which only that comparison read, goes.
+**Decision logic.** Step 3 compares each rewritten declaration with the expected type of its own site, in its unit. A declaration without one was another entity's before the rewrite, which merges into the entity: the collisions judge it (stage 1, ruling 3), as `check_const_suggestion_merged_declaration` and `check_const_suggestion_overload_defined_elsewhere` require. No comparison ignores the top-level qualifiers, as the user asked on 2026-10-22: the definition's own belong to its candidate, which D10 needs (`const IntPtr p` must become `const int *const p`). `SuggestionPlan::expectedType`, which only that comparison read, goes.
 
 **Tests.** Two new checks, placed after `check_const_suggestion_werror_on_a_tracked_group` and registered after it. They read the verdicts in the trace, which Task 2.4 does not change.
 
@@ -2954,7 +2954,7 @@ Expected failures at the batch's base: the two alternatives and the old "checked
 - New fixtures in C and C++ (t3: `t.c`, `t.cpp`), verified with `const int *const p`.
 - The C fixture also has a qualifier written by a macro, indeterminate with the new reason.
 
-Expected failure at the batch's base: in all three cases, `not checked with Clang: the rewritten declaration does not get the suggested type`.
+Expected failure at the batch's base: in all three cases, `not checked with Clang: the rewritten declaration does not get the suggested type`. That failure also guards Task 2.2's comparison: one that ignored the top-level qualifiers would make t3 verified at the batch's base (`batch-2.2/mutant-ignore-top-level.diff`), and no other test of T detects it.
 
 **Validation of stage 2.** As for stage 1, for D6, D8, D10, D12, D13, D18 and Review Focus 5:
 - their tests pass, and every other test of T passes unchanged;
