@@ -678,7 +678,8 @@ The check runs these steps:
    `const T *const p`), or a reference to const (`const T &r`, for an rvalue reference `T &&r` too):
    - a type written in a macro argument is rewritten where it is written;
    - a type written by a macro that writes only the parameter gets `const` before the invocation;
-   - a typedef of a plain pointer is replaced by the type it names, made const.
+   - a typedef of a plain pointer is replaced by the type it names, made const, with the
+     qualifiers written beside it; one written by a macro leaves the suggestion not checked.
 
    A macro definition is never rewritten, nor a macro argument that writes another parameter's type
    too: the suggestion is then not checked.
@@ -753,8 +754,6 @@ Its limits:
 - a rewrite that changes the program's behavior in a way that calls, overrides and constant
   conditions do not show is kept as not checked, not removed: `sizeof(__PRETTY_FUNCTION__)`, for
   example, changes with the rewrite;
-- a pointer typedef with a qualifier written before it (`const IntPtr p`) does not get the type
-  tried: the suggestion is not checked;
 - a file that sees the changes of two analyzed files is compiled as it is once for each, and a hit
   of the IR cache gives no syntax tree: the check always compiles from the sources.
 

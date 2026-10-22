@@ -23,6 +23,7 @@ namespace ctrace::stack::analysis
 {
     namespace
     {
+        using const_suggestion::candidateOf;
         using const_suggestion::Edit;
         using const_suggestion::MacroDefinitions;
         using const_suggestion::realPath;
@@ -123,9 +124,10 @@ namespace ctrace::stack::analysis
                     {
                         return fail("the parameter's type is a typedef of no plain pointer");
                     }
+                    // The candidate of this declaration's own type, its qualifiers kept (D10).
                     clang::PrintingPolicy policy(context_.getLangOpts());
                     const std::string text =
-                        pointer->getPointeeType().withConst().getAsString(policy) + " *";
+                        candidateOf(context_, param.getType()).getAsString(policy);
                     if (text.find("(unnamed") != std::string::npos ||
                         text.find("(anonymous") != std::string::npos ||
                         text.find("(lambda") != std::string::npos)
@@ -136,10 +138,70 @@ namespace ctrace::stack::analysis
                     const clang::SourceLocation end = loc.getEndLoc();
                     if (begin.isMacroID() || end.isMacroID())
                         return fail("the parameter's typedef is written by a macro");
-                    const unsigned length = sm_.getFileOffset(clang::Lexer::getLocForEndOfToken(
-                                                end, 0, sm_, context_.getLangOpts())) -
-                                            sm_.getFileOffset(begin);
-                    return replace(function, begin, length, text);
+                    // The qualifiers written apart, before or after the name, are folded into
+                    // the candidate: the edit spans them (D10).
+                    const clang::LangOptions& lang = context_.getLangOpts();
+                    const auto qualifier = [&](const clang::Token& token)
+                    {
+                        if (!token.is(clang::tok::raw_identifier))
+                            return std::string();
+                        const llvm::StringRef word = token.getRawIdentifier();
+                        return word == "const" || word == "volatile" || word == "restrict"
+                                   ? word.str()
+                                   : std::string();
+                    };
+                    std::set<std::string> folded;
+                    clang::SourceLocation first = begin;
+                    for (clang::SourceLocation at = param.getBeginLoc();
+                         at.isValid() && !at.isMacroID() &&
+                         sm_.isBeforeInTranslationUnit(at, begin);)
+                    {
+                        clang::Token token;
+                        if (clang::Lexer::getRawToken(at, token, sm_, lang, true))
+                            break;
+                        if (qualifier(token).empty())
+                        {
+                            folded.clear();
+                            first = begin;
+                        }
+                        else
+                        {
+                            if (folded.empty())
+                                first = at;
+                            folded.insert(qualifier(token));
+                        }
+                        const std::optional<clang::Token> next =
+                            clang::Lexer::findNextToken(at, sm_, lang);
+                        at = next ? next->getLocation() : clang::SourceLocation();
+                    }
+                    clang::SourceLocation last = end;
+                    for (std::optional<clang::Token> next =
+                             clang::Lexer::findNextToken(end, sm_, lang);
+                         next && !next->getLocation().isMacroID();
+                         next = clang::Lexer::findNextToken(next->getLocation(), sm_, lang))
+                    {
+                        clang::Token token;
+                        if (clang::Lexer::getRawToken(next->getLocation(), token, sm_, lang,
+                                                      true) ||
+                            qualifier(token).empty())
+                        {
+                            break;
+                        }
+                        folded.insert(qualifier(token));
+                        last = next->getLocation();
+                    }
+                    const clang::Qualifiers written = param.getType().getLocalQualifiers();
+                    if ((written.hasConst() && !folded.count("const")) ||
+                        (written.hasVolatile() && !folded.count("volatile")) ||
+                        (written.hasRestrict() && !folded.count("restrict")))
+                    {
+                        return fail(
+                            "the qualifier of the parameter's typedef is written by a macro");
+                    }
+                    const unsigned length =
+                        sm_.getFileOffset(clang::Lexer::getLocForEndOfToken(last, 0, sm_, lang)) -
+                        sm_.getFileOffset(first);
+                    return replace(function, first, length, text);
                 }
                 return fail("the parameter's type has no form this check rewrites");
             }
