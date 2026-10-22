@@ -61,6 +61,11 @@ namespace ctrace::stack::analysis
             "they compile with the suggested type, and their generated code matches, metadata "
             "included, once debug information, diagnostic metadata, descriptive names and "
             "renamed symbols are set aside";
+        // For an rvalue reference, the const reference only (D12).
+        constexpr const char* kCheckedReference =
+            "they compile with the suggested const reference, and their generated code matches, "
+            "metadata included, once debug information, diagnostic metadata, descriptive names "
+            "and renamed symbols are set aside; passing by value is not checked";
         constexpr const char* kNotChecked = "not checked with Clang: ";
         constexpr const char* kDoesNotCompileAsItIs = "a file does not compile with Clang as it is";
 
@@ -721,6 +726,13 @@ namespace ctrace::stack::analysis
             ConstParamIssue& issue = issues[i];
             const UnitFacts::Entity& found = before.entities[i];
             const SuggestionPlan& plan = found.plan;
+            // The type displayed is the plan's candidate, not the rule's proposal (stage 2,
+            // ruling 3): for an rvalue reference, the const reference alone.
+            if (!plan.candidate.shown.empty() && (issue.isRvalueRef || issue.pointerConstOnly))
+            {
+                issue.suggestedType = plan.candidate.shown;
+                issue.suggestedTypeAlt.clear();
+            }
             if (!found.found && !plan.indeterminate)
             {
                 issue.checkLines.push_back(kNotChecked +
@@ -901,7 +913,7 @@ namespace ctrace::stack::analysis
             grounds(issue, &plan, judged, judgements, verdict);
             const std::string checked =
                 std::string(config.compilationDatabase ? kCheckedDatabase : kCheckedAnalyzed) +
-                kCheckedResult;
+                (issue.isRvalueRef ? kCheckedReference : kCheckedResult);
             issue.checkLines.push_back(
                 accepted.empty() ? checked : checked + ", except for the differences below");
             issue.checkLines.insert(issue.checkLines.end(), accepted.begin(), accepted.end());

@@ -82,6 +82,9 @@ namespace ctrace::stack::analysis::const_suggestion
         std::string current;
         std::string type;
         std::string alternative;
+        // The candidate as a diagnostic displays it: Clang's writing, a type without a name
+        // written <anonymous type> (stage 2, ruling 3).
+        std::string shown;
     };
 
     // A position in a file's original text: after the rewrite, a position in a rewritten file is

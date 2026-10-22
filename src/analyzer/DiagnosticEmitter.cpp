@@ -1051,8 +1051,13 @@ namespace ctrace::stack::analyzer
 
             if (issue.isRvalueRef)
             {
-                body << kDiagIndentArrow << "consider passing by value (" << issue.suggestedType
-                     << ") or const reference (" << issue.suggestedTypeAlt << ")\n";
+                // Without an alternative, the check names the const reference it tried (D12).
+                if (issue.suggestedTypeAlt.empty())
+                    body << kDiagIndentArrow << "consider passing by const reference ("
+                         << issue.suggestedType << ")\n";
+                else
+                    body << kDiagIndentArrow << "consider passing by value (" << issue.suggestedType
+                         << ") or const reference (" << issue.suggestedTypeAlt << ")\n";
                 body << kDiagIndentArrow << "current type: " << issue.currentType << "\n";
             }
             else if (issue.pointerConstOnly)

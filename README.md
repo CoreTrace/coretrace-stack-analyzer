@@ -753,9 +753,6 @@ Its limits:
 - a rewrite that changes the program's behavior in a way that calls, overrides and constant
   conditions do not show is kept as not checked, not removed: `sizeof(__PRETTY_FUNCTION__)`, for
   example, changes with the rewrite;
-- the type shown can differ from the type checked. For a `T *const p` parameter, the message shows
-  `const T *p`, and the check tries `const T *const p`. For an rvalue reference `T &&r`, the message
-  suggests passing by value, and the check tries `const T &r` only. The trace names the type tried;
 - a pointer typedef with a qualifier written before it (`const IntPtr p`) does not get the type
   tried: the suggestion is not checked;
 - a file that sees the changes of two analyzed files is compiled as it is once for each, and a hit

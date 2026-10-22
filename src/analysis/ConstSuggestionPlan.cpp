@@ -290,6 +290,29 @@ namespace ctrace::stack::analysis
             return out;
         }
 
+        // The candidate as a diagnostic displays it: as Clang writes it, struct, union and enum
+        // included where C needs them, except that a type without a name is <anonymous type>,
+        // as the rule's own lines write it (stage 2, ruling 3).
+        std::string shownOf(const clang::ASTContext& context, clang::QualType type,
+                            llvm::StringRef name)
+        {
+            std::string out = declaring(context, type, name);
+            const clang::Type* base = type.getTypePtr();
+            while (!base->getPointeeType().isNull())
+                base = base->getPointeeType().getTypePtr();
+            const clang::TagDecl* tag = base->getAsTagDecl();
+            if (tag && !tag->getIdentifier() && !tag->getTypedefNameForAnonDecl())
+            {
+                clang::PrintingPolicy policy(context.getLangOpts());
+                policy.AnonymousTagLocations = false;
+                const std::string spelled =
+                    clang::QualType(base, 0).getUnqualifiedType().getAsString(policy);
+                if (const std::size_t at = out.find(spelled); at != std::string::npos)
+                    out.replace(at, spelled.size(), "<anonymous type>");
+            }
+            return out;
+        }
+
         // What the candidate stands for, as the trace names it (Texts).
         const char* alternativeOf(clang::QualType type)
         {
@@ -393,7 +416,8 @@ namespace ctrace::stack::analysis
         }
         out.candidate = {declaring(context, param.getType(), param.getName()),
                          declaring(context, candidate, param.getName()),
-                         alternativeOf(param.getType())};
+                         alternativeOf(param.getType()),
+                         shownOf(context, candidate, param.getName())};
         Planner planner(context, macros, out);
         for (const clang::FunctionDecl* declaration : pattern->redecls())
         {
