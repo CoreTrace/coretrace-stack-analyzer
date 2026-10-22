@@ -8,15 +8,15 @@
 
 // at line 24, column 0
 // [ !Info! ] ConstParameterNotModified.ReferenceRvaluePreferValue: parameter 'f' in function 'int apply_twice<from_temporaries()::$_0>(from_temporaries()::$_0&&)' is an rvalue reference and is never used to modify the referred object
-// ↳ consider passing by value (<anonymous type> f) or const reference (const <anonymous type> &f)
+// ↳ consider passing by const reference (const <anonymous type> &f)
 // ↳ current type: <anonymous type> &&f
-// ↳ checked in the analyzed files only, with their compile commands: they compile with the suggested type, and their generated code matches, metadata included, once debug information, diagnostic metadata, descriptive names and renamed symbols are set aside
+// ↳ checked in the analyzed files only, with their compile commands: they compile with the suggested const reference, and their generated code matches, metadata included, once debug information, diagnostic metadata, descriptive names and renamed symbols are set aside; passing by value is not checked
 
 // at line 24, column 0
 // [ !Info! ] ConstParameterNotModified.ReferenceRvaluePreferValue: parameter 'f' in function 'int apply_twice<from_temporaries()::$_1>(from_temporaries()::$_1&&)' is an rvalue reference and is never used to modify the referred object
-// ↳ consider passing by value (<anonymous type> f) or const reference (const <anonymous type> &f)
+// ↳ consider passing by const reference (const <anonymous type> &f)
 // ↳ current type: <anonymous type> &&f
-// ↳ checked in the analyzed files only, with their compile commands: they compile with the suggested type, and their generated code matches, metadata included, once debug information, diagnostic metadata, descriptive names and renamed symbols are set aside
+// ↳ checked in the analyzed files only, with their compile commands: they compile with the suggested const reference, and their generated code matches, metadata included, once debug information, diagnostic metadata, descriptive names and renamed symbols are set aside; passing by value is not checked
 
 // The lvalue passes a const reference already: no suggestion for that specialization.
 // not contains: in function 'int apply_twice<from_lvalue()

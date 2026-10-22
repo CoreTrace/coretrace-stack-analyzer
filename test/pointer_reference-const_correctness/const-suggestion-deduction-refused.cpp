@@ -14,7 +14,7 @@
 
 // at line 28, column 0
 // [ !Info! ] ConstParameterNotModified.ReferenceRvaluePreferValue: parameter 'f' in function 'int call<from_temporary()::$_0>(from_temporary()::$_0&&)' is an rvalue reference and is only read, or passed where a reference to const is expected
-// ↳ consider passing by value (<anonymous type> f) or const reference (const <anonymous type> &f)
+// ↳ consider passing by const reference (const <anonymous type> &f)
 // ↳ current type: <anonymous type> &&f
 // ↳ the callee's body is not checked: it may still modify the referred object through a cast
 // ↳ not checked with Clang: 'int call<from_lvalues()::$_0&>(from_lvalues()::$_0&)' and 'int call<from_lvalues()::$_0 const&>(from_lvalues()::$_0 const&)' both become 'int call<from_lvalues()::$_0>(from_lvalues()::$_0 const&)': their correspondence is not one to one
