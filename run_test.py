@@ -3931,6 +3931,38 @@ def check_const_suggestion_extern_c_user() -> bool:
     return ok
 
 
+def check_const_suggestion_top_level_qualifier() -> bool:
+    """
+    #217 (D18): a parameter's top-level qualifier is not part of the function's type, so a
+    declaration and the definition can differ in it. The rewrite gives each declaration the
+    candidate of its own type, and each is compared with that candidate: in both directions, the
+    suggestion is checked.
+    """
+    print("=== Testing declarations that differ from the definition in a top-level qualifier ===")
+    source = (
+        "int f(int* p);\nint f(int* const p)\n{\n    return *p;\n}\n"
+        "int g(int* const p);\nint g(int* p)\n{\n    return *p;\n}\n"
+    )
+    with tempfile.TemporaryDirectory(prefix="ct_const_suggestion_top_level_") as tmp:
+        path = Path(tmp).resolve() / "decls.c"
+        path.write_text(source)
+        run = _const_suggestion_run([str(path)])
+    if run is None:
+        return fail_check("the analysis did not run")
+    messages, trace, _ = run
+    ok = True
+    for label, function in (
+        ("declared without the top-level const, defined with it", "f"),
+        ("declared with the top-level const, defined without it", "g"),
+    ):
+        verdicts = [line for line in trace if line.startswith(f"{function} parameter p, verdict: ")]
+        good = function in messages and verdicts == [f"{function} parameter p, verdict: verified"]
+        print(f"  {'✅' if good else '❌'} {label}" + ("" if good else f": {verdicts}"))
+        ok = ok and good
+    print()
+    return ok
+
+
 def check_duplicate_if_cross_tu() -> bool:
     """
     #157: a function defined in another file is deterministic when every definition of it is, as
@@ -6899,6 +6931,7 @@ def main() -> int:
         check_const_suggestion_trace,
         check_const_suggestion_werror_on_a_tracked_group,
         check_const_suggestion_extern_c_user,
+        check_const_suggestion_top_level_qualifier,
         check_duplicate_if_cross_tu,
         check_global_read_before_write_identity_across_files,
         check_size_minus_one_cross_tu,
