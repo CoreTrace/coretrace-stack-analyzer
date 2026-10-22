@@ -29,7 +29,6 @@ namespace ctrace::stack::analysis
         using const_suggestion::SiteReader;
         using const_suggestion::SourceLinkage;
         using const_suggestion::SuggestionPlan;
-        using const_suggestion::writtenType;
 
         // Records where each macro definition lies, by file.
         class MacroRecorder : public clang::PPCallbacks
@@ -279,22 +278,6 @@ namespace ctrace::stack::analysis
             const std::set<const clang::ParmVarDecl*>& planned_;
         };
 
-        // The type the parameter has once rewritten, which the edits write (§3): a pointer to
-        // const, its top-level qualifiers kept; a reference to const, for an rvalue reference
-        // too. Null for another type.
-        clang::QualType candidateOf(clang::ASTContext& context, clang::QualType type)
-        {
-            if (const auto* pointer = type->getAs<clang::PointerType>())
-            {
-                return context.getQualifiedType(
-                    context.getPointerType(pointer->getPointeeType().withConst()),
-                    type.getQualifiers());
-            }
-            if (type->isReferenceType())
-                return context.getLValueReferenceType(type.getNonReferenceType().withConst());
-            return {};
-        }
-
         // A type as a declaration of `name` writes it.
         std::string declaring(const clang::ASTContext& context, clang::QualType type,
                               llvm::StringRef name)
@@ -318,6 +301,22 @@ namespace ctrace::stack::analysis
                                            : "pointer to const";
         }
     } // namespace
+
+    // The type the parameter has once rewritten, which the edits write (§3): a pointer to const,
+    // its top-level qualifiers kept; a reference to const, for an rvalue reference too. Null for
+    // another type.
+    clang::QualType const_suggestion::candidateOf(clang::ASTContext& context, clang::QualType type)
+    {
+        if (const auto* pointer = type->getAs<clang::PointerType>())
+        {
+            return context.getQualifiedType(
+                context.getPointerType(pointer->getPointeeType().withConst()),
+                type.getQualifiers());
+        }
+        if (type->isReferenceType())
+            return context.getLValueReferenceType(type.getNonReferenceType().withConst());
+        return {};
+    }
 
     // A type written canonically. An anonymous type, such as a lambda's, is written without
     // its location: the path of that location depends on how the file was named, relative
@@ -392,7 +391,6 @@ namespace ctrace::stack::analysis
             out.indeterminate = "the parameter is no pointer or reference";
             return out;
         }
-        out.expectedType = writtenType(context, candidate);
         out.candidate = {declaring(context, param.getType(), param.getName()),
                          declaring(context, candidate, param.getName()),
                          alternativeOf(param.getType())};

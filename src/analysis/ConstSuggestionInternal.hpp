@@ -172,7 +172,6 @@ namespace ctrace::stack::analysis::const_suggestion
         std::vector<DeclarationSite> parameters;        // the parameters it rewrites, sorted
         std::map<std::string, std::vector<Edit>> edits; // by real path
         Candidate candidate;                            // the type the rewrite gives the parameter
-        std::string expectedType;                       // the candidate, written canonically
         std::optional<std::string> indeterminate;       // why the plan is not executed
         unsigned sourceIndex = 0;
         // A free function with external linkage can be declared by a file that reads none of the
@@ -206,6 +205,9 @@ namespace ctrace::stack::analysis::const_suggestion
 
     // A type written canonically, an anonymous type without its location.
     std::string writtenType(const clang::ASTContext& context, clang::QualType type);
+
+    // The type a parameter of type `type` gets once rewritten (§3); null for another type.
+    clang::QualType candidateOf(clang::ASTContext& context, clang::QualType type);
 
     // The macro definitions a compilation reads, by file: from each macro's name to its last
     // token, as offsets (D11).
@@ -253,6 +255,9 @@ namespace ctrace::stack::analysis::const_suggestion
         // After the rewrite, the symbols the entity takes, as the defining unit's compilation
         // names them: another unit can define one without declaring the entity (§5.10).
         std::vector<std::string> takes;
+        // After the rewrite, the type each declaration of the entity must have, by site: the
+        // unit's own, from its compilation before the rewrite (D8, D18).
+        std::map<DeclarationSite, std::string> expected;
     };
 
     // An error or a checked warning, in the order Clang reports it.
@@ -307,6 +312,10 @@ namespace ctrace::stack::analysis::const_suggestion
             // Its declarations' sites, each with the line where Clang expands it: those that the
             // rewrite adds are other entities' declarations that merge into it (ruling 3).
             std::map<DeclarationSite, unsigned> declarations;
+            // Before the rewrite, by site, the type each of its declarations must get: the
+            // candidate of the declaration's own parameter type, its top-level qualifiers kept,
+            // written canonically in this compilation's language (D8, D18).
+            std::map<DeclarationSite, std::string> expected;
             std::vector<Fact> overrides; // O, for the methods named like it
             std::vector<Named> variants; // the entity's: C1, C2, D0... or "" for a function
             // The constructors inheriting it, or a specialization of its template: by derived

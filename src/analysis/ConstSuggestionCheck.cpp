@@ -431,7 +431,10 @@ namespace ctrace::stack::analysis
             // Step 1: a unit that cannot be checked.
             if (!before)
                 return indeterminate(kDoesNotCompileAsItIs);
-            after = inspect(command, &plan, rewritten, {planned}, "const_suggestion.compile.after",
+            // Each declaration's candidate, as the unit writes it before the rewrite (D8, D18).
+            Target target = planned;
+            target.expected = before->unit.entities[index].expected;
+            after = inspect(command, &plan, rewritten, {target}, "const_suggestion.compile.after",
                             timing);
             if (!after.failure.empty())
                 return indeterminate(after.failure);

@@ -55,6 +55,7 @@ namespace ctrace::stack::analysis
 {
     namespace
     {
+        using const_suggestion::candidateOf;
         using const_suggestion::DeclarationSite;
         using const_suggestion::Edit;
         using const_suggestion::EntityIdentity;
@@ -907,6 +908,30 @@ namespace ctrace::stack::analysis
                         }
                     }
                 }
+                // Before the rewrite, the type each declaration must get: the candidate of its
+                // own parameter type, as this compilation's language writes it (D8, D18).
+                const SuggestionPlan& plan = target.plan ? *target.plan : facts.plan;
+                if (!rewrittenBy_ && !plan.indeterminate)
+                {
+                    for (const clang::FunctionDecl* function : found)
+                    {
+                        for (const clang::FunctionDecl* declaration : function->redecls())
+                        {
+                            if (declaration->isDependentContext() ||
+                                plan.sourceIndex >= declaration->getNumParams())
+                            {
+                                continue;
+                            }
+                            const clang::QualType candidate = candidateOf(
+                                *context_, declaration->getParamDecl(plan.sourceIndex)->getType());
+                            if (!candidate.isNull())
+                            {
+                                facts.expected.emplace((*sites_)(declaration->getLocation()),
+                                                       writtenType(*context_, candidate));
+                            }
+                        }
+                    }
+                }
                 if (!target.plan || target.plan != rewrittenBy_)
                     return;
                 definitions(i);
@@ -925,15 +950,19 @@ namespace ctrace::stack::analysis
                         const std::string type = writtenType(
                             *context_,
                             declaration->getParamDecl(target.plan->sourceIndex)->getType());
-                        if (type == target.plan->expectedType)
+                        // A declaration with no expected type was another entity's before the
+                        // rewrite, which merges into it: the collisions judge it (ruling 3).
+                        const auto expected =
+                            target.expected.find((*sites_)(declaration->getLocation()));
+                        if (expected == target.expected.end() || type == expected->second)
                             continue;
                         const clang::SourceLocation at =
                             sm.getExpansionLoc(declaration->getLocation());
                         const std::string& file = sites_->fileOf(sm.getFileID(at));
-                        // A planned parameter must have the candidate (§5.6, step 3). A declaration
-                        // in a file that the plan does not rewrite, through which the unit declares
-                        // the entity for the linker only, keeps its type: the unit does not see the
-                        // rewrite (D17).
+                        // A planned parameter must have the candidate of its own type, as its
+                        // unit writes it (§5.6, step 3; D8, D18). A declaration in a file that the
+                        // plan does not rewrite, through which the unit declares the entity for the
+                        // linker only, keeps its type: the unit does not see the rewrite (D17).
                         if (target.plan->edits.count(file))
                             facts.withoutCandidate = true;
                         else

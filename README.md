@@ -756,9 +756,6 @@ Its limits:
 - the type shown can differ from the type checked. For a `T *const p` parameter, the message shows
   `const T *p`, and the check tries `const T *const p`. For an rvalue reference `T &&r`, the message
   suggests passing by value, and the check tries `const T &r` only. The trace names the type tried;
-- the type tried is compared as each file's language writes it: a C function that a C++ file
-  declares through a shared header (`extern "C"`) is not checked when C++ writes the parameter's
-  type differently, `foo *` for C's `struct foo *`;
 - a pointer typedef with a qualifier written before it (`const IntPtr p`) does not get the type
   tried: the suggestion is not checked;
 - a file that sees the changes of two analyzed files is compiled as it is once for each, and a hit
