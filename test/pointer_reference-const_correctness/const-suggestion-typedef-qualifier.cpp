@@ -12,7 +12,7 @@
 // ↳ checked in the analyzed files only, with their compile commands: they compile with the suggested type, and their generated code matches, metadata included, once debug information, diagnostic metadata, descriptive names and renamed symbols are set aside
 // ↳ ABI: the suggested type changes the symbol (_Z6beforePi -> _Z6beforePKi): code compiled separately must use the updated declaration and be recompiled
 
-// at line 28, column 0
+// at line 31, column 0
 // [ !Info! ] ConstParameterNotModified.PointerConstOnly: parameter 'p' in function 'after(int*)' is declared 'int * const p' but the pointed object is never modified
 // ↳ consider 'const int *const p' for API const-correctness
 // ↳ current type: int * const p
@@ -24,5 +24,11 @@
 
 typedef int* IntPtr;
 
-int before(const IntPtr p) { return *p; }
-int after(IntPtr const p) { return *p; }
+int before(const IntPtr p)
+{
+    return *p;
+}
+int after(IntPtr const p)
+{
+    return *p;
+}
