@@ -437,8 +437,14 @@ namespace ctrace::stack
             const auto& rule = rules[i];
             os << "            {\n";
             os << "              \"id\": \"" << jsonEscape(rule.id) << "\",\n";
-            os << "              \"shortDescription\": { \"text\": \"" << jsonEscape(rule.id)
-               << "\" }";
+            // The title and the description of the rule, when the catalog has them; the id
+            // otherwise, as before.
+            const std::optional<RuleDescription> described = describeRule(rule.id);
+            os << "              \"shortDescription\": { \"text\": \""
+               << jsonEscape(described ? std::string(described->title) : rule.id) << "\" }";
+            if (described)
+                os << ",\n              \"fullDescription\": { \"text\": \""
+                   << jsonEscape(std::string(described->description)) << "\" }";
             if (!rule.cwes.empty())
             {
                 // One score for the whole rule: the highest of its CWEs.
