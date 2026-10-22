@@ -970,6 +970,47 @@ namespace
         return report.failures == 0;
     }
 
+    /// #217 (D10, D18): step 3 detects a rewrite that loses the parameter's own top-level const.
+    /// The plan of read_only(int *const p) is executed with an edit that writes `const int *`
+    /// instead of `const int *const`: the declaration does not get the candidate of its type,
+    /// whatever the planner's later edits are.
+    bool testConstSuggestionTopLevelQualifierLost(TestReport& report)
+    {
+        namespace cs = ctrace::stack::analysis::const_suggestion;
+        const std::filesystem::path dir =
+            std::filesystem::temp_directory_path() / "ct_const_suggestion_top_level_lost";
+        std::filesystem::create_directories(dir);
+        const std::filesystem::path file = dir / "k.c";
+        const std::string text = "int read_only(int *const p) { return *p; }\n";
+        std::ofstream(file) << text;
+        const ctrace::stack::analysis::UnitCommand command{{"clang", "-c", file.string()},
+                                                           dir.string()};
+        std::vector<cs::Target> targets(1);
+        targets[0].symbol = "read_only";
+        targets[0].sourceIndex = 0;
+        const cs::UnitFacts before = cs::inspect(command, nullptr, {}, targets, "test", false);
+        if (before.entities.size() != 1 || before.entities[0].plan.edits.size() != 1)
+        {
+            report.expect(false, "ConstSuggestionTopLevel setup: read_only is not planned");
+            return false;
+        }
+        cs::SuggestionPlan lost = before.entities[0].plan;
+        const std::string written = "int *const";
+        const std::size_t at = text.find(written);
+        lost.edits.begin()->second = {{at, written.size(), "const int *", 1}};
+        std::string rewritten = text;
+        rewritten.replace(at, written.size(), "const int *");
+        cs::Target target = targets[0];
+        target.plan = &lost;
+        target.expected = before.entities[0].expected;
+        const cs::UnitFacts after = cs::inspect(
+            command, &lost, {{lost.edits.begin()->first, rewritten}}, {target}, "test", false);
+        report.expect(after.entities.size() == 1 && after.entities[0].withoutCandidate,
+                      "ConstSuggestionTopLevel: a rewrite that loses the pointer's own const does "
+                      "not get the candidate");
+        return report.failures == 0;
+    }
+
     bool testUninitializedSummaryKeysAreLinkerSymbols(const std::filesystem::path& repoRoot,
                                                       TestReport& report)
     {
@@ -2938,6 +2979,7 @@ int main(int argc, char** argv)
     (void)testAnalysisIncompleteNotesHaveTheirOwnRules(report);
     (void)testConstSuggestionCodeComparison(report);
     (void)testConstSuggestionNormalizations(report);
+    (void)testConstSuggestionTopLevelQualifierLost(report);
     (void)testUnresolvedCallsMarkStackUnknown(repoRoot, report);
     (void)testAssumeExternalFrameReplacesUnknown(repoRoot, report);
     (void)testUninitializedFixpointBudgetIsExplicit(repoRoot, report);
