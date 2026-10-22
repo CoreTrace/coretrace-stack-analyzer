@@ -1011,6 +1011,73 @@ namespace
         return report.failures == 0;
     }
 
+    /// #217 (Task 3.2, O1): the correspondences of §5.7 keep the multiplicity and the order of
+    /// the references at each key, those with a template and those without alike, and map the
+    /// instantiation contexts through the pairs that earlier rounds establish. These cases pin
+    /// what an index built once must give.
+    bool testConstSuggestionCorrespondenceIndex(TestReport& report)
+    {
+        namespace cs = ctrace::stack::analysis::const_suggestion;
+        const auto site = [](std::size_t offset)
+        {
+            cs::DeclarationSite out;
+            out.expansion = {"use.cpp", offset};
+            out.spelling = out.expansion;
+            return out;
+        };
+        const auto reference = [](cs::FactKey key, std::vector<std::string> value)
+        {
+            cs::Fact fact;
+            fact.key = std::move(key);
+            fact.value = std::move(value);
+            fact.shown = fact.value.front();
+            return fact;
+        };
+        const cs::FactKey at{{"ctx"}, site(10)};
+        const cs::Fact withTemplate = reference(at, {"symbol:_Z1aIiEvv", "template:a"});
+        const cs::Fact rewritten = reference(at, {"symbol:_Z1aIKiEvv", "template:a"});
+        const cs::Fact plain = reference(at, {"site:use.cpp:3"});
+        const auto pairsOf = [&](std::vector<cs::Fact> before, std::vector<cs::Fact> after,
+                                 std::set<std::string> instantiations)
+        {
+            cs::UnitFacts was;
+            was.entities.resize(1);
+            was.facts = std::move(before);
+            cs::UnitFacts now;
+            now.entities.resize(1);
+            now.facts = std::move(after);
+            now.instantiations = std::move(instantiations);
+            std::string missing;
+            std::vector<std::string> out;
+            for (const ctrace::stack::analysis::SymbolPair& pair :
+                 cs::correspond(was, 0, now, missing))
+                out.push_back(pair.before + "->" + pair.after);
+            return out;
+        };
+        using Pairs = std::vector<std::string>;
+        report.expect(pairsOf({withTemplate, plain}, {rewritten}, {"ctx"}).empty(),
+                      "ConstSuggestionCorrespondence: two references before, one after, at one "
+                      "key: no pair, though only one has a template");
+        report.expect(pairsOf({withTemplate, plain}, {rewritten, plain}, {"ctx"}) ==
+                          Pairs{"_Z1aIiEvv->_Z1aIKiEvv"},
+                      "ConstSuggestionCorrespondence: as many on both sides, in the same order: "
+                      "the template's references pair");
+        report.expect(pairsOf({withTemplate, plain}, {plain, rewritten}, {"ctx"}).empty(),
+                      "ConstSuggestionCorrespondence: as many on both sides, in another order: "
+                      "no pair");
+        const cs::Fact outer = reference({{}, site(20)}, {"symbol:_Z1xIiEvv", "template:x"});
+        const cs::Fact outerAfter = reference({{}, site(20)}, {"symbol:_Z1xIKiEvv", "template:x"});
+        const cs::Fact inner =
+            reference({{"_Z1xIiEvv"}, site(30)}, {"symbol:_Z1yIiEvv", "template:y"});
+        const cs::Fact innerAfter =
+            reference({{"_Z1xIKiEvv"}, site(30)}, {"symbol:_Z1yIKiEvv", "template:y"});
+        report.expect(pairsOf({outer, inner}, {outerAfter, innerAfter}, {}) ==
+                          Pairs{"_Z1xIiEvv->_Z1xIKiEvv", "_Z1yIiEvv->_Z1yIKiEvv"},
+                      "ConstSuggestionCorrespondence: a context maps through the pair an earlier "
+                      "round establishes");
+        return report.failures == 0;
+    }
+
     bool testUninitializedSummaryKeysAreLinkerSymbols(const std::filesystem::path& repoRoot,
                                                       TestReport& report)
     {
@@ -2980,6 +3047,7 @@ int main(int argc, char** argv)
     (void)testConstSuggestionCodeComparison(report);
     (void)testConstSuggestionNormalizations(report);
     (void)testConstSuggestionTopLevelQualifierLost(report);
+    (void)testConstSuggestionCorrespondenceIndex(report);
     (void)testUnresolvedCallsMarkStackUnknown(repoRoot, report);
     (void)testAssumeExternalFrameReplacesUnknown(repoRoot, report);
     (void)testUninitializedFixpointBudgetIsExplicit(repoRoot, report);
