@@ -3900,6 +3900,37 @@ def check_const_suggestion_werror_on_a_tracked_group() -> bool:
     return good
 
 
+def check_const_suggestion_extern_c_user() -> bool:
+    """
+    #217 (D8): a C function that a C++ file declares through a shared header (extern "C"). Each
+    file writes the parameter's type in its own language, struct foo * in C and foo * in C++, and
+    each rewritten declaration is compared with the candidate as its own file writes it: the
+    suggestion is checked with the C++ user, as with a C user.
+    """
+    print('=== Testing a C function that a C++ file declares through an extern "C" header ===')
+    sources = {
+        "api.h": '#ifdef __cplusplus\nextern "C" {\n#endif\nstruct foo { int x; };\n'
+        "int rd(struct foo* f);\n#ifdef __cplusplus\n}\n#endif\n",
+        "def.c": '#include "api.h"\nint rd(struct foo* f) { return f->x; }\n',
+        "user.cpp": '#include "api.h"\nint user(foo* f) { return rd(f); }\n',
+        "user2.c": '#include "api.h"\nint user2(struct foo* f) { return rd(f); }\n',
+    }
+    ok = True
+    with tempfile.TemporaryDirectory(prefix="ct_const_suggestion_extern_c_") as tmp:
+        root = Path(tmp).resolve()
+        for name, text in sources.items():
+            (root / name).write_text(text)
+        for label, user in (("a C++ user", "user.cpp"), ("a C user", "user2.c")):
+            run = _const_suggestion_run([str(root / "def.c"), str(root / user)])
+            messages, trace, _ = run if run else ({}, [], "")
+            verdicts = [line for line in trace if line.startswith("rd parameter f, verdict: ")]
+            good = "rd" in messages and verdicts == ["rd parameter f, verdict: verified"]
+            print(f"  {'✅' if good else '❌'} {label}" + ("" if good else f": {verdicts}"))
+            ok = ok and good
+    print()
+    return ok
+
+
 def check_duplicate_if_cross_tu() -> bool:
     """
     #157: a function defined in another file is deterministic when every definition of it is, as
@@ -6867,6 +6898,7 @@ def main() -> int:
         check_const_suggestion_cast_in_the_defining_file,
         check_const_suggestion_trace,
         check_const_suggestion_werror_on_a_tracked_group,
+        check_const_suggestion_extern_c_user,
         check_duplicate_if_cross_tu,
         check_global_read_before_write_identity_across_files,
         check_size_minus_one_cross_tu,
