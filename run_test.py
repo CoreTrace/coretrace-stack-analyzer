@@ -3963,6 +3963,50 @@ def check_const_suggestion_top_level_qualifier() -> bool:
     return ok
 
 
+def check_const_suggestion_deduced_type_error() -> bool:
+    """
+    #217: a rewrite that makes a call ill-formed changes the type that a declaration deduces from
+    that call, here a structured binding. The deduced part of a type is not what the rewrite
+    writes: the declaration stays within the plan (step 3), and the error refutes the suggestion
+    (step 4).
+    """
+    print("=== Testing a declaration that deduces its type from a call the rewrite breaks ===")
+    source = (
+        "#include <map>\n"
+        "\n"
+        "// publish writes the map that publish_all receives: const does not compile.\n"
+        "void publish_all(std::map<int, int>& ranges, int key)\n"
+        "{\n"
+        "    const auto publish = [&ranges](int k)\n"
+        "    {\n"
+        "        const auto [it, inserted] = ranges.try_emplace(k, 0);\n"
+        "        if (!inserted)\n"
+        "            ++it->second;\n"
+        "    };\n"
+        "    publish(key);\n"
+        "}\n"
+    )
+    with tempfile.TemporaryDirectory(prefix="ct_const_suggestion_deduced_") as tmp:
+        path = Path(tmp).resolve() / "publish.cpp"
+        path.write_text(source)
+        run = _const_suggestion_run([str(path), "--compile-arg=-std=c++17"])
+    if run is None:
+        return fail_check("the analysis did not run")
+    messages, trace, _ = run
+    removed = (
+        f"ranges: removed, does not compile: {path}:8: no matching member function for call to "
+        "'try_emplace'"
+    )
+    good = not any("publish_all" in name for name in messages) and any(
+        " parameter " in line and line.split(" parameter ", 1)[1].startswith(removed)
+        for line in trace
+    )
+    detail = "" if good else f": {[line for line in trace if ' parameter ranges' in line]}"
+    print(f"  {'✅' if good else '❌'} removed for the error{detail}")
+    print()
+    return good
+
+
 def check_duplicate_if_cross_tu() -> bool:
     """
     #157: a function defined in another file is deterministic when every definition of it is, as
@@ -6932,6 +6976,7 @@ def main() -> int:
         check_const_suggestion_werror_on_a_tracked_group,
         check_const_suggestion_extern_c_user,
         check_const_suggestion_top_level_qualifier,
+        check_const_suggestion_deduced_type_error,
         check_duplicate_if_cross_tu,
         check_global_read_before_write_identity_across_files,
         check_size_minus_one_cross_tu,
