@@ -4007,6 +4007,43 @@ def check_const_suggestion_deduced_type_error() -> bool:
     return good
 
 
+def check_const_suggestion_written_part_outside_the_plan() -> bool:
+    """
+    #217: a macro argument writes the parameter's type and, outside the plan, a part of another
+    type that the source writes explicitly: a template argument of a type whose other part is
+    deduced, or a cast in the initializer of a variable whose type is deduced. The rewrite changes
+    what is written outside the plan: the suggestion is kept, not checked (step 3), whatever the
+    deduced part becomes.
+    """
+    print("=== Testing an explicitly written part changed outside the plan ===")
+    head = "#define PAIR(name, type) int name(type p); "
+    tail = "PAIR(read_value, int*)\n\nint read_value(int* p)\n{\n    return *p;\n}\n"
+    cases = {
+        "a written template argument beside a deduced one": (
+            "template <class A, class B> struct Two\n{\n    A a;\n    B b;\n};\n"
+            + head
+            + "Two<type, decltype(0)> name##_two;\n"
+        ),
+        "a cast in a deduced declaration's initializer": (
+            head + "auto name##_slot = static_cast<type>(nullptr);\n"
+        ),
+    }
+    ok = True
+    with tempfile.TemporaryDirectory(prefix="ct_const_suggestion_written_part_") as tmp:
+        for k, (label, prefix) in enumerate(cases.items()):
+            path = Path(tmp).resolve() / f"pair{k}.cpp"
+            path.write_text(prefix + tail)
+            run = _const_suggestion_run([str(path)])
+            texts = run[0].get("_Z10read_valuePi", []) if run else []
+            good = len(texts) == 1 and (
+                "not checked with Clang: the rewrite also changes the type" in texts[0]
+            )
+            print(f"  {'✅' if good else '❌'} {label}" + ("" if good else f": {texts}"))
+            ok = ok and good
+    print()
+    return ok
+
+
 def check_duplicate_if_cross_tu() -> bool:
     """
     #157: a function defined in another file is deterministic when every definition of it is, as
@@ -6977,6 +7014,7 @@ def main() -> int:
         check_const_suggestion_extern_c_user,
         check_const_suggestion_top_level_qualifier,
         check_const_suggestion_deduced_type_error,
+        check_const_suggestion_written_part_outside_the_plan,
         check_duplicate_if_cross_tu,
         check_global_read_before_write_identity_across_files,
         check_size_minus_one_cross_tu,
