@@ -2983,4 +2983,15 @@ Expected failure at the batch's base: in all three cases, `not checked with Clan
 ### Task F.3: delivery
 **Work:** README; the description of the draft #239, opened after stage 1, brought up to date; CI; code scanning triaged; final review on the updated base. No merge.
 
+### Task F.4: the scope of step 3, written form and deduced component (D19)
+Found by the comparison of the corpora at `48f3ec1`, authorized by the user on 2026-10-23.
+**Work:**
+- 1a: a declaration whose type has a deduced part (`auto`, `decltype(auto)`, `decltype`, `typeof`, a deduced class template's arguments) is recorded by its written form, the deduced part written as its keyword; any other declaration as before, canonically.
+- 1b: in each compilation after the rewrite, a type location whose spelling an edit writes, and that does not belong to a planned parameter's type, is outside the plan: "the rewrite also changes the type written at <file>:<line>", reported after the declarations. A planned parameter's default argument is outside its type.
+- The order of the judgement's steps is unchanged; the checks of D5, of the X-macro and of the invalid declarations stay as they are.
+
+**Tests:** `check_const_suggestion_deduced_type_error` (publish_all removed for its error; FAIL at `48f3ec1`), `check_const_suggestion_written_part_outside_the_plan` (a written template argument beside a deduced one, a cast in a deduced declaration's initializer; PASS at `48f3ec1`, FAIL with a fix that ignores declarations with a deduced part). A check of a planned parameter's default argument is presented with its proof before it is added.
+
+**Validation:** the three platforms; the comparison of the corpora, where only publishSingleStoreSlots may change (removed for its error); the cost added.
+
 **Validation of the final phase:** every classification explained; cost reported against the criterion; CI green; triage summarized.

@@ -1,7 +1,7 @@
 # Vérification des suggestions const par Clang, version 2 (#217)
 
 Statut : validée à `8b283a8`, puis complétée à la relecture du plan d'implémentation (D17, fixture
-de D13), au détail de l'étape 1 (mutualisation limitée au module, §5 et §10), et à celui de l'étape 2 (erreurs natives de Clang conservées, §5.3 ; D18, §5.6 et §6). N'autorise ni le code ni la modification des tests : chaque lot présentera ses
+de D13), au détail de l'étape 1 (mutualisation limitée au module, §5 et §10), à celui de l'étape 2 (erreurs natives de Clang conservées, §5.3 ; D18, §5.6 et §6), et après la comparaison des corpus (D19, §5.6 et §6). N'autorise ni le code ni la modification des tests : chaque lot présentera ses
 tests, avec leurs preuves d'échec, avant de les ajouter. La fusion n'est pas autorisée.
 Issue : #217. Liens : #221 (T v1, référence conservée), #167 (faits et contrat const), #197
 (identité d'un global entre fichiers).
@@ -201,10 +201,16 @@ Sur la compilation initiale du fichier de définition :
 
 Les fichiers réécrits sont remappés ; les mêmes faits qu'en 5.3 sont relevés. La portée est vérifiée
 dans chaque unité :
-- aucune déclaration écrite dans les sources des fichiers réécrits ne change hors du plan. Les
-  signatures instanciées (spécialisations de gabarits) qui changent avec la réécriture ne relèvent
+- aucune déclaration écrite dans les sources des fichiers réécrits ne change hors du plan dans sa
+  forme écrite : ses qualificatifs, ses déclarateurs, les types et les arguments de gabarit que le
+  source écrit. Sa composante déduite (`auto`, `decltype`, arguments déduits d'un gabarit de
+  classe) n'en fait pas partie : ce que la réécriture y change est une conséquence du plan, que
+  jugent les étapes 4 à 7 (D19). Les signatures instanciées (spécialisations de gabarits) qui changent avec la réécriture ne relèvent
   pas de cet invariant : elles sont examinées par les correspondances (5.7), comme dans
   `const-suggestion-deduction-kept.cpp` ;
+- aucun type qu'une modification écrit ne sert hors du type des paramètres prévus, dans une
+  déclaration comme dans une expression (conversion, `sizeof`, argument de gabarit) ; l'argument
+  par défaut d'un paramètre prévu est hors du plan (D19) ;
 - chaque redéclaration visée a le candidat de son propre type, qualificatifs de premier niveau
   compris (D18), comparé dans la langue de son unité (D8).
 
@@ -310,6 +316,7 @@ suggestion valide.
 | D12 | alternative de `ReferenceRvaluePreferValue` | seul `const T &` est vérifié ; la ligne dit « the suggested type » | vérifiée ; le type affiché et la ligne nomment `const T &`, le passage par valeur n'est pas vérifié | attentes modifiées (`const-suggestion-deduction-kept.cpp` et autres) | 2 |
 | D13 | `PointerConstOnly` (t15) | affiche `const int *p`, vérifie `const int *const p` | vérifiée ; le type affiché et la ligne nomment `const int *const p` | nouvelle fixture qui active T, aucune fixture de T v1 ne couvrant `PointerConstOnly` ; le test existant sans l'option reste inchangé | 2 |
 | D18 | redéclaration qui diffère de la définition par un qualificatif de premier niveau du paramètre (`int f(int *p);` puis `int f(int *const p) {…}`, et l'inverse), observée à `4fd0dae` (`stage2/observations/toplevel-qualifier/`) | « not checked: the rewritten declaration does not get the suggested type » | vérifiée (VP), dans les deux sens | contrôle run_test.py, deux sens | 2 |
+| D19 | déclaration dont le type est déduit d'un appel que la réécriture rend invalide (`publishSingleStoreSlots`, `IntRanges.cpp:314`, relevée par la comparaison des corpus à `48f3ec1`) | gardée : « not checked: the rewrite also changes the type of an unnamed declaration » | réfutée pour l'erreur introduite ; une partie écrite que la réécriture change hors du plan, y compris dans une expression ou un argument par défaut, reste indéterminée | contrôles run_test.py | F |
 
 **Non retenus :**
 - le cache « avant » indexé par l'identifiant (point 9 de la revue) : non reproduit (t12) ; les
