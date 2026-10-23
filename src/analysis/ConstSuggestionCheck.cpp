@@ -399,6 +399,13 @@ namespace ctrace::stack::analysis
                 if (std::optional<std::string> changed = compare(site, was, none))
                     return changed;
             }
+            // A type that an edit writes outside the planned parameters' types (D19).
+            if (after.writtenOutside)
+            {
+                return "the rewrite also changes the type written at " +
+                       after.writtenOutside->site.expansion.file + ":" +
+                       std::to_string(after.writtenOutside->line);
+            }
             return incomplete;
         }
 

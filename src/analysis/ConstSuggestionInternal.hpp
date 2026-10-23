@@ -194,6 +194,9 @@ namespace ctrace::stack::analysis::const_suggestion
         DeclarationSite operator()(clang::SourceLocation location);
         // The real path of a file, or its buffer's name when it is none.
         const std::string& fileOf(clang::FileID file);
+        // Whether a position of the original text is written by one of the edits: inside the
+        // text an edit replaces, or where it inserts text (§5.6, D19).
+        bool edited(const SourcePosition& at) const;
 
       private:
         SourcePosition position(clang::SourceLocation location);
@@ -339,7 +342,7 @@ namespace ctrace::stack::analysis::const_suggestion
         // A declaration that a rewritten file writes (§5.6).
         struct Written
         {
-            std::string type; // written canonically
+            std::string type; // canonically, or its written form when a part is deduced (D19)
             std::string name;
             unsigned line = 0; // where Clang expands it
             std::uint8_t reservedPadding[4] = {};
@@ -356,6 +359,15 @@ namespace ctrace::stack::analysis::const_suggestion
         // In the rewritten files, by site; one site can hold several, in the order of the
         // traversal, such as a macro argument expanded twice.
         std::map<DeclarationSite, std::vector<Written>> writtenTypes;
+        // After the rewrite, the first type that an edit writes outside the planned parameters'
+        // types, in a declaration or an expression, a default argument included (§5.6, D19).
+        struct Outside
+        {
+            DeclarationSite site;
+            unsigned line = 0; // where Clang expands it
+            std::uint8_t reservedPadding[4] = {};
+        };
+        std::optional<Outside> writtenOutside;
         std::unique_ptr<llvm::LLVMContext> context;
         std::unique_ptr<llvm::Module> module;
         std::vector<Fact> facts;                   // R and K, in the order of the traversal

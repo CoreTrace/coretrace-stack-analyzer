@@ -252,6 +252,97 @@ namespace ctrace::stack::analysis
 
         // Each target's function, found by its declarations (§3, §5.5), the explicit casts of its
         // address, and the facts R, O and K (§5.4).
+        // §5.6 (D19): a type as the source writes it. A deduced part (auto, decltype(auto),
+        // decltype, typeof, a deduced class template's arguments) is written as its keyword, the
+        // rest canonically, so that what deduction gives it, a consequence of the plan, is left
+        // to steps 4 to 7. `deduced` tells whether the type has such a part.
+        std::string writtenForm(const clang::ASTContext& context, clang::QualType type,
+                                bool& deduced)
+        {
+            const clang::PrintingPolicy policy(context.getLangOpts());
+            const std::string qualifiers = type.getLocalQualifiers().getAsString(policy);
+            const auto qualified = [&](const std::string& text)
+            { return qualifiers.empty() ? text : qualifiers + " " + text; };
+            const auto part = [&](clang::QualType inner)
+            { return writtenForm(context, inner, deduced); };
+            const clang::Type* node = type.getTypePtr();
+            if (const auto* deducedTemplate =
+                    llvm::dyn_cast<clang::DeducedTemplateSpecializationType>(node))
+            {
+                deduced = true;
+                std::string name;
+                llvm::raw_string_ostream out(name);
+                deducedTemplate->getTemplateName().print(out, policy);
+                return qualified(name);
+            }
+            if (const auto* automatic = llvm::dyn_cast<clang::AutoType>(node))
+            {
+                deduced = true;
+                return qualified(automatic->isDecltypeAuto() ? "decltype(auto)" : "auto");
+            }
+            if (llvm::isa<clang::DecltypeType, clang::TypeOfExprType, clang::TypeOfType>(node))
+            {
+                deduced = true;
+                return qualified("decltype");
+            }
+            if (const auto* pointer = llvm::dyn_cast<clang::PointerType>(node))
+                return qualified(part(pointer->getPointeeType()) + " *");
+            if (const auto* reference = llvm::dyn_cast<clang::ReferenceType>(node))
+            {
+                return qualified(part(reference->getPointeeTypeAsWritten()) +
+                                 (reference->isLValueReferenceType() ? " &" : " &&"));
+            }
+            if (const auto* member = llvm::dyn_cast<clang::MemberPointerType>(node))
+            {
+                return qualified(part(member->getPointeeType()) + " " +
+                                 writtenType(context, clang::QualType(member->getClass(), 0)) +
+                                 "::*");
+            }
+            if (const auto* array = llvm::dyn_cast<clang::ArrayType>(node))
+            {
+                const auto* constant = llvm::dyn_cast<clang::ConstantArrayType>(array);
+                return qualified(part(array->getElementType()) + " [" +
+                                 (constant ? llvm::toString(constant->getSize(), 10, false) : "") +
+                                 "]");
+            }
+            if (const auto* function = llvm::dyn_cast<clang::FunctionProtoType>(node))
+            {
+                std::string out = part(function->getReturnType()) + " (";
+                for (unsigned i = 0; i < function->getNumParams(); ++i)
+                    out += (i ? ", " : "") + part(function->getParamType(i));
+                out += function->isVariadic() ? ", ...)" : ")";
+                const std::string method = function->getMethodQuals().getAsString(policy);
+                return qualified(method.empty() ? out : out + " " + method);
+            }
+            if (const auto* specialization =
+                    llvm::dyn_cast<clang::TemplateSpecializationType>(node);
+                specialization && !specialization->isTypeAlias())
+            {
+                std::string out;
+                llvm::raw_string_ostream text(out);
+                specialization->getTemplateName().print(text, policy);
+                text << "<";
+                bool first = true;
+                for (const clang::TemplateArgument& argument : specialization->template_arguments())
+                {
+                    text << (first ? "" : ", ");
+                    first = false;
+                    if (argument.getKind() == clang::TemplateArgument::Type)
+                        text << part(argument.getAsType());
+                    else
+                        argument.print(policy, text, /*IncludeType=*/true);
+                }
+                text << ">";
+                return qualified(out);
+            }
+            if (llvm::isa<clang::ElaboratedType, clang::ParenType, clang::AttributedType,
+                          clang::MacroQualifiedType>(node))
+            {
+                return qualified(part(node->getLocallyUnqualifiedSingleStepDesugaredType()));
+            }
+            return qualified(writtenType(context, clang::QualType(node, 0)));
+        }
+
         class Inspector : public clang::ASTConsumer, public clang::RecursiveASTVisitor<Inspector>
         {
           public:
@@ -439,6 +530,56 @@ namespace ctrace::stack::analysis
                 return true;
             }
 
+            // §5.6 (D19), after the rewrite: the planned parameters' types are the plan's. A type
+            // that an edit writes anywhere else, in a declaration, an expression or a planned
+            // parameter's default argument, is outside it.
+            bool TraverseParmVarDecl(clang::ParmVarDecl* parameter)
+            {
+                const clang::TypeSourceInfo* outer = plannedType_;
+                if (rewrittenBy_ && parameter->getTypeSourceInfo() &&
+                    std::binary_search(rewrittenBy_->parameters.begin(),
+                                       rewrittenBy_->parameters.end(),
+                                       (*sites_)(parameter->getLocation())))
+                {
+                    plannedType_ = parameter->getTypeSourceInfo();
+                }
+                const bool traversed =
+                    clang::RecursiveASTVisitor<Inspector>::TraverseParmVarDecl(parameter);
+                plannedType_ = outer;
+                return traversed;
+            }
+
+            bool TraverseTypeLoc(clang::TypeLoc loc)
+            {
+                const bool planned = plannedType_ && loc == plannedType_->getTypeLoc();
+                inPlannedType_ += planned;
+                const bool traversed = clang::RecursiveASTVisitor<Inspector>::TraverseTypeLoc(loc);
+                inPlannedType_ -= planned;
+                return traversed;
+            }
+
+            bool VisitTypeLoc(clang::TypeLoc loc)
+            {
+                if (!rewrittenBy_ || inPlannedType_ || out_.writtenOutside)
+                    return true;
+                const clang::SourceLocation at = loc.getBeginLoc();
+                if (at.isInvalid())
+                    return true;
+                const clang::SourceManager& sm = context_->getSourceManager();
+                const clang::FileID file = sm.getFileID(sm.getSpellingLoc(at));
+                const auto known = rewrittenSpelling_.find(file.getHashValue());
+                const bool rewritten = known != rewrittenSpelling_.end()
+                                           ? known->second
+                                           : (rewrittenSpelling_[file.getHashValue()] =
+                                                  rewrittenFiles_.count(sites_->fileOf(file)) != 0);
+                if (!rewritten)
+                    return true;
+                const DeclarationSite site = (*sites_)(at);
+                if (sites_->edited(site.spelling))
+                    out_.writtenOutside = UnitFacts::Outside{site, lineOf(at)};
+                return true;
+            }
+
             bool VisitVarDecl(clang::VarDecl* variable)
             {
                 if (!collectFacts_ || !variable->isStaticLocal() ||
@@ -597,8 +738,10 @@ namespace ctrace::stack::analysis
                 if (!rewrittenFiles_.count(sites_->fileOf(sm.getFileID(sm.getExpansionLoc(at)))))
                     return;
                 std::string name = declaration.getNameAsString();
+                bool deduced = false;
+                std::string form = writtenForm(*context_, type, deduced);
                 out_.writtenTypes[(*sites_)(at)].push_back(UnitFacts::Written{
-                    writtenType(*context_, type),
+                    deduced ? std::move(form) : writtenType(*context_, type),
                     name.empty() ? "an unnamed declaration" : std::move(name), lineOf(at)});
             }
 
@@ -1005,6 +1148,10 @@ namespace ctrace::stack::analysis
             std::map<const clang::FunctionDecl*, std::vector<std::string>> symbols_;
             std::map<const clang::FunctionDecl*, std::vector<std::string>> values_;
             std::map<const clang::FunctionDecl*, std::string> shown_;
+            // After the rewrite, the planned parameter's type being traversed (D19).
+            const clang::TypeSourceInfo* plannedType_ = nullptr;
+            std::size_t inPlannedType_ = 0;
+            std::map<unsigned, bool> rewrittenSpelling_; // by FileID: is it a rewritten file
         };
 
         class InspectAction : public clang::EmitLLVMOnlyAction
@@ -1250,6 +1397,20 @@ namespace ctrace::stack::analysis
         std::string path = entry ? realPath(entry->getName())
                                  : sm_.getBufferName(sm_.getLocForStartOfFile(file)).str();
         return files_.emplace(file, std::move(path)).first->second;
+    }
+
+    bool const_suggestion::SiteReader::edited(const SourcePosition& at) const
+    {
+        const auto edits = edits_.find(at.file);
+        if (edits == edits_.end())
+            return false;
+        return std::any_of(edits->second.begin(), edits->second.end(),
+                           [&](const Edit& edit)
+                           {
+                               return edit.offset <= at.offset &&
+                                      at.offset <
+                                          edit.offset + std::max<std::size_t>(edit.length, 1);
+                           });
     }
 
     SourcePosition const_suggestion::SiteReader::position(clang::SourceLocation location)
