@@ -4044,6 +4044,37 @@ def check_const_suggestion_written_part_outside_the_plan() -> bool:
     return ok
 
 
+def check_const_suggestion_default_argument_outside_the_plan() -> bool:
+    """
+    #217 (D19): only the types that make up a planned parameter's type are the plan's. A macro
+    argument writes the parameter's type and the type of a cast in its default argument: the
+    rewrite changes, outside the plan, what the default argument writes, and the suggestion is
+    kept, not checked.
+    """
+    print("=== Testing a planned parameter's default argument written by its macro argument ===")
+    source = (
+        "#define PARAM(type) type p = static_cast<type>(nullptr)\n"
+        "\n"
+        "int read_value(PARAM(int*))\n"
+        "{\n"
+        "    return p ? *p : 0;\n"
+        "}\n"
+    )
+    with tempfile.TemporaryDirectory(prefix="ct_const_suggestion_default_argument_") as tmp:
+        path = Path(tmp).resolve() / "default.cpp"
+        path.write_text(source)
+        run = _const_suggestion_run([str(path)])
+        expected = (
+            f"not checked with Clang: the rewrite also changes the type written at {path}:3"
+        )
+    texts = run[0].get("_Z10read_valuePi", []) if run else []
+    good = len(texts) == 1 and expected in texts[0]
+    detail = "" if good else f": {texts}"
+    print(f"  {'✅' if good else '❌'} the default argument's cast{detail}")
+    print()
+    return good
+
+
 def check_duplicate_if_cross_tu() -> bool:
     """
     #157: a function defined in another file is deterministic when every definition of it is, as
@@ -7015,6 +7046,7 @@ def main() -> int:
         check_const_suggestion_top_level_qualifier,
         check_const_suggestion_deduced_type_error,
         check_const_suggestion_written_part_outside_the_plan,
+        check_const_suggestion_default_argument_outside_the_plan,
         check_duplicate_if_cross_tu,
         check_global_read_before_write_identity_across_files,
         check_size_minus_one_cross_tu,
