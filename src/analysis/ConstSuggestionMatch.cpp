@@ -123,132 +123,214 @@ namespace ctrace::stack::analysis
                 fixed[it->second].facts.push_back(&fact);
             }
         }
-        for (bool added = true; added;)
+        // Steps 3, 4 and 5 run to one common fixpoint: a pair that one establishes may map what
+        // another needs.
+        for (std::size_t settled = static_cast<std::size_t>(-1); settled != pairs.size();)
         {
-            added = false;
-            const auto forward = [&](FactKey key) -> std::optional<FactKey>
+            settled = pairs.size();
+            for (bool added = true; added;)
             {
-                for (std::string& context : key.contexts)
+                added = false;
+                const auto forward = [&](FactKey key) -> std::optional<FactKey>
                 {
-                    const auto found = pairs.find(context);
-                    if (found != pairs.end())
-                        context = found->second;
-                    else if (!after.instantiations.count(context))
-                        return std::nullopt;
-                }
-                return key;
-            };
-            std::vector<At> moving;
-            {
-                std::map<FactKey, std::size_t> slot;
-                for (const auto& [i, fact] : contextual)
-                {
-                    if (const std::optional<FactKey> key = forward(fact->key))
+                    for (std::string& context : key.contexts)
                     {
-                        const auto [it, added] = slot.try_emplace(*key, moving.size());
-                        if (added)
-                            moving.push_back({i, *key, {}});
-                        moving[it->second].facts.push_back(fact);
+                        const auto found = pairs.find(context);
+                        if (found != pairs.end())
+                            context = found->second;
+                        else if (!after.instantiations.count(context))
+                            return std::nullopt;
+                    }
+                    return key;
+                };
+                std::vector<At> moving;
+                {
+                    std::map<FactKey, std::size_t> slot;
+                    for (const auto& [i, fact] : contextual)
+                    {
+                        if (const std::optional<FactKey> key = forward(fact->key))
+                        {
+                            const auto [it, added] = slot.try_emplace(*key, moving.size());
+                            if (added)
+                                moving.push_back({i, *key, {}});
+                            moving[it->second].facts.push_back(fact);
+                        }
                     }
                 }
-            }
-            // Both, merged in the order of their first references: a key with contexts never
-            // equals one without.
-            std::vector<const At*> order;
-            order.reserve(fixed.size() + moving.size());
-            for (std::size_t a = 0, b = 0; a < fixed.size() || b < moving.size();)
-            {
-                if (b == moving.size() || (a < fixed.size() && fixed[a].first < moving[b].first))
-                    order.push_back(&fixed[a++]);
-                else
-                    order.push_back(&moving[b++]);
-            }
-            std::vector<std::string> proposing;                   // in the order of the facts
-            std::map<std::string, std::vector<std::string>> to;   // before to after
-            std::map<std::string, std::vector<std::string>> from; // after to before
-            std::map<std::string, std::string> shown;
-            for (const At* at : order)
-            {
-                const std::vector<const Fact*>& wasFacts = at->facts;
-                const auto nowFacts = nowAt.find(at->key);
-                if (nowFacts == nowAt.end() || nowFacts->second.size() != wasFacts.size())
-                    continue;
-                for (std::size_t k = 0; k < wasFacts.size(); ++k)
+                // Both, merged in the order of their first references: a key with contexts never
+                // equals one without.
+                std::vector<const At*> order;
+                order.reserve(fixed.size() + moving.size());
+                for (std::size_t a = 0, b = 0; a < fixed.size() || b < moving.size();)
                 {
-                    const Fact& one = *wasFacts[k];
-                    const Fact& other = *nowFacts->second[k];
-                    const std::string wasTarget = itemOf(one.value, "symbol:");
-                    const std::string nowTarget = itemOf(other.value, "symbol:");
-                    const std::string pattern = itemOf(one.value, "template:");
-                    if (wasTarget.empty() || nowTarget.empty() || pattern.empty() ||
-                        wasTarget == nowTarget || pattern != itemOf(other.value, "template:") ||
-                        pairs.count(wasTarget))
+                    if (b == moving.size() ||
+                        (a < fixed.size() && fixed[a].first < moving[b].first))
+                        order.push_back(&fixed[a++]);
+                    else
+                        order.push_back(&moving[b++]);
+                }
+                std::vector<std::string> proposing;                   // in the order of the facts
+                std::map<std::string, std::vector<std::string>> to;   // before to after
+                std::map<std::string, std::vector<std::string>> from; // after to before
+                std::map<std::string, std::string> shown;
+                for (const At* at : order)
+                {
+                    const std::vector<const Fact*>& wasFacts = at->facts;
+                    const auto nowFacts = nowAt.find(at->key);
+                    if (nowFacts == nowAt.end() || nowFacts->second.size() != wasFacts.size())
+                        continue;
+                    for (std::size_t k = 0; k < wasFacts.size(); ++k)
                     {
+                        const Fact& one = *wasFacts[k];
+                        const Fact& other = *nowFacts->second[k];
+                        const std::string wasTarget = itemOf(one.value, "symbol:");
+                        const std::string nowTarget = itemOf(other.value, "symbol:");
+                        const std::string pattern = itemOf(one.value, "template:");
+                        if (wasTarget.empty() || nowTarget.empty() || pattern.empty() ||
+                            wasTarget == nowTarget || pattern != itemOf(other.value, "template:") ||
+                            pairs.count(wasTarget))
+                        {
+                            continue;
+                        }
+                        addOnce(proposing, wasTarget);
+                        addOnce(to[wasTarget], nowTarget);
+                        addOnce(from[nowTarget], wasTarget);
+                        shown[wasTarget] = one.shown;
+                        shown[nowTarget] = other.shown;
+                    }
+                }
+                for (const std::string& one : proposing)
+                {
+                    const std::vector<std::string>& targets = to[one];
+                    if (targets.size() > 1)
+                    {
+                        if (missing.empty())
+                        {
+                            missing = "'" + shown[one] + "' becomes both '" + shown[targets[0]] +
+                                      "' and '" + shown[targets[1]] +
+                                      "': their correspondence is not one to one";
+                        }
                         continue;
                     }
-                    addOnce(proposing, wasTarget);
-                    addOnce(to[wasTarget], nowTarget);
-                    addOnce(from[nowTarget], wasTarget);
-                    shown[wasTarget] = one.shown;
-                    shown[nowTarget] = other.shown;
+                    // Two before the rewrite that become one, or one that becomes a symbol already
+                    // paired.
+                    std::vector<std::string> sources = from[targets[0]];
+                    for (const auto& [wasSymbol, nowSymbol] : pairs)
+                    {
+                        if (nowSymbol == targets[0])
+                            sources.insert(sources.begin(), wasSymbol);
+                    }
+                    if (sources.size() > 1)
+                    {
+                        if (missing.empty())
+                        {
+                            const auto name = [&](const std::string& symbol)
+                            {
+                                return shown.count(symbol) ? shown[symbol] : llvm::demangle(symbol);
+                            };
+                            missing = "'" + name(sources[0]) + "' and '" + name(sources[1]) +
+                                      "' both become '" + name(targets[0]) +
+                                      "': their correspondence is not one to one";
+                        }
+                        continue;
+                    }
+                    added = pair(one, targets[0]) || added;
                 }
             }
-            for (const std::string& one : proposing)
+
+            // 4: the nested symbols, by kind and site, once the symbols around them are paired.
+            for (bool added = was && now; added;)
             {
-                const std::vector<std::string>& targets = to[one];
-                if (targets.size() > 1)
+                added = false;
+                for (const Named& one : was->nested)
                 {
-                    if (missing.empty())
+                    if (pairs.count(one.symbol))
+                        continue;
+                    const auto around = pairs.find(one.enclosing);
+                    const std::string enclosing =
+                        around == pairs.end() ? one.enclosing : around->second;
+                    const auto other = std::find_if(
+                        now->nested.begin(), now->nested.end(), [&](const Named& named)
+                        { return named.key == one.key && named.enclosing == enclosing; });
+                    if (other != now->nested.end())
+                        added = pair(one.symbol, other->symbol) || added;
+                }
+            }
+
+            // 5: the types nested in every established pair (lambdas, local classes) and what they
+            // reach: the members of those types, the specializations whose arguments or type hold
+            // them, and the implicit members of the classes that hold them, by the identities the
+            // facts give (UnitFacts::Identity). A key's nested types are mapped through the pairs;
+            // every other part of it is kept as it is. One to one: a key with more than one symbol
+            // on either side gives no pair, and a reason.
+            {
+                const auto substitute = [&](const std::string& key)
+                {
+                    std::string out;
+                    for (std::size_t at = 0; at < key.size();)
                     {
-                        missing = "'" + shown[one] + "' becomes both '" + shown[targets[0]] +
-                                  "' and '" + shown[targets[1]] +
-                                  "': their correspondence is not one to one";
+                        const std::size_t open = key.find('\x02', at);
+                        if (open == std::string::npos)
+                        {
+                            out += key.substr(at);
+                            break;
+                        }
+                        const std::size_t close = key.find('\x03', open);
+                        out += key.substr(at, open + 1 - at);
+                        const std::string enclosing = key.substr(open + 1, close - open - 1);
+                        const auto mapped = pairs.find(enclosing);
+                        out += mapped == pairs.end() ? enclosing : mapped->second;
+                        at = close;
                     }
-                    continue;
-                }
-                // Two before the rewrite that become one, or one that becomes a symbol already
-                // paired.
-                std::vector<std::string> sources = from[targets[0]];
-                for (const auto& [wasSymbol, nowSymbol] : pairs)
+                    return out;
+                };
+                // Only the symbols that the rewrite renames: one side has them, the other not.
+                std::set<std::string> beforeNames, afterNames;
+                for (const UnitFacts::Identity& identity : before.identities)
+                    beforeNames.insert(identity.symbol);
+                for (const UnitFacts::Identity& identity : after.identities)
+                    afterNames.insert(identity.symbol);
+                std::map<std::string, std::vector<std::string>> nowAtKey; // key -> symbols after
+                for (const UnitFacts::Identity& identity : after.identities)
                 {
-                    if (nowSymbol == targets[0])
-                        sources.insert(sources.begin(), wasSymbol);
+                    if (taken.count(identity.symbol) || beforeNames.count(identity.symbol))
+                        continue;
+                    if (!identity.nested.empty())
+                        nowAtKey["n" + identity.nested + '\0' + identity.enclosing].push_back(
+                            identity.symbol);
+                    if (!identity.specialization.empty())
+                        nowAtKey["s" + identity.specialization].push_back(identity.symbol);
                 }
-                if (sources.size() > 1)
+                std::map<std::string, std::vector<std::string>>
+                    wasAtKey; // mapped key -> symbols before
+                for (const UnitFacts::Identity& identity : before.identities)
                 {
-                    if (missing.empty())
+                    if (pairs.count(identity.symbol) || afterNames.count(identity.symbol))
+                        continue;
+                    if (!identity.nested.empty())
                     {
-                        const auto name = [&](const std::string& symbol)
-                        { return shown.count(symbol) ? shown[symbol] : llvm::demangle(symbol); };
-                        missing = "'" + name(sources[0]) + "' and '" + name(sources[1]) +
-                                  "' both become '" + name(targets[0]) +
-                                  "': their correspondence is not one to one";
+                        const auto around = pairs.find(identity.enclosing);
+                        if (around != pairs.end())
+                            wasAtKey["n" + substitute(identity.nested) + '\0' + around->second]
+                                .push_back(identity.symbol);
                     }
-                    continue;
+                    else if (!identity.specialization.empty())
+                        wasAtKey["s" + substitute(identity.specialization)].push_back(
+                            identity.symbol);
                 }
-                added = pair(one, targets[0]) || added;
+                for (const auto& [key, sources] : wasAtKey)
+                {
+                    const auto found = nowAtKey.find(key);
+                    if (found == nowAtKey.end())
+                        continue;
+                    if (sources.size() == 1 && found->second.size() == 1)
+                        pair(sources.front(), found->second.front());
+                    else if (missing.empty())
+                        missing = "'" + llvm::demangle(sources.front()) +
+                                  "' has no one-to-one counterpart through its template arguments";
+                }
             }
         }
-
-        // 4: the nested symbols, by kind and site, once the symbols around them are paired.
-        for (bool added = was && now; added;)
-        {
-            added = false;
-            for (const Named& one : was->nested)
-            {
-                if (pairs.count(one.symbol))
-                    continue;
-                const auto around = pairs.find(one.enclosing);
-                const std::string enclosing =
-                    around == pairs.end() ? one.enclosing : around->second;
-                const auto other =
-                    std::find_if(now->nested.begin(), now->nested.end(), [&](const Named& named)
-                                 { return named.key == one.key && named.enclosing == enclosing; });
-                if (other != now->nested.end())
-                    added = pair(one.symbol, other->symbol) || added;
-            }
-        }
-
         std::vector<SymbolPair> out;
         for (const auto& [wasSymbol, nowSymbol] : pairs)
         {

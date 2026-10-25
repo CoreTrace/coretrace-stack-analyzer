@@ -368,6 +368,18 @@ namespace ctrace::stack::analysis::const_suggestion
             std::uint8_t reservedPadding[4] = {};
         };
         std::optional<Outside> writtenOutside;
+        // Each function the module emits that a nested type (a lambda or a local class) names, as
+        // Clang identifies it, read before the AST goes (§5.7, step 5).
+        struct Identity
+        {
+            std::string symbol;
+            std::string
+                nested; // member of a nested type: kind and variant, record and member sites
+            std::string enclosing; // the symbol of the function around that nested type
+            std::string
+                specialization; // variant, pattern site, template arguments with nested types
+        };
+        std::vector<Identity> identities;
         std::unique_ptr<llvm::LLVMContext> context;
         std::unique_ptr<llvm::Module> module;
         std::vector<Fact> facts;                   // R and K, in the order of the traversal

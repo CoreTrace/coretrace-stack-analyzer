@@ -414,6 +414,11 @@ namespace ctrace::stack::analysis
                 TraverseDecl(context.getTranslationUnitDecl());
                 for (std::size_t i = 0; i < targets_.size(); ++i)
                     resolve(i);
+                {
+                    const analyzer::ScopedHotspot identifying(out_.timing,
+                                                              "const_suggestion.identify");
+                    identify();
+                }
             }
 
             bool VisitFunctionDecl(clang::FunctionDecl* function)
@@ -848,6 +853,221 @@ namespace ctrace::stack::analysis
                     return symbols.empty() ? "" : symbols.front();
                 }
                 return "";
+            }
+
+            // The symbol of the function around a nested type (§5.7, step 5); "" in a template.
+            std::string enclosingOf(const clang::CXXRecordDecl& record)
+            {
+                for (const clang::DeclContext* at = record.getDeclContext(); at;
+                     at = at->getParent())
+                {
+                    if (const auto* function = llvm::dyn_cast<clang::FunctionDecl>(at))
+                    {
+                        if (function->isDependentContext())
+                            return "";
+                        const std::vector<std::string>& symbols = symbolsOf(*function);
+                        return symbols.empty() ? "" : symbols.front();
+                    }
+                }
+                return "";
+            }
+
+            // A template argument's type, canonically (§5.7, step 5), each nested type written as
+            // its record's site and the symbol of the function around it, which the
+            // correspondences map; every other part, qualifiers included, kept as it is.
+            std::string typeKey(clang::QualType type, bool& nested)
+            {
+                type = type.getCanonicalType();
+                const std::string qualifiers = type.getLocalQualifiers().getAsString();
+                const auto with = [&](const std::string& text)
+                { return qualifiers.empty() ? text : qualifiers + " " + text; };
+                const clang::Type* node = type.getTypePtr();
+                if (const auto* pointer = llvm::dyn_cast<clang::PointerType>(node))
+                    return with(typeKey(pointer->getPointeeType(), nested) + " *");
+                if (const auto* reference = llvm::dyn_cast<clang::ReferenceType>(node))
+                {
+                    return with(typeKey(reference->getPointeeType(), nested) +
+                                (reference->isLValueReferenceType() ? " &" : " &&"));
+                }
+                if (const auto* array = llvm::dyn_cast<clang::ConstantArrayType>(node))
+                {
+                    return with(typeKey(array->getElementType(), nested) + " [" +
+                                llvm::toString(array->getSize(), 10, false) + "]");
+                }
+                if (const auto* function = llvm::dyn_cast<clang::FunctionProtoType>(node))
+                {
+                    std::string out = typeKey(function->getReturnType(), nested) + " (";
+                    for (unsigned i = 0; i < function->getNumParams(); ++i)
+                        out += (i ? ", " : "") + typeKey(function->getParamType(i), nested);
+                    return with(out + (function->isVariadic() ? ", ...)" : ")"));
+                }
+                if (const clang::CXXRecordDecl* record = node->getAsCXXRecordDecl())
+                {
+                    if (record->isLambda() || record->isLocalClass())
+                    {
+                        nested = true;
+                        return with("\x01" + textOf((*sites_)(record->getLocation())) + "\x02" +
+                                    enclosingOf(*record) + "\x03");
+                    }
+                    // A member class is written through the class around it, whose arguments
+                    // may hold a nested type: std::vector<State>::__destroy_vector.
+                    const auto* parent =
+                        llvm::dyn_cast<clang::CXXRecordDecl>(record->getDeclContext());
+                    const std::string outer =
+                        parent ? typeKey(context_->getRecordType(parent), nested) + "::" : "";
+                    if (const auto* specialization =
+                            llvm::dyn_cast<clang::ClassTemplateSpecializationDecl>(record))
+                    {
+                        return with(
+                            (parent ? outer + specialization->getNameAsString()
+                                    : specialization->getSpecializedTemplate()
+                                          ->getQualifiedNameAsString()) +
+                            "<" +
+                            argumentsKey(specialization->getTemplateArgs().asArray(), nested) +
+                            ">");
+                    }
+                    if (parent)
+                        return with(outer + record->getNameAsString());
+                }
+                return with(writtenType(*context_, type));
+            }
+
+            std::string argumentsKey(llvm::ArrayRef<clang::TemplateArgument> arguments,
+                                     bool& nested)
+            {
+                std::string out;
+                for (const clang::TemplateArgument& argument : arguments)
+                {
+                    if (!out.empty())
+                        out += ", ";
+                    if (argument.getKind() == clang::TemplateArgument::Type)
+                        out += typeKey(argument.getAsType(), nested);
+                    else if (argument.getKind() == clang::TemplateArgument::Pack)
+                        out += "{" + argumentsKey(argument.getPackAsArray(), nested) + "}";
+                    else
+                    {
+                        llvm::raw_string_ostream text(out);
+                        argument.print(clang::PrintingPolicy(context_->getLangOpts()), text, true);
+                    }
+                }
+                return out;
+            }
+
+            // The identities of the functions the module emits (§5.7, step 5), read before the AST
+            // goes: a member of a nested type, a specialization whose arguments or type hold a
+            // nested type, an implicit member of a class whose key holds one.
+            void identify()
+            {
+                if (!generator_ || !collectFacts_ || !generator_->GetModule())
+                    return;
+                for (const llvm::Function& emitted : *generator_->GetModule())
+                {
+                    if (!emitted.hasName())
+                        continue;
+                    const std::string symbol = emitted.getName().str();
+                    const auto* function = llvm::dyn_cast_or_null<clang::FunctionDecl>(
+                        generator_->GetDeclForMangledName(symbol));
+                    if (!function)
+                        continue;
+                    const std::vector<std::string>& symbols = symbolsOf(*function);
+                    const std::vector<std::string> keys = variantKeys(*function);
+                    std::string variant;
+                    for (std::size_t k = 0; k < symbols.size() && k < keys.size(); ++k)
+                    {
+                        if (symbols[k] == symbol)
+                            variant = keys[k];
+                    }
+                    UnitFacts::Identity identity{symbol, "", "", ""};
+                    if (const auto* method = llvm::dyn_cast<clang::CXXMethodDecl>(function))
+                    {
+                        const clang::CXXRecordDecl* record = method->getParent();
+                        const std::string enclosing = record->isLambda() || record->isLocalClass()
+                                                          ? enclosingOf(*record)
+                                                          : "";
+                        if (!enclosing.empty())
+                        {
+                            // The member's own type tells overloads apart, such as a local
+                            // class's implicit default and move constructors, at one site.
+                            bool member = false;
+                            identity.nested =
+                                std::string(record->isLambda() ? "lambda " : "method ") + variant +
+                                "|" + textOf((*sites_)(record->getLocation())) + "|" +
+                                textOf((*sites_)(method->getLocation())) + "|" +
+                                method->getNameAsString() +
+                                (method->isStatic() ? " static " : " ") +
+                                method->getMethodQualifiers().getAsString() + "|" +
+                                typeKey(method->getType(), member);
+                            identity.enclosing = enclosing;
+                        }
+                    }
+                    if (const clang::FunctionDecl* pattern =
+                            function->getTemplateInstantiationPattern(/*ForDefinition=*/false))
+                    {
+                        bool nested = false;
+                        std::string arguments;
+                        std::vector<const clang::DeclContext*> chain;
+                        for (const clang::DeclContext* at = function->getDeclContext(); at;
+                             at = at->getParent())
+                            chain.push_back(at);
+                        for (auto at = chain.rbegin(); at != chain.rend(); ++at)
+                        {
+                            if (const auto* specialization =
+                                    llvm::dyn_cast<clang::ClassTemplateSpecializationDecl>(*at))
+                            {
+                                arguments +=
+                                    "<" +
+                                    argumentsKey(specialization->getTemplateArgs().asArray(),
+                                                 nested) +
+                                    ">";
+                            }
+                        }
+                        if (const clang::TemplateArgumentList* own =
+                                function->getTemplateSpecializationArgs())
+                            arguments += "(" + argumentsKey(own->asArray(), nested) + ")";
+                        // Its type too, so that a friend defined in a class template, which has
+                        // neither arguments nor an enclosing specialization, is identified.
+                        arguments += "[" + typeKey(function->getType(), nested) + "]";
+                        if (nested)
+                        {
+                            identity.specialization = variant + "|" +
+                                                      textOf((*sites_)(pattern->getLocation())) +
+                                                      "|" + arguments;
+                        }
+                    }
+                    // An implicit member has no pattern and, outside a nested type, no nested
+                    // key; when its class's key holds a nested type, it is identified by that
+                    // class, its kind and name, its variant and its whole type, its qualifiers
+                    // included. Nothing in it is specific to a standard library.
+                    if (identity.nested.empty() && identity.specialization.empty())
+                    {
+                        const auto* method = llvm::dyn_cast<clang::CXXMethodDecl>(function);
+                        if (method && method->isImplicit())
+                        {
+                            bool nested = false;
+                            const std::string owner =
+                                typeKey(context_->getRecordType(method->getParent()), nested);
+                            if (nested)
+                            {
+                                const char* kind =
+                                    llvm::isa<clang::CXXConstructorDecl>(method)  ? "constructor"
+                                    : llvm::isa<clang::CXXDestructorDecl>(method) ? "destructor"
+                                                                                  : "method";
+                                const char* reference =
+                                    method->getRefQualifier() == clang::RQ_LValue   ? " &"
+                                    : method->getRefQualifier() == clang::RQ_RValue ? " &&"
+                                                                                    : "";
+                                bool inType = false;
+                                identity.specialization =
+                                    "implicit " + variant + "|" + owner + "|" + kind + " " +
+                                    method->getNameAsString() + "|" +
+                                    method->getMethodQualifiers().getAsString() + reference + "|" +
+                                    typeKey(method->getType(), inType);
+                            }
+                        }
+                    }
+                    if (!identity.nested.empty() || !identity.specialization.empty())
+                        out_.identities.push_back(std::move(identity));
+                }
             }
 
             // Records nested symbols, each with its kind, for the targets whose entity they lie in.
