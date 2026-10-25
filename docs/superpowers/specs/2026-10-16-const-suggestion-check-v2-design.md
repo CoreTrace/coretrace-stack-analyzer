@@ -231,6 +231,26 @@ configurations :
   les demandent se correspondent (chacun avec son propre contexte), visent le même gabarit avant et
   après, désignent tous la même paire, et forment une bijection. Sinon, indéterminée, et la raison
   nomme le contexte.
+- **Entités imbriquées dans une paire établie** (étape 5, P2) : les types imbriqués (lambdas, classes
+  locales) de toute fonction déjà appariée, et ce qu'ils atteignent, identifiés par les faits de
+  Clang lus avant la destruction de l'AST, jamais par des heuristiques de noms :
+  - un membre d'un type imbriqué, par sa nature, sa variante ABI, les positions du type et du
+    membre, son nom, `static`, ses qualificatifs et son type ;
+  - une spécialisation dont les arguments ou le type contiennent un type imbriqué, par sa variante,
+    la position de son patron, les arguments des spécialisations englobantes, les siens et son type
+    de fonction ;
+  - un membre implicite d'une classe dont la clé contient un type imbriqué, par cette classe, sa
+    nature et son nom, sa variante et son type complet, qualificatifs compris.
+
+  Dans une clé, seuls les types imbriqués passent par les paires ; tout le reste (autres arguments,
+  qualifications, type) est comparé tel quel. Seuls les symboles que la réécriture renomme y
+  prennent part. Les étapes 3, 4 et 5 tournent jusqu'à un point fixe commun. Une clé portée par plus
+  d'un symbole d'un côté ne donne aucune paire, et une raison. Une spécialisation dont la
+  réécriture change elle-même le type ou un argument reste sans paire. Les globales (vtables,
+  typeinfo, constantes `__const`) ne sont pas couvertes. Limite des tests : la nature et le nom d'un
+  membre implicite ne sont pas montrés nécessaires (sur les cas réels, la variante ou le type
+  suffit à séparer), de même que chacun des nom, `static` et qualificatifs d'un membre de type
+  imbriqué ; ils sont gardés et protégés ensemble.
 
 ### 5.8 Jugement
 
@@ -317,6 +337,7 @@ suggestion valide.
 | D13 | `PointerConstOnly` (t15) | affiche `const int *p`, vérifie `const int *const p` | vérifiée ; le type affiché et la ligne nomment `const int *const p` | nouvelle fixture qui active T, aucune fixture de T v1 ne couvrant `PointerConstOnly` ; le test existant sans l'option reste inchangé | 2 |
 | D18 | redéclaration qui diffère de la définition par un qualificatif de premier niveau du paramètre (`int f(int *p);` puis `int f(int *const p) {…}`, et l'inverse), observée à `4fd0dae` (`stage2/observations/toplevel-qualifier/`) | « not checked: the rewritten declaration does not get the suggested type » | vérifiée (VP), dans les deux sens | contrôle run_test.py, deux sens | 2 |
 | D19 | déclaration dont le type est déduit d'un appel que la réécriture rend invalide (`publishSingleStoreSlots`, `IntRanges.cpp:314`, relevée par la comparaison des corpus à `48f3ec1`) | gardée : « not checked: the rewrite also changes the type of an unnamed declaration » | réfutée pour l'erreur introduite ; une partie écrite que la réécriture change hors du plan, y compris dans une expression ou un argument par défaut, reste indéterminée | contrôles run_test.py | F |
+| D20 | spécialisations et membres implicites qui dépendent d'entités imbriquées dans une autre paire (`parallelFor`, `build`, `isRecursiveCallee`, corpus à `48f3ec1` ; P2a, P2b, P2c) | gardées : « not checked: the generated code changes … symbols no longer used » | appariées par l'étape 5 de 5.7, vérifiées si l'IR concorde ; une clé ambiguë, ou dont la réécriture change une autre partie, reste sans paire et indéterminée | tests unitaires et contrôles run_test.py | F |
 
 **Non retenus :**
 - le cache « avant » indexé par l'identifiant (point 9 de la revue) : non reproduit (t12) ; les

@@ -2994,4 +2994,10 @@ Found by the comparison of the corpora at `48f3ec1`, authorized by the user on 2
 
 **Validation:** the three platforms; the comparison of the corpora, where only publishSingleStoreSlots may change (removed for its error); the cost added.
 
+### Task F.5: the correspondences of nested entities (§5.7, step 5; D20)
+Found by the comparison of the corpora at `48f3ec1`; a throwaway prototype, then its implicit-member extension, measured before the integration, which the user authorized on 2026-10-25.
+**Work:** identities read before the AST goes (members of nested types, specializations whose arguments or type hold one, implicit members of classes whose key holds one); step 5 maps their nested types through the pairs, keeps every other part of a key, pairs one to one and refuses ambiguities, in a fixpoint common with steps 3 and 4.
+**Tests:** end-to-end checks in run_test.py first (five FAIL at `5167998`, the negative one passes there), then the unit tests of the keys and of `correspond`, which need the integration's declarations. Each was proven against mutants of the prototype; the kind and the name of an implicit member, like the name, static flag and qualifiers of a nested member, are protected only together (§5.7).
+**Validation:** the three platforms with the full suite; the corpora, where only parallelFor x2, build x2 and isRecursiveCallee x2 may change (checked).
+
 **Validation of the final phase:** every classification explained; cost reported against the criterion; CI green; triage summarized.
