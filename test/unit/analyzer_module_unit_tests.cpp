@@ -30,6 +30,8 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <llvm/Demangle/Demangle.h>
+#include <compilerlib/toolchain.hpp>
 #include <map>
 #include <set>
 #include <unordered_map>
@@ -1008,6 +1010,413 @@ namespace
         report.expect(after.entities.size() == 1 && after.entities[0].withoutCandidate,
                       "ConstSuggestionTopLevel: a rewrite that loses the pointer's own const does "
                       "not get the candidate");
+        return report.failures == 0;
+    }
+
+    /// A compile command for a C++ source, as the Clang check builds one: compilerlib's driver
+    /// settings (Clang's resource directory, the SDK on macOS) before the arguments, so that the
+    /// standard library's headers are found on every platform.
+    ctrace::stack::analysis::UnitCommand cxxCommand(const std::filesystem::path& file)
+    {
+        const std::vector<std::string> args{"-std=c++20", "-c", file.string()};
+        ctrace::stack::analysis::UnitCommand out{{"clang++"}, file.parent_path().string()};
+        compilerlib::DriverConfig driver;
+        std::string error;
+        if (compilerlib::resolveDriverConfig(args, driver, error))
+        {
+            out.args = {driver.clang_path};
+            if (driver.force_cxx_driver)
+                out.args.push_back("--driver-mode=g++");
+            if (driver.add_resource_dir)
+            {
+                out.args.push_back("-resource-dir");
+                out.args.push_back(driver.resource_dir);
+            }
+            if (driver.add_sysroot)
+            {
+                out.args.push_back("-isysroot");
+                out.args.push_back(driver.sysroot);
+            }
+        }
+        out.args.insert(out.args.end(), args.begin(), args.end());
+        return out;
+    }
+
+    // run_test.py's P2_KEYS_SOURCE with a polymorphic local class, whose destructor has a deleting
+    // and a base variant.
+    constexpr const char* kNestedKeysSourceWithPoly = R"(#include <vector>
+
+template <typename T> struct Box
+{
+    T* value;
+    friend bool operator==(const Box& a, const Box& b) { return a.value == b.value; }
+    struct Inner
+    {
+        int n = 0;
+    };
+};
+
+template <typename T> int probe(T) { return 1; }
+
+template <typename L> int apply_both(L call)
+{
+    int (*pointer)(int) = call;
+    return pointer(1) + call(1);
+}
+
+template <typename Each> int pass(int n, Each&& each)
+{
+    int total = 0;
+    each(n, [&](int i) { total += i; });
+    return total;
+}
+
+int drive(int n)
+{
+    return pass(n, [&](int count, auto&& body) {
+        struct State
+        {
+            std::vector<int> v;
+        };
+        State a{{count}};
+        State b = a;
+        State c = static_cast<State&&>(a);
+        b = c;
+        c = static_cast<State&&>(b);
+        State d;
+        struct Poly
+        {
+            virtual ~Poly() {}
+        };
+        delete new Poly;
+        Box<State> x{nullptr}, y{nullptr};
+        const int found = (x == y) + probe(typename Box<State>::Inner{}) +
+                          probe(typename Box<decltype([](int v) { return v; })>::Inner{}) +
+                          probe(typename Box<decltype([](int v) { return -v; })>::Inner{}) +
+                          apply_both([](int v) { return 2 * v; });
+        body(found + static_cast<int>(b.v.size() + c.v.size() + d.v.size()));
+    });
+}
+)";
+
+    /// #217 (§5.7, step 5): the correspondences of the types nested in established pairs and of the
+    /// specializations whose arguments hold them (§5.7): only the symbols that the rewrite renames,
+    /// one to one, every other part of a key kept. Synthetic facts: what Clang writes into a key is
+    /// pinned by testConstSuggestionNestedIdentities.
+    bool testConstSuggestionNestedCorrespondences(TestReport& report)
+    {
+        namespace cs = ctrace::stack::analysis::const_suggestion;
+        // The entity before and after the rewrite, paired by its variant (step 1).
+        const std::string was = "_Z1fIiEviOT_";
+        const std::string now = "_Z1fIiEviRKT_";
+        // A type nested in a function: its record's site and the symbol of the function around it.
+        const auto nested = [](const std::string& site, const std::string& around)
+        { return "\x01" + site + "\x02" + around + "\x03"; };
+        // A specialization's key: variant, pattern site, its arguments, its function type.
+        const auto spec =
+            [&](const std::string& variant, const std::string& argument, const std::string& other)
+        {
+            return variant + "|use.cpp:3|(" + argument + ", " + other + ")[void (" + argument +
+                   " &&)]";
+        };
+        const auto pairsOf = [&](std::vector<cs::UnitFacts::Identity> before,
+                                 std::vector<cs::UnitFacts::Identity> after, std::string& missing)
+        {
+            cs::UnitFacts wasUnit;
+            wasUnit.entities.resize(1);
+            wasUnit.entities[0].variants = {{was, "", ""}};
+            wasUnit.identities = std::move(before);
+            cs::UnitFacts nowUnit;
+            nowUnit.entities.resize(1);
+            nowUnit.entities[0].variants = {{now, "", ""}};
+            nowUnit.identities = std::move(after);
+            std::vector<std::string> out;
+            for (const ctrace::stack::analysis::SymbolPair& pair :
+                 cs::correspond(wasUnit, 0, nowUnit, missing))
+            {
+                if (pair.before != was)
+                    out.push_back(pair.before + "->" + pair.after);
+            }
+            return out;
+        };
+        using Pairs = std::vector<std::string>;
+        const std::string inWas = nested("use.cpp:40", was);
+        const std::string inNow = nested("use.cpp:40", now);
+        std::string missing;
+
+        // A specialization whose argument is a type nested in the entity pairs through the
+        // entity's pair.
+        report.expect(pairsOf({{"_Z1aOld", "", "", spec("", inWas, "int")}},
+                              {{"_Z1aNew", "", "", spec("", inNow, "int")}},
+                              missing) == Pairs{"_Z1aOld->_Z1aNew"} &&
+                          missing.empty(),
+                      "ConstSuggestionNested: a specialization pairs through its nested argument");
+
+        // Every other argument is kept: int against long, no pair (mutant: a key without the
+        // arguments that hold no nested type).
+        missing.clear();
+        report.expect(pairsOf({{"_Z1aOld", "", "", spec("", inWas, "int")}},
+                              {{"_Z1aNew", "", "", spec("", inNow, "long")}}, missing)
+                          .empty(),
+                      "ConstSuggestionNested: another argument differs, no pair");
+
+        // Refinement 1, only renamed symbols: a symbol present on both sides at the same key
+        // stays out, and the renamed one pairs (without that filter: two candidates on each
+        // side, no pair, a reason). The nested type is written in a template, without an
+        // enclosing symbol, so its key does not change with the rewrite.
+        const std::string inTemplate = nested("use.cpp:50", "");
+        missing.clear();
+        report.expect(pairsOf({{"_Z1bOld", "", "", spec("", inTemplate, "int")},
+                               {"_Z1bSame", "", "", spec("", inTemplate, "int")}},
+                              {{"_Z1bNew", "", "", spec("", inTemplate, "int")},
+                               {"_Z1bSame", "", "", spec("", inTemplate, "int")}},
+                              missing) == Pairs{"_Z1bOld->_Z1bNew"} &&
+                          missing.empty(),
+                      "ConstSuggestionNested: a symbol the rewrite does not rename takes no part");
+
+        // One to one: two before and two after at one key, no pair and a reason, not the
+        // first candidates paired.
+        missing.clear();
+        report.expect(pairsOf({{"_Z1cOne", "", "", spec("", inWas, "int")},
+                               {"_Z1cTwo", "", "", spec("", inWas, "int")}},
+                              {{"_Z1cThree", "", "", spec("", inNow, "int")},
+                               {"_Z1cFour", "", "", spec("", inNow, "int")}},
+                              missing)
+                              .empty() &&
+                          missing.find("has no one-to-one counterpart") != std::string::npos,
+                      "ConstSuggestionNested: two candidates on each side, no pair, a reason");
+
+        // One before, two after: no pair, a reason.
+        missing.clear();
+        report.expect(pairsOf({{"_Z1dOne", "", "", spec("", inWas, "int")}},
+                              {{"_Z1dTwo", "", "", spec("", inNow, "int")},
+                               {"_Z1dThree", "", "", spec("", inNow, "int")}},
+                              missing)
+                              .empty() &&
+                          missing.find("has no one-to-one counterpart") != std::string::npos,
+                      "ConstSuggestionNested: one candidate becomes two, no pair, a reason");
+
+        // The ABI variant is part of the key: C1 before, C2 after, no pair.
+        missing.clear();
+        report.expect(pairsOf({{"_Z1eOld", "", "", spec("C1", inWas, "int")}},
+                              {{"_Z1eNew", "", "", spec("C2", inNow, "int")}}, missing)
+                          .empty(),
+                      "ConstSuggestionNested: two variants never pair");
+
+        // A member of a nested type pairs once the function around it is paired; around a
+        // function without a pair, it does not.
+        const std::string member = "lambda |use.cpp:40|use.cpp:40|operator() const|int (int)";
+        missing.clear();
+        report.expect(pairsOf({{"_ZOldL", member, was, ""}}, {{"_ZNewL", member, now, ""}},
+                              missing) == Pairs{"_ZOldL->_ZNewL"},
+                      "ConstSuggestionNested: a lambda's member pairs through its function");
+        missing.clear();
+        report.expect(
+            pairsOf({{"_ZOldL", member, "_Z1hv", ""}}, {{"_ZNewL", member, now, ""}}, missing)
+                .empty(),
+            "ConstSuggestionNested: around an unpaired function, no pair");
+        return report.failures == 0;
+    }
+
+    /// #217 (§5.7, step 5): what Clang writes into the keys of the nested entities, on one compilation of
+    /// real code. Every expected member and specialization has an identity, and two symbols
+    /// never share a key: a local class's implicit members, a lambda's call operator and static
+    /// invoker, a virtual destructor's variants, a class template's hidden friend, and member
+    /// classes of two specializations that differ only by a closure type.
+    bool testConstSuggestionNestedIdentities(TestReport& report)
+    {
+        namespace cs = ctrace::stack::analysis::const_suggestion;
+        const std::filesystem::path dir =
+            std::filesystem::temp_directory_path() / "ct_const_suggestion_nested_identities";
+        std::filesystem::create_directories(dir);
+        const std::filesystem::path file = dir / "keys.cpp";
+        // checks.py's P2_KEYS_SOURCE, with a polymorphic local class for the destructor's
+        // variants (its vtable is a global that P2 does not pair, so the end-to-end check
+        // leaves it out).
+        std::ofstream(file) << kNestedKeysSourceWithPoly;
+        const ctrace::stack::analysis::UnitCommand command = cxxCommand(file);
+        std::vector<cs::Target> targets(1);
+        targets[0].symbol = "_Z4passIZ5driveiE3$_0EiiOT_";
+        targets[0].sourceIndex = 0;
+        const cs::UnitFacts unit = cs::inspect(command, nullptr, {}, targets, "test", false);
+        // How many identities a mangled or demangled part selects, by kind of key.
+        const auto count = [&](const std::string& part, bool specialization)
+        {
+            return std::count_if(unit.identities.begin(), unit.identities.end(),
+                                 [&](const cs::UnitFacts::Identity& identity)
+                                 {
+                                     const std::string& key =
+                                         specialization ? identity.specialization : identity.nested;
+                                     return !key.empty() &&
+                                            (identity.symbol.find(part) != std::string::npos ||
+                                             llvm::demangle(identity.symbol).find(part) !=
+                                                 std::string::npos);
+                                 });
+        };
+        // Presence: each refinement's candidates are identified: the
+        // default, copy and move constructors (State d, b, c), the two assignments.
+        report.expect(count("::State::State(", false) >= 3 &&
+                          count("::State::operator=(", false) == 2,
+                      "ConstSuggestionNestedKeys: the local class's implicit members are there");
+        report.expect(count("__invoke", false) == 1, "ConstSuggestionNestedKeys: the static "
+                                                     "invoker is there");
+        report.expect(count("4PolyD0Ev", false) == 1 && count("4PolyD2Ev", false) == 1,
+                      "ConstSuggestionNestedKeys: the destructor's deleting and base variants "
+                      "are there");
+        report.expect(count("operator==", true) == 1,
+                      "ConstSuggestionNestedKeys: the hidden friend is identified (by its "
+                      "function type)");
+        report.expect(count("::Inner>(", true) == 3,
+                      "ConstSuggestionNestedKeys: probe of the three member classes is identified "
+                      "(through their specialization, which holds the nested type)");
+        // Distinctness: no two symbols share a key (without the member's type, the implicit
+        // constructors and assignments merge; without the name, the static flag and the
+        // qualifiers together, which the test protects collectively, not each one, operator() and
+        // __invoke merge; without the variant, D0 and D2 merge; a member
+        // class written without its specialization's arguments: probe's two closures merge).
+        std::map<std::string, std::string> owner;
+        bool apart = true;
+        for (const cs::UnitFacts::Identity& identity : unit.identities)
+        {
+            for (const std::string& key :
+                 {identity.nested.empty() ? "" : "n" + identity.nested + '\0' + identity.enclosing,
+                  identity.specialization.empty() ? "" : "s" + identity.specialization})
+            {
+                if (key.empty())
+                    continue;
+                const auto [it, added] = owner.try_emplace(key, identity.symbol);
+                apart = apart && (added || it->second == identity.symbol);
+            }
+        }
+        report.expect(apart, "ConstSuggestionNestedKeys: two symbols never share a key");
+        return report.failures == 0;
+    }
+
+    // The implicit members of classes whose arguments hold a type nested in the generic lambda's
+    // call operator (P2, implicit-member extension): Box<State>'s six, Derived<State>'s virtual
+    // destructor (D0 and D2), Holder<State, int>'s and Holder<State, long>'s destructors; and a
+    // class whose arguments hold no nested type, Plain<int>, whose members must not be identified.
+    constexpr const char* kImplicitMembersSource = R"(#include <vector>
+
+struct Base
+{
+    virtual ~Base() {}
+};
+
+template <typename T> struct Box
+{
+    T value;
+};
+
+template <typename T> struct Derived : Base
+{
+    T value;
+};
+
+template <typename T, typename U> struct Holder
+{
+    T value;
+    U other;
+};
+
+template <typename T> struct Plain
+{
+    std::vector<T> items;
+};
+
+template <typename Each> int pass(int n, Each&& each)
+{
+    int total = 0;
+    each(n, [&](int i) { total += i; });
+    return total;
+}
+
+int drive(int n)
+{
+    return pass(n, [&](int count, auto&& body) {
+        struct State
+        {
+            std::vector<int> v;
+        };
+        Box<State> a{{{count}}};
+        Box<State> b = a;
+        Box<State> c = static_cast<Box<State>&&>(a);
+        b = c;
+        c = static_cast<Box<State>&&>(b);
+        Box<State> d;
+        delete new Derived<State>;
+        Holder<State, int> h{};
+        Holder<State, long> k{};
+        Plain<int> plain;
+        body(static_cast<int>(b.value.v.size() + c.value.v.size() + d.value.v.size() +
+                              plain.items.size()) +
+             h.other + static_cast<int>(k.other));
+    });
+}
+)";
+
+    /// #217 (§5.7, step 5): an implicit member of a class whose key holds a nested type is
+    /// identified by that class, its kind and name, its variant and its whole type. Every expected
+    /// one is there, a class without a nested type gets none, and no two symbols share a key: the
+    /// copy and move constructors (the type), D0 and D2 (the variant), Holder<State, int> and
+    /// Holder<State, long> (the class's other arguments). Limit: the kind and the name are not
+    /// shown to be needed. On every real case found, the variant (C against D) or the type already
+    /// separates two implicit members, so a key without them passes these tests too; they are kept,
+    /// and protected only together with the variant and the type.
+    bool testConstSuggestionImplicitMemberIdentities(TestReport& report)
+    {
+        namespace cs = ctrace::stack::analysis::const_suggestion;
+        const std::filesystem::path dir =
+            std::filesystem::temp_directory_path() / "ct_const_suggestion_implicit_members";
+        std::filesystem::create_directories(dir);
+        const std::filesystem::path file = dir / "implicit.cpp";
+        std::ofstream(file) << kImplicitMembersSource;
+        const ctrace::stack::analysis::UnitCommand command = cxxCommand(file);
+        std::vector<cs::Target> targets(1);
+        targets[0].symbol = "_Z4passIZ5driveiE3$_0EiiOT_";
+        targets[0].sourceIndex = 0;
+        const cs::UnitFacts unit = cs::inspect(command, nullptr, {}, targets, "test", false);
+        // The implicit-member keys whose symbol holds a mangled or demangled part.
+        const auto count = [&](const std::string& part)
+        {
+            return std::count_if(unit.identities.begin(), unit.identities.end(),
+                                 [&](const cs::UnitFacts::Identity& identity)
+                                 {
+                                     return identity.specialization.rfind("implicit ", 0) == 0 &&
+                                            (identity.symbol.find(part) != std::string::npos ||
+                                             llvm::demangle(identity.symbol).find(part) !=
+                                                 std::string::npos);
+                                 });
+        };
+        report.expect(count("Box<") >= 6,
+                      "ConstSuggestionImplicitMembers: Box<State>'s default, copy and move "
+                      "constructors, assignments and destructor are identified");
+        report.expect(count("DerivedI") >= 2 && count("D0Ev") >= 1 && count("D2Ev") >= 1,
+                      "ConstSuggestionImplicitMembers: Derived<State>'s deleting and base "
+                      "destructors are identified");
+        // Each Holder's destructor, by its mangled class (State then int, State then long): one variant
+        // where the base and complete destructors are aliases (ELF), both where they are not (Darwin).
+        report.expect(count("5StateiED") >= 1 && count("5StatelED") >= 1,
+                      "ConstSuggestionImplicitMembers: both Holder destructors are identified");
+        report.expect(count("Plain<") == 0,
+                      "ConstSuggestionImplicitMembers: a class without a nested type gets none "
+                      "(not identified whatever the class)");
+        std::map<std::string, std::string> owner;
+        bool apart = true;
+        for (const cs::UnitFacts::Identity& identity : unit.identities)
+        {
+            for (const std::string& key :
+                 {identity.nested.empty() ? "" : "n" + identity.nested + '\0' + identity.enclosing,
+                  identity.specialization.empty() ? "" : "s" + identity.specialization})
+            {
+                if (key.empty())
+                    continue;
+                const auto [it, added] = owner.try_emplace(key, identity.symbol);
+                apart = apart && (added || it->second == identity.symbol);
+            }
+        }
+        report.expect(apart, "ConstSuggestionImplicitMembers: two symbols never share a key (the "
+                             "type, the variant and the class's arguments keep them apart)");
         return report.failures == 0;
     }
 
@@ -3048,6 +3457,9 @@ int main(int argc, char** argv)
     (void)testConstSuggestionNormalizations(report);
     (void)testConstSuggestionTopLevelQualifierLost(report);
     (void)testConstSuggestionCorrespondenceIndex(report);
+    (void)testConstSuggestionNestedCorrespondences(report);
+    (void)testConstSuggestionNestedIdentities(report);
+    (void)testConstSuggestionImplicitMemberIdentities(report);
     (void)testUnresolvedCallsMarkStackUnknown(repoRoot, report);
     (void)testAssumeExternalFrameReplacesUnknown(repoRoot, report);
     (void)testUninitializedFixpointBudgetIsExplicit(repoRoot, report);
