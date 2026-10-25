@@ -4075,6 +4075,324 @@ def check_const_suggestion_default_argument_outside_the_plan() -> bool:
     return good
 
 
+# #217 (§5.7, step 5): the correspondences of nested entities, end to end.
+P2_LAMBDAS_SOURCE = (
+    "template <typename F> void run_all(int n, F&& f)\n"
+    "{\n"
+    "    for (int i = 0; i < n; ++i)\n"
+    "        f(i);\n"
+    "}\n"
+    "\n"
+    "template <typename Each> int pass(int n, Each&& each)\n"
+    "{\n"
+    "    int total = 0;\n"
+    "    each(n, [&](int i) { total += i; });\n"
+    "    return total;\n"
+    "}\n"
+    "\n"
+    "int drive(int n)\n"
+    "{\n"
+    "    return pass(n, [&](int count, auto&& body) { run_all(count, [&](int i) { body(i); }); });\n"
+    "}\n"
+)
+
+P2_LOCAL_CLASS_SOURCE = (
+    "#include <deque>\n"
+    "\n"
+    "template <typename Pred> int count_paths(int n, Pred&& pred)\n"
+    "{\n"
+    "    struct State\n"
+    "    {\n"
+    "        int value;\n"
+    "    };\n"
+    "    std::deque<State> work;\n"
+    "    work.push_back({n});\n"
+    "    int found = 0;\n"
+    "    while (!work.empty())\n"
+    "    {\n"
+    "        const State state = work.front();\n"
+    "        work.pop_front();\n"
+    "        if (pred(state.value))\n"
+    "            ++found;\n"
+    "        if (state.value > 0)\n"
+    "            work.push_back({state.value - 1});\n"
+    "    }\n"
+    "    return found;\n"
+    "}\n"
+    "\n"
+    "int use(int n)\n"
+    "{\n"
+    "    return count_paths(n, [](int v) { return v % 2 == 0; });\n"
+    "}\n"
+)
+
+P2_TWO_INSTANTIATIONS_SOURCE = P2_LAMBDAS_SOURCE.replace(
+    "    each(n, [&](int i) { total += i; });\n",
+    "    each(n, [&](int i) { total += i; });\n    each(n, [&](int i) { total -= 2 * i; });\n",
+)
+
+# Everything nested in the generic lambda's call operator, a specialization that step 3 pairs, so
+# that P2, not step 4, pairs it: a local class with non-trivial implicit members, a lambda converted
+# to a function pointer by apply_both (operator() and __invoke), a class template's hidden friend,
+# and probe of three member classes, two of which differ only by a closure type. No lambda is kept in
+# a local variable and Box holds a pointer: the __const globals of lambdas kept in locals, which step 5
+# does not pair, and Box<State>'s implicit members, which have their own check, are not what this
+# check is about. The unit test
+# testConstSuggestionNestedIdentities adds a polymorphic local class to this source, whose vtable P2
+# does not pair.
+P2_KEYS_SOURCE = (
+    "#include <vector>\n"
+    "\n"
+    "template <typename T> struct Box\n"
+    "{\n"
+    "    T* value;\n"
+    "    friend bool operator==(const Box& a, const Box& b) { return a.value == b.value; }\n"
+    "    struct Inner\n"
+    "    {\n"
+    "        int n = 0;\n"
+    "    };\n"
+    "};\n"
+    "\n"
+    "template <typename T> int probe(T) { return 1; }\n"
+    "\n"
+    "template <typename L> int apply_both(L call)\n"
+    "{\n"
+    "    int (*pointer)(int) = call;\n"
+    "    return pointer(1) + call(1);\n"
+    "}\n"
+    "\n"
+    "template <typename Each> int pass(int n, Each&& each)\n"
+    "{\n"
+    "    int total = 0;\n"
+    "    each(n, [&](int i) { total += i; });\n"
+    "    return total;\n"
+    "}\n"
+    "\n"
+    "int drive(int n)\n"
+    "{\n"
+    "    return pass(n, [&](int count, auto&& body) {\n"
+    "        struct State\n"
+    "        {\n"
+    "            std::vector<int> v;\n"
+    "        };\n"
+    "        State a{{count}};\n"
+    "        State b = a;\n"
+    "        State c = static_cast<State&&>(a);\n"
+    "        b = c;\n"
+    "        c = static_cast<State&&>(b);\n"
+    "        State d;\n"
+    "        Box<State> x{nullptr}, y{nullptr};\n"
+    "        const int found = (x == y) + probe(typename Box<State>::Inner{}) +\n"
+    "                          probe(typename Box<decltype([](int v) { return v; })>::Inner{}) +\n"
+    "                          probe(typename Box<decltype([](int v) { return -v; })>::Inner{}) +\n"
+    "                          apply_both([](int v) { return 2 * v; });\n"
+    "        body(found + static_cast<int>(b.v.size() + c.v.size() + d.v.size()));\n"
+    "    });\n"
+    "}\n"
+)
+
+_P2_VERDICT = re.compile(r"^(\S+) parameter (\S+): (checked in \d+ file\(s\)|removed, .*|not checked, .*)$")
+
+
+def _p2_verdicts(name: str, source: str) -> Optional[dict[str, list[str]]]:
+    """The trace's verdicts by parameter name, in the order of the trace; None if no run."""
+    with tempfile.TemporaryDirectory(prefix="ct_const_suggestion_p2_") as tmp:
+        path = Path(tmp).resolve() / name
+        path.write_text(source)
+        run = _const_suggestion_run([str(path), "--compile-arg=-std=c++20"])
+    if not run:
+        return None
+    verdicts: dict[str, list[str]] = {}
+    for line in run[1]:
+        match = _P2_VERDICT.match(line)
+        if match:
+            verdicts.setdefault(match.group(2), []).append(match.group(3))
+    return verdicts
+
+
+def _p2_expect(label: str, verdicts: Optional[dict[str, list[str]]], expected: dict[str, list[str]]) -> bool:
+    """Each expected parameter's verdicts, by their beginning."""
+    good = verdicts is not None and all(
+        len(verdicts.get(name, [])) == len(starts)
+        and all(text.startswith(start) for text, start in zip(verdicts[name], starts))
+        for name, starts in expected.items()
+    )
+    print(f"  {'✅' if good else '❌'} {label}{'' if good else f': {verdicts}'}")
+    return good
+
+
+def check_const_suggestion_p2_lambdas_of_another_specialization() -> bool:
+    """
+    #217 (§5.7, step 5): a lambda nested in the generic lambda's call operator, a specialization that the
+    rewrite of pass renames, is the argument of run_all: P2 pairs it through that specialization,
+    and every suggestion is checked.
+    """
+    print("=== Testing the lambdas nested in another renamed specialization (P2) ===")
+    good = _p2_expect(
+        "each, body and f checked",
+        _p2_verdicts("lambdas.cpp", P2_LAMBDAS_SOURCE),
+        {"each": ["checked in"], "body": ["checked in"], "f": ["checked in"]},
+    )
+    print()
+    return good
+
+
+def check_const_suggestion_p2_local_class_in_a_library_template() -> bool:
+    """
+    #217 (§5.7, step 5): a local class of the rewritten specialization is the argument of
+    std::deque; the library's members of std::deque<State>, its member classes and their implicit
+    members among them, pair through State. A member key without the member's type, or member
+    classes written as Clang prints them, leave pred not checked; so does a standard library whose
+    implicit members (libstdc++'s _Deque_impl::~_Deque_impl()) would go unidentified.
+    """
+    print("=== Testing a local class as a library template's argument (P2) ===")
+    good = _p2_expect(
+        "pred checked",
+        _p2_verdicts("local_class.cpp", P2_LOCAL_CLASS_SOURCE),
+        {"pred": ["checked in"]},
+    )
+    print()
+    return good
+
+
+def check_const_suggestion_p2_other_specialization_of_the_rewritten_template() -> bool:
+    """
+    #217 (§5.7, step 5): run_all is instantiated twice. Rewriting f in one specialization
+    rewrites the template, so the other specialization's function type changes too; P2 keeps every
+    part of a key but the nested types, so that one stays unpaired and both f stay not checked. A
+    specialization key without the function type would pair it.
+    """
+    print("=== Testing the other specialization of the rewritten template (P2) ===")
+    good = _p2_expect(
+        "each and both body checked, both f not checked",
+        _p2_verdicts("two_instantiations.cpp", P2_TWO_INSTANTIATIONS_SOURCE),
+        {
+            "each": ["checked in"],
+            "body": ["checked in", "checked in"],
+            "f": ["not checked, the generated code changes", "not checked, the generated code changes"],
+        },
+    )
+    print()
+    return good
+
+
+def check_const_suggestion_p2_keys_keep_candidates_apart() -> bool:
+    """
+    #217 (§5.7, step 5): the candidates nested in the generic lambda's call operator pair one to
+    one: the local class's implicit constructors and assignments (by the member's type), the
+    lambda's operator() and __invoke (by name, static flag and qualifiers, which this check protects
+    together, not each one), the hidden friend of Box<State> (by its function type), probe of member
+    classes whose specializations differ only by a closure type (through their specialization). A
+    key without any of these parts merges two of them, and each stays not checked.
+    """
+    print("=== Testing that the keys keep the nested candidates apart (P2) ===")
+    good = _p2_expect(
+        "each and body checked",
+        _p2_verdicts("keys.cpp", P2_KEYS_SOURCE),
+        {"each": ["checked in"], "body": ["checked in"]},
+    )
+    print()
+    return good
+
+
+# The implicit members of classes whose arguments hold a type nested in the generic lambda's call
+# operator: Box<State>'s default, copy and move constructors, assignments and destructor, the
+# destructors of Holder<State, int> and Holder<State, long>. No polymorphic class: its vtable is a
+# global that P2 does not pair.
+P2_IMPLICIT_SOURCE = (
+    "#include <vector>\n"
+    "\n"
+    "template <typename T> struct Box\n"
+    "{\n"
+    "    T value;\n"
+    "};\n"
+    "\n"
+    "template <typename T, typename U> struct Holder\n"
+    "{\n"
+    "    T value;\n"
+    "    U other;\n"
+    "};\n"
+    "\n"
+    "template <typename Each> int pass(int n, Each&& each)\n"
+    "{\n"
+    "    int total = 0;\n"
+    "    each(n, [&](int i) { total += i; });\n"
+    "    return total;\n"
+    "}\n"
+    "\n"
+    "int drive(int n)\n"
+    "{\n"
+    "    return pass(n, [&](int count, auto&& body) {\n"
+    "        struct State\n"
+    "        {\n"
+    "            std::vector<int> v;\n"
+    "        };\n"
+    "        Box<State> a{{{count}}};\n"
+    "        Box<State> b = a;\n"
+    "        Box<State> c = static_cast<Box<State>&&>(a);\n"
+    "        b = c;\n"
+    "        c = static_cast<Box<State>&&>(b);\n"
+    "        Box<State> d;\n"
+    "        Holder<State, int> h{};\n"
+    "        Holder<State, long> k{};\n"
+    "        body(static_cast<int>(b.value.v.size() + c.value.v.size() + d.value.v.size()) +\n"
+    "             h.other + static_cast<int>(k.other));\n"
+    "    });\n"
+    "}\n"
+)
+
+# The rewrite of p, only read, changes Tag's own argument, int * becoming const int *: Tag's implicit
+# destructor is then another class's, and Tag holds no nested type. (p is not stored in Tag: a stored
+# pointer escapes, and no const is suggested; the first version of this check had no suggestion.)
+P2_OWNER_CHANGED_SOURCE = (
+    "#include <vector>\n"
+    "\n"
+    "template <typename T> struct Tag\n"
+    "{\n"
+    "    std::vector<int> items;\n"
+    "};\n"
+    "\n"
+    "int read_value(int* p)\n"
+    "{\n"
+    "    Tag<decltype(p)> tag{};\n"
+    "    return *p + static_cast<int>(tag.items.size());\n"
+    "}\n"
+)
+
+
+def check_const_suggestion_p2_implicit_members_of_a_specialization() -> bool:
+    """
+    #217 (§5.7, step 5): the implicit members of Box<State> and of the two Holders pair through
+    State, by their class, kind and name, variant and whole type. Without the type, the variant or
+    the class's other arguments, two of them merge, and each stays not checked.
+    """
+    print("=== Testing the implicit members of specializations (P2) ===")
+    good = _p2_expect(
+        "each and body checked",
+        _p2_verdicts("implicit.cpp", P2_IMPLICIT_SOURCE),
+        {"each": ["checked in"], "body": ["checked in"]},
+    )
+    print()
+    return good
+
+
+def check_const_suggestion_p2_owner_changed_by_the_rewrite() -> bool:
+    """
+    #217 (§5.7, step 5, negative): the rewrite of p changes Tag's own argument, so Tag<int *>'s
+    implicit destructor has no counterpart; step 5, which keeps every argument and identifies only
+    the classes that hold a nested type, leaves it unpaired, and the suggestion stays not checked. A
+    key that wrote the class by its name alone, whatever it holds, would pair it.
+    """
+    print("=== Testing an implicit member whose class the rewrite changes (P2) ===")
+    good = _p2_expect(
+        "p not checked",
+        _p2_verdicts("owner_changed.cpp", P2_OWNER_CHANGED_SOURCE),
+        {"p": ["not checked, the generated code changes"]},
+    )
+    print()
+    return good
+
+
 def check_duplicate_if_cross_tu() -> bool:
     """
     #157: a function defined in another file is deterministic when every definition of it is, as
@@ -7047,6 +7365,12 @@ def main() -> int:
         check_const_suggestion_deduced_type_error,
         check_const_suggestion_written_part_outside_the_plan,
         check_const_suggestion_default_argument_outside_the_plan,
+        check_const_suggestion_p2_lambdas_of_another_specialization,
+        check_const_suggestion_p2_local_class_in_a_library_template,
+        check_const_suggestion_p2_other_specialization_of_the_rewritten_template,
+        check_const_suggestion_p2_keys_keep_candidates_apart,
+        check_const_suggestion_p2_implicit_members_of_a_specialization,
+        check_const_suggestion_p2_owner_changed_by_the_rewrite,
         check_duplicate_if_cross_tu,
         check_global_read_before_write_identity_across_files,
         check_size_minus_one_cross_tu,
