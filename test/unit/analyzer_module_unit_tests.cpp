@@ -2166,6 +2166,117 @@ namespace
         return std::nullopt;
     }
 
+    /// Every rule id the emitters can give a diagnostic, read from their sources so that a new
+    /// rule cannot go undescribed unnoticed: the explicit ids, the const-parameter variants, the
+    /// clang classifications, and the error code names, which a diagnostic without an explicit
+    /// id takes.
+    std::set<std::string> emittableRuleIds(const std::filesystem::path& repoRoot)
+    {
+        std::set<std::string> ids;
+        const auto read = [&](const char* source) -> std::string
+        {
+            llvm::ErrorOr<std::unique_ptr<llvm::MemoryBuffer>> buffer =
+                llvm::MemoryBuffer::getFile((repoRoot / source).string());
+            return buffer ? (*buffer)->getBuffer().str() : std::string();
+        };
+        // The literal after each occurrence of `marker`, up to its closing quote.
+        const auto literalsAfter =
+            [&ids](const std::string& text, llvm::StringRef marker, const std::string& prefix = {})
+        {
+            for (std::size_t at = text.find(marker.str()); at != std::string::npos;
+                 at = text.find(marker.str(), at + 1))
+            {
+                const std::size_t start = at + marker.size();
+                const std::size_t end = text.find('"', start);
+                if (end != std::string::npos)
+                    ids.insert(prefix + text.substr(start, end - start));
+            }
+        };
+        const std::string emitter = read("src/analyzer/DiagnosticEmitter.cpp");
+        literalsAfter(emitter, "ruleId(\"");
+        literalsAfter(emitter, "ruleId = \"");
+        // `subLabel = "Pointer"`, and both arms of `subLabel = cond ? "A" : "B"`.
+        for (std::size_t at = emitter.find("subLabel ="); at != std::string::npos;
+             at = emitter.find("subLabel =", at + 1))
+        {
+            const std::string statement = emitter.substr(at, emitter.find(';', at) - at);
+            literalsAfter(statement, "\"", "ConstParameterNotModified.");
+        }
+        literalsAfter(read("src/analysis/FrontendDiagnostics.cpp"), "Classification{\"");
+        for (const std::string_view name :
+             ctrace::stack::EnumTraits<ctrace::stack::DescriptiveErrorCode>::names)
+        {
+            if (name != "None")
+                ids.insert(std::string(name));
+        }
+        // literalsAfter("\"") also collects the closing quote of each literal as an opening
+        // one: keep the ids, which are the literals, not what lies between them.
+        std::erase_if(ids,
+                      [](const std::string& id)
+                      {
+                          return id.empty() || id.find_first_of(" ?:;") != std::string::npos ||
+                                 id == "ConstParameterNotModified.";
+                      });
+        return ids;
+    }
+
+    /// The rule @p rule of the SARIF log @p sarif, or std::nullopt when it is absent.
+    std::optional<llvm::json::Object> sarifRule(const std::string& sarif, llvm::StringRef rule)
+    {
+        llvm::Expected<llvm::json::Value> parsed = llvm::json::parse(sarif);
+        if (!parsed)
+        {
+            llvm::consumeError(parsed.takeError());
+            return std::nullopt;
+        }
+        const llvm::json::Object* root = parsed->getAsObject();
+        const llvm::json::Array* runs = root ? root->getArray("runs") : nullptr;
+        const llvm::json::Object* run = runs && !runs->empty() ? (*runs)[0].getAsObject() : nullptr;
+        const llvm::json::Object* tool = run ? run->getObject("tool") : nullptr;
+        const llvm::json::Object* driver = tool ? tool->getObject("driver") : nullptr;
+        const llvm::json::Array* rules = driver ? driver->getArray("rules") : nullptr;
+        for (const llvm::json::Value& entry : rules ? *rules : llvm::json::Array{})
+        {
+            const llvm::json::Object* object = entry.getAsObject();
+            if (object && object->getString("id") == rule)
+                return *object;
+        }
+        return std::nullopt;
+    }
+
+    /// SARIF: a consumer such as GitHub code scanning explains a finding from its rule, so every
+    /// rule the analyzer can report carries a title other than its id and a description.
+    bool testEveryRuleIsDescribed(const std::filesystem::path& repoRoot, TestReport& report)
+    {
+        const std::set<std::string> ids = emittableRuleIds(repoRoot);
+        report.expect(ids.count("StackBufferOverflow") && ids.count("Recursion.Unconditional") &&
+                          ids.count("ConstParameterNotModified.ReferenceRvaluePreferValue") &&
+                          ids.count("FormatString.NonLiteral"),
+                      "SARIF: the rule ids are read from the emitters' sources");
+        for (const std::string& id : ids)
+        {
+            ctrace::stack::Diagnostic d;
+            d.ruleId = id;
+            d.filePath = "demo.c";
+            d.line = 1;
+            d.column = 1;
+            d.message = "m";
+            ctrace::stack::AnalysisResult result;
+            result.diagnostics = {d};
+            const std::optional<llvm::json::Object> rule =
+                sarifRule(ctrace::stack::toSarif(result, "demo.c"), id);
+            const auto text = [&rule](llvm::StringRef key) -> llvm::StringRef
+            {
+                const llvm::json::Object* message = rule ? rule->getObject(key) : nullptr;
+                return message ? message->getString("text").value_or("") : "";
+            };
+            report.expect(rule && !text("shortDescription").empty() &&
+                              text("shortDescription") != id && !text("fullDescription").empty(),
+                          "SARIF: rule " + id + " has a title and a description");
+        }
+        return report.failures == 0;
+    }
+
     /// SARIF: every CWE the diagnostics report has a security severity, so the rules that report
     /// it are security rules; dead code (CWE-561), a quality issue for CodeQL, is the exception.
     /// The CWEs are read from the emitters' sources, so a new one cannot be left unscored
@@ -2689,6 +2800,7 @@ int main(int argc, char** argv)
     (void)testAnalysisReportContract(repoRoot, report);
     (void)testSarifRuleCweTags(report);
     (void)testSarifSecuritySeverity(report);
+    (void)testEveryRuleIsDescribed(repoRoot, report);
     (void)testAnalysisIncompleteNotesHaveTheirOwnRules(report);
     (void)testUnresolvedCallsMarkStackUnknown(repoRoot, report);
     (void)testAssumeExternalFrameReplacesUnknown(repoRoot, report);

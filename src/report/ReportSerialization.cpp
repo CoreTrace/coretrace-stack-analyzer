@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "StackUsageAnalyzer.hpp"
+#include "RuleCatalog.hpp"
 
 #include <algorithm>
 #include <charconv>
@@ -436,8 +437,14 @@ namespace ctrace::stack
             const auto& rule = rules[i];
             os << "            {\n";
             os << "              \"id\": \"" << jsonEscape(rule.id) << "\",\n";
-            os << "              \"shortDescription\": { \"text\": \"" << jsonEscape(rule.id)
-               << "\" }";
+            // The title and the description of the rule, when the catalog has them; the id
+            // otherwise, as before.
+            const std::optional<RuleDescription> described = describeRule(rule.id);
+            os << "              \"shortDescription\": { \"text\": \""
+               << jsonEscape(described ? std::string(described->title) : rule.id) << "\" }";
+            if (described)
+                os << ",\n              \"fullDescription\": { \"text\": \""
+                   << jsonEscape(std::string(described->description)) << "\" }";
             if (!rule.cwes.empty())
             {
                 // One score for the whole rule: the highest of its CWEs.
@@ -542,4 +549,190 @@ namespace ctrace::stack
         return os.str();
     }
 
+    std::optional<RuleDescription> describeRule(std::string_view ruleId)
+    {
+        struct DescribedRule
+        {
+            std::string_view ruleId;
+            RuleDescription description;
+        };
+        // Sorted by id. Every id the emitters can give, the error code names included: a
+        // diagnostic without an explicit id takes the name of its code.
+        static constexpr DescribedRule kRules[] = {
+            {"AllocaTooLarge",
+             {"Large stack allocation", "An alloca or variable-length array larger than the "
+                                        "configured threshold, which may overflow the stack."}},
+            {"AllocaUsageWarning",
+             {"Dynamic stack allocation", "An alloca whose size is known only at run time: the "
+                                          "stack usage of the function grows with that value."}},
+            {"AllocaUserControlled",
+             {"User-controlled stack allocation size",
+              "An alloca or variable-length array whose size depends on user-controlled input, "
+              "which may exhaust the stack."}},
+            {"CommandInjection",
+             {"Command injection",
+              "A command that is not a literal reaches a function that runs it."}},
+            {"CommandInjection.NonLiteralCommand",
+             {"Non-literal command",
+              "A command that is not a string literal reaches a function that runs it (system, "
+              "popen, an exec function), so that data may choose what runs."}},
+            {"ConstParameterNotModified",
+             {"Parameter could be const", "A pointer or reference parameter that is never used to "
+                                          "modify the object it designates."}},
+            {"ConstParameterNotModified.Pointer",
+             {"Pointer parameter could point to const",
+              "A pointer parameter that is never used to modify the object it points to: it could "
+              "point to const."}},
+            {"ConstParameterNotModified.PointerConstOnly",
+             {"Const pointer parameter could point to const",
+              "A pointer parameter declared const whose pointed object is never modified: the "
+              "pointed type could be const too."}},
+            {"ConstParameterNotModified.Reference",
+             {"Reference parameter could be const",
+              "A reference parameter that is never used to modify the object it refers to: it "
+              "could be a reference to const."}},
+            {"ConstParameterNotModified.ReferenceRvaluePreferValue",
+             {"Rvalue reference parameter could be a value",
+              "An rvalue reference parameter that is never used to modify the object it refers to: "
+              "it could be passed by value or by reference to const."}},
+            {"DuplicateIfCondition",
+             {"Duplicate if condition", "An else-if branch whose condition is equivalent to a "
+                                        "previous one, so that it can never run."}},
+            {"FormatString.NonLiteral",
+             {"Non-literal format string",
+              "A format string that is not a literal reaches a printf-like function, so that data "
+              "may control the format."}},
+            {"GlobalReadBeforeWrite",
+             {"Global buffer read before its first write",
+              "A global buffer that a function reads before it first writes it: the read sees the "
+              "static zero initialization or a stale value."}},
+            {"InformationExposure.UninitializedStackBytes",
+             {"Uninitialized stack bytes exposed",
+              "A local variable whose bytes are not all initialized reaches an external sink, "
+              "which may leak memory contents."}},
+            {"IntegerConversion.SignedToSize",
+             {"Signed value converted to a size",
+              "A signed value that may be negative is converted to the size of an allocation or a "
+              "copy."}},
+            {"IntegerOverflow", {"Integer overflow", "An integer computation that may overflow."}},
+            {"IntegerOverflow.SignedArithmetic",
+             {"Signed integer overflow",
+              "A signed arithmetic operation that may overflow, which is undefined behavior."}},
+            {"IntegerOverflow.SizeComputation",
+             {"Integer overflow in a size computation",
+              "The size of an allocation or a copy is computed with an operation that may overflow "
+              "before the size is used."}},
+            {"IntegerTruncation.SizeComputation",
+             {"Integer truncation in a size computation",
+              "The size of an allocation or a copy may be truncated to a narrower type before it "
+              "is used."}},
+            {"InvalidBaseReconstruction",
+             {"Invalid base reconstruction",
+              "A pointer to an object rebuilt from a pointer to one of its members with an offset "
+              "that does not lead back to the object, which is undefined behavior."}},
+            {"MemcpyWithStackDest",
+             {"Stack buffer overflow in a memory copy",
+              "A memcpy, memset or similar copy whose length may exceed the stack buffer it "
+              "writes."}},
+            {"MultipleStoresToStackBuffer",
+             {"Multiple stores to a stack buffer",
+              "A stack buffer written many times in one function: each index is worth checking "
+              "against the buffer's bounds."}},
+            {"NegativeStackIndex",
+             {"Negative stack index", "An index into a stack array that may be negative, so that "
+                                      "the access lands before the array."}},
+            {"NullPointerDereference",
+             {"Null pointer dereference", "A pointer that may be null is dereferenced."}},
+            {"OutOfBoundsRead", {"Out-of-bounds read", "A read past the end of a buffer."}},
+            {"OutOfBoundsRead.HeapIndex",
+             {"Out-of-bounds read on a heap buffer",
+              "A read at an index that may be past the end of a heap buffer."}},
+            {"OutOfBoundsRead.MissingNullTerminator",
+             {"String buffer without a null terminator",
+              "A string function reads a buffer that may not be null-terminated, past its end."}},
+            {"Recursion.Detected",
+             {"Recursive function", "A recursive or mutually recursive function: its stack usage "
+                                    "grows with the depth of the recursion."}},
+            {"Recursion.Unconditional",
+             {"Unconditional recursion", "A function that calls itself on every path, with no base "
+                                         "case: it overflows the stack at run time."}},
+            {"ResourceLifetime.AnalysisIncomplete",
+             {"Resource analysis incomplete", "The resource ownership analysis did not converge in "
+                                              "this function: its resources are not checked."}},
+            {"ResourceLifetime.DoubleRelease",
+             {"Double release", "A resource handle released twice, such as a file closed or memory "
+                                "freed a second time."}},
+            {"ResourceLifetime.IncompleteInterproc",
+             {"Inter-procedural resource analysis incomplete",
+              "A handle passed to a function the analysis could not follow: whether it is released "
+              "is not known."}},
+            {"ResourceLifetime.MissingDestructorRelease",
+             {"Resource acquired in a constructor may leak",
+              "A resource a constructor acquires and the class's destructor does not release."}},
+            {"ResourceLifetime.MissingRelease",
+             {"Resource leak",
+              "A resource acquired in a function and not released on every path out of it."}},
+            {"ResourceLifetime.ReleasedHandleEscapes",
+             {"Released handle escapes",
+              "A handle that was released is returned or stored, so that it may be used later."}},
+            {"ResourceLifetime.UseAfterRelease",
+             {"Use after release", "A resource handle used after it was released."}},
+            {"ResourceLifetimeIssue",
+             {"Resource lifetime issue",
+              "A resource that may leak, be released twice or be used after it was released."}},
+            {"SizeMinusOneWrite",
+             {"Size minus a constant as a length",
+              "A length computed as a size minus a constant, which may fall below the minimum of "
+              "its type before a write or a call."}},
+            {"SizeofPitfall",
+             {"Suspicious sizeof",
+              "A sizeof applied to a pointer or an array parameter, which gives the size of the "
+              "pointer, where the size of the data was likely meant."}},
+            {"StackBufferOverflow",
+             {"Stack buffer overflow",
+              "A read or a write at an index that may be past the end of a stack array."}},
+            {"StackFrameTooLarge",
+             {"Stack frame too large",
+              "A function whose stack frame exceeds the configured limit."}},
+            {"StackPointerEscape",
+             {"Stack address escapes", "The address of a local variable escapes its function, so "
+                                       "that it may be used after the stack frame is gone."}},
+            {"TOCTOU.PathCheckThenUse",
+             {"Path checked then used", "A path checked (access, stat) and then used (open) by "
+                                        "separate calls: the file may change in between."}},
+            {"TOCTOURace",
+             {"Time-of-check to time-of-use race", "A resource checked and then used by separate "
+                                                   "operations: it may change in between."}},
+            {"TypeConfusion",
+             {"Type confusion", "The same memory accessed through incompatible types."}},
+            {"TypeConfusion.IncompatibleStructView",
+             {"Incompatible struct views of one pointer",
+              "The same pointer used as two incompatible struct types."}},
+            {"UninitializedLocalRead",
+             {"Read of an uninitialized local variable",
+              "A local variable read before it is written on some path."}},
+            {"UninitializedLocalRead.AnalysisIncomplete",
+             {"Uninitialized-read analysis incomplete",
+              "The uninitialized-read analysis did not converge in this function: its reads are "
+              "not checked."}},
+            {"UninitializedLocalVariable",
+             {"Uninitialized local variable",
+              "A local variable declared without an initializer and never definitely written."}},
+            {"UnsafeFunction.DeprecatedGets",
+             {"Use of gets",
+              "A call to gets, which cannot bound what it writes and was removed from C11."}},
+            {"VLAUsage",
+             {"Variable-length array",
+              "A stack allocation whose size is not a compile-time constant."}},
+            {"VariadicFormatMismatch",
+             {"Format and arguments mismatch",
+              "The arguments of a printf-like call do not match its format string."}},
+        };
+        const auto found = std::lower_bound(std::begin(kRules), std::end(kRules), ruleId,
+                                            [](const DescribedRule& rule, std::string_view id)
+                                            { return rule.ruleId < id; });
+        if (found == std::end(kRules) || found->ruleId != ruleId)
+            return std::nullopt;
+        return found->description;
+    }
 } // namespace ctrace::stack
