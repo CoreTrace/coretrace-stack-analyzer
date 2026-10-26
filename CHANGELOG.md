@@ -5,6 +5,8 @@ Notable changes are grouped by release. See [all releases](https://github.com/Co
 ## Unreleased
 
 - Added an authors file and linked the repository documents from the README.
+- SARIF rules carry a title (`shortDescription`) and a description (`fullDescription`) instead
+  of their id, and `describeRule` (`RuleCatalog.hpp`) gives them to programs linking the analyzer.
 
 ## v0.22.0
 
