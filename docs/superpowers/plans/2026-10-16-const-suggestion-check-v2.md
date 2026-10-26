@@ -2967,21 +2967,26 @@ Expected failure at the batch's base: in all three cases, `not checked with Clan
 ### Task 3.1: measure
 **Work:** the `const_suggestion.*` hotspots of `--timing` on the self-analysis with the option, as CI runs it; the per-suggestion copy of each unit's scan, the recompilation of a failing initial compilation, the duplicated construction of the invocation, each measured.
 **Validation:** a measurement report in `evidence/217/v2-cost/`; only measurable costs go to Task 3.2.
+**Status:** done (`report-fe43067.md`, `report-ct3-fe43067.md`). Measured on the self-analysis: the 38 compilations about 270 s (front-end about 166 s, inspection 87 s, CodeGen 17 s), the correspondences about 80 to 90 s, the facts' comparison 10 to 15 s, the scans 31 s; the copies of the scans 2.7 s; the preparation of the commands, the rewrite and the release of the modules under 1 s together.
 
 ### Task 3.2: remove the measured costs; build the invocation once
 **Work:** shared scans instead of copies; a failing initial compilation cached as failing; one function builds the Clang invocation for scanning and compiling, reusing the existing path normalization.
 **Validation:** outputs identical before and after the stage (suite, review cases, corpora with the option); the gain measured.
+**Status:** partly done. The correspondences' index is built once per call (O1, `48f3ec1`): correspond 49.5 -> 23.0 s, same pairs and rounds. The shared scans and the single construction of the invocation are not done: their measured cost (2.7 s, and under 1 s) is below the noise, so by Task 3.1's rule they stay as they are. The failing initial compilation is not cached either: 4 such compilations on the self-analysis. The faster fact comparison (O2) was withdrawn by the user; the precompiled preamble (O3) was abandoned after its prototype (a net loss, a crash); the reduced scans (O4) and the stop after an introduced error (O5) were not engaged; sharing the pipeline's compilation (O6) is not recommended (`final/o6-feasibility.md`). The +10 % criterion is not met.
 
 ## Final phase
 
 ### Task F.1: corpora
 **Work:** on Linux, `src/`, zlib, tinyxml2 and PCRE2, three outputs: without the option, T v1, T v2. Each suggestion classified verified, kept indeterminate, or removed on an established refutation. Each disappearance against the output without the option is explained by its violation; each difference with T v1 is explained.
+**Status:** done at `48f3ec1` (`final/report.md`); the seven differences with T v1 led to Tasks F.4 and F.5, each of which changed only the cases it targets (src/ now 10 verified, 0 not checked, 12 removed; zlib 16/0/10, tinyxml2 0/0/6, PCRE2 10/31/3 with the corpora configured in the container).
 
 ### Task F.2: cost
 **Work:** the protocol of §8. The criterion is +10 % on the self-analysis.
+**Status:** measured, not met: +24 to +25 % in a 6 GiB container, +30 to +32 % in a 10 GiB one (4 CPUs, Linux x86_64); T v1 measured +14.6 % in the first conditions. No overrun is accepted.
 
 ### Task F.3: delivery
 **Work:** README; the description of the draft #239, opened after stage 1, brought up to date; CI; code scanning triaged; final review on the updated base. No merge.
+**Status:** in progress with the publication of the integrated head on #239, still a draft.
 
 ### Task F.4: the scope of step 3, written form and deduced component (D19)
 Found by the comparison of the corpora at `48f3ec1`, authorized by the user on 2026-10-23.

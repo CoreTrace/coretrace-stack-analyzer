@@ -653,8 +653,8 @@ experimental:
   code. A difference that the facts do not explain keeps the suggestion as not checked. A change
   that they show removes it, even when the program would behave the same;
 - it compiles each file that sees the change once as it is, for all the suggestions of an analyzed
-  file, and once more for each suggestion. The cost of this version is not measured yet; the first
-  version made this repository's self-analysis about 19% longer.
+  file, and once more for each suggestion. On this repository's self-analysis, on 4 CPUs, it adds
+  about 25 to 30% to the wall time.
 
 The option is a trade-off, not a fix: with it, a valid suggestion can still be removed or kept as
 not checked; without it, suggestions whose type does not compile, drops a qualifier, or changes the
@@ -706,8 +706,11 @@ The check runs these steps:
    - a file that declares the function itself, outside the rewritten files, with its current type,
      or that converts the function's address with an explicit cast, other than to `void`: not
      checked;
-   - the symbols that the rewrite renames are paired from these facts. One left without a pair, or
-     two that would pair with the same symbol, leaves the file not checked;
+   - the symbols that the rewrite renames are paired from these facts, and from what Clang
+     identifies of the lambdas and local classes nested in paired functions: their members, the
+     specializations whose template arguments or type hold them, and the implicit members of the
+     classes that hold them. Every other part of such an identity must match. One left without a
+     pair, or two that would pair with the same symbol, leaves the file not checked;
    - the generated code is compared through those pairs. It matches: verified. A difference that
      none of these facts explains: not checked.
 

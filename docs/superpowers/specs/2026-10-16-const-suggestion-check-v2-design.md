@@ -1,7 +1,7 @@
 # Vérification des suggestions const par Clang, version 2 (#217)
 
 Statut : validée à `8b283a8`, puis complétée à la relecture du plan d'implémentation (D17, fixture
-de D13), au détail de l'étape 1 (mutualisation limitée au module, §5 et §10), à celui de l'étape 2 (erreurs natives de Clang conservées, §5.3 ; D18, §5.6 et §6), et après la comparaison des corpus (D19, §5.6 et §6). N'autorise ni le code ni la modification des tests : chaque lot présentera ses
+de D13), au détail de l'étape 1 (mutualisation limitée au module, §5 et §10), à celui de l'étape 2 (erreurs natives de Clang conservées, §5.3 ; D18, §5.6 et §6), après la comparaison des corpus (D19, §5.6 et §6), puis à l'intégration de l'étape 5 de §5.7 (D20). N'autorise ni le code ni la modification des tests : chaque lot présentera ses
 tests, avec leurs preuves d'échec, avant de les ajouter. La fusion n'est pas autorisée.
 Issue : #217. Liens : #221 (T v1, référence conservée), #167 (faits et contrat const), #197
 (identité d'un global entre fichiers).
