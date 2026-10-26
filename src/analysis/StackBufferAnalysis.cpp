@@ -214,8 +214,10 @@ namespace ctrace::stack::analysis
         /// pointer variables (`char* p = buf; p[i]`) and pointer PHIs. One instance serves one
         /// function: it indexes the stores into each alloca once, and resolves every pointer
         /// variable and PHI once, by strongly connected components, so that a node's result
-        /// depends on the function alone and not on the query that reached it (#215). The cost
-        /// is bounded by the function's size.
+        /// depends on the function alone and not on the query that reached it (#215). The work is
+        /// proportional to the function's pointer variables, PHIs and stores: each is visited
+        /// once by the walk and once more to settle its alias path witness. A query then
+        /// copies its alias path once.
         class ArrayAllocaResolver
         {
           public:
@@ -454,34 +456,57 @@ namespace ctrace::stack::analysis
                 if (ambiguous)
                     found = nullptr;
 
-                // Witnesses: a member takes its first source that leads to the array, directly or
-                // through a member settled in an earlier round. A round settles the members one
-                // step further from the array, so the path does not depend on the member order.
-                bool progress = found != nullptr;
-                while (progress)
+                // Witnesses, for the alias path. Level 0: the members with a source that leads
+                // to the array directly or through a node outside the component. Level k + 1:
+                // the members not settled yet with a source that leads to a member of level k.
+                // A member takes its first source among those settled at a lower level, so the
+                // path depends neither on the member order nor on the query. Each member is
+                // settled once and each edge between members is followed once.
+                std::unordered_map<const Value*, SmallVector<const Value*, 4>> dependents;
+                SmallVector<const Value*, 8> level;
+                if (found)
                 {
-                    SmallVector<const Value*, 8> settled;
                     for (const Value* member : members)
                     {
+                        bool direct = false;
+                        for (const Target& target : nodes_[member].targets)
+                        {
+                            if (target.node && nodes_[target.node].onStack)
+                                dependents[target.node].push_back(member);
+                            else if (arrayOf(target) == found)
+                                direct = true;
+                        }
+                        if (direct)
+                            level.push_back(member);
+                    }
+                }
+                SmallPtrSet<const Value*, 16> queued(level.begin(), level.end());
+                while (!level.empty())
+                {
+                    for (const Value* member : level)
+                    {
                         Node& node = nodes_[member];
-                        if (node.done)
-                            continue;
                         for (const Target& target : node.targets)
                         {
                             if (arrayOf(target) != found)
                                 continue;
                             node.segment = target.names;
                             node.next = target.node;
-                            settled.push_back(member);
                             break;
                         }
                     }
-                    for (const Value* member : settled)
+                    SmallVector<const Value*, 8> next;
+                    for (const Value* member : level)
                     {
                         nodes_[member].alloca = found;
                         nodes_[member].done = 1;
+                        for (const Value* dependent : dependents[member])
+                        {
+                            if (queued.insert(dependent).second)
+                                next.push_back(dependent);
+                        }
                     }
-                    progress = !settled.empty();
+                    level = std::move(next);
                 }
 
                 for (const Value* member : members)
