@@ -2972,13 +2972,13 @@ Expected failure at the batch's base: in all three cases, `not checked with Clan
 ### Task 3.2: remove the measured costs; build the invocation once
 **Work:** shared scans instead of copies; a failing initial compilation cached as failing; one function builds the Clang invocation for scanning and compiling, reusing the existing path normalization.
 **Validation:** outputs identical before and after the stage (suite, review cases, corpora with the option); the gain measured.
-**Status:** partly done. The correspondences' index is built once per call (O1, `48f3ec1`): correspond 49.5 -> 23.0 s, same pairs and rounds. The shared scans and the single construction of the invocation are not done: their measured cost (2.7 s, and under 1 s) is below the noise, so by Task 3.1's rule they stay as they are. The failing initial compilation is not cached either: 4 such compilations on the self-analysis. The faster fact comparison (O2) was withdrawn by the user; the precompiled preamble (O3) was abandoned after its prototype (a net loss, a crash); the reduced scans (O4) and the stop after an introduced error (O5) were not engaged; sharing the pipeline's compilation (O6) is not recommended (`final/o6-feasibility.md`). The +10 % criterion is not met.
+**Status:** partly done. The correspondences' index is built once per call (O1, `48f3ec1`): correspond 49.5 -> 23.0 s, same pairs and rounds. The shared scans and the single construction of the invocation are not done: their measured cost (2.7 s, and under 1 s) is below the noise. The user deferred the single construction of the Clang invocation to a separate follow-up (2026-10-26), the task staying partly done; that deferral does not accept the cost overrun. The failing initial compilation is not cached either: 4 such compilations on the self-analysis. The faster fact comparison (O2) was withdrawn by the user; the precompiled preamble (O3) was abandoned after its prototype (a net loss, a crash); the reduced scans (O4) and the stop after an introduced error (O5) were not engaged; sharing the pipeline's compilation (O6) is not recommended (`final/o6-feasibility.md`). The +10 % criterion is not met.
 
 ## Final phase
 
 ### Task F.1: corpora
 **Work:** on Linux, `src/`, zlib, tinyxml2 and PCRE2, three outputs: without the option, T v1, T v2. Each suggestion classified verified, kept indeterminate, or removed on an established refutation. Each disappearance against the output without the option is explained by its violation; each difference with T v1 is explained.
-**Status:** done at `48f3ec1` (`final/report.md`); the seven differences with T v1 led to Tasks F.4 and F.5, each of which changed only the cases it targets (src/ now 10 verified, 0 not checked, 12 removed; zlib 16/0/10, tinyxml2 0/0/6, PCRE2 10/31/3 with the corpora configured in the container).
+**Status:** done at `48f3ec1` (`final/report.md`); the seven differences with T v1 led to Tasks F.4 and F.5, each of which changed only the cases it targets (src/ now 10 verified, 0 not checked, 12 removed; zlib 16/0/10, tinyxml2 0/0/6, PCRE2 10/31/3 with the corpora configured in the container). **Reserve (#215):** every comparison leaves out the units on which the analysis does not finish, as T v1's measurements did: 5 of zlib's 37 (`crc32.c`, `deflate.c`, `infback.c`, `inffast.c`, `inflate.c`) and 14 of PCRE2's 35 (`pcre2_auto_possess.c`, `pcre2_compile.c`, `pcre2_compile_class.c`, `pcre2_convert.c`, `pcre2_dfa_match.c`, `pcre2_find_bracket.c`, `pcre2_match.c`, `pcre2_pattern_info.c`, `pcre2_script_run.c`, `pcre2_study.c`, `pcre2_valid_utf.c`, `pcre2_xclass.c`, `pcre2grep.c`, `pcre2test.c`). Analyzed alone without the option by the product binary, each runs past a 120 s limit (2026-10-26). The suggestions of these units are not classified; the conclusions on the corpora hold for the units analyzed only.
 
 ### Task F.2: cost
 **Work:** the protocol of §8. The criterion is +10 % on the self-analysis.
@@ -2986,7 +2986,7 @@ Expected failure at the batch's base: in all three cases, `not checked with Clan
 
 ### Task F.3: delivery
 **Work:** README; the description of the draft #239, opened after stage 1, brought up to date; CI; code scanning triaged; final review on the updated base. No merge.
-**Status:** in progress with the publication of the integrated head on #239, still a draft.
+**Status:** in progress. The integrated head is published on #239, still a draft; README, description, CI and code scanning are done at `bed265d`. The final review on the updated base is still due: its findings, and their fixes, come before any decision to merge.
 
 ### Task F.4: the scope of step 3, written form and deduced component (D19)
 Found by the comparison of the corpora at `48f3ec1`, authorized by the user on 2026-10-23.
