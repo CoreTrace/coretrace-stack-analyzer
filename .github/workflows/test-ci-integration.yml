@@ -20,7 +20,7 @@ jobs:
   # =================================================================
   test-github-action:
     name: Test GitHub Action
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       security-events: write
@@ -83,7 +83,7 @@ jobs:
   # =================================================================
   test-docker:
     name: Test Docker Image
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
 
@@ -177,7 +177,7 @@ jobs:
   # =================================================================
   test-consumer-project:
     name: Test Consumer Project
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
 
