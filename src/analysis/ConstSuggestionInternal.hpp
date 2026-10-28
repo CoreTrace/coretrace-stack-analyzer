@@ -414,6 +414,10 @@ namespace ctrace::stack::analysis::const_suggestion
     // incomplete and must not be judged.
     std::map<std::string, std::string> rewrite(const SuggestionPlan& plan, std::string& failure);
 
+    // The token by which the scan records a function's name: the name itself, or `operator` for
+    // an operator, whose name is not an identifier (a free operator, a conversion, a literal one).
+    std::string scannedName(llvm::StringRef name);
+
     // The files a unit reads and its identifiers, from its preprocessing.
     UnitScan scan(const UnitCommand& command, bool timing);
 } // namespace ctrace::stack::analysis::const_suggestion

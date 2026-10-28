@@ -907,7 +907,8 @@ namespace ctrace::stack::analysis
                     std::any_of(rewrittenFiles.begin(), rewrittenFiles.end(),
                                 [&](const std::string& path) { return seen.files.count(path); }) ||
                     (plan.declarableElsewhere &&
-                     seen.identifiers.count(llvm::xxh3_64bits(plan.entity.name)) != 0);
+                     seen.identifiers.count(
+                         llvm::xxh3_64bits(const_suggestion::scannedName(plan.entity.name))) != 0);
                 if (!sees)
                     continue;
                 std::vector<std::string> otherAccepted;
