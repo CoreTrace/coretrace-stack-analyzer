@@ -144,20 +144,29 @@ namespace ctrace::stack::analysis
     std::map<std::string, std::string> const_suggestion::rewrite(const SuggestionPlan& plan,
                                                                  std::string& failure)
     {
-        (void)failure;
         std::map<std::string, std::string> out;
         for (const auto& [path, edits] : plan.edits)
         {
             llvm::ErrorOr<std::unique_ptr<llvm::MemoryBuffer>> buffer =
                 llvm::MemoryBuffer::getFile(path);
             if (!buffer)
-                continue;
+            {
+                failure = path + " cannot be read";
+                return out;
+            }
             std::string text = (*buffer)->getBuffer().str();
             std::vector<Edit> sorted = edits;
             std::sort(sorted.begin(), sorted.end(),
                       [](const Edit& a, const Edit& b) { return a.offset > b.offset; });
             for (const Edit& edit : sorted)
+            {
+                if (edit.offset > text.size() || edit.length > text.size() - edit.offset)
+                {
+                    failure = path + " changed after the plan was made";
+                    return out;
+                }
                 text.replace(edit.offset, edit.length, edit.text);
+            }
             out[path] = std::move(text);
         }
         return out;
@@ -795,6 +804,14 @@ namespace ctrace::stack::analysis
             std::string unreadable;
             const std::map<std::string, std::string> rewritten =
                 const_suggestion::rewrite(plan, unreadable);
+            if (!unreadable.empty())
+            {
+                issue.checkLines.push_back(kNotChecked + unreadable);
+                trace(issue, "not checked, " + unreadable);
+                grounds(issue, &plan, {}, {}, indeterminate(unreadable));
+                kept.push_back(std::move(issue));
+                continue;
+            }
             std::set<std::string> rewrittenFiles;
             for (const auto& [path, text] : rewritten)
                 rewrittenFiles.insert(path);
