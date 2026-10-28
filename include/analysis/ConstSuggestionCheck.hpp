@@ -95,9 +95,11 @@ namespace ctrace::stack::analysis
 
     // Checks the suggestions made for `mod` with Clang (#217): rewrites every declaration of the
     // parameter with the suggested type, recompiles every analyzed unit that sees a rewritten file
-    // or references the function, and compares their generated code. A suggestion that does not
-    // compile, or that changes the generated code, is removed; the others get detail lines that
-    // say what was checked, or why it could not be.
+    // or references the function, and compares their generated code. A suggestion is removed when
+    // the rewrite adds an error or a tracked warning, or changes a call or reference target, an
+    // override or a constant condition; it is kept as not checked when it cannot be shown valid,
+    // a generated code difference included; the others are kept as checked. Each gets detail lines
+    // that say what was checked, or why it could not be.
     void checkConstSuggestions(const llvm::Module& mod, std::vector<ConstParamIssue>& issues,
                                const AnalysisConfig& config);
 } // namespace ctrace::stack::analysis
