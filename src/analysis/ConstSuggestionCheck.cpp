@@ -551,6 +551,34 @@ namespace ctrace::stack::analysis
             {
                 const analyzer::ScopedHotspot hotspot(timing, "const_suggestion.compare");
                 const const_suggestion::ModuleText now = const_suggestion::prepare(*after.module);
+                // A renamed symbol that this file only declares, on both sides, other than the
+                // entity's own variants and inheriting constructors (which the defining file
+                // compiles): comparing its two declarations proves nothing about the code that
+                // another file defines for it, if any does.
+                std::set<std::string> own;
+                if (index < before->unit.entities.size())
+                {
+                    for (const const_suggestion::Named& named :
+                         before->unit.entities[index].variants)
+                        own.insert(named.symbol);
+                    for (const const_suggestion::Named& named :
+                         before->unit.entities[index].inheriting)
+                        own.insert(named.symbol);
+                }
+                for (const SymbolPair& pair : pairs)
+                {
+                    if (own.count(pair.before) || !before->code->globals.count(pair.before) ||
+                        !now.globals.count(pair.after) ||
+                        before->code->defined.count(pair.before) || now.defined.count(pair.after))
+                    {
+                        continue;
+                    }
+                    return indeterminate(formatFunctionNameForMessage(pair.before) + " becomes " +
+                                         formatFunctionNameForMessage(pair.after) + ", which " +
+                                         after.file +
+                                         " only declares: the code another file defines for it "
+                                         "is not checked");
+                }
                 difference = const_suggestion::codeDifference(*before->code, now, pairs, &signature,
                                                               &accepted);
             }
