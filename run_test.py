@@ -4393,6 +4393,96 @@ def check_const_suggestion_p2_owner_changed_by_the_rewrite() -> bool:
     return good
 
 
+def check_const_suggestion_external_dependency_only_declared() -> bool:
+    """
+    #217 (final review of #239, C1): f's rewrite changes the specialization of h it calls, from
+    h<int *> to h<const int *>. h is only declared in f.cpp; another file defines h<int *> by an
+    explicit instantiation and nothing defines h<const int *>. Comparing the two declarations proves
+    nothing about that code, so the suggestion is kept, not checked, naming h. The witness: with h
+    defined in its header, f.cpp defines the specialization it calls, and the suggestion stays
+    checked.
+    """
+    print("=== Testing a renamed dependency that the file only declares ===")
+    good = True
+    with tempfile.TemporaryDirectory(prefix="ct_const_suggestion_external_dependency_") as tmp:
+        root = Path(tmp).resolve()
+        for name, header, extra in (
+            ("only declared", "template <class T> int h(T p);\n",
+             "template <class T> int h(T p) { return p ? 1 : 0; }\ntemplate int h<int*>(int*);\n"),
+            ("defined in its header", "template <class T> int h(T p) { return p ? 1 : 0; }\n", ""),
+        ):
+            case = root / name.replace(" ", "_")
+            case.mkdir()
+            (case / "h.hpp").write_text(header)
+            (case / "hdef.cpp").write_text('#include "h.hpp"\n' + extra + "int g() { return 0; }\n")
+            (case / "f.cpp").write_text(
+                '#include "h.hpp"\nint f(int* p)\n{\n    return *p + h(decltype(p){});\n}\n'
+            )
+            run = _const_suggestion_run([str(case / "f.cpp"), str(case / "hdef.cpp")])
+            texts = run[0].get("_Z1fPi", []) if run else []
+            if name == "only declared":
+                ok = (
+                    len(texts) == 1
+                    and "not checked with Clang:" in texts[0]
+                    and "int h<int*>(int*)" in texts[0]
+                    and "only declares" in texts[0]
+                )
+            else:
+                ok = len(texts) == 1 and "checked in the analyzed files only" in texts[0]
+            print(f"  {'✅' if ok else '❌'} {name}{'' if ok else f': {texts}'}")
+            good = good and ok
+    print()
+    return good
+
+
+def check_const_suggestion_operator_declared_elsewhere() -> bool:
+    """
+    #217 (final review of #239, C2, D17): a free operator defined in a.cpp is declared again with
+    its current type in b.cpp, which only the compilation database lists. An operator's name is not
+    an identifier, so the units that write `operator` are checked for it: b.cpp is judged and the
+    suggestion is kept, not checked, for that declaration. The witness: c.cpp writes another
+    operator only; it is judged too, and does not keep the suggestion of a.cpp's own unit from
+    being checked.
+    """
+    print("=== Testing a free operator declared again in a file of the database ===")
+    good = True
+    with tempfile.TemporaryDirectory(prefix="ct_const_suggestion_operator_elsewhere_") as tmp:
+        root = Path(tmp).resolve()
+        for name, other in (
+            ("declared again", "struct A { int v; };\nbool operator==(A& x, A& y);\n"
+                               "bool same(A& x, A& y) { return x == y; }\n"),
+            ("another operator only", "struct B { int v; };\n"
+                                      "bool operator<(B x, B y) { return x.v < y.v; }\n"),
+        ):
+            case = root / name.replace(" ", "_")
+            case.mkdir()
+            (case / "a.cpp").write_text(
+                "struct A { int v; };\nbool operator==(A& x, A& y) { return x.v == y.v; }\n"
+            )
+            (case / "b.cpp").write_text(other)
+            (case / "compile_commands.json").write_text(json.dumps([
+                {"directory": str(case), "command": f"clang++ -c {f} -o {f}.o", "file": f}
+                for f in ("a.cpp", "b.cpp")
+            ]))
+            run = _const_suggestion_run([
+                str(case / "a.cpp"), f"--compile-commands={case / 'compile_commands.json'}"
+            ])
+            texts = run[0].get("_ZeqR1AS0_", []) if run else []
+            if name == "declared again":
+                ok = (
+                    len(texts) == 2
+                    and all("not checked with Clang:" in t for t in texts)
+                    and all("b.cpp declares" in t for t in texts)
+                )
+            else:
+                ok = len(texts) == 2 and all(
+                    "checked in every file of the compilation database" in t for t in texts
+                )
+            print(f"  {'✅' if ok else '❌'} {name}{'' if ok else f': {texts}'}")
+            good = good and ok
+    print()
+    return good
+
 def check_duplicate_if_cross_tu() -> bool:
     """
     #157: a function defined in another file is deterministic when every definition of it is, as
@@ -7371,6 +7461,8 @@ def main() -> int:
         check_const_suggestion_p2_keys_keep_candidates_apart,
         check_const_suggestion_p2_implicit_members_of_a_specialization,
         check_const_suggestion_p2_owner_changed_by_the_rewrite,
+        check_const_suggestion_external_dependency_only_declared,
+        check_const_suggestion_operator_declared_elsewhere,
         check_duplicate_if_cross_tu,
         check_global_read_before_write_identity_across_files,
         check_size_minus_one_cross_tu,

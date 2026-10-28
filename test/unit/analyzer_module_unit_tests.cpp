@@ -1420,6 +1420,59 @@ int drive(int n)
         return report.failures == 0;
     }
 
+    /// #217 (final review of #239, M5): a plan's rewrite that cannot be carried out says so. A
+    /// file that can no longer be read, and one that no longer has the text the plan was made on
+    /// (an edit past its end), name the file and leave the result unjudged, without an exception;
+    /// a plan on an unchanged file rewrites it.
+    bool testConstSuggestionRewriteFailures(TestReport& report)
+    {
+        namespace cs = ctrace::stack::analysis::const_suggestion;
+        const std::filesystem::path dir =
+            std::filesystem::temp_directory_path() /
+            ("ct_const_suggestion_rewrite_" + std::to_string(::getpid()));
+        std::filesystem::create_directories(dir);
+        const std::filesystem::path file = dir / "r.c";
+        std::ofstream(file) << "int read_value(int *p) { return *p; }\n";
+        const auto attempt = [](const cs::SuggestionPlan& plan, std::string& failure)
+        {
+            try
+            {
+                return std::optional<std::map<std::string, std::string>>(
+                    cs::rewrite(plan, failure));
+            }
+            catch (const std::exception& error)
+            {
+                failure = std::string("exception: ") + error.what();
+                return std::optional<std::map<std::string, std::string>>();
+            }
+        };
+        cs::SuggestionPlan plan;
+        plan.edits[file.string()] = {{15, 0, "const ", 1}};
+        std::string failure;
+        const auto done = attempt(plan, failure);
+        report.expect(done && failure.empty() &&
+                          done->at(file.string()).find("const int *p") != std::string::npos,
+                      "ConstSuggestionRewrite: an unchanged file is rewritten");
+        cs::SuggestionPlan gone;
+        gone.edits[(dir / "missing.c").string()] = {{0, 0, "const ", 1}};
+        failure.clear();
+        (void)attempt(gone, failure);
+        report.expect(failure.find("missing.c") != std::string::npos &&
+                          failure.find("cannot be read") != std::string::npos,
+                      "ConstSuggestionRewrite: a file that cannot be read is named");
+        cs::SuggestionPlan shrunk;
+        shrunk.edits[file.string()] = {{4096, 3, "const ", 1}};
+        failure.clear();
+        (void)attempt(shrunk, failure);
+        report.expect(
+            failure.find("r.c") != std::string::npos &&
+                failure.find("changed after the plan") != std::string::npos,
+            "ConstSuggestionRewrite: a file that no longer has the planned text is named, "
+            "without an exception");
+        std::filesystem::remove_all(dir);
+        return report.failures == 0;
+    }
+
     /// #217 (Task 3.2, O1): the correspondences of §5.7 keep the multiplicity and the order of
     /// the references at each key, those with a template and those without alike, and map the
     /// instantiation contexts through the pairs that earlier rounds establish. These cases pin
@@ -3572,6 +3625,7 @@ int main(int argc, char** argv)
     (void)testConstSuggestionNestedCorrespondences(report);
     (void)testConstSuggestionNestedIdentities(report);
     (void)testConstSuggestionImplicitMemberIdentities(report);
+    (void)testConstSuggestionRewriteFailures(report);
     (void)testUnresolvedCallsMarkStackUnknown(repoRoot, report);
     (void)testAssumeExternalFrameReplacesUnknown(repoRoot, report);
     (void)testUninitializedFixpointBudgetIsExplicit(repoRoot, report);
