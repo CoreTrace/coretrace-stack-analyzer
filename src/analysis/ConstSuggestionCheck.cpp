@@ -492,8 +492,15 @@ namespace ctrace::stack::analysis
                         diagnostic.text);
                 }
             }
+            // A rewrite that does not compile, and adds no error to tell why: it is not shown to be
+            // wrong (#239 review, M6).
             if (!after.module)
-                return refuted("does not compile: " + after.firstDiagnostic);
+            {
+                return indeterminate(
+                    "the rewritten code does not compile, and no error that the rewrite adds "
+                    "explains it" +
+                    (after.firstDiagnostic.empty() ? "" : ": " + after.firstDiagnostic));
+            }
             // Another entity's declaration that the rewrite merges into the entity: a declaration
             // it has after the rewrite only (ruling 3).
             if (!after.entities.empty() && index < before->unit.entities.size())
