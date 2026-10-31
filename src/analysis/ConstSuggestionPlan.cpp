@@ -455,6 +455,9 @@ namespace ctrace::stack::analysis
         }
         std::sort(out.entity.redeclarations.begin(), out.entity.redeclarations.end());
         out.entity.name = function.getDeclName().getAsString();
+        const clang::DeclarationName::NameKind kind = function.getDeclName().getNameKind();
+        out.entity.operatorName = kind == clang::DeclarationName::CXXOperatorName ||
+                                  kind == clang::DeclarationName::CXXLiteralOperatorName;
         out.entity.linkage = linkageOf(function);
         if (instantiated)
             out.entity.templateOrigin = sites(instantiated->getFirstDecl()->getLocation());

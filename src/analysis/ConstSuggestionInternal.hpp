@@ -129,7 +129,11 @@ namespace ctrace::stack::analysis::const_suggestion
         std::vector<std::string> symbols; // every variant's, before the rewrite (CodeGen)
         std::string templateArguments;    // a specialization's, written canonically (ruling 7)
         SourceLinkage linkage = SourceLinkage::None;
-        std::uint8_t reservedPadding[7] = {};
+        // Whether Clang's kind of the name is an operator's (operator==, operator""_x): such a
+        // name is the keyword `operator` and what follows it, never one identifier. A name is
+        // told by its kind, not its spelling: `operator$x` is an identifier.
+        bool operatorName = false;
+        std::uint8_t reservedPadding[6] = {};
     };
 
     // R, O and K (§5.4).
@@ -413,10 +417,6 @@ namespace ctrace::stack::analysis::const_suggestion
     // cannot be read, or that no longer has the text the plan was made on; the result is then
     // incomplete and must not be judged.
     std::map<std::string, std::string> rewrite(const SuggestionPlan& plan, std::string& failure);
-
-    // The token by which the scan records a function's name: the name itself, or `operator` for
-    // an operator, whose name is not an identifier (a free operator, a conversion, a literal one).
-    std::string scannedName(llvm::StringRef name);
 
     // The files a unit reads and its identifiers, from its preprocessing.
     UnitScan scan(const UnitCommand& command, bool timing);

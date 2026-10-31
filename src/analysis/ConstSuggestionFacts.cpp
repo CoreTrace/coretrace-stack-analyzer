@@ -6,7 +6,6 @@
 #include "analyzer/HotspotProfiler.hpp"
 
 #include <algorithm>
-#include <cctype>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -1412,7 +1411,9 @@ namespace ctrace::stack::analysis
             UnitFacts& out_;
         };
 
-        // Preprocesses a unit and records every identifier, after macro expansion.
+        // Preprocesses a unit and records every identifier, and the keyword `operator` that an
+        // operator's name begins with, after macro expansion. System headers are read too: a
+        // declaration that one of them makes is the unit's own.
         class ScanAction : public clang::PreprocessorFrontendAction
         {
           public:
@@ -1434,8 +1435,7 @@ namespace ctrace::stack::analysis
                         identifiers_.insert(
                             llvm::xxh3_64bits(token.getIdentifierInfo()->getName()));
                     else if (token.is(clang::tok::kw_operator))
-                        identifiers_.insert(
-                            llvm::xxh3_64bits(const_suggestion::scannedName("operator")));
+                        identifiers_.insert(llvm::xxh3_64bits(llvm::StringRef("operator")));
                 } while (token.isNot(clang::tok::eof));
             }
 
@@ -1443,16 +1443,6 @@ namespace ctrace::stack::analysis
             std::unordered_set<std::uint64_t>& identifiers_;
         };
     } // namespace
-
-    std::string const_suggestion::scannedName(llvm::StringRef name)
-    {
-        // An operator's name is the keyword `operator` and what follows it, never one identifier.
-        if (name.starts_with("operator") &&
-            (name.size() == 8 ||
-             !(std::isalnum(static_cast<unsigned char>(name[8])) || name[8] == '_')))
-            return "operator";
-        return name.str();
-    }
 
     UnitFacts const_suggestion::inspect(const UnitCommand& command,
                                         const SuggestionPlan* rewrittenBy,
