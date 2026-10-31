@@ -9,6 +9,7 @@
 
 #include <llvm/ADT/APInt.h>
 #include <llvm/ADT/SmallPtrSet.h>
+#include <llvm/ADT/SmallVector.h>
 #include <llvm/Analysis/ValueTracking.h>
 #include <llvm/BinaryFormat/Dwarf.h>
 #include <llvm/IR/Constants.h>
@@ -32,21 +33,6 @@ namespace ctrace::stack::analysis
     namespace
     {
         using SmtFeasibility = smt::SmtFeasibility;
-
-        struct RecursionGuard
-        {
-            llvm::SmallPtrSetImpl<const llvm::Value*>& set;
-            const llvm::Value* value;
-            RecursionGuard(llvm::SmallPtrSetImpl<const llvm::Value*>& s, const llvm::Value* v)
-                : set(s), value(v)
-            {
-                set.insert(value);
-            }
-            ~RecursionGuard()
-            {
-                set.erase(value);
-            }
-        };
 
         struct AnalysisComplexityBudgets
         {
@@ -224,159 +210,319 @@ namespace ctrace::stack::analysis
             return count;
         }
 
-        static const llvm::AllocaInst* resolveArrayAllocaFromPointerInternal(
-            const llvm::Value* V, llvm::Function& F, std::vector<std::string>& path,
-            llvm::SmallPtrSetImpl<const llvm::Value*>& recursionStack, int depth,
-            bool allowPointerStoreScan)
+        /// Resolves a pointer to the stack array it indexes, through the function's local
+        /// pointer variables (`char* p = buf; p[i]`) and pointer PHIs. One instance serves one
+        /// function: it indexes the stores into each alloca once, and resolves every pointer
+        /// variable and PHI once, by strongly connected components, so that a node's result
+        /// depends on the function alone and not on the query that reached it (#215). The work is
+        /// proportional to the function's pointer variables, PHIs and stores: each is visited
+        /// once by the walk and once more to settle its alias path witness. A query then
+        /// copies its alias path once.
+        class ArrayAllocaResolver
         {
-            using namespace llvm;
-
-            if (!V)
-                return nullptr;
-            if (depth > 64)
-                return nullptr;
-            if (recursionStack.contains(V))
-                return nullptr;
-
-            RecursionGuard guard(recursionStack, V);
-
-            auto isArrayAlloca = [](const AllocaInst* AI) -> bool
+          public:
+            ArrayAllocaResolver(const llvm::Function& F, bool allowPointerStoreScan)
             {
-                // Consider a "stack buffer" as:
-                //  - real arrays,
-                //  - array-typed allocas (VLA in IR),
-                //  - structs containing array fields.
-                if (AI->isArrayAllocation())
-                    return true;
-                return isArrayBackedType(AI->getAllocatedType());
-            };
-
-            // Avoid weird aliasing loops
-            SmallPtrSet<const Value*, 16> visited;
-            const Value* cur = V;
-
-            while (cur && !visited.contains(cur))
-            {
-                visited.insert(cur);
-                if (cur->hasName())
-                    path.push_back(cur->getName().str());
-
-                // Case 1: we hit an alloca.
-                if (auto* AI = dyn_cast<AllocaInst>(cur))
+                using namespace llvm;
+                // Without the scan, a pointer variable has no known source and resolves to nothing.
+                if (!allowPointerStoreScan)
+                    return;
+                for (const BasicBlock& BB : F)
                 {
-                    if (isArrayAlloca(AI))
+                    for (const Instruction& I : BB)
                     {
-                        // Stack buffer alloca (array): final target.
-                        return AI;
-                    }
-
-                    // Otherwise, it's very likely a local pointer variable
-                    // (char *ptr; char **pp; etc.). Walk stores into this variable
-                    // to see what values get assigned, and try to trace back to
-                    // a real array alloca.
-                    if (!allowPointerStoreScan)
-                        return nullptr;
-                    const AllocaInst* foundAI = nullptr;
-
-                    for (BasicBlock& BB : F)
-                    {
-                        for (Instruction& I : BB)
-                        {
-                            auto* SI = dyn_cast<StoreInst>(&I);
-                            if (!SI)
-                                continue;
-                            if (SI->getPointerOperand() != AI)
-                                continue;
-
-                            const Value* storedPtr = SI->getValueOperand();
-                            std::vector<std::string> subPath;
-                            const AllocaInst* cand = resolveArrayAllocaFromPointerInternal(
-                                storedPtr, F, subPath, recursionStack, depth + 1,
-                                allowPointerStoreScan);
-                            if (!cand)
-                                continue;
-
-                            if (!foundAI)
-                            {
-                                foundAI = cand;
-                                // Append subPath to path
-                                path.insert(path.end(), subPath.begin(), subPath.end());
-                            }
-                            else if (foundAI != cand)
-                            {
-                                // Multiple different bases: ambiguous aliasing,
-                                // prefer to stop rather than be wrong.
-                                return nullptr;
-                            }
-                        }
-                    }
-                    return foundAI;
-                }
-
-                // Case 2: bitcast -> follow the operand.
-                if (auto* BC = dyn_cast<BitCastInst>(cur))
-                {
-                    cur = BC->getOperand(0);
-                    continue;
-                }
-
-                // Case 3: GEP -> follow the base pointer.
-                if (auto* GEP = dyn_cast<GetElementPtrInst>(cur))
-                {
-                    cur = GEP->getPointerOperand();
-                    continue;
-                }
-
-                // Case 4: load of a pointer. Typical example:
-                //    char *ptr = test;
-                //    char *p2  = ptr;
-                //    char **pp = &ptr;
-                //    (*pp)[i] = ...
-                //
-                // Walk up to the pointer "container" (local variable, or other value)
-                // by following the load operand.
-                if (auto* LI = dyn_cast<LoadInst>(cur))
-                {
-                    cur = LI->getPointerOperand();
-                    continue;
-                }
-
-                // Case 5: PHI of pointers (merge of aliases):
-                // try to resolve each incoming and ensure they
-                // all point to the same array alloca.
-                if (auto* PN = dyn_cast<PHINode>(cur))
-                {
-                    const AllocaInst* foundAI = nullptr;
-                    std::vector<std::string> phiPath;
-                    for (unsigned i = 0; i < PN->getNumIncomingValues(); ++i)
-                    {
-                        const Value* inV = PN->getIncomingValue(i);
-                        std::vector<std::string> subPath;
-                        const AllocaInst* cand = resolveArrayAllocaFromPointerInternal(
-                            inV, F, subPath, recursionStack, depth + 1, allowPointerStoreScan);
-                        if (!cand)
+                        const auto* SI = dyn_cast<StoreInst>(&I);
+                        if (!SI)
                             continue;
-                        if (!foundAI)
-                        {
-                            foundAI = cand;
-                            phiPath = subPath;
-                        }
-                        else if (foundAI != cand)
-                        {
-                            // PHI mixes multiple different bases: too ambiguous.
-                            return nullptr;
-                        }
+                        if (const auto* AI = dyn_cast<AllocaInst>(SI->getPointerOperand()))
+                            storedValues_[AI].push_back(SI->getValueOperand());
                     }
-                    path.insert(path.end(), phiPath.begin(), phiPath.end());
-                    return foundAI;
                 }
-
-                // Other cases (arguments, complex globals, etc.): stop the heuristic.
-                break;
             }
 
-            return nullptr;
-        }
+            /// The array alloca `V` points into, or nullptr when none is known or several are.
+            /// Appends to `path` the names met on the way, the array's last.
+            const llvm::AllocaInst* resolve(const llvm::Value* V, std::vector<std::string>& path)
+            {
+                const Target target = walk(V);
+                path.insert(path.end(), target.names.begin(), target.names.end());
+                if (!target.node)
+                    return target.array;
+
+                resolveFrom(target.node);
+                const Node* node = &nodes_[target.node];
+                if (!node->alloca)
+                    return nullptr;
+                for (;; node = &nodes_[node->next])
+                {
+                    path.insert(path.end(), node->segment.begin(), node->segment.end());
+                    if (!node->next)
+                        return node->alloca;
+                }
+            }
+
+          private:
+            // Where following casts, GEPs and loads from a value ends: a stack array, a node (a
+            // local pointer variable or a PHI), or neither when the heuristic does not follow.
+            struct Target
+            {
+                const llvm::AllocaInst* array = nullptr;
+                const llvm::Value* node = nullptr;
+                std::vector<std::string> names; // the names met on the way, the target's last
+            };
+
+            struct Node
+            {
+                const llvm::AllocaInst* alloca = nullptr; // the result, once done
+                // The witness of the result, for the alias path: the names from the chosen
+                // source to its target, and that target when it is a node.
+                const llvm::Value* next = nullptr;
+                std::vector<std::string> segment;
+                std::vector<Target> targets;  // what each source leads to, until done
+                std::uint64_t index : 31 = 0; // Tarjan's discovery index, 0 until visited
+                std::uint64_t low : 31 = 0;
+                std::uint64_t onStack : 1 = 0;
+                std::uint64_t done : 1 = 0;
+            };
+
+            Target walk(const llvm::Value* V) const
+            {
+                using namespace llvm;
+
+                Target target;
+                SmallPtrSet<const Value*, 16> visited;
+                const Value* cur = V;
+                while (cur && visited.insert(cur).second)
+                {
+                    if (cur->hasName())
+                        target.names.push_back(cur->getName().str());
+
+                    if (const auto* AI = dyn_cast<AllocaInst>(cur))
+                    {
+                        // A stack buffer: a real array, an array alloca (VLA in IR) or a struct
+                        // with an array field. Anything else is a local pointer variable
+                        // (char* ptr; char** pp; ...): what is stored into it says where it points.
+                        if (AI->isArrayAllocation() || isArrayBackedType(AI->getAllocatedType()))
+                            target.array = AI;
+                        else
+                            target.node = AI;
+                        return target;
+                    }
+                    if (const auto* BC = dyn_cast<BitCastInst>(cur))
+                    {
+                        cur = BC->getOperand(0);
+                        continue;
+                    }
+                    if (const auto* GEP = dyn_cast<GetElementPtrInst>(cur))
+                    {
+                        cur = GEP->getPointerOperand();
+                        continue;
+                    }
+                    // A load of a pointer: walk up to its container (char* ptr = buf; (*pp)[i]).
+                    if (const auto* LI = dyn_cast<LoadInst>(cur))
+                    {
+                        cur = LI->getPointerOperand();
+                        continue;
+                    }
+                    if (isa<PHINode>(cur))
+                    {
+                        target.node = cur;
+                        return target;
+                    }
+                    // Arguments, globals, calls: the heuristic stops here.
+                    break;
+                }
+                return target;
+            }
+
+            // The values a node takes: those stored into the variable, or the PHI's incoming values.
+            llvm::SmallVector<const llvm::Value*, 4> sourcesOf(const llvm::Value* node) const
+            {
+                using namespace llvm;
+
+                SmallVector<const Value*, 4> sources;
+                if (const auto* PN = dyn_cast<PHINode>(node))
+                {
+                    for (const Use& incoming : PN->incoming_values())
+                        sources.push_back(incoming.get());
+                }
+                else if (auto stored = storedValues_.find(cast<AllocaInst>(node));
+                         stored != storedValues_.end())
+                {
+                    sources = stored->second;
+                }
+                return sources;
+            }
+
+            // Resolves `start` and every node it reaches, with Tarjan's algorithm: a strongly
+            // connected component is finished only once every component it reaches is, so its
+            // result is computed from final results and is final itself, whatever the query
+            // that started the walk. Iterative, so that a long chain of pointer variables costs
+            // no stack.
+            void resolveFrom(const llvm::Value* start)
+            {
+                using namespace llvm;
+
+                if (nodes_[start].index != 0)
+                    return; // done: no query starts while a walk is in progress
+
+                struct Frame
+                {
+                    const Value* node;
+                    std::size_t nextTarget;
+                };
+                SmallVector<Frame, 16> frames;
+                SmallVector<const Value*, 16> component; // Tarjan's stack
+                const auto enter = [&](const Value* value)
+                {
+                    Node& node = nodes_[value];
+                    node.index = node.low = ++counter_;
+                    node.onStack = 1;
+                    for (const Value* source : sourcesOf(value))
+                        node.targets.push_back(walk(source));
+                    component.push_back(value);
+                    frames.push_back({value, 0});
+                };
+
+                enter(start);
+                while (!frames.empty())
+                {
+                    Frame& frame = frames.back();
+                    Node& node = nodes_[frame.node];
+                    if (frame.nextTarget < node.targets.size())
+                    {
+                        const Value* next = node.targets[frame.nextTarget++].node;
+                        if (!next)
+                            continue;
+                        const Node& child = nodes_[next];
+                        if (child.index == 0)
+                            enter(next);
+                        else if (child.onStack)
+                            node.low = std::min<std::uint64_t>(node.low, child.index);
+                        continue;
+                    }
+
+                    if (node.low == node.index)
+                        finishComponent(component, frame.node);
+                    const std::uint64_t low = node.low;
+                    frames.pop_back();
+                    if (!frames.empty())
+                    {
+                        Node& parent = nodes_[frames.back().node];
+                        parent.low = std::min<std::uint64_t>(parent.low, low);
+                    }
+                }
+            }
+
+            // Pops the component rooted at `root` and gives every member its result: the one
+            // array the members' sources lead to, directly or through a finished node. A source
+            // that leads to nothing is ignored; two different arrays make the component ambiguous.
+            void finishComponent(llvm::SmallVectorImpl<const llvm::Value*>& stack,
+                                 const llvm::Value* root)
+            {
+                using namespace llvm;
+
+                SmallVector<const Value*, 8> members;
+                do
+                {
+                    members.push_back(stack.back());
+                    stack.pop_back();
+                } while (members.back() != root);
+
+                // A member of this component is not done yet: its sources speak for it.
+                const auto arrayOf = [&](const Target& target) -> const AllocaInst*
+                {
+                    if (target.array || !target.node)
+                        return target.array;
+                    const Node& child = nodes_[target.node];
+                    return child.done ? child.alloca : nullptr;
+                };
+
+                const AllocaInst* found = nullptr;
+                bool ambiguous = false;
+                for (const Value* member : members)
+                {
+                    for (const Target& target : nodes_[member].targets)
+                    {
+                        const AllocaInst* array = arrayOf(target);
+                        if (!array)
+                            continue;
+                        if (!found)
+                            found = array;
+                        else if (found != array)
+                            ambiguous = true;
+                    }
+                }
+                if (ambiguous)
+                    found = nullptr;
+
+                // Witnesses, for the alias path. Level 0: the members with a source that leads
+                // to the array directly or through a node outside the component. Level k + 1:
+                // the members not settled yet with a source that leads to a member of level k.
+                // A member takes its first source among those settled at a lower level, so the
+                // path depends neither on the member order nor on the query. Each member is
+                // settled once and each edge between members is followed once.
+                std::unordered_map<const Value*, SmallVector<const Value*, 4>> dependents;
+                SmallVector<const Value*, 8> level;
+                if (found)
+                {
+                    for (const Value* member : members)
+                    {
+                        bool direct = false;
+                        for (const Target& target : nodes_[member].targets)
+                        {
+                            if (target.node && nodes_[target.node].onStack)
+                                dependents[target.node].push_back(member);
+                            else if (arrayOf(target) == found)
+                                direct = true;
+                        }
+                        if (direct)
+                            level.push_back(member);
+                    }
+                }
+                SmallPtrSet<const Value*, 16> queued(level.begin(), level.end());
+                while (!level.empty())
+                {
+                    for (const Value* member : level)
+                    {
+                        Node& node = nodes_[member];
+                        for (const Target& target : node.targets)
+                        {
+                            if (arrayOf(target) != found)
+                                continue;
+                            node.segment = target.names;
+                            node.next = target.node;
+                            break;
+                        }
+                    }
+                    SmallVector<const Value*, 8> next;
+                    for (const Value* member : level)
+                    {
+                        nodes_[member].alloca = found;
+                        nodes_[member].done = 1;
+                        for (const Value* dependent : dependents[member])
+                        {
+                            if (queued.insert(dependent).second)
+                                next.push_back(dependent);
+                        }
+                    }
+                    level = std::move(next);
+                }
+
+                for (const Value* member : members)
+                {
+                    Node& node = nodes_[member];
+                    node.onStack = 0;
+                    node.done = 1;
+                    node.targets = {};
+                }
+            }
+
+            std::unordered_map<const llvm::AllocaInst*, llvm::SmallVector<const llvm::Value*, 4>>
+                storedValues_;
+            std::unordered_map<const llvm::Value*, Node> nodes_;
+            std::uint64_t counter_ = 0;
+        };
 
         static std::optional<bool> isAllocaArrayByDebugInfo(const llvm::AllocaInst* AI,
                                                             const llvm::Function& F)
@@ -445,16 +591,6 @@ namespace ctrace::stack::analysis
             }
 
             return false;
-        }
-
-        static const llvm::AllocaInst* resolveArrayAllocaFromPointer(const llvm::Value* V,
-                                                                     llvm::Function& F,
-                                                                     std::vector<std::string>& path,
-                                                                     bool allowPointerStoreScan)
-        {
-            llvm::SmallPtrSet<const llvm::Value*, 32> recursionStack;
-            return resolveArrayAllocaFromPointerInternal(V, F, path, recursionStack, 0,
-                                                         allowPointerStoreScan);
         }
 
         static const llvm::StoreInst* findUniqueStoreToKeyInBlock(const llvm::BasicBlock& block,
@@ -758,6 +894,7 @@ namespace ctrace::stack::analysis
                 return;
             const bool allowPointerStoreScan =
                 instructionCount <= budgets.pointerStoreScanInstrThreshold;
+            ArrayAllocaResolver resolver(F, allowPointerStoreScan);
             const FunctionFacts facts(F);
             const ProgramPointRanges ranges(F, facts);
             std::size_t analyzedGEPs = 0;
@@ -785,8 +922,7 @@ namespace ctrace::stack::analysis
 
                 cached.computed = true;
                 std::vector<std::string> resolvedPath;
-                cached.alloca =
-                    resolveArrayAllocaFromPointer(basePtr, F, resolvedPath, allowPointerStoreScan);
+                cached.alloca = resolver.resolve(basePtr, resolvedPath);
                 if (!cached.alloca)
                     cached.global = resolveArrayGlobalFromPointer(basePtr);
 
@@ -1173,6 +1309,7 @@ namespace ctrace::stack::analysis
                 return;
             const bool allowPointerStoreScan =
                 instructionCount <= budgets.pointerStoreScanInstrThreshold;
+            ArrayAllocaResolver resolver(F, allowPointerStoreScan);
             std::size_t analyzedStores = 0;
 
             struct Info
@@ -1203,8 +1340,7 @@ namespace ctrace::stack::analysis
                     // Walk back to the base to find a stack array alloca.
                     const Value* basePtr = GEP->getPointerOperand();
                     std::vector<std::string> dummyAliasPath;
-                    const AllocaInst* AI = resolveArrayAllocaFromPointer(basePtr, F, dummyAliasPath,
-                                                                         allowPointerStoreScan);
+                    const AllocaInst* AI = resolver.resolve(basePtr, dummyAliasPath);
                     if (!AI)
                         continue;
 
