@@ -91,18 +91,57 @@ runs:
     # ---------------------------------------------------------------
     - name: Install LLVM ${{ inputs.llvm-version }}
       shell: bash
+      env:
+        LLVM_VERSION: ${{ inputs.llvm-version }}
       run: |
+        CODENAME=$(. /etc/os-release && printf '%s' "${VERSION_CODENAME}")
+        if [[ ! "${LLVM_VERSION}" =~ ^[0-9]+$ ]] || (( 10#${LLVM_VERSION} < 19 )); then
+          echo "::error::llvm-version must be a numeric LLVM major version of 19 or newer."
+          exit 1
+        fi
+
+        case "${CODENAME}" in
+          jammy|noble)
+            case "${LLVM_VERSION}" in
+              19|20|21|22|23)
+                ;;
+              *)
+                echo "::error::Ubuntu 22.04 (jammy) and 24.04 (noble) support versioned apt.llvm.org packages for LLVM 19 through 23. Choose one of those versions."
+                exit 1
+                ;;
+            esac
+            ;;
+          resolute)
+            case "${LLVM_VERSION}" in
+              21|22|23)
+                ;;
+              *)
+                echo "::error::Ubuntu 26.04 (resolute) provides versioned LLVM packages 21, 22, and 23 from apt.llvm.org. Use ubuntu-22.04 or ubuntu-24.04 for LLVM 20, or set llvm-version to 21, 22, or 23."
+                exit 1
+                ;;
+            esac
+            ;;
+          *)
+            echo "::error::Unsupported Ubuntu release '${CODENAME}'. Supported runner images are ubuntu-22.04 (jammy) and ubuntu-24.04 (noble) with LLVM 19-23, and ubuntu-26.04 (resolute) with LLVM 21-23."
+            exit 1
+            ;;
+        esac
+
         sudo apt-get update
-        wget -qO - https://apt.llvm.org/llvm-snapshot.gpg.key | sudo apt-key add -
-        CODENAME=$(lsb_release -cs)
-        sudo apt-add-repository "deb http://apt.llvm.org/${CODENAME}/ llvm-toolchain-${CODENAME}-${{ inputs.llvm-version }} main"
+        sudo apt-get install -y --no-install-recommends ca-certificates curl gnupg
+        sudo install -d -m 0755 /etc/apt/keyrings
+        curl --fail --silent --show-error --location https://apt.llvm.org/llvm-snapshot.gpg.key |
+          sudo gpg --dearmor --batch --yes --output /etc/apt/keyrings/llvm.gpg
+        sudo chmod 0644 /etc/apt/keyrings/llvm.gpg
+        echo "deb [signed-by=/etc/apt/keyrings/llvm.gpg] https://apt.llvm.org/${CODENAME}/ llvm-toolchain-${CODENAME}-${LLVM_VERSION} main" |
+          sudo tee /etc/apt/sources.list.d/llvm.list
         sudo apt-get update
         sudo apt-get install -y --no-install-recommends \
           cmake ninja-build python3 build-essential \
-          llvm-${{ inputs.llvm-version }} \
-          llvm-${{ inputs.llvm-version }}-dev \
-          clang-${{ inputs.llvm-version }} \
-          libclang-${{ inputs.llvm-version }}-dev
+          llvm-${LLVM_VERSION} \
+          llvm-${LLVM_VERSION}-dev \
+          clang-${LLVM_VERSION} \
+          libclang-${LLVM_VERSION}-dev
 
     # ---------------------------------------------------------------
     # 2. Cache + Build the analyzer
