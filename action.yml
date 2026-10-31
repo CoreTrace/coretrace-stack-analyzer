@@ -65,7 +65,7 @@ inputs:
     required: false
     default: "true"
   llvm-version:
-    description: "LLVM version to install."
+    description: "LLVM version to install. The analyzer builds with LLVM 20 only."
     required: false
     default: "20"
 
