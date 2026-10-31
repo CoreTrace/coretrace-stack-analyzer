@@ -2633,6 +2633,9 @@ namespace
             }
             return parameters;
         };
+        // The arguments' bindings, in order. An expected entry written "?name: binding" is the
+        // parameter of an argument that only some ABIs pass: absent, or at that place with that
+        // binding, its IR name the parameter's or derived from it (tag.coerce).
         const auto check = [&](const LoadedModule& loaded, const char* symbol,
                                const std::vector<std::string>& expected)
         {
@@ -2641,7 +2644,28 @@ namespace
             std::string text;
             for (const std::string& parameter : actual)
                 text += " [" + parameter + "]";
-            report.expect(actual == expected,
+            const auto passes = [](const std::string& parameter, const std::string& optional)
+            {
+                const std::size_t colon = optional.find(':');
+                const std::string name = optional.substr(1, colon - 1);
+                return parameter == optional.substr(1) ||
+                       (parameter.starts_with(name + ".") &&
+                        parameter.substr(parameter.find(':')) == optional.substr(colon));
+            };
+            std::size_t next = 0;
+            bool matches = true;
+            for (const std::string& entry : expected)
+            {
+                if (entry.starts_with("?"))
+                {
+                    if (next < actual.size() && passes(actual[next], entry))
+                        ++next;
+                    continue;
+                }
+                matches = matches && next < actual.size() && actual[next] == entry;
+                ++next;
+            }
+            report.expect(matches && next == actual.size(),
                           std::string("ParameterDebugBinding: ") + symbol + text);
         };
         const auto load =
@@ -2686,7 +2710,8 @@ namespace
               {".block_descriptor: artificial, source none", "x: int *, source 0",
                "y: double *, source 1"});
         // A variadic function's debug type ends with a null entry for `...`, which no parameter
-        // takes; an empty parameter takes no IR argument, but keeps its debug declaration.
+        // takes; an empty parameter keeps its debug declaration, and takes an IR argument only on
+        // some ABIs (an i8 under AAPCS64 on Linux, none on x86-64 or Apple arm64).
         check(itanium, "_ZN7VarargsC2EPiPdz",
               {"this: artificial, source none", "vtt: artificial, source none",
                "x: int *, source 0", "y: double *, source 1"});
@@ -2695,7 +2720,7 @@ namespace
                "x: int *, source 0", "y: double *, source 1"});
         check(itanium, "_ZN6TaggedC2EPi3Tag",
               {"this: artificial, source none", "vtt: artificial, source none",
-               "x: int *, source 0"});
+               "x: int *, source 0", "?tag: Tag, source 1"});
         check(itanium, "_Z8make_bigPiz",
               {"agg.result: artificial, source none", "p: int *, source 0"});
 
@@ -2710,7 +2735,7 @@ namespace
         // The empty parameter comes first: x is the second parameter the source declares.
         check(itanium, "_ZN8TagFirstC2E3TagPi",
               {"this: artificial, source none", "vtt: artificial, source none",
-               "x: int *, source 1"});
+               "?tag: Tag, source 0", "x: int *, source 1"});
 
         // Optimized code spills nothing: each argument is bound through its own debug records.
         check(optimized, "_ZN8VariadicC2EPiPdz",
