@@ -660,7 +660,7 @@ The option is a trade-off, not a fix: with it, a valid suggestion can still be r
 not checked; without it, suggestions whose type does not compile, drops a qualifier, or changes the
 generated code are reported.
 
-Each suggestion gets one of three verdicts:
+Each suggestion gets one of three verdicts, which step 3 below decides in its order:
 - verified: the suggestion is kept, with a `checked ...` line. In every file that sees the change,
   the rewrite compiles, adds none of the tracked warnings, changes none of the facts below, and the
   generated code matches;
@@ -688,8 +688,14 @@ The check runs these steps:
    `--compile-commands`, every C or C++ file of the compilation database, analyzed or not. A file
    sees the change when it reads a rewritten file, when its analyzed code references the function,
    or, for a function outside any class with external linkage, when it names the function after
-   preprocessing. A function with internal linkage (`static`, anonymous namespace) and a function of
-   the same name in another file are two functions, whichever of them has internal linkage.
+   preprocessing, in its own text or in any header it includes, system headers included. An
+   operator's name is not an identifier: for an operator, a file sees the change when it writes the
+   keyword `operator`, which most C++ files do through the standard headers they include. A
+   suggestion on such an operator then compiles most C++ files of the compilation database as they
+   are and with the rewrite, which can cost far more than for a function named by an identifier,
+   and any of them that Clang cannot compile as it is leaves the suggestion not checked. A function
+   with internal linkage (`static`, anonymous namespace) and a function of the same name in another
+   file are two functions, whichever of them has internal linkage.
 3. The judgement, in each file, in this order:
    - a file that cannot be preprocessed, or does not compile as it is, cannot be checked, nor a file
      whose compilation with the rewrite stops at a fatal error: not checked;
@@ -700,6 +706,7 @@ The check runs these steps:
      `incompatible-function-pointer-types`, `int-conversion` and `overloaded-virtual`. Whatever the
      compile command says, the check enables them and keeps the level Clang gives them by default:
      a warning stays a warning under `-Werror`, and an error stays an error;
+   - a compilation with the rewrite that fails without an error that the rewrite adds: not checked;
    - a call or a reference that targets another function, a method of that name that overrides
      other methods, an `if constexpr` condition or a `_Generic` selection that changes: refuted.
      Facts that cannot be compared one to one leave the file not checked;
@@ -711,8 +718,11 @@ The check runs these steps:
      specializations whose template arguments or type hold them, and the implicit members of the
      classes that hold them. Every other part of such an identity must match. One left without a
      pair, or two that would pair with the same symbol, leaves the file not checked;
-   - the generated code is compared through those pairs. It matches: verified. A difference that
-     none of these facts explains: not checked.
+   - the generated code is compared through those pairs. It matches: verified, unless a symbol
+     that the rewrite renames, other than the function's own and those of the constructors that
+     inherit it, is only declared in the file, before and after the rewrite: nothing shows that
+     another file defines the renamed one (`h<int *>` becoming `h<const int *>`), so not checked.
+     A difference that none of these facts explains: not checked.
 
    Once every file is judged, a symbol that the rewrite gives the function and that another file
    defines, or another declaration that the rewrite merges into the function, could collide if the

@@ -414,8 +414,9 @@ namespace ctrace::stack::analysis::const_suggestion
                       const std::vector<Target>& targets, std::string_view step, bool timing);
 
     // The text of each file that `plan` rewrites, its edits applied. `failure` names a file that
-    // cannot be read, or that no longer has the text the plan was made on; the result is then
-    // incomplete and must not be judged.
+    // cannot be read, or that has become too short for an edit, so changed after the plan was
+    // made; the result is then incomplete and must not be judged. A file that changed and is long
+    // enough is not detected.
     std::map<std::string, std::string> rewrite(const SuggestionPlan& plan, std::string& failure);
 
     // The files a unit reads and its identifiers, from its preprocessing.

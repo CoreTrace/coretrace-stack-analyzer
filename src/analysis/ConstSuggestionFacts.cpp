@@ -381,7 +381,8 @@ namespace ctrace::stack::analysis
                 context_ = &context;
                 generator_ = action_.getCodeGenerator();
                 mangle_.reset(context.createMangleContext());
-                // After an error, the rewrite is refuted by it (§5.8, step 4): no fact is needed.
+                // After an error, no fact is needed: the rewrite is refuted by the error it adds
+                // (§5.8, step 4), or kept as not checked when it adds none.
                 collectFacts_ = generator_ && !context.getDiagnostics().hasErrorOccurred();
                 sites_.emplace(context.getSourceManager(), rewrittenBy_);
                 out_.file = sites_->fileOf(context.getSourceManager().getMainFileID());

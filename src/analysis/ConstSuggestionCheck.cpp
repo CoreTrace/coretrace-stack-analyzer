@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Checks the const suggestions of ConstParameterNotModified with Clang (#217): the analysis of the
-// IR decides whether an execution writes the pointee; Clang decides whether the suggested type
-// compiles in every analyzed file and leaves the generated code as it is.
+// IR decides whether an execution writes the pointee; Clang compiles every file that sees the
+// change as it is and with the suggested type, and the two compilations decide whether the
+// suggestion is verified, refuted or kept as not checked (§5.8).
 #include "analysis/ConstSuggestionCheck.hpp"
 
 #include "ConstSuggestionInternal.hpp"

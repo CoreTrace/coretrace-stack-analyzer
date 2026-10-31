@@ -94,12 +94,16 @@ namespace ctrace::stack::analysis
         const PrintedSignature* signature = nullptr, std::vector<std::string>* accepted = nullptr);
 
     // Checks the suggestions made for `mod` with Clang (#217): rewrites every declaration of the
-    // parameter with the suggested type, recompiles every analyzed unit that sees a rewritten file
-    // or references the function, and compares their generated code. A suggestion is removed when
-    // the rewrite adds an error or a tracked warning, or changes a call or reference target, an
-    // override or a constant condition; it is kept as not checked when it cannot be shown valid,
-    // a generated code difference included; the others are kept as checked. Each gets detail lines
-    // that say what was checked, or why it could not be.
+    // parameter with the suggested type, recompiles every unit that sees the change, and compares
+    // their generated code. The units are the analyzed ones and, with a compilation database, its
+    // C and C++ files; a unit sees the change when it reads a rewritten file, when its analyzed
+    // code references the function, or, for a function with external linkage outside any class,
+    // when it names the function after preprocessing (an operator: when it writes `operator`). A
+    // suggestion is removed when the rewrite adds an error or a tracked warning, or changes a call
+    // or reference target, an override or a constant condition, unless the check stops first at a
+    // fatal error or a change beyond the declarations it plans; it is kept as not checked when it
+    // cannot be shown valid, a generated code difference included; the others are kept as checked.
+    // Each gets detail lines that say what was checked, or why it could not be.
     void checkConstSuggestions(const llvm::Module& mod, std::vector<ConstParamIssue>& issues,
                                const AnalysisConfig& config);
 } // namespace ctrace::stack::analysis
