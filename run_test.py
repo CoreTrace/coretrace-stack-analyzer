@@ -4440,19 +4440,23 @@ def check_const_suggestion_operator_declared_elsewhere() -> bool:
     #217 (final review of #239, C2, D17): a free operator defined in a.cpp is declared again with
     its current type in b.cpp, which only the compilation database lists. An operator's name is not
     an identifier, so the units that write `operator` are checked for it: b.cpp is judged and the
-    suggestion is kept, not checked, for that declaration. The witness: c.cpp writes another
+    suggestion is kept, not checked, for that declaration. The witness: b.cpp writes another
     operator only; it is judged too, and does not keep the suggestion of a.cpp's own unit from
-    being checked.
+    being checked. In both, the trace names the units judged for each parameter, a.cpp and b.cpp,
+    with their verdicts.
     """
     print("=== Testing a free operator declared again in a file of the database ===")
+    unit = re.compile(r"_ZeqR1AS0_ parameter ([xy]), unit (\S+) \[[0-9a-f]+\]: (\w+)")
     good = True
     with tempfile.TemporaryDirectory(prefix="ct_const_suggestion_operator_elsewhere_") as tmp:
         root = Path(tmp).resolve()
-        for name, other in (
+        for name, other, judged in (
             ("declared again", "struct A { int v; };\nbool operator==(A& x, A& y);\n"
-                               "bool same(A& x, A& y) { return x == y; }\n"),
+                               "bool same(A& x, A& y) { return x == y; }\n",
+             {"a.cpp": "verified", "b.cpp": "indeterminate"}),
             ("another operator only", "struct B { int v; };\n"
-                                      "bool operator<(B x, B y) { return x.v < y.v; }\n"),
+                                      "bool operator<(B x, B y) { return x.v < y.v; }\n",
+             {"a.cpp": "verified", "b.cpp": "verified"}),
         ):
             case = root / name.replace(" ", "_")
             case.mkdir()
@@ -4468,6 +4472,11 @@ def check_const_suggestion_operator_declared_elsewhere() -> bool:
                 str(case / "a.cpp"), f"--compile-commands={case / 'compile_commands.json'}"
             ])
             texts = run[0].get("_ZeqR1AS0_", []) if run else []
+            units: dict[str, dict[str, str]] = {}
+            for line in run[1] if run else []:
+                match = unit.match(line)
+                if match:
+                    units.setdefault(match.group(1), {})[Path(match.group(2)).name] = match.group(3)
             if name == "declared again":
                 ok = (
                     len(texts) == 2
@@ -4478,10 +4487,94 @@ def check_const_suggestion_operator_declared_elsewhere() -> bool:
                 ok = len(texts) == 2 and all(
                     "checked in every file of the compilation database" in t for t in texts
                 )
+            ok = ok and units == {"x": judged, "y": judged}
+            print(f"  {'✅' if ok else '❌'} {name}"
+                  f"{'' if ok else f': {texts}, units judged: {units}'}")
+            good = good and ok
+    print()
+    return good
+
+
+def check_const_suggestion_identifier_starting_with_operator() -> bool:
+    """
+    #217 (review of #239's fixes): a C function named by one identifier that starts with
+    `operator`, `operator$x` or `operatoré`, is not an operator: Clang's kind of the name, not its
+    spelling, tells them apart. b.c, which only the compilation database lists, declares it again
+    with its current type: b.c is judged, and the suggestion is kept, not checked, for that
+    declaration (D17).
+    """
+    print("=== Testing a function whose identifier starts with operator ===")
+    good = True
+    with tempfile.TemporaryDirectory(prefix="ct_const_suggestion_operator_identifier_") as tmp:
+        root = Path(tmp).resolve()
+        for index, name in enumerate(("operator$x", "operatoré")):
+            case = root / f"case{index}"
+            case.mkdir()
+            (case / "a.c").write_text(f"int {name}(int *p) {{ return *p; }}\n", encoding="utf-8")
+            (case / "b.c").write_text(
+                f"int {name}(int *p);\nint use(int *q) {{ return {name}(q); }}\n", encoding="utf-8"
+            )
+            (case / "compile_commands.json").write_text(json.dumps([
+                {"directory": str(case), "command": f"clang -c {f} -o {f}.o", "file": f}
+                for f in ("a.c", "b.c")
+            ]))
+            run = _const_suggestion_run([
+                str(case / "a.c"), f"--compile-commands={case / 'compile_commands.json'}"
+            ])
+            texts = [text for found in run[0].values() for text in found] if run else []
+            ok = (
+                len(texts) == 1
+                and "not checked with Clang:" in texts[0]
+                and f"b.c declares {name} with its current type" in texts[0]
+            )
             print(f"  {'✅' if ok else '❌'} {name}{'' if ok else f': {texts}'}")
             good = good and ok
     print()
     return good
+
+
+def check_const_suggestion_declared_in_a_system_header() -> bool:
+    """
+    #217 (review of #239's fixes): b, which only the compilation database lists, declares the
+    function again with its current type only through a header that its command includes with
+    -isystem; b's own text does not name it. That declaration counts as one b writes: b is judged,
+    and the suggestion is kept, not checked, for it (D17), for an operator and for a function
+    named by an identifier alike. The units judged must not leave system headers out.
+    """
+    print("=== Testing a declaration made by a header included with -isystem ===")
+    good = True
+    with tempfile.TemporaryDirectory(prefix="ct_const_suggestion_system_header_") as tmp:
+        root = Path(tmp).resolve()
+        for name, extension, compiler, definition, declaration, function in (
+            ("operator", "cpp", "clang++",
+             "struct A { int v; };\nbool operator==(A& x, A& y) { return x.v == y.v; }\n",
+             "struct A { int v; };\nbool operator==(A& x, A& y);\n", "_ZeqR1AS0_"),
+            ("identifier", "c", "clang", "int opx(int *p) { return *p; }\n",
+             "int opx(int *p);\n", "opx"),
+        ):
+            case = root / name
+            (case / "system").mkdir(parents=True)
+            (case / "system" / "declaration.h").write_text(declaration)
+            (case / f"a.{extension}").write_text(definition)
+            (case / f"b.{extension}").write_text("#include <declaration.h>\nint other(void);\n")
+            (case / "compile_commands.json").write_text(json.dumps([
+                {"directory": str(case), "file": f"a.{extension}",
+                 "command": f"{compiler} -c a.{extension} -o a.o"},
+                {"directory": str(case), "file": f"b.{extension}",
+                 "command": f"{compiler} -isystem {case / 'system'} -c b.{extension} -o b.o"},
+            ]))
+            run = _const_suggestion_run([
+                str(case / f"a.{extension}"), f"--compile-commands={case / 'compile_commands.json'}"
+            ])
+            texts = run[0].get(function, []) if run else []
+            ok = bool(texts) and all(
+                "not checked with Clang:" in t and f"b.{extension} declares" in t for t in texts
+            )
+            print(f"  {'✅' if ok else '❌'} {name}{'' if ok else f': {texts}'}")
+            good = good and ok
+    print()
+    return good
+
 
 def check_duplicate_if_cross_tu() -> bool:
     """
@@ -7463,6 +7556,8 @@ def main() -> int:
         check_const_suggestion_p2_owner_changed_by_the_rewrite,
         check_const_suggestion_external_dependency_only_declared,
         check_const_suggestion_operator_declared_elsewhere,
+        check_const_suggestion_identifier_starting_with_operator,
+        check_const_suggestion_declared_in_a_system_header,
         check_duplicate_if_cross_tu,
         check_global_read_before_write_identity_across_files,
         check_size_minus_one_cross_tu,
