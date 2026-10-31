@@ -95,8 +95,8 @@ runs:
         LLVM_VERSION: ${{ inputs.llvm-version }}
       run: |
         CODENAME=$(. /etc/os-release && printf '%s' "${VERSION_CODENAME}")
-        if [[ ! "${LLVM_VERSION}" =~ ^[0-9]+$ ]] || (( 10#${LLVM_VERSION} < 19 )); then
-          echo "::error::llvm-version must be a numeric LLVM major version of 19 or newer."
+        if [[ "${LLVM_VERSION}" != 20 ]]; then
+          echo "::error::The analyzer builds with LLVM 20 only; got llvm-version '${LLVM_VERSION}'."
           exit 1
         fi
 
@@ -106,7 +106,7 @@ runs:
         release_url="https://apt.llvm.org/${CODENAME}/dists/llvm-toolchain-${CODENAME}-${LLVM_VERSION}/Release"
         status=$(curl --silent --head --location --output /dev/null --write-out '%{http_code}' "${release_url}") || status="unreachable"
         if [[ "${status}" != 200 ]]; then
-          echo "::error::Cannot find LLVM ${LLVM_VERSION} packages for '${CODENAME}' at ${release_url} (status: ${status})."
+          echo "::error::Cannot find LLVM ${LLVM_VERSION} packages for '${CODENAME}' at ${release_url} (status: ${status}). The action is tested on ubuntu-24.04."
           exit 1
         fi
         sudo install -d -m 0755 /etc/apt/keyrings
