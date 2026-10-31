@@ -79,6 +79,11 @@ static void printHelp()
         << "  --compile-ir-format=bc|ll  Compilation IR format for source inputs (default: bc)\n"
         << "  --resource-summary-cache-memory-only  Use in-memory cache only for cross-TU "
            "summaries\n"
+        << "  --experimental-const-suggestion-check  Experimental: compile each const "
+           "suggestion\n"
+        << "                         with Clang and remove it if the code no longer compiles "
+           "or\n"
+        << "                         generates different code (off by default)\n"
         << "  --uninitialized-cross-tu    Enable cross-TU uninitialized summaries (default: on)\n"
         << "  --no-uninitialized-cross-tu Disable cross-TU uninitialized summaries\n"
         << "  --only-file=<path>     Only report functions from this source file\n"
@@ -170,6 +175,8 @@ static void printEffectiveConfig(const ctrace::stack::cli::ParsedArguments& pars
     llvm::errs() << "warnings-only: " << (cfg.warningsOnly ? "true" : "false") << "\n";
     llvm::errs() << "quiet: " << (cfg.quiet ? "true" : "false") << "\n";
     llvm::errs() << "demangle: " << (cfg.demangle ? "true" : "false") << "\n";
+    llvm::errs() << "experimental-const-suggestion-check: "
+                 << (cfg.constSuggestionCheck ? "true" : "false") << "\n";
     llvm::errs() << "resource-model: "
                  << (cfg.resourceModelPath.empty() ? "<none>" : cfg.resourceModelPath) << "\n";
     llvm::errs() << "escape-model: "
