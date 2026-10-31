@@ -65,7 +65,7 @@ inputs:
     required: false
     default: "true"
   llvm-version:
-    description: "LLVM version to install."
+    description: "LLVM version to install. The analyzer builds with LLVM 20 only."
     required: false
     default: "20"
 
@@ -91,18 +91,37 @@ runs:
     # ---------------------------------------------------------------
     - name: Install LLVM ${{ inputs.llvm-version }}
       shell: bash
+      env:
+        LLVM_VERSION: ${{ inputs.llvm-version }}
       run: |
+        CODENAME=$(. /etc/os-release && printf '%s' "${VERSION_CODENAME}")
+        if [[ "${LLVM_VERSION}" != 20 ]]; then
+          echo "::error::The analyzer builds with LLVM 20 only; got llvm-version '${LLVM_VERSION}'."
+          exit 1
+        fi
+
         sudo apt-get update
-        wget -qO - https://apt.llvm.org/llvm-snapshot.gpg.key | sudo apt-key add -
-        CODENAME=$(lsb_release -cs)
-        sudo apt-add-repository "deb http://apt.llvm.org/${CODENAME}/ llvm-toolchain-${CODENAME}-${{ inputs.llvm-version }} main"
+        sudo apt-get install -y --no-install-recommends ca-certificates curl gnupg
+        # apt.llvm.org publishes a different set of LLVM branches for each Ubuntu release: ask it.
+        release_url="https://apt.llvm.org/${CODENAME}/dists/llvm-toolchain-${CODENAME}-${LLVM_VERSION}/Release"
+        status=$(curl --silent --head --location --output /dev/null --write-out '%{http_code}' "${release_url}") || status="unreachable"
+        if [[ "${status}" != 200 ]]; then
+          echo "::error::Cannot find LLVM ${LLVM_VERSION} packages for '${CODENAME}' at ${release_url} (status: ${status}). The action is tested on ubuntu-24.04."
+          exit 1
+        fi
+        sudo install -d -m 0755 /etc/apt/keyrings
+        curl --fail --silent --show-error --location https://apt.llvm.org/llvm-snapshot.gpg.key |
+          sudo gpg --dearmor --batch --yes --output /etc/apt/keyrings/llvm.gpg
+        sudo chmod 0644 /etc/apt/keyrings/llvm.gpg
+        echo "deb [signed-by=/etc/apt/keyrings/llvm.gpg] https://apt.llvm.org/${CODENAME}/ llvm-toolchain-${CODENAME}-${LLVM_VERSION} main" |
+          sudo tee /etc/apt/sources.list.d/llvm.list
         sudo apt-get update
         sudo apt-get install -y --no-install-recommends \
           cmake ninja-build python3 build-essential \
-          llvm-${{ inputs.llvm-version }} \
-          llvm-${{ inputs.llvm-version }}-dev \
-          clang-${{ inputs.llvm-version }} \
-          libclang-${{ inputs.llvm-version }}-dev
+          llvm-${LLVM_VERSION} \
+          llvm-${LLVM_VERSION}-dev \
+          clang-${LLVM_VERSION} \
+          libclang-${LLVM_VERSION}-dev
 
     # ---------------------------------------------------------------
     # 2. Cache + Build the analyzer
