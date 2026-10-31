@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "StackUsageAnalyzer.hpp"
 #include "analysis/AnalyzerUtils.hpp"
+#include "analysis/ConstSuggestionCheck.hpp"
+#include "analysis/ConstSuggestionInternal.hpp"
 #include "app/CrossTUSummaryDriver.hpp"
 #include "app/AnalyzerApp.hpp"
 #include "cli/ArgParser.hpp"
@@ -21,12 +23,15 @@
 #include "analyzer/DiagnosticEmitter.hpp"
 #include "analyzer/LocationResolver.hpp"
 #include "analyzer/ModulePreparationService.hpp"
+#include "mangle.hpp"
 
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <llvm/Demangle/Demangle.h>
+#include <compilerlib/toolchain.hpp>
 #include <map>
 #include <set>
 #include <unordered_map>
@@ -746,6 +751,793 @@ namespace
         report.expect(linkerSymbolName(*elf->getFunction("_ZN5probe4peekEPNSt3__13tagE")) !=
                           linkerSymbolName(*elf->getFunction("_ZN5probe4peekEPNSt7__cxx113tagE")),
                       "LinkerSymbolName: std::__1 and std::__cxx11 symbols stay distinct");
+        return report.failures == 0;
+    }
+
+    /// #217: the code generated before and after a const rewrite is compared once the symbols
+    /// the rewrite renames are paired, by the pairs its correspondences established and by them
+    /// only: a symbol renamed without a pair, even one whose name differs only by const, is a
+    /// difference.
+    bool testConstSuggestionCodeComparison(TestReport& report)
+    {
+        using ctrace::stack::analysis::rewrittenCodeDifference;
+        using ctrace::stack::analysis::SymbolPair;
+        llvm::LLVMContext context;
+        llvm::SMDiagnostic error;
+        const auto parse =
+            [&](std::string text, const std::string& function, const std::string& typeInfo)
+        {
+            for (const auto& [from, to] : {std::pair{std::string("@F"), "@" + function},
+                                           std::pair{std::string("@TI"), "@" + typeInfo}})
+            {
+                for (std::size_t at = text.find(from); at != std::string::npos;
+                     at = text.find(from, at + to.size()))
+                {
+                    text.replace(at, from.size(), to);
+                }
+            }
+            return llvm::parseAssemblyString(text, error, context);
+        };
+        // The rewritten function and its caller.
+        const std::string called = "define i32 @F(ptr %p) {\n"
+                                   "  %v = load i32, ptr %p\n"
+                                   "  ret i32 %v\n"
+                                   "}\n"
+                                   "define i32 @_Z3usePi(ptr %p) {\n"
+                                   "  %r = call i32 @F(ptr %p)\n"
+                                   "  ret i32 %r\n"
+                                   "}\n";
+        // The rewritten function throws its parameter: the thrown type changes with it, and a
+        // handler `catch (int*)` elsewhere no longer catches it.
+        const std::string thrown = "@TI = external constant ptr\n"
+                                   "declare ptr @__cxa_allocate_exception(i64)\n"
+                                   "declare void @__cxa_throw(ptr, ptr, ptr)\n"
+                                   "define void @F(ptr %p) {\n"
+                                   "  %e = call ptr @__cxa_allocate_exception(i64 8)\n"
+                                   "  store ptr %p, ptr %e\n"
+                                   "  call void @__cxa_throw(ptr %e, ptr @TI, ptr null)\n"
+                                   "  unreachable\n"
+                                   "}\n";
+        const std::unique_ptr<llvm::Module> calledBefore = parse(called, "_Z1fPi", "");
+        const std::unique_ptr<llvm::Module> calledAfter = parse(called, "_Z1fPKi", "");
+        const std::unique_ptr<llvm::Module> thrownBefore = parse(thrown, "_Z1fPi", "_ZTIPi");
+        const std::unique_ptr<llvm::Module> thrownAfter = parse(thrown, "_Z1fPKi", "_ZTIPKi");
+        if (!calledBefore || !calledAfter || !thrownBefore || !thrownAfter)
+        {
+            report.expect(false, "ConstSuggestionCode setup: the IR does not parse");
+            return false;
+        }
+        const std::vector<SymbolPair> function = {{"_Z1fPi", "_Z1fPKi"}};
+        report.expect(!rewrittenCodeDifference(*calledBefore, *calledAfter, function),
+                      "ConstSuggestionCode: the rewritten function and its caller are renamed "
+                      "together");
+        report.expect(rewrittenCodeDifference(*calledBefore, *calledAfter, {}).has_value(),
+                      "ConstSuggestionCode: a function renamed without an established pair is a "
+                      "difference");
+        report.expect(rewrittenCodeDifference(*thrownBefore, *thrownAfter, function).has_value(),
+                      "ConstSuggestionCode: typeinfo for int* and for int const*, without a pair, "
+                      "are not paired");
+        return report.failures == 0;
+    }
+
+    /// #217: the code comparison sets aside what carries no meaning for an execution: debug
+    /// information, diagnostic metadata, the descriptive names of alias scopes, the numbers of
+    /// metadata and the comments of the printed IR. Every other metadata is compared by contents.
+    bool testConstSuggestionNormalizations(TestReport& report)
+    {
+        using ctrace::stack::analysis::rewrittenCodeDifference;
+        llvm::LLVMContext context;
+        llvm::SMDiagnostic error;
+        const auto differ = [&](const std::string& before, const std::string& after)
+        {
+            const std::unique_ptr<llvm::Module> was =
+                llvm::parseAssemblyString(before, error, context);
+            const std::unique_ptr<llvm::Module> now =
+                llvm::parseAssemblyString(after, error, context);
+            if (!was || !now)
+                return std::optional<bool>();
+            return std::optional<bool>(rewrittenCodeDifference(*was, *now, {}).has_value());
+        };
+        const auto replaced = [](std::string text, const std::string& from, const std::string& to)
+        {
+            text.replace(text.find(from), from.size(), to);
+            return text;
+        };
+        const std::string range = "define i32 @f(ptr %p) {\n"
+                                  "  %v = load i32, ptr %p, !range !0\n"
+                                  "  ret i32 %v\n"
+                                  "}\n"
+                                  "!0 = !{i32 0, i32 10}\n";
+        const std::string debug =
+            "define i32 @f(ptr %p) !dbg !3 {\n"
+            "  %v = load i32, ptr %p, !dbg !6\n"
+            "  ret i32 %v, !dbg !6\n"
+            "}\n"
+            "!llvm.dbg.cu = !{!0}\n"
+            "!llvm.module.flags = !{!2}\n"
+            "!0 = distinct !DICompileUnit(language: DW_LANG_C11, file: !1, emissionKind: "
+            "FullDebug)\n"
+            "!1 = !DIFile(filename: \"a.c\", directory: \"/\")\n"
+            "!2 = !{i32 2, !\"Debug Info Version\", i32 3}\n"
+            "!3 = distinct !DISubprogram(name: \"f\", scope: !1, file: !1, line: 1, type: !4, "
+            "spFlags: DISPFlagDefinition, unit: !0)\n"
+            "!4 = !DISubroutineType(types: !5)\n"
+            "!5 = !{}\n"
+            "!6 = !DILocation(line: 2, column: 3, scope: !3)\n";
+        const std::string srcloc = "define void @f() {\n"
+                                   "  call void asm sideeffect \"nop\", \"\"(), !srcloc !0\n"
+                                   "  ret void\n"
+                                   "}\n"
+                                   "!0 = !{i64 100}\n";
+        const std::string annotation = "define void @f() {\n"
+                                       "  %a = alloca i32, align 4, !annotation !0\n"
+                                       "  ret void\n"
+                                       "}\n"
+                                       "!0 = !{!\"auto-init\"}\n";
+        const std::string scopes =
+            "declare void @llvm.experimental.noalias.scope.decl(metadata)\n"
+            "define void @f(ptr %p, ptr %q) {\n"
+            "  call void @llvm.experimental.noalias.scope.decl(metadata !2)\n"
+            "  %v = load i32, ptr %p, align 4, !alias.scope !2, !noalias !3\n"
+            "  store i32 %v, ptr %q, align 4, !alias.scope !3, !noalias !2\n"
+            "  ret void\n"
+            "}\n"
+            "!0 = distinct !{!0, !\"domain of f(int*)\"}\n"
+            "!1 = distinct !{!1, !0, !\"f(int*): %p\"}\n"
+            "!4 = distinct !{!4, !0, !\"f(int*): %q\"}\n"
+            "!2 = !{!1}\n"
+            "!3 = !{!4}\n";
+        const std::string flags = "define void @f() {\n"
+                                  "  ret void\n"
+                                  "}\n"
+                                  "!llvm.module.flags = !{!0}\n"
+                                  "!0 = !{i32 1, !\"wchar_size\", i32 4}\n";
+        // The same two functions, defined in the other order: the printer numbers their loop
+        // metadata in the other order.
+        const std::string loopF = "define void @f() {\n"
+                                  "entry:\n"
+                                  "  br label %a\n"
+                                  "a:\n"
+                                  "  br label %a, !llvm.loop !0\n"
+                                  "}\n";
+        const std::string loopG = "define void @g() {\n"
+                                  "entry:\n"
+                                  "  br label %b\n"
+                                  "b:\n"
+                                  "  br label %b, !llvm.loop !1\n"
+                                  "}\n";
+        const std::string loops = "!0 = distinct !{!0, !2}\n"
+                                  "!1 = distinct !{!1, !3}\n"
+                                  "!2 = !{!\"llvm.loop.mustprogress\"}\n"
+                                  "!3 = !{!\"llvm.loop.unroll.disable\"}\n";
+        const std::optional<bool> orderChanged =
+            differ(loopF + loopG + loops, loopG + loopF + loops);
+        // The same code, its join block's predecessors listed in the other order: only the
+        // "; preds" comment of the printed IR changes.
+        const std::string join = "define i32 @f(i1 %c) {\n"
+                                 "entry:\n"
+                                 "  br i1 %c, label %a, label %b\n"
+                                 "a:\n"
+                                 "  br label %join\n"
+                                 "b:\n"
+                                 "  br label %join\n"
+                                 "join:\n"
+                                 "  %v = phi i32 [ 1, %a ], [ 2, %b ]\n"
+                                 "  ret i32 %v\n"
+                                 "}\n";
+        const std::optional<bool> predecessorsChanged =
+            differ(join, replaced(join, "  ret i32 %v\n",
+                                  "  ret i32 %v\n  uselistorder label %join, { 1, 0 }\n"));
+        const std::optional<bool> rangeChanged =
+            differ(range, replaced(range, "i32 0, i32 10", "i32 0, i32 5"));
+        const std::optional<bool> debugChanged =
+            differ(debug, replaced(debug, "column: 3", "column: 9"));
+        const std::optional<bool> srclocChanged =
+            differ(srcloc, replaced(srcloc, "i64 100", "i64 200"));
+        const std::optional<bool> annotationChanged =
+            differ(annotation, replaced(annotation, "auto-init", "other"));
+        const std::optional<bool> namesChanged = differ(
+            scopes,
+            replaced(replaced(replaced(scopes, "domain of f(int*)", "domain of f(const int*)"),
+                              "f(int*): %p", "f(const int*): %p"),
+                     "f(int*): %q", "f(const int*): %q"));
+        const std::optional<bool> scopesChanged =
+            differ(scopes, replaced(scopes, "!alias.scope !3, !noalias !2",
+                                    "!alias.scope !2, !noalias !2"));
+        const std::optional<bool> flagsChanged = differ(flags, replaced(flags, "i32 4}", "i32 2}"));
+        if (!orderChanged || !predecessorsChanged || !rangeChanged || !debugChanged ||
+            !srclocChanged || !annotationChanged || !namesChanged || !scopesChanged ||
+            !flagsChanged)
+        {
+            report.expect(false, "ConstSuggestionMetadata setup: the IR does not parse: " +
+                                     error.getMessage().str());
+            return false;
+        }
+        report.expect(!*orderChanged,
+                      "ConstSuggestionMetadata: metadata numbered in another order are the same");
+        report.expect(!*predecessorsChanged,
+                      "ConstSuggestionCode: predecessors listed in another order are the same");
+        report.expect(*rangeChanged, "ConstSuggestionMetadata: another !range is a difference");
+        report.expect(!*debugChanged, "ConstSuggestionMetadata: debug information is not compared");
+        report.expect(!*srclocChanged,
+                      "ConstSuggestionMetadata: the source position of inline assembly is not "
+                      "compared");
+        report.expect(!*annotationChanged, "ConstSuggestionMetadata: annotations are not compared");
+        report.expect(!*namesChanged,
+                      "ConstSuggestionMetadata: the descriptive names of alias scopes are not "
+                      "compared");
+        report.expect(*scopesChanged,
+                      "ConstSuggestionMetadata: another alias scope on an access is a difference");
+        report.expect(*flagsChanged,
+                      "ConstSuggestionMetadata: another module flag is a difference");
+        return report.failures == 0;
+    }
+
+    /// #217 (D10, D18): step 3 detects a rewrite that loses the parameter's own top-level const.
+    /// The plan of read_only(int *const p) is executed with an edit that writes `const int *`
+    /// instead of `const int *const`: the declaration does not get the candidate of its type,
+    /// whatever the planner's later edits are.
+    bool testConstSuggestionTopLevelQualifierLost(TestReport& report)
+    {
+        namespace cs = ctrace::stack::analysis::const_suggestion;
+        const std::filesystem::path dir =
+            std::filesystem::temp_directory_path() / "ct_const_suggestion_top_level_lost";
+        std::filesystem::create_directories(dir);
+        const std::filesystem::path file = dir / "k.c";
+        const std::string text = "int read_only(int *const p) { return *p; }\n";
+        std::ofstream(file) << text;
+        const ctrace::stack::analysis::UnitCommand command{{"clang", "-c", file.string()},
+                                                           dir.string()};
+        std::vector<cs::Target> targets(1);
+        targets[0].symbol = "read_only";
+        targets[0].sourceIndex = 0;
+        const cs::UnitFacts before = cs::inspect(command, nullptr, {}, targets, "test", false);
+        if (before.entities.size() != 1 || before.entities[0].plan.edits.size() != 1)
+        {
+            report.expect(false, "ConstSuggestionTopLevel setup: read_only is not planned");
+            return false;
+        }
+        cs::SuggestionPlan lost = before.entities[0].plan;
+        const std::string written = "int *const";
+        const std::size_t at = text.find(written);
+        lost.edits.begin()->second = {{at, written.size(), "const int *", 1}};
+        std::string rewritten = text;
+        rewritten.replace(at, written.size(), "const int *");
+        cs::Target target = targets[0];
+        target.plan = &lost;
+        target.expected = before.entities[0].expected;
+        const cs::UnitFacts after = cs::inspect(
+            command, &lost, {{lost.edits.begin()->first, rewritten}}, {target}, "test", false);
+        report.expect(after.entities.size() == 1 && after.entities[0].withoutCandidate,
+                      "ConstSuggestionTopLevel: a rewrite that loses the pointer's own const does "
+                      "not get the candidate");
+        return report.failures == 0;
+    }
+
+    /// A compile command for a C++ source, as the Clang check builds one: compilerlib's driver
+    /// settings (Clang's resource directory, the SDK on macOS) before the arguments, so that the
+    /// standard library's headers are found on every platform.
+    ctrace::stack::analysis::UnitCommand cxxCommand(const std::filesystem::path& file)
+    {
+        const std::vector<std::string> args{"-std=c++20", "-c", file.string()};
+        ctrace::stack::analysis::UnitCommand out{{"clang++"}, file.parent_path().string()};
+        compilerlib::DriverConfig driver;
+        std::string error;
+        if (compilerlib::resolveDriverConfig(args, driver, error))
+        {
+            out.args = {driver.clang_path};
+            if (driver.force_cxx_driver)
+                out.args.push_back("--driver-mode=g++");
+            if (driver.add_resource_dir)
+            {
+                out.args.push_back("-resource-dir");
+                out.args.push_back(driver.resource_dir);
+            }
+            if (driver.add_sysroot)
+            {
+                out.args.push_back("-isysroot");
+                out.args.push_back(driver.sysroot);
+            }
+        }
+        out.args.insert(out.args.end(), args.begin(), args.end());
+        return out;
+    }
+
+    // run_test.py's P2_KEYS_SOURCE with a polymorphic local class, whose destructor has a deleting
+    // and a base variant.
+    constexpr const char* kNestedKeysSourceWithPoly = R"(#include <vector>
+
+template <typename T> struct Box
+{
+    T* value;
+    friend bool operator==(const Box& a, const Box& b) { return a.value == b.value; }
+    struct Inner
+    {
+        int n = 0;
+    };
+};
+
+template <typename T> int probe(T) { return 1; }
+
+template <typename L> int apply_both(L call)
+{
+    int (*pointer)(int) = call;
+    return pointer(1) + call(1);
+}
+
+template <typename Each> int pass(int n, Each&& each)
+{
+    int total = 0;
+    each(n, [&](int i) { total += i; });
+    return total;
+}
+
+int drive(int n)
+{
+    return pass(n, [&](int count, auto&& body) {
+        struct State
+        {
+            std::vector<int> v;
+        };
+        State a{{count}};
+        State b = a;
+        State c = static_cast<State&&>(a);
+        b = c;
+        c = static_cast<State&&>(b);
+        State d;
+        struct Poly
+        {
+            virtual ~Poly() {}
+        };
+        delete new Poly;
+        Box<State> x{nullptr}, y{nullptr};
+        const int found = (x == y) + probe(typename Box<State>::Inner{}) +
+                          probe(typename Box<decltype([](int v) { return v; })>::Inner{}) +
+                          probe(typename Box<decltype([](int v) { return -v; })>::Inner{}) +
+                          apply_both([](int v) { return 2 * v; });
+        body(found + static_cast<int>(b.v.size() + c.v.size() + d.v.size()));
+    });
+}
+)";
+
+    /// #217 (§5.7, step 5): the correspondences of the types nested in established pairs and of the
+    /// specializations whose arguments hold them (§5.7): only the symbols that the rewrite renames,
+    /// one to one, every other part of a key kept. Synthetic facts: what Clang writes into a key is
+    /// pinned by testConstSuggestionNestedIdentities.
+    bool testConstSuggestionNestedCorrespondences(TestReport& report)
+    {
+        namespace cs = ctrace::stack::analysis::const_suggestion;
+        // The entity before and after the rewrite, paired by its variant (step 1).
+        const std::string was = "_Z1fIiEviOT_";
+        const std::string now = "_Z1fIiEviRKT_";
+        // A type nested in a function: its record's site and the symbol of the function around it.
+        const auto nested = [](const std::string& site, const std::string& around)
+        { return "\x01" + site + "\x02" + around + "\x03"; };
+        // A specialization's key: variant, pattern site, its arguments, its function type.
+        const auto spec =
+            [&](const std::string& variant, const std::string& argument, const std::string& other)
+        {
+            return variant + "|use.cpp:3|(" + argument + ", " + other + ")[void (" + argument +
+                   " &&)]";
+        };
+        const auto pairsOf = [&](std::vector<cs::UnitFacts::Identity> before,
+                                 std::vector<cs::UnitFacts::Identity> after, std::string& missing)
+        {
+            cs::UnitFacts wasUnit;
+            wasUnit.entities.resize(1);
+            wasUnit.entities[0].variants = {{was, "", ""}};
+            wasUnit.identities = std::move(before);
+            cs::UnitFacts nowUnit;
+            nowUnit.entities.resize(1);
+            nowUnit.entities[0].variants = {{now, "", ""}};
+            nowUnit.identities = std::move(after);
+            std::vector<std::string> out;
+            for (const ctrace::stack::analysis::SymbolPair& pair :
+                 cs::correspond(wasUnit, 0, nowUnit, missing))
+            {
+                if (pair.before != was)
+                    out.push_back(pair.before + "->" + pair.after);
+            }
+            return out;
+        };
+        using Pairs = std::vector<std::string>;
+        const std::string inWas = nested("use.cpp:40", was);
+        const std::string inNow = nested("use.cpp:40", now);
+        std::string missing;
+
+        // A specialization whose argument is a type nested in the entity pairs through the
+        // entity's pair.
+        report.expect(pairsOf({{"_Z1aOld", "", "", spec("", inWas, "int")}},
+                              {{"_Z1aNew", "", "", spec("", inNow, "int")}},
+                              missing) == Pairs{"_Z1aOld->_Z1aNew"} &&
+                          missing.empty(),
+                      "ConstSuggestionNested: a specialization pairs through its nested argument");
+
+        // Every other argument is kept: int against long, no pair (mutant: a key without the
+        // arguments that hold no nested type).
+        missing.clear();
+        report.expect(pairsOf({{"_Z1aOld", "", "", spec("", inWas, "int")}},
+                              {{"_Z1aNew", "", "", spec("", inNow, "long")}}, missing)
+                          .empty(),
+                      "ConstSuggestionNested: another argument differs, no pair");
+
+        // Refinement 1, only renamed symbols: a symbol present on both sides at the same key
+        // stays out, and the renamed one pairs (without that filter: two candidates on each
+        // side, no pair, a reason). The nested type is written in a template, without an
+        // enclosing symbol, so its key does not change with the rewrite.
+        const std::string inTemplate = nested("use.cpp:50", "");
+        missing.clear();
+        report.expect(pairsOf({{"_Z1bOld", "", "", spec("", inTemplate, "int")},
+                               {"_Z1bSame", "", "", spec("", inTemplate, "int")}},
+                              {{"_Z1bNew", "", "", spec("", inTemplate, "int")},
+                               {"_Z1bSame", "", "", spec("", inTemplate, "int")}},
+                              missing) == Pairs{"_Z1bOld->_Z1bNew"} &&
+                          missing.empty(),
+                      "ConstSuggestionNested: a symbol the rewrite does not rename takes no part");
+
+        // One to one: two before and two after at one key, no pair and a reason, not the
+        // first candidates paired.
+        missing.clear();
+        report.expect(pairsOf({{"_Z1cOne", "", "", spec("", inWas, "int")},
+                               {"_Z1cTwo", "", "", spec("", inWas, "int")}},
+                              {{"_Z1cThree", "", "", spec("", inNow, "int")},
+                               {"_Z1cFour", "", "", spec("", inNow, "int")}},
+                              missing)
+                              .empty() &&
+                          missing.find("has no one-to-one counterpart") != std::string::npos,
+                      "ConstSuggestionNested: two candidates on each side, no pair, a reason");
+
+        // One before, two after: no pair, a reason.
+        missing.clear();
+        report.expect(pairsOf({{"_Z1dOne", "", "", spec("", inWas, "int")}},
+                              {{"_Z1dTwo", "", "", spec("", inNow, "int")},
+                               {"_Z1dThree", "", "", spec("", inNow, "int")}},
+                              missing)
+                              .empty() &&
+                          missing.find("has no one-to-one counterpart") != std::string::npos,
+                      "ConstSuggestionNested: one candidate becomes two, no pair, a reason");
+
+        // The ABI variant is part of the key: C1 before, C2 after, no pair.
+        missing.clear();
+        report.expect(pairsOf({{"_Z1eOld", "", "", spec("C1", inWas, "int")}},
+                              {{"_Z1eNew", "", "", spec("C2", inNow, "int")}}, missing)
+                          .empty(),
+                      "ConstSuggestionNested: two variants never pair");
+
+        // A member of a nested type pairs once the function around it is paired; around a
+        // function without a pair, it does not.
+        const std::string member = "lambda |use.cpp:40|use.cpp:40|operator() const|int (int)";
+        missing.clear();
+        report.expect(pairsOf({{"_ZOldL", member, was, ""}}, {{"_ZNewL", member, now, ""}},
+                              missing) == Pairs{"_ZOldL->_ZNewL"},
+                      "ConstSuggestionNested: a lambda's member pairs through its function");
+        missing.clear();
+        report.expect(
+            pairsOf({{"_ZOldL", member, "_Z1hv", ""}}, {{"_ZNewL", member, now, ""}}, missing)
+                .empty(),
+            "ConstSuggestionNested: around an unpaired function, no pair");
+        return report.failures == 0;
+    }
+
+    /// #217 (§5.7, step 5): what Clang writes into the keys of the nested entities, on one compilation of
+    /// real code. Every expected member and specialization has an identity, and two symbols
+    /// never share a key: a local class's implicit members, a lambda's call operator and static
+    /// invoker, a virtual destructor's variants, a class template's hidden friend, and member
+    /// classes of two specializations that differ only by a closure type.
+    bool testConstSuggestionNestedIdentities(TestReport& report)
+    {
+        namespace cs = ctrace::stack::analysis::const_suggestion;
+        const std::filesystem::path dir =
+            std::filesystem::temp_directory_path() / "ct_const_suggestion_nested_identities";
+        std::filesystem::create_directories(dir);
+        const std::filesystem::path file = dir / "keys.cpp";
+        // checks.py's P2_KEYS_SOURCE, with a polymorphic local class for the destructor's
+        // variants (its vtable is a global that P2 does not pair, so the end-to-end check
+        // leaves it out).
+        std::ofstream(file) << kNestedKeysSourceWithPoly;
+        const ctrace::stack::analysis::UnitCommand command = cxxCommand(file);
+        std::vector<cs::Target> targets(1);
+        targets[0].symbol = "_Z4passIZ5driveiE3$_0EiiOT_";
+        targets[0].sourceIndex = 0;
+        const cs::UnitFacts unit = cs::inspect(command, nullptr, {}, targets, "test", false);
+        // How many identities a mangled or demangled part selects, by kind of key.
+        const auto count = [&](const std::string& part, bool specialization)
+        {
+            return std::count_if(unit.identities.begin(), unit.identities.end(),
+                                 [&](const cs::UnitFacts::Identity& identity)
+                                 {
+                                     const std::string& key =
+                                         specialization ? identity.specialization : identity.nested;
+                                     return !key.empty() &&
+                                            (identity.symbol.find(part) != std::string::npos ||
+                                             llvm::demangle(identity.symbol).find(part) !=
+                                                 std::string::npos);
+                                 });
+        };
+        // Presence: each refinement's candidates are identified: the
+        // default, copy and move constructors (State d, b, c), the two assignments.
+        report.expect(count("::State::State(", false) >= 3 &&
+                          count("::State::operator=(", false) == 2,
+                      "ConstSuggestionNestedKeys: the local class's implicit members are there");
+        report.expect(count("__invoke", false) == 1, "ConstSuggestionNestedKeys: the static "
+                                                     "invoker is there");
+        report.expect(count("4PolyD0Ev", false) == 1 && count("4PolyD2Ev", false) == 1,
+                      "ConstSuggestionNestedKeys: the destructor's deleting and base variants "
+                      "are there");
+        report.expect(count("operator==", true) == 1,
+                      "ConstSuggestionNestedKeys: the hidden friend is identified (by its "
+                      "function type)");
+        report.expect(count("::Inner>(", true) == 3,
+                      "ConstSuggestionNestedKeys: probe of the three member classes is identified "
+                      "(through their specialization, which holds the nested type)");
+        // Distinctness: no two symbols share a key (without the member's type, the implicit
+        // constructors and assignments merge; without the name, the static flag and the
+        // qualifiers together, which the test protects collectively, not each one, operator() and
+        // __invoke merge; without the variant, D0 and D2 merge; a member
+        // class written without its specialization's arguments: probe's two closures merge).
+        std::map<std::string, std::string> owner;
+        bool apart = true;
+        for (const cs::UnitFacts::Identity& identity : unit.identities)
+        {
+            for (const std::string& key :
+                 {identity.nested.empty() ? "" : "n" + identity.nested + '\0' + identity.enclosing,
+                  identity.specialization.empty() ? "" : "s" + identity.specialization})
+            {
+                if (key.empty())
+                    continue;
+                const auto [it, added] = owner.try_emplace(key, identity.symbol);
+                apart = apart && (added || it->second == identity.symbol);
+            }
+        }
+        report.expect(apart, "ConstSuggestionNestedKeys: two symbols never share a key");
+        return report.failures == 0;
+    }
+
+    // The implicit members of classes whose arguments hold a type nested in the generic lambda's
+    // call operator (P2, implicit-member extension): Box<State>'s six, Derived<State>'s virtual
+    // destructor (D0 and D2), Holder<State, int>'s and Holder<State, long>'s destructors; and a
+    // class whose arguments hold no nested type, Plain<int>, whose members must not be identified.
+    constexpr const char* kImplicitMembersSource = R"(#include <vector>
+
+struct Base
+{
+    virtual ~Base() {}
+};
+
+template <typename T> struct Box
+{
+    T value;
+};
+
+template <typename T> struct Derived : Base
+{
+    T value;
+};
+
+template <typename T, typename U> struct Holder
+{
+    T value;
+    U other;
+};
+
+template <typename T> struct Plain
+{
+    std::vector<T> items;
+};
+
+template <typename Each> int pass(int n, Each&& each)
+{
+    int total = 0;
+    each(n, [&](int i) { total += i; });
+    return total;
+}
+
+int drive(int n)
+{
+    return pass(n, [&](int count, auto&& body) {
+        struct State
+        {
+            std::vector<int> v;
+        };
+        Box<State> a{{{count}}};
+        Box<State> b = a;
+        Box<State> c = static_cast<Box<State>&&>(a);
+        b = c;
+        c = static_cast<Box<State>&&>(b);
+        Box<State> d;
+        delete new Derived<State>;
+        Holder<State, int> h{};
+        Holder<State, long> k{};
+        Plain<int> plain;
+        body(static_cast<int>(b.value.v.size() + c.value.v.size() + d.value.v.size() +
+                              plain.items.size()) +
+             h.other + static_cast<int>(k.other));
+    });
+}
+)";
+
+    /// #217 (§5.7, step 5): an implicit member of a class whose key holds a nested type is
+    /// identified by that class, its kind and name, its variant and its whole type. Every expected
+    /// one is there, a class without a nested type gets none, and no two symbols share a key: the
+    /// copy and move constructors (the type), D0 and D2 (the variant), Holder<State, int> and
+    /// Holder<State, long> (the class's other arguments). Limit: the kind and the name are not
+    /// shown to be needed. On every real case found, the variant (C against D) or the type already
+    /// separates two implicit members, so a key without them passes these tests too; they are kept,
+    /// and protected only together with the variant and the type.
+    bool testConstSuggestionImplicitMemberIdentities(TestReport& report)
+    {
+        namespace cs = ctrace::stack::analysis::const_suggestion;
+        const std::filesystem::path dir =
+            std::filesystem::temp_directory_path() / "ct_const_suggestion_implicit_members";
+        std::filesystem::create_directories(dir);
+        const std::filesystem::path file = dir / "implicit.cpp";
+        std::ofstream(file) << kImplicitMembersSource;
+        const ctrace::stack::analysis::UnitCommand command = cxxCommand(file);
+        std::vector<cs::Target> targets(1);
+        targets[0].symbol = "_Z4passIZ5driveiE3$_0EiiOT_";
+        targets[0].sourceIndex = 0;
+        const cs::UnitFacts unit = cs::inspect(command, nullptr, {}, targets, "test", false);
+        // The implicit-member keys whose symbol holds a mangled or demangled part.
+        const auto count = [&](const std::string& part)
+        {
+            return std::count_if(unit.identities.begin(), unit.identities.end(),
+                                 [&](const cs::UnitFacts::Identity& identity)
+                                 {
+                                     return identity.specialization.rfind("implicit ", 0) == 0 &&
+                                            (identity.symbol.find(part) != std::string::npos ||
+                                             llvm::demangle(identity.symbol).find(part) !=
+                                                 std::string::npos);
+                                 });
+        };
+        report.expect(count("Box<") >= 6,
+                      "ConstSuggestionImplicitMembers: Box<State>'s default, copy and move "
+                      "constructors, assignments and destructor are identified");
+        report.expect(count("DerivedI") >= 2 && count("D0Ev") >= 1 && count("D2Ev") >= 1,
+                      "ConstSuggestionImplicitMembers: Derived<State>'s deleting and base "
+                      "destructors are identified");
+        // Each Holder's destructor, by its mangled class (State then int, State then long): one variant
+        // where the base and complete destructors are aliases (ELF), both where they are not (Darwin).
+        report.expect(count("5StateiED") >= 1 && count("5StatelED") >= 1,
+                      "ConstSuggestionImplicitMembers: both Holder destructors are identified");
+        report.expect(count("Plain<") == 0,
+                      "ConstSuggestionImplicitMembers: a class without a nested type gets none "
+                      "(not identified whatever the class)");
+        std::map<std::string, std::string> owner;
+        bool apart = true;
+        for (const cs::UnitFacts::Identity& identity : unit.identities)
+        {
+            for (const std::string& key :
+                 {identity.nested.empty() ? "" : "n" + identity.nested + '\0' + identity.enclosing,
+                  identity.specialization.empty() ? "" : "s" + identity.specialization})
+            {
+                if (key.empty())
+                    continue;
+                const auto [it, added] = owner.try_emplace(key, identity.symbol);
+                apart = apart && (added || it->second == identity.symbol);
+            }
+        }
+        report.expect(apart, "ConstSuggestionImplicitMembers: two symbols never share a key (the "
+                             "type, the variant and the class's arguments keep them apart)");
+        return report.failures == 0;
+    }
+
+    /// #217 (final review of #239, M5): a plan's rewrite that cannot be carried out says so. A
+    /// file that can no longer be read, and one that no longer has the text the plan was made on
+    /// (an edit past its end), name the file and leave the result unjudged, without an exception;
+    /// a plan on an unchanged file rewrites it.
+    bool testConstSuggestionRewriteFailures(TestReport& report)
+    {
+        namespace cs = ctrace::stack::analysis::const_suggestion;
+        const std::filesystem::path dir =
+            std::filesystem::temp_directory_path() /
+            ("ct_const_suggestion_rewrite_" + std::to_string(::getpid()));
+        std::filesystem::create_directories(dir);
+        const std::filesystem::path file = dir / "r.c";
+        std::ofstream(file) << "int read_value(int *p) { return *p; }\n";
+        const auto attempt = [](const cs::SuggestionPlan& plan, std::string& failure)
+        {
+            try
+            {
+                return std::optional<std::map<std::string, std::string>>(
+                    cs::rewrite(plan, failure));
+            }
+            catch (const std::exception& error)
+            {
+                failure = std::string("exception: ") + error.what();
+                return std::optional<std::map<std::string, std::string>>();
+            }
+        };
+        cs::SuggestionPlan plan;
+        plan.edits[file.string()] = {{15, 0, "const ", 1}};
+        std::string failure;
+        const auto done = attempt(plan, failure);
+        report.expect(done && failure.empty() &&
+                          done->at(file.string()).find("const int *p") != std::string::npos,
+                      "ConstSuggestionRewrite: an unchanged file is rewritten");
+        cs::SuggestionPlan gone;
+        gone.edits[(dir / "missing.c").string()] = {{0, 0, "const ", 1}};
+        failure.clear();
+        (void)attempt(gone, failure);
+        report.expect(failure.find("missing.c") != std::string::npos &&
+                          failure.find("cannot be read") != std::string::npos,
+                      "ConstSuggestionRewrite: a file that cannot be read is named");
+        cs::SuggestionPlan shrunk;
+        shrunk.edits[file.string()] = {{4096, 3, "const ", 1}};
+        failure.clear();
+        (void)attempt(shrunk, failure);
+        report.expect(
+            failure.find("r.c") != std::string::npos &&
+                failure.find("changed after the plan") != std::string::npos,
+            "ConstSuggestionRewrite: a file that no longer has the planned text is named, "
+            "without an exception");
+        std::filesystem::remove_all(dir);
+        return report.failures == 0;
+    }
+
+    /// #217 (Task 3.2, O1): the correspondences of §5.7 keep the multiplicity and the order of
+    /// the references at each key, those with a template and those without alike, and map the
+    /// instantiation contexts through the pairs that earlier rounds establish. These cases pin
+    /// what an index built once must give.
+    bool testConstSuggestionCorrespondenceIndex(TestReport& report)
+    {
+        namespace cs = ctrace::stack::analysis::const_suggestion;
+        const auto site = [](std::size_t offset)
+        {
+            cs::DeclarationSite out;
+            out.expansion = {"use.cpp", offset};
+            out.spelling = out.expansion;
+            return out;
+        };
+        const auto reference = [](cs::FactKey key, std::vector<std::string> value)
+        {
+            cs::Fact fact;
+            fact.key = std::move(key);
+            fact.value = std::move(value);
+            fact.shown = fact.value.front();
+            return fact;
+        };
+        const cs::FactKey at{{"ctx"}, site(10)};
+        const cs::Fact withTemplate = reference(at, {"symbol:_Z1aIiEvv", "template:a"});
+        const cs::Fact rewritten = reference(at, {"symbol:_Z1aIKiEvv", "template:a"});
+        const cs::Fact plain = reference(at, {"site:use.cpp:3"});
+        const auto pairsOf = [&](std::vector<cs::Fact> before, std::vector<cs::Fact> after,
+                                 std::set<std::string> instantiations)
+        {
+            cs::UnitFacts was;
+            was.entities.resize(1);
+            was.facts = std::move(before);
+            cs::UnitFacts now;
+            now.entities.resize(1);
+            now.facts = std::move(after);
+            now.instantiations = std::move(instantiations);
+            std::string missing;
+            std::vector<std::string> out;
+            for (const ctrace::stack::analysis::SymbolPair& pair :
+                 cs::correspond(was, 0, now, missing))
+                out.push_back(pair.before + "->" + pair.after);
+            return out;
+        };
+        using Pairs = std::vector<std::string>;
+        report.expect(pairsOf({withTemplate, plain}, {rewritten}, {"ctx"}).empty(),
+                      "ConstSuggestionCorrespondence: two references before, one after, at one "
+                      "key: no pair, though only one has a template");
+        report.expect(pairsOf({withTemplate, plain}, {rewritten, plain}, {"ctx"}) ==
+                          Pairs{"_Z1aIiEvv->_Z1aIKiEvv"},
+                      "ConstSuggestionCorrespondence: as many on both sides, in the same order: "
+                      "the template's references pair");
+        report.expect(pairsOf({withTemplate, plain}, {plain, rewritten}, {"ctx"}).empty(),
+                      "ConstSuggestionCorrespondence: as many on both sides, in another order: "
+                      "no pair");
+        const cs::Fact outer = reference({{}, site(20)}, {"symbol:_Z1xIiEvv", "template:x"});
+        const cs::Fact outerAfter = reference({{}, site(20)}, {"symbol:_Z1xIKiEvv", "template:x"});
+        const cs::Fact inner =
+            reference({{"_Z1xIiEvv"}, site(30)}, {"symbol:_Z1yIiEvv", "template:y"});
+        const cs::Fact innerAfter =
+            reference({{"_Z1xIKiEvv"}, site(30)}, {"symbol:_Z1yIKiEvv", "template:y"});
+        report.expect(pairsOf({outer, inner}, {outerAfter, innerAfter}, {}) ==
+                          Pairs{"_Z1xIiEvv->_Z1xIKiEvv", "_Z1yIiEvv->_Z1yIKiEvv"},
+                      "ConstSuggestionCorrespondence: a context maps through the pair an earlier "
+                      "round establishes");
         return report.failures == 0;
     }
 
@@ -2596,6 +3388,32 @@ namespace
         return report.failures == 0;
     }
 
+    /// A symbol is recognized as mangled and shown demangled when a demangler reads it, whatever
+    /// the C++ runtime: one that predates a mangling, such as a C++23 explicit object member's
+    /// (macOS 14, GCC 11), leaves it to LLVM's (#240). A name that neither reads stays as it is.
+    bool testSymbolDemangling(TestReport& report)
+    {
+        using ctrace::stack::analysis::formatFunctionNameForMessage;
+        const std::string explicitObject = "_ZNH6Reader4peekERKS_Pi";
+        const std::string shown = "Reader::peek(this Reader const&, int*)";
+        report.expect(ctrace_tools::isMangled(explicitObject),
+                      "Demangling: an explicit object member's symbol is a mangled name");
+        report.expect(ctrace_tools::demangle(explicitObject.c_str()) == shown,
+                      "Demangling: an explicit object member's symbol is shown demangled");
+        report.expect(formatFunctionNameForMessage(explicitObject) == shown,
+                      "Demangling: a message names an explicit object member demangled");
+        report.expect(ctrace_tools::isMangled("_ZN6Reader4peekEPi") &&
+                          ctrace_tools::demangle("_ZN6Reader4peekEPi") == "Reader::peek(int*)",
+                      "Demangling: a member's symbol is recognized and shown demangled");
+        report.expect(!ctrace_tools::isMangled("read_value") &&
+                          formatFunctionNameForMessage("read_value") == "read_value",
+                      "Demangling: a C function's name is no mangled name");
+        report.expect(!ctrace_tools::isMangled("_Z_not_a_symbol") &&
+                          ctrace_tools::demangle("_Z_not_a_symbol") == "_Z_not_a_symbol",
+                      "Demangling: a name that no demangler reads stays as it is");
+        return report.failures == 0;
+    }
+
     /// resolveParameterDebugBinding: each parameter gets its own type, and its position among the
     /// parameters the source declares. The others are artificial: `this`, the vtt that the
     /// base-object constructor (C2) of a class with a virtual base takes, is_most_derived under the
@@ -2633,6 +3451,9 @@ namespace
             }
             return parameters;
         };
+        // The arguments' bindings, in order. An expected entry written "?name: binding" is the
+        // parameter of an argument that only some ABIs pass: absent, or at that place with that
+        // binding, its IR name the parameter's or derived from it (tag.coerce).
         const auto check = [&](const LoadedModule& loaded, const char* symbol,
                                const std::vector<std::string>& expected)
         {
@@ -2641,7 +3462,28 @@ namespace
             std::string text;
             for (const std::string& parameter : actual)
                 text += " [" + parameter + "]";
-            report.expect(actual == expected,
+            const auto passes = [](const std::string& parameter, const std::string& optional)
+            {
+                const std::size_t colon = optional.find(':');
+                const std::string name = optional.substr(1, colon - 1);
+                return parameter == optional.substr(1) ||
+                       (parameter.starts_with(name + ".") &&
+                        parameter.substr(parameter.find(':')) == optional.substr(colon));
+            };
+            std::size_t next = 0;
+            bool matches = true;
+            for (const std::string& entry : expected)
+            {
+                if (entry.starts_with("?"))
+                {
+                    if (next < actual.size() && passes(actual[next], entry))
+                        ++next;
+                    continue;
+                }
+                matches = matches && next < actual.size() && actual[next] == entry;
+                ++next;
+            }
+            report.expect(matches && next == actual.size(),
                           std::string("ParameterDebugBinding: ") + symbol + text);
         };
         const auto load =
@@ -2686,7 +3528,8 @@ namespace
               {".block_descriptor: artificial, source none", "x: int *, source 0",
                "y: double *, source 1"});
         // A variadic function's debug type ends with a null entry for `...`, which no parameter
-        // takes; an empty parameter takes no IR argument, but keeps its debug declaration.
+        // takes; an empty parameter keeps its debug declaration, and takes an IR argument only on
+        // some ABIs (an i8 under AAPCS64 on Linux, none on x86-64 or Apple arm64).
         check(itanium, "_ZN7VarargsC2EPiPdz",
               {"this: artificial, source none", "vtt: artificial, source none",
                "x: int *, source 0", "y: double *, source 1"});
@@ -2695,7 +3538,7 @@ namespace
                "x: int *, source 0", "y: double *, source 1"});
         check(itanium, "_ZN6TaggedC2EPi3Tag",
               {"this: artificial, source none", "vtt: artificial, source none",
-               "x: int *, source 0"});
+               "x: int *, source 0", "?tag: Tag, source 1"});
         check(itanium, "_Z8make_bigPiz",
               {"agg.result: artificial, source none", "p: int *, source 0"});
 
@@ -2710,7 +3553,7 @@ namespace
         // The empty parameter comes first: x is the second parameter the source declares.
         check(itanium, "_ZN8TagFirstC2E3TagPi",
               {"this: artificial, source none", "vtt: artificial, source none",
-               "x: int *, source 1"});
+               "?tag: Tag, source 0", "x: int *, source 1"});
 
         // Optimized code spills nothing: each argument is bound through its own debug records.
         check(optimized, "_ZN8VariadicC2EPiPdz",
@@ -2901,6 +3744,14 @@ int main(int argc, char** argv)
     (void)testSarifSecuritySeverity(report);
     (void)testEveryRuleIsDescribed(repoRoot, report);
     (void)testAnalysisIncompleteNotesHaveTheirOwnRules(report);
+    (void)testConstSuggestionCodeComparison(report);
+    (void)testConstSuggestionNormalizations(report);
+    (void)testConstSuggestionTopLevelQualifierLost(report);
+    (void)testConstSuggestionCorrespondenceIndex(report);
+    (void)testConstSuggestionNestedCorrespondences(report);
+    (void)testConstSuggestionNestedIdentities(report);
+    (void)testConstSuggestionImplicitMemberIdentities(report);
+    (void)testConstSuggestionRewriteFailures(report);
     (void)testUnresolvedCallsMarkStackUnknown(repoRoot, report);
     (void)testAssumeExternalFrameReplacesUnknown(repoRoot, report);
     (void)testUninitializedFixpointBudgetIsExplicit(repoRoot, report);
@@ -2928,6 +3779,7 @@ int main(int argc, char** argv)
     (void)testOwnershipCollectorExceptions(repoRoot, report);
     (void)testOwnershipSummaryIndex(repoRoot, report);
     (void)testCompileIRCacheWithoutCompilerRevision(report);
+    (void)testSymbolDemangling(report);
 
     if (report.failures == 0)
     {

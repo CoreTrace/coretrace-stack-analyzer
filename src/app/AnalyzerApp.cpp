@@ -47,6 +47,7 @@
 #include "analysis/AnalyzerUtils.hpp"
 #include "analysis/CompileCommands.hpp"
 #include "analysis/ConstParamAnalysis.hpp"
+#include "analysis/ConstSuggestionCheck.hpp"
 #include "analysis/DuplicateIfCondition.hpp"
 #include "analysis/FunctionFilter.hpp"
 #include "analysis/GlobalReadBeforeWriteAnalysis.hpp"
@@ -989,6 +990,17 @@ static AppStatus analyzeWithSharedModuleLoading(const std::vector<std::string>& 
     loadedModules.swap(orderedLoadedModules);
 
     {
+        // Every input analyzed together, for the Clang check of const suggestions (#217).
+        auto units = std::make_shared<analysis::AnalyzedUnits>();
+        for (const auto& loaded : loadedModules)
+        {
+            units->units.push_back({loaded.filename, loaded.module.get(),
+                                    analysis::detectFromExtension(loaded.filename)});
+        }
+        cfg.analyzedUnits = std::move(units);
+    }
+
+    {
         // A function found never to return ends the paths that call it in the other modules;
         // repeat until no round finds a new one, for chains across several files. A caller may
         // be linked with any definition of the symbol: it never returns only if every one of
@@ -1161,6 +1173,8 @@ static AppStatus analyzeWithSharedModuleLoading(const std::vector<std::string>& 
             logText(coretrace::Level::Info, emptyMsg);
         results.emplace_back(loaded.filename, std::move(result));
     }
+    // The modules are freed on return.
+    cfg.analyzedUnits.reset();
     return AppStatus::success();
 }
 
@@ -1203,7 +1217,9 @@ static AppStatus analyzeWithoutSharedModuleLoading(const std::vector<std::string
             {
                 const analyzer::ScopedHotspot hotspot(cfg.timing,
                                                       "app.direct_loading.analyze_module");
-                result = analyzeModule(*load.module, cfg);
+                AnalysisConfig unitCfg = cfg;
+                unitCfg.analyzedUnits = analysis::analyzedUnitOf(inputFilename, *load.module);
+                result = analyzeModule(*load.module, unitCfg);
             }
             if (!load.frontendDiagnostics.empty())
             {
@@ -1259,7 +1275,9 @@ static AppStatus analyzeWithoutSharedModuleLoading(const std::vector<std::string
             {
                 const analyzer::ScopedHotspot hotspot(cfg.timing,
                                                       "app.direct_loading.analyze_module");
-                result = analyzeModule(*load.module, cfg);
+                AnalysisConfig unitCfg = cfg;
+                unitCfg.analyzedUnits = analysis::analyzedUnitOf(inputFilename, *load.module);
+                result = analyzeModule(*load.module, unitCfg);
             }
             if (!load.frontendDiagnostics.empty())
             {

@@ -1051,8 +1051,13 @@ namespace ctrace::stack::analyzer
 
             if (issue.isRvalueRef)
             {
-                body << kDiagIndentArrow << "consider passing by value (" << issue.suggestedType
-                     << ") or const reference (" << issue.suggestedTypeAlt << ")\n";
+                // Without an alternative, the check names the const reference it tried (D12).
+                if (issue.suggestedTypeAlt.empty())
+                    body << kDiagIndentArrow << "consider passing by const reference ("
+                         << issue.suggestedType << ")\n";
+                else
+                    body << kDiagIndentArrow << "consider passing by value (" << issue.suggestedType
+                         << ") or const reference (" << issue.suggestedTypeAlt << ")\n";
                 body << kDiagIndentArrow << "current type: " << issue.currentType << "\n";
             }
             else if (issue.pointerConstOnly)
@@ -1071,6 +1076,8 @@ namespace ctrace::stack::analyzer
                 body << kDiagIndentArrow << "the callee's body is not checked: it may still modify "
                      << "the " << object << " object through a cast\n";
             }
+            for (const std::string& line : issue.checkLines)
+                body << kDiagIndentArrow << line << "\n";
 
             DiagnosticBuilder builder;
             builder.function(issue.funcName)

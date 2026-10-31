@@ -79,6 +79,14 @@ static void printHelp()
         << "  --compile-ir-format=bc|ll  Compilation IR format for source inputs (default: bc)\n"
         << "  --resource-summary-cache-memory-only  Use in-memory cache only for cross-TU "
            "summaries\n"
+        << "  --experimental-const-suggestion-check  Experimental: check each const "
+           "suggestion\n"
+        << "                         with Clang: removed if the rewrite adds an error or a\n"
+        << "                         tracked warning, or changes a call or reference target,\n"
+        << "                         an override or a constant condition, unless the check\n"
+        << "                         stops first at a fatal error or a change beyond the\n"
+        << "                         declarations it plans; kept as not checked when it\n"
+        << "                         cannot be shown valid (off by default)\n"
         << "  --uninitialized-cross-tu    Enable cross-TU uninitialized summaries (default: on)\n"
         << "  --no-uninitialized-cross-tu Disable cross-TU uninitialized summaries\n"
         << "  --only-file=<path>     Only report functions from this source file\n"
@@ -170,6 +178,8 @@ static void printEffectiveConfig(const ctrace::stack::cli::ParsedArguments& pars
     llvm::errs() << "warnings-only: " << (cfg.warningsOnly ? "true" : "false") << "\n";
     llvm::errs() << "quiet: " << (cfg.quiet ? "true" : "false") << "\n";
     llvm::errs() << "demangle: " << (cfg.demangle ? "true" : "false") << "\n";
+    llvm::errs() << "experimental-const-suggestion-check: "
+                 << (cfg.constSuggestionCheck ? "true" : "false") << "\n";
     llvm::errs() << "resource-model: "
                  << (cfg.resourceModelPath.empty() ? "<none>" : cfg.resourceModelPath) << "\n";
     llvm::errs() << "escape-model: "

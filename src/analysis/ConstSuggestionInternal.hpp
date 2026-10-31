@@ -1,0 +1,424 @@
+// SPDX-License-Identifier: Apache-2.0
+#pragma once
+
+#include <cstdint>
+#include <map>
+#include <memory>
+#include <optional>
+#include <set>
+#include <string>
+#include <string_view>
+#include <tuple>
+#include <vector>
+
+#include <clang/Basic/SourceLocation.h>
+#include <llvm/ADT/StringRef.h>
+#include <llvm/IR/GlobalValue.h>
+
+#include "analysis/ConstSuggestionCheck.hpp"
+
+namespace clang
+{
+    class ASTContext;
+    class FunctionDecl;
+    class PPCallbacks;
+    class QualType;
+    class SourceManager;
+} // namespace clang
+
+namespace llvm
+{
+    class LLVMContext;
+    class Module;
+} // namespace llvm
+
+namespace ctrace::stack::analysis
+{
+    struct PrintedSignature;
+} // namespace ctrace::stack::analysis
+
+namespace ctrace::stack::analysis::const_suggestion
+{
+    // What the check concludes about a suggestion, in one unit or overall (#217 v2, §3).
+    enum class Verdict : std::uint8_t
+    {
+        Verified,
+        Refuted,
+        Indeterminate
+    };
+
+    struct Judgement
+    {
+        std::string reason; // empty when verified
+        Verdict verdict = Verdict::Verified;
+        std::uint8_t reservedPadding[7] = {};
+    };
+
+    // Refuted if a judgement refutes, else indeterminate if one is, else verified; with the
+    // reason of the first judgement that has that verdict.
+    Judgement aggregate(const std::vector<Judgement>& judgements);
+
+    // 16 hexadecimal digits: xxh3 of the arguments and the working directory, each followed by a
+    // NUL byte.
+    std::string fingerprintOf(const UnitCommand& command);
+
+    // A file's real path, or the path as given when it has none.
+    std::string realPath(llvm::StringRef path);
+
+    // `length` bytes at `offset` replaced with `text`.
+    struct Edit
+    {
+        std::size_t offset = 0;
+        std::size_t length = 0;
+        std::string text;
+        unsigned line = 0; // the offset's, in the original text
+        std::uint8_t reservedPadding[4] = {};
+    };
+
+    // The type a suggestion tries (§3), as the trace shows it: the parameter's current type and
+    // the candidate, each written with the parameter's name, and the alternative it stands for.
+    struct Candidate
+    {
+        std::string current;
+        std::string type;
+        std::string alternative;
+        // The candidate as a diagnostic displays it: Clang's writing, a type without a name
+        // written <anonymous type> (stage 2, ruling 3).
+        std::string shown;
+    };
+
+    // A position in a file's original text: after the rewrite, a position in a rewritten file is
+    // mapped back through the plan's edits (§5.4).
+    struct SourcePosition
+    {
+        std::string file; // real path
+        std::size_t offset = 0;
+        bool operator==(const SourcePosition&) const = default;
+        bool operator<(const SourcePosition& other) const
+        {
+            return std::tie(file, offset) < std::tie(other.file, other.offset);
+        }
+    };
+
+    // Where a name is expanded and where it is written: one macro invocation can expand several
+    // names at the same place (ruling 14).
+    struct DeclarationSite
+    {
+        SourcePosition expansion;
+        SourcePosition spelling;
+        bool operator==(const DeclarationSite&) const = default;
+        bool operator<(const DeclarationSite& other) const
+        {
+            return std::tie(expansion, spelling) < std::tie(other.expansion, other.spelling);
+        }
+    };
+
+    enum class SourceLinkage : std::uint8_t
+    {
+        None,
+        Internal,
+        External
+    };
+
+    // The function a suggestion names, as the defining unit's initial compilation shows it (§3).
+    struct EntityIdentity
+    {
+        std::vector<DeclarationSite> redeclarations;   // the declarations the plan rewrites, sorted
+        std::string name;                              // as Clang prints it: dot, operator==, ~A
+        std::optional<DeclarationSite> templateOrigin; // a specialization's pattern, first declared
+        std::vector<std::string> symbols; // every variant's, before the rewrite (CodeGen)
+        std::string templateArguments;    // a specialization's, written canonically (ruling 7)
+        SourceLinkage linkage = SourceLinkage::None;
+        // Whether Clang's kind of the name is an operator's (operator==, operator""_x): such a
+        // name is the keyword `operator` and what follows it, never one identifier. A name is
+        // told by its kind, not its spelling: `operator$x` is an identifier.
+        bool operatorName = false;
+        std::uint8_t reservedPadding[6] = {};
+    };
+
+    // R, O and K (§5.4).
+    enum class FactKind : std::uint8_t
+    {
+        Reference,
+        Override,
+        Constant
+    };
+
+    // Where a fact is: the instantiations around it, by their symbols, outermost first, and its
+    // site.
+    struct FactKey
+    {
+        std::vector<std::string> contexts;
+        DeclarationSite site;
+        bool operator==(const FactKey&) const = default;
+        bool operator<(const FactKey& other) const
+        {
+            return std::tie(contexts, site) < std::tie(other.contexts, other.site);
+        }
+    };
+
+    // What one compilation shows at a key, and what a reason names when it changes (Texts).
+    struct Fact
+    {
+        FactKey key;
+        // Sorted. R: the target's declaration sites, or the symbol of a specialization or an
+        // implicit function (ruling 4); O: each overridden method, the same way; K: true, false
+        // or the selected association.
+        std::vector<std::string> value;
+        std::string subject; // O: the method; K: _Generic for a selection
+        std::string shown;   // the value, as a reason names it
+        unsigned line = 0;   // the site's, where Clang expands it
+        FactKind kind = FactKind::Reference;
+        std::uint8_t reservedPadding[3] = {};
+    };
+
+    // The rewrite of one suggestion, planned on the defining unit's initial compilation (§5.5).
+    struct SuggestionPlan
+    {
+        EntityIdentity entity;
+        std::vector<DeclarationSite> parameters;        // the parameters it rewrites, sorted
+        std::map<std::string, std::vector<Edit>> edits; // by real path
+        Candidate candidate;                            // the type the rewrite gives the parameter
+        std::optional<std::string> indeterminate;       // why the plan is not executed
+        unsigned sourceIndex = 0;
+        // A free function with external linkage can be declared by a file that reads none of the
+        // rewritten files; a method only where its class is defined. One with internal linkage
+        // (static, anonymous namespace) cannot: another file's homonym is another function.
+        bool declarableElsewhere = false;
+        std::uint8_t reservedPadding[3] = {};
+    };
+
+    // The sites of one compilation's locations. After the rewrite, a position in a file that
+    // `rewrittenBy` rewrites is mapped back to the original text through its edits.
+    class SiteReader
+    {
+      public:
+        SiteReader(const clang::SourceManager& sm, const SuggestionPlan* rewrittenBy);
+
+        DeclarationSite operator()(clang::SourceLocation location);
+        // The real path of a file, or its buffer's name when it is none.
+        const std::string& fileOf(clang::FileID file);
+        // Whether a position of the original text is written by one of the edits: inside the
+        // text an edit replaces, or where it inserts text (§5.6, D19).
+        bool edited(const SourcePosition& at) const;
+
+      private:
+        SourcePosition position(clang::SourceLocation location);
+
+        const clang::SourceManager& sm_;
+        std::map<std::string, std::vector<Edit>> edits_; // by real path, sorted by offset
+        std::map<clang::FileID, std::string> files_;
+    };
+
+    // External for external or module linkage, internal for internal or unique-external.
+    SourceLinkage linkageOf(const clang::FunctionDecl& function);
+
+    // A type written canonically, an anonymous type without its location.
+    std::string writtenType(const clang::ASTContext& context, clang::QualType type);
+
+    // The type a parameter of type `type` gets once rewritten (§3); null for another type.
+    clang::QualType candidateOf(clang::ASTContext& context, clang::QualType type);
+
+    // The macro definitions a compilation reads, by file: from each macro's name to its last
+    // token, as offsets (D11).
+    using MacroDefinitions = std::map<clang::FileID, std::vector<std::pair<unsigned, unsigned>>>;
+
+    // Records them, in the compilation that plans.
+    std::unique_ptr<clang::PPCallbacks> recordMacroDefinitions(const clang::SourceManager& sm,
+                                                               MacroDefinitions& out);
+
+    // Plans the rewrite of the parameter at `sourceIndex` of `function`, located in the defining
+    // unit's initial compilation by the suggestion's symbol.
+    SuggestionPlan plan(clang::ASTContext& context, const MacroDefinitions& macros,
+                        const clang::FunctionDecl& function, std::optional<unsigned> sourceIndex);
+
+    // The generated code of one module, ready to compare: what carries no meaning removed, and
+    // each piece keyed by what it defines.
+    struct ModuleText
+    {
+        std::map<std::string, std::string> globals; // functions, variables, aliases
+        std::map<std::string, std::string> types;
+        std::map<std::string, std::string> attributeGroups; // "#N" -> "{ ... }"
+        std::map<std::string, std::string> metadata;        // "!N" -> its definition
+        std::map<std::string, std::string> namedMetadata;   // "!name" -> its operands
+        std::set<std::string> defined;                      // has code or data here
+    };
+
+    // Prepares `module`, which it changes (debug information and other metadata removed).
+    ModuleText prepare(llvm::Module& module);
+
+    // rewrittenCodeDifference, with the code before the rewrite already prepared.
+    std::optional<std::string> codeDifference(const ModuleText& was, const ModuleText& now,
+                                              const std::vector<SymbolPair>& established,
+                                              const PrintedSignature* signature,
+                                              std::vector<std::string>* accepted);
+
+    // What to look for in one compilation: the function a suggestion names.
+    struct Target
+    {
+        std::string symbol; // the suggestion's symbol, before the rewrite
+        // Its plan; null in the defining unit's initial compilation, which plans it.
+        const SuggestionPlan* plan = nullptr;
+        // The parameter's position among those the source declares (P0), none for one it
+        // does not declare.
+        std::optional<unsigned> sourceIndex;
+        // After the rewrite, the symbols the entity takes, as the defining unit's compilation
+        // names them: another unit can define one without declaring the entity (§5.10).
+        std::vector<std::string> takes;
+        // After the rewrite, the type each declaration of the entity must have, by site: the
+        // unit's own, from its compilation before the rewrite (D8, D18).
+        std::map<DeclarationSite, std::string> expected;
+    };
+
+    // An error or a checked warning, in the order Clang reports it.
+    struct Diagnostic
+    {
+        std::string key; // place and kind, as `diagnostics` holds it
+        std::string text;
+        bool error = false;
+        std::uint8_t reservedPadding[7] = {};
+    };
+
+    // A symbol that the rewrite may rename with the entity, and what pairs it (§5.7).
+    struct Named
+    {
+        std::string symbol;
+        std::string key;       // its kind or variant, and what it belongs to
+        std::string enclosing; // a nested symbol's: the symbol of the function around it
+    };
+
+    // What one compilation shows (§5.3, §5.6).
+    struct UnitFacts
+    {
+        // About the function of one target.
+        struct Entity
+        {
+            // After the rewrite: a symbol the entity takes that another entity defines here, or
+            // another entity's declaration merged into it (ruling 3).
+            struct Collision
+            {
+                std::string symbol;
+                DeclarationSite site; // the other entity's definition, or declaration
+                std::optional<llvm::GlobalValue::LinkageTypes> linkage; // none for a declaration
+                unsigned line = 0; // the site's, where Clang expands it
+                std::uint8_t reservedPadding[4] = {};
+            };
+
+            // After the rewrite, an explicit cast of its address, other than to void (D15).
+            struct Cast
+            {
+                DeclarationSite site;
+                unsigned line = 0; // the site's, where Clang expands it
+                std::uint8_t reservedPadding[4] = {};
+            };
+
+            SuggestionPlan plan;          // in the compilation that plans
+            std::string printedSignature; // for __PRETTY_FUNCTION__
+            std::vector<Cast> casts;      // in source order
+            std::vector<Collision> collisions;
+            // After the rewrite, the IR linkage of the first symbol it takes that this
+            // compilation defines: in the defining unit, the entity's own (§5.10).
+            std::optional<llvm::GlobalValue::LinkageTypes> linkage;
+            // Its declarations' sites, each with the line where Clang expands it: those that the
+            // rewrite adds are other entities' declarations that merge into it (ruling 3).
+            std::map<DeclarationSite, unsigned> declarations;
+            // Before the rewrite, by site, the type each of its declarations must get: the
+            // candidate of the declaration's own parameter type, its top-level qualifiers kept,
+            // written canonically in this compilation's language (D8, D18).
+            std::map<DeclarationSite, std::string> expected;
+            std::vector<Fact> overrides; // O, for the methods named like it
+            std::vector<Named> variants; // the entity's: C1, C2, D0... or "" for a function
+            // The constructors inheriting it, or a specialization of its template: by derived
+            // class, inherited specialization and variant (ruling 7).
+            std::vector<Named> inheriting;
+            // Lambdas, local classes (methods, _ZTI, _ZTS, _ZTV), static locals and their guards,
+            // in the entity or in a specialization of its template: by kind and site.
+            std::vector<Named> nested;
+            bool found = false; // the compilation declares it
+            // After the rewrite, a declaration in a rewritten file without the candidate.
+            bool withoutCandidate = false;
+            // After the rewrite, a declaration in a file it does not rewrite, without the
+            // candidate: the unit declares the entity only for the linker (D17).
+            bool stale = false;
+            std::uint8_t reservedPadding[5] = {};
+        };
+
+        // A declaration that a rewritten file writes (§5.6).
+        struct Written
+        {
+            std::string type; // canonically, or its written form when a part is deduced (D19)
+            std::string name;
+            unsigned line = 0; // where Clang expands it
+            std::uint8_t reservedPadding[4] = {};
+        };
+
+        bool timing = false;
+        std::uint8_t reservedPadding[7] = {};
+        std::string failure; // the compilation could not run
+        std::string file;    // its main file's real path
+        std::multiset<std::string> diagnostics;
+        std::vector<Diagnostic> reported;
+        std::string firstDiagnostic;
+        std::string fatal; // the first fatal error: the AST lacks the rest of the unit
+        // In the rewritten files, by site; one site can hold several, in the order of the
+        // traversal, such as a macro argument expanded twice.
+        std::map<DeclarationSite, std::vector<Written>> writtenTypes;
+        // After the rewrite, the first type that an edit writes outside the planned parameters'
+        // types, in a declaration or an expression, a default argument included (§5.6, D19).
+        struct Outside
+        {
+            DeclarationSite site;
+            unsigned line = 0; // where Clang expands it
+            std::uint8_t reservedPadding[4] = {};
+        };
+        std::optional<Outside> writtenOutside;
+        // Each function the module emits that a nested type (a lambda or a local class) names, as
+        // Clang identifies it, read before the AST goes (§5.7, step 5).
+        struct Identity
+        {
+            std::string symbol;
+            std::string
+                nested; // member of a nested type: kind and variant, record and member sites
+            std::string enclosing; // the symbol of the function around that nested type
+            std::string
+                specialization; // variant, pattern site, template arguments with nested types
+        };
+        std::vector<Identity> identities;
+        std::unique_ptr<llvm::LLVMContext> context;
+        std::unique_ptr<llvm::Module> module;
+        std::vector<Fact> facts;                   // R and K, in the order of the traversal
+        std::set<std::string> instantiations;      // the symbols of those around a fact
+        std::vector<Entity> entities;              // indexed like the targets
+        const_suggestion::MacroDefinitions macros; // read only when the compilation plans
+    };
+
+    // The item of an R value that starts with `prefix`, without it; "" when it has none.
+    std::string itemOf(const std::vector<std::string>& value, std::string_view prefix);
+
+    // The pairs established between a unit's initial and modified compilations for the entity
+    // at `entity` of `before` and the one of `after` (§5.7). `missing` receives the first reason
+    // a correspondence could not be established.
+    std::vector<SymbolPair> correspond(const UnitFacts& before, std::size_t entity,
+                                       const UnitFacts& after, std::string& missing);
+
+    // §5.10: the verdict of the collisions that the units' compilations after the rewrite found,
+    // once none of the units refutes: `definingFile` names the defining unit, `function` the
+    // entity as the diagnostic shows it.
+    Judgement judgeCollisions(const std::vector<const UnitFacts*>& units, std::size_t entity,
+                              const std::string& definingFile, const std::string& function);
+
+    // Compiles a unit and inspects it for `targets`. After the rewrite, `rewritten` remaps the
+    // files that the plan `rewrittenBy` rewrites to their texts.
+    UnitFacts inspect(const UnitCommand& command, const SuggestionPlan* rewrittenBy,
+                      const std::map<std::string, std::string>& rewritten,
+                      const std::vector<Target>& targets, std::string_view step, bool timing);
+
+    // The text of each file that `plan` rewrites, its edits applied. `failure` names a file that
+    // cannot be read, or that has become too short for an edit, so changed after the plan was
+    // made; the result is then incomplete and must not be judged. A file that changed and is long
+    // enough is not detected.
+    std::map<std::string, std::string> rewrite(const SuggestionPlan& plan, std::string& failure);
+
+    // The files a unit reads and its identifiers, from its preprocessing.
+    UnitScan scan(const UnitCommand& command, bool timing);
+} // namespace ctrace::stack::analysis::const_suggestion
