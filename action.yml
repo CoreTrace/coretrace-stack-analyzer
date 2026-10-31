@@ -100,35 +100,15 @@ runs:
           exit 1
         fi
 
-        case "${CODENAME}" in
-          jammy|noble)
-            case "${LLVM_VERSION}" in
-              19|20|21|22|23)
-                ;;
-              *)
-                echo "::error::Ubuntu 22.04 (jammy) and 24.04 (noble) support versioned apt.llvm.org packages for LLVM 19 through 23. Choose one of those versions."
-                exit 1
-                ;;
-            esac
-            ;;
-          resolute)
-            case "${LLVM_VERSION}" in
-              21|22|23)
-                ;;
-              *)
-                echo "::error::Ubuntu 26.04 (resolute) provides versioned LLVM packages 21, 22, and 23 from apt.llvm.org. Use ubuntu-22.04 or ubuntu-24.04 for LLVM 20, or set llvm-version to 21, 22, or 23."
-                exit 1
-                ;;
-            esac
-            ;;
-          *)
-            echo "::error::Unsupported Ubuntu release '${CODENAME}'. Supported runner images are ubuntu-22.04 (jammy) and ubuntu-24.04 (noble) with LLVM 19-23, and ubuntu-26.04 (resolute) with LLVM 21-23."
-            exit 1
-            ;;
-        esac
-
         sudo apt-get update
         sudo apt-get install -y --no-install-recommends ca-certificates curl gnupg
+        # apt.llvm.org publishes a different set of LLVM branches for each Ubuntu release: ask it.
+        release_url="https://apt.llvm.org/${CODENAME}/dists/llvm-toolchain-${CODENAME}-${LLVM_VERSION}/Release"
+        status=$(curl --silent --head --location --output /dev/null --write-out '%{http_code}' "${release_url}") || status="unreachable"
+        if [[ "${status}" != 200 ]]; then
+          echo "::error::Cannot find LLVM ${LLVM_VERSION} packages for '${CODENAME}' at ${release_url} (status: ${status})."
+          exit 1
+        fi
         sudo install -d -m 0755 /etc/apt/keyrings
         curl --fail --silent --show-error --location https://apt.llvm.org/llvm-snapshot.gpg.key |
           sudo gpg --dearmor --batch --yes --output /etc/apt/keyrings/llvm.gpg
