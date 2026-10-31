@@ -493,13 +493,16 @@ namespace ctrace::stack::analysis
                 }
             }
             // A rewrite that does not compile, and adds no error to tell why: it is not shown to be
-            // wrong (#239 review, M6).
+            // wrong (#239 review, M6). The reason names its first error, not an earlier warning.
             if (!after.module)
             {
+                const auto error =
+                    std::find_if(after.reported.begin(), after.reported.end(),
+                                 [](const Diagnostic& diagnostic) { return diagnostic.error; });
                 return indeterminate(
                     "the rewritten code does not compile, and no error that the rewrite adds "
                     "explains it" +
-                    (after.firstDiagnostic.empty() ? "" : ": " + after.firstDiagnostic));
+                    (error == after.reported.end() ? "" : ": " + error->text));
             }
             // Another entity's declaration that the rewrite merges into the entity: a declaration
             // it has after the rewrite only (ruling 3).
