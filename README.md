@@ -64,6 +64,8 @@ GitHub Actions consumer example is available at:
 
 If you publish tags for this repository, other projects can consume it directly:
 
+**Supported Ubuntu runners:** Ubuntu 22.04 (`jammy`) and 24.04 (`noble`) support versioned LLVM packages 19–23. Ubuntu 26.04 (`resolute`) supports versions 21–23; set `llvm-version` to one of those versions. Unsupported runner and LLVM combinations fail before package installation with a diagnostic.
+
 ```yaml
 name: Stack Analysis
 
