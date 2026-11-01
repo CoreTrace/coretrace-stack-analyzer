@@ -939,7 +939,20 @@ namespace ctrace::stack::analysis
                          plan.entity.operatorName ? llvm::StringRef("operator")
                                                   : llvm::StringRef(plan.entity.name))) != 0);
                 if (!sees)
+                {
+                    // The scan does not read a module that the unit imports: the unit may see
+                    // the function there, unless only the defining file can declare it.
+                    if (seen.importsModule &&
+                        (plan.declarableElsewhere ||
+                         std::any_of(rewrittenFiles.begin(), rewrittenFiles.end(),
+                                     [&](const std::string& path) { return path != definingFile; })))
+                    {
+                        cannotCheck(key, &other,
+                                    unit.filename + " imports a module, whose declarations the "
+                                                    "check does not see");
+                    }
                     continue;
+                }
                 std::vector<std::string> otherAccepted;
                 Judgement judgement =
                     checkUnit(other, originalOf(other, key, targets, originals, timing), i, others,

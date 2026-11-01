@@ -695,7 +695,12 @@ The check runs these steps:
    are and with the rewrite, which can cost far more than for a function named by an identifier,
    and any of them that Clang cannot compile as it is leaves the suggestion not checked. A function
    with internal linkage (`static`, anonymous namespace) and a function of the same name in another
-   file are two functions, whichever of them has internal linkage.
+   file are two functions, whichever of them has internal linkage. Preprocessing does not read a
+   module that a file imports: a Clang header module, a C++20 header unit or named module, the
+   interface that a module implementation unit imports included. A file that imports one, and does
+   not see the change otherwise, leaves the suggestion not checked, unless another file refutes it.
+   This does not apply when the rewrite changes only the defining file and the function is not a
+   free function with external linkage: no other file can declare it then.
 3. The judgement, in each file, in this order:
    - a file that cannot be preprocessed, or does not compile as it is, cannot be checked, nor a file
      whose compilation with the rewrite stops at a fatal error: not checked;

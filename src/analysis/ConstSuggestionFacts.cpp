@@ -39,6 +39,7 @@
 #include <clang/Frontend/FrontendActions.h>
 #include <clang/Frontend/MultiplexConsumer.h>
 #include <clang/Frontend/Utils.h>
+#include <clang/Lex/PPCallbacks.h>
 #include <clang/Lex/Preprocessor.h>
 #include <clang/Lex/PreprocessorOptions.h>
 #include <llvm/ADT/StringExtras.h>
@@ -1413,36 +1414,59 @@ namespace ctrace::stack::analysis
             UnitFacts& out_;
         };
 
+        // An import declaration (`import M;`, `#pragma clang module import`), which gives no
+        // token of its own when it names a C++20 module.
+        class ImportRecorder : public clang::PPCallbacks
+        {
+          public:
+            explicit ImportRecorder(bool& imports) : imports_(imports) {}
+
+            void moduleImport(clang::SourceLocation, clang::ModuleIdPath,
+                              const clang::Module*) override
+            {
+                imports_ = true;
+            }
+
+          private:
+            bool& imports_;
+        };
+
         // Preprocesses a unit and records every identifier, and the keyword `operator` that an
         // operator's name begins with, after macro expansion. System headers are read too: a
-        // declaration that one of them makes is the unit's own.
+        // declaration that one of them makes is the unit's own. A module that the unit imports
+        // is not read: the import is recorded, from its token (an #include that becomes an
+        // import, a header unit), from its declaration, or from the unit's own module
+        // declaration when the unit implements a module, whose interface it imports.
         class ScanAction : public clang::PreprocessorFrontendAction
         {
           public:
-            explicit ScanAction(std::unordered_set<std::uint64_t>& identifiers)
-                : identifiers_(identifiers)
-            {
-            }
+            explicit ScanAction(UnitScan& out) : out_(out) {}
 
           protected:
             void ExecuteAction() override
             {
                 clang::Preprocessor& preprocessor = getCompilerInstance().getPreprocessor();
+                preprocessor.addPPCallbacks(std::make_unique<ImportRecorder>(out_.importsModule));
                 preprocessor.EnterMainSourceFile();
                 clang::Token token;
                 do
                 {
                     preprocessor.Lex(token);
                     if (token.is(clang::tok::identifier))
-                        identifiers_.insert(
+                        out_.identifiers.insert(
                             llvm::xxh3_64bits(token.getIdentifierInfo()->getName()));
                     else if (token.is(clang::tok::kw_operator))
-                        identifiers_.insert(llvm::xxh3_64bits(llvm::StringRef("operator")));
+                        out_.identifiers.insert(llvm::xxh3_64bits(llvm::StringRef("operator")));
+                    else if (token.isOneOf(clang::tok::annot_module_include,
+                                           clang::tok::annot_header_unit))
+                        out_.importsModule = true;
                 } while (token.isNot(clang::tok::eof));
+                if (preprocessor.isInImplementationUnit())
+                    out_.importsModule = true;
             }
 
           private:
-            std::unordered_set<std::uint64_t>& identifiers_;
+            UnitScan& out_;
         };
     } // namespace
 
@@ -1581,7 +1605,7 @@ namespace ctrace::stack::analysis
                 instance.setInvocation(std::move(invocation));
                 instance.createDiagnostics(*files, &ignore, false);
                 instance.createFileManager(files);
-                ScanAction action(out.identifiers);
+                ScanAction action(out);
                 instance.ExecuteAction(action);
                 if (!instance.hasSourceManager() || instance.getDiagnostics().hasErrorOccurred())
                     return;

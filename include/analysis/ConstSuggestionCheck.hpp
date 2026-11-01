@@ -31,12 +31,15 @@ namespace ctrace::stack::analysis
         std::uint32_t reservedLanguagePadding = 0;
     };
 
-    // What the preprocessing of one unit shows: the files it reads, and its identifiers (as
-    // 64-bit hashes: a collision only adds a recheck).
+    // What the preprocessing of one unit shows: the files it reads, its identifiers (as 64-bit
+    // hashes: a collision only adds a recheck), and whether it imports a module, which it does
+    // not read.
     struct UnitScan
     {
         std::set<std::string> files;
         std::unordered_set<std::uint64_t> identifiers;
+        bool importsModule = false;
+        std::uint8_t reservedPadding[7] = {};
     };
 
     // How the check compiles one unit.
