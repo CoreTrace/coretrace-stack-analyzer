@@ -4751,6 +4751,53 @@ def check_const_suggestion_module_import() -> bool:
     return good
 
 
+def check_const_suggestion_defining_file_imports_a_module() -> bool:
+    """
+    #239: a.cpp, alone in the compilation database, defines f and imports the Clang header module
+    Pre, whose header includes a.h and initializes an int (*)(int *) with f: the rewrite of f's
+    parameter breaks that initialization. a.cpp is compiled, so its compilation loads Pre, but the
+    check does not rebuild Pre with the rewritten a.h: Pre's declaration of f keeps its type, and
+    the suggestion stays not checked. The witness: without -fmodules, a.cpp reads pre.h as text, and
+    the rewrite is refuted at pre.h:2.
+    """
+    print("=== Testing a defining file that imports a module ===")
+    sysroot = []
+    if sys.platform == "darwin":
+        sdk = subprocess.run(["xcrun", "--show-sdk-path"], capture_output=True, text=True)
+        sysroot = ["-isysroot", sdk.stdout.strip()]
+    good = True
+    with tempfile.TemporaryDirectory(prefix="ct_const_suggestion_defining_module_") as tmp:
+        root = Path(tmp).resolve()
+        for directory, name, flags, expected in (
+            ("module", "a.cpp imports Pre, whose header uses f",
+             f"-std=c++17 -fmodules -fimplicit-module-maps -fmodules-cache-path={root}/module/cache",
+             "not checked, the rewritten declaration does not get the suggested type"),
+            ("textual", "witness, a.cpp reads pre.h as text", "-std=c++17",
+             f"removed, does not compile: {root}/textual/pre.h:2: "),
+        ):
+            case = root / directory
+            case.mkdir()
+            (case / "a.h").write_text("int f(int *p);\n")
+            (case / "pre.h").write_text(
+                '#include "a.h"\ninline int call(int *p) { int (*g)(int *) = f; return g(p); }\n'
+            )
+            (case / "module.modulemap").write_text('module Pre {\n  header "pre.h"\n  export *\n}\n')
+            (case / "a.cpp").write_text('#include "pre.h"\n#include "a.h"\nint f(int *p) { return *p; }\n')
+            (case / "compile_commands.json").write_text(json.dumps([
+                {"directory": str(case), "file": "a.cpp",
+                 "command": shlex.join(["clang++", *sysroot, *shlex.split(flags), "-c", "a.cpp"])}
+            ]))
+            run = _const_suggestion_run([
+                str(case / "a.cpp"), f"--compile-commands={case / 'compile_commands.json'}"
+            ])
+            trace = run[1] if run else []
+            ok = any(line.startswith(f"_Z1fPi parameter p: {expected}") for line in trace)
+            print(f"  {'✅' if ok else '❌'} {name}{'' if ok else f': {trace}'}")
+            good = good and ok
+    print()
+    return good
+
+
 def check_duplicate_if_cross_tu() -> bool:
     """
     #157: a function defined in another file is deterministic when every definition of it is, as
@@ -7735,6 +7782,7 @@ def main() -> int:
         check_const_suggestion_identifier_starting_with_operator,
         check_const_suggestion_declared_in_a_system_header,
         check_const_suggestion_module_import,
+        check_const_suggestion_defining_file_imports_a_module,
         check_duplicate_if_cross_tu,
         check_global_read_before_write_identity_across_files,
         check_size_minus_one_cross_tu,
