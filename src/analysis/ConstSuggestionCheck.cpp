@@ -945,7 +945,8 @@ namespace ctrace::stack::analysis
                     if (seen.importsModule &&
                         (plan.declarableElsewhere ||
                          std::any_of(rewrittenFiles.begin(), rewrittenFiles.end(),
-                                     [&](const std::string& path) { return path != definingFile; })))
+                                     [&](const std::string& path)
+                                     { return path != definingFile; })))
                     {
                         cannotCheck(key, &other,
                                     unit.filename + " imports a module, whose declarations the "

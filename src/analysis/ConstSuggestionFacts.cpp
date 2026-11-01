@@ -74,8 +74,11 @@ namespace ctrace::stack::analysis
         // Warnings that the C and C++ standards make constraint violations, or that a rewrite
         // turns on silently: the rewritten code must not add any.
         constexpr const char* kCheckedWarnings[] = {
-            "incompatible-pointer-types-discards-qualifiers", "incompatible-pointer-types",
-            "incompatible-function-pointer-types", "int-conversion", "overloaded-virtual",
+            "incompatible-pointer-types-discards-qualifiers",
+            "incompatible-pointer-types",
+            "incompatible-function-pointer-types",
+            "int-conversion",
+            "overloaded-virtual",
             "pointer-type-mismatch"};
 
         // Errors, and the checked warnings, by place and kind: their texts name types that the
