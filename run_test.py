@@ -4626,6 +4626,131 @@ def check_const_suggestion_declared_in_a_system_header() -> bool:
     return good
 
 
+def _llvm_clang() -> Optional[Path]:
+    """
+    The clang++ of the LLVM that the analyzer under test is built with, found through its build's
+    CMakeCache.txt: the analyzer's Clang reads the precompiled headers and header units it writes.
+    """
+    cache = RUN_CONFIG.analyzer.resolve().parent / "CMakeCache.txt"
+    found = re.search(r"^LLVM_DIR:\w+=(.+)$", cache.read_text(), re.MULTILINE) if cache.exists() else None
+    clang = Path(found.group(1)).resolve().parents[2] / "bin" / "clang++" if found else None
+    return clang if clang is not None and clang.exists() else None
+
+
+def check_const_suggestion_module_import() -> bool:
+    """
+    #239: a.cpp defines f. b.cpp, which only the compilation database lists, gets a declaration of
+    f and a use of it from pre.h, and never names f in its own text. The check tells whether b.cpp
+    sees f from its preprocessing, which does not read a module that b.cpp imports. When b.cpp
+    imports one, as a Clang header module (its #include of pre.h becomes an import), a C++20 header
+    unit, a C++20 named module, or the interface of the module whose implementation unit it is
+    (neither interface is built: preprocessing does not read it), the suggestion is not checked
+    for that import. The witness: b.cpp gets pre.h from a precompiled header, which preprocessing
+    replaces with pre.h itself, so b.cpp is judged, and the suggestion stays not checked for
+    b.cpp's declaration (D17). In every case, a.cpp's static s, which no other file can declare,
+    stays checked. Last, an import does not hide a refutation: c.cpp, listed after b.cpp, which
+    imports the header module, refutes the suggestion, and the trace shows b.cpp's import; b.cpp
+    refutes it too when it imports an unrelated module and includes a.cpp's rewritten header.
+    """
+    print("=== Testing a file of the compilation database that imports a module ===")
+    clang = _llvm_clang()
+    if clang is None:
+        print("  ❌ the clang++ of the analyzer's LLVM is needed (LLVM_DIR in its CMakeCache.txt)")
+        return False
+    sysroot = []
+    if sys.platform == "darwin":
+        sdk = subprocess.run(["xcrun", "--show-sdk-path"], capture_output=True, text=True)
+        sysroot = ["-isysroot", sdk.stdout.strip()]
+    main = "int main() { return g() - 1; }\n"
+    good = True
+    with tempfile.TemporaryDirectory(prefix="ct_const_suggestion_module_") as tmp:
+        root = Path(tmp).resolve()
+
+        def analyze(case: Path, b_text: str, b_flags: str, built: list[str], c_text: str = ""):
+            case.mkdir()
+            (case / "a.h").write_text("int f(int *p);\n")
+            (case / "a.cpp").write_text(
+                '#include "a.h"\nint f(int *p) { return *p; }\n'
+                "static int s(int *p) { return *p; }\nint use_s() { int x = 1; return s(&x); }\n"
+            )
+            (case / "pre.h").write_text("int f(int *p);\ninline int g() { int x = 1; return f(&x); }\n")
+            (case / "other.h").write_text("int other();\n")
+            (case / "module.modulemap").write_text(
+                'module Pre {\n  header "pre.h"\n  export *\n}\n'
+                'module Other {\n  header "other.h"\n  export *\n}\n'
+            )
+            (case / "b.cpp").write_text(b_text)
+            if built:
+                result = subprocess.run([str(clang), *sysroot, *built], cwd=case,
+                                        capture_output=True, text=True)
+                if result.returncode != 0:
+                    print(result.stderr)
+                    return None
+            units = [("a.cpp", "-std=c++17"), ("b.cpp", b_flags)]
+            if c_text:
+                (case / "c.cpp").write_text(c_text)
+                units.append(("c.cpp", "-std=c++17"))
+            (case / "compile_commands.json").write_text(json.dumps([
+                {"directory": str(case), "file": name,
+                 "command": shlex.join(["clang++", *sysroot, *shlex.split(flags), "-c", name])}
+                for name, flags in units
+            ]))
+            return _const_suggestion_run([
+                str(case / "a.cpp"), f"--compile-commands={case / 'compile_commands.json'}"
+            ])
+
+        def static_checked(run) -> bool:
+            texts = run[0].get("_ZL1sPi", []) if run else []
+            return len(texts) == 1 and "checked in every file of the compilation database" in texts[0]
+
+        def modules(case: str) -> str:
+            return f"-std=c++17 -fmodules -fimplicit-module-maps -fmodules-cache-path={root}/{case}/cache"
+
+        for directory, name, b_text, b_flags, built, reason in (
+            ("header", "Clang header module", '#include "pre.h"\n' + main, modules("header"), [],
+             "b.cpp imports a module"),
+            ("unit", "C++20 header unit", 'import "pre.h";\n' + main,
+             f"-std=c++20 -fmodule-file={root}/unit/pre.pcm",
+             ["-std=c++20", "-fmodule-header=user", "-xc++-header", "pre.h", "-o", "pre.pcm"],
+             "b.cpp imports a module"),
+            ("named", "C++20 named module", "import M;\n" + main, "-std=c++20", [],
+             "b.cpp imports a module"),
+            ("implementation", "C++20 module implementation unit",
+             "module M;\nint h() { return g() - 1; }\n", "-std=c++20", [], "b.cpp imports a module"),
+            ("pch", "precompiled header, the witness", main,
+             f"-std=c++17 -include-pch {root}/pch/pre.h.pch",
+             ["-std=c++17", "-xc++-header", "pre.h", "-o", "pre.h.pch"], "b.cpp declares f(int*)"),
+        ):
+            run = analyze(root / directory, b_text, b_flags, built)
+            texts = run[0].get("_Z1fPi", []) if run else []
+            ok = (len(texts) == 1 and "not checked with Clang:" in texts[0] and reason in texts[0]
+                  and static_checked(run))
+            print(f"  {'✅' if ok else '❌'} {name}{'' if ok else f': {run[0] if run else None}'}")
+            good = good and ok
+
+        for directory, name, b_text, c_text, refuter, importer in (
+            ("refuted", "refuted by c.cpp, b.cpp importing the module", '#include "pre.h"\n' + main,
+             '#include "a.h"\nint (*fp)(int *) = f;\n', "c.cpp:2", True),
+            ("importer", "refuted by b.cpp, which imports a module and reads the rewritten header",
+             '#include "other.h"\n#include "a.h"\nint (*fp)(int *) = f;\n', "", "b.cpp:3", False),
+        ):
+            case = root / directory
+            run = analyze(case, b_text, modules(directory), [], c_text)
+            messages, trace = (run[0], run[1]) if run else ({}, [])
+            ok = (
+                "_Z1fPi" not in messages and static_checked(run)
+                and any(line.startswith(f"_Z1fPi parameter p: removed, does not compile: {case}/{refuter}:")
+                        for line in trace)
+                and (not importer or any(
+                    re.match(rf"_Z1fPi parameter p, unit {re.escape(str(case))}/b\.cpp \[[0-9a-f]+\]: "
+                             rf"indeterminate: .*b\.cpp imports a module", line) for line in trace))
+            )
+            print(f"  {'✅' if ok else '❌'} {name}{'' if ok else f': {messages}, trace: {trace}'}")
+            good = good and ok
+    print()
+    return good
+
+
 def check_duplicate_if_cross_tu() -> bool:
     """
     #157: a function defined in another file is deterministic when every definition of it is, as
@@ -7609,6 +7734,7 @@ def main() -> int:
         check_const_suggestion_operator_declared_elsewhere,
         check_const_suggestion_identifier_starting_with_operator,
         check_const_suggestion_declared_in_a_system_header,
+        check_const_suggestion_module_import,
         check_duplicate_if_cross_tu,
         check_global_read_before_write_identity_across_files,
         check_size_minus_one_cross_tu,
