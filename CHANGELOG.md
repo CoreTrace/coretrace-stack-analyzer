@@ -4,6 +4,8 @@ Notable changes are grouped by release. See [all releases](https://github.com/Co
 
 ## Unreleased
 
+- `NOTICE` names this project instead of coretrace-concurrency-analyzer, dates its copyright
+  from 2025 and gives the repository's URL.
 - Building requires LLVM 20. CMake rejects an older LLVM when it configures the build, where
   LLVM 19 passed that check and then failed to compile. On macOS, `scripts/build.sh` looks for
   Homebrew `llvm@20` before `llvm`, a later version, and no longer for `llvm@19` or `llvm@18`.
