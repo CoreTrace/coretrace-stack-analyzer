@@ -219,7 +219,7 @@ detect_from_brew() {
 
   local formula
   local prefix
-  for formula in llvm llvm@20 llvm@19 llvm@18; do
+  for formula in llvm llvm@20; do
     prefix="$(brew --prefix "$formula" 2>/dev/null || true)"
     if [ -n "$prefix" ] && [ -d "$prefix" ]; then
       if [ -z "$LLVM_DIR" ] && [ -d "$prefix/lib/cmake/llvm" ]; then
