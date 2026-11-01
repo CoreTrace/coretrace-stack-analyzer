@@ -3900,6 +3900,56 @@ def check_const_suggestion_werror_on_a_tracked_group() -> bool:
     return good
 
 
+def check_const_suggestion_conditional_between_callbacks() -> bool:
+    """
+    #239: in C, a conditional between pointers to incompatible types violates a constraint
+    (C11 6.5.15p3), which Clang reports only as the warning -Wpointer-type-mismatch. use passes f1
+    or f2 through `?:`: a rewrite of one of them makes their types differ, so each suggestion on f1
+    and f2 is removed for that warning. The witness: pick chooses between a pointer to const and a
+    pointer of the same type, which C allows: both suggestions on pick are checked. Both hold with
+    the project's -Werror and the group disabled (D6): the check keeps the group a warning in both
+    compilations, so the file, whose mix already mixes two incompatible pointers, compiles as it
+    is, and each removal names the warning, not an error.
+    """
+    print("=== Testing a rewrite that makes the two callbacks of a conditional differ ===")
+    good = True
+    with tempfile.TemporaryDirectory(prefix="ct_const_suggestion_conditional_") as tmp:
+        path = Path(tmp).resolve() / "callbacks.c"
+        path.write_text(
+            "typedef struct blk { int x; } blk;\n"
+            "int api(int (*cb)(blk *, void *), void *data);\n"
+            "static int f1(blk *b, void *data) { (void)data; return b->x; }\n"
+            "static int f2(blk *b, void *data) { (void)b; (void)data; return 0; }\n"
+            "int use(int c) { return api(c ? f1 : f2, 0); }\n"
+            "int pick(int c, blk *b, blk *other) { const blk *q = c ? b : other; return q->x; }\n"
+            "int gi;\nlong gl;\n"
+            "void *mix(int c) { return c ? &gi : &gl; }\n"
+        )
+        for name, extra in (
+            ("default warnings", []),
+            ("-Werror, the group disabled",
+             ["--compile-arg=-Werror", "--compile-arg=-Wno-pointer-type-mismatch"]),
+        ):
+            run = _const_suggestion_run([str(path), *extra])
+            messages, trace = (run[0], run[1]) if run else ({}, [])
+            removed = all(
+                any(line.startswith(f"{function} parameter {parameter}: removed, gains a checked "
+                                    f"warning: {path}:5: pointer type mismatch") for line in trace)
+                for function in ("f1", "f2") for parameter in ("b", "data")
+            )
+            picked = messages.get("pick", [])
+            ok = (
+                removed and "f1" not in messages and "f2" not in messages
+                and len(picked) == 2
+                and all("checked in the analyzed files only" in t for t in picked)
+            )
+            print(f"  {'✅' if ok else '❌'} {name}"
+                  f"{'' if ok else f': {messages}, trace: {trace}'}")
+            good = good and ok
+    print()
+    return good
+
+
 def check_const_suggestion_extern_c_user() -> bool:
     """
     #217 (D8): a C function that a C++ file declares through a shared header (extern "C"). Each
@@ -7543,6 +7593,7 @@ def main() -> int:
         check_const_suggestion_cast_in_the_defining_file,
         check_const_suggestion_trace,
         check_const_suggestion_werror_on_a_tracked_group,
+        check_const_suggestion_conditional_between_callbacks,
         check_const_suggestion_extern_c_user,
         check_const_suggestion_top_level_qualifier,
         check_const_suggestion_deduced_type_error,
