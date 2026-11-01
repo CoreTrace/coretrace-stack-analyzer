@@ -7,7 +7,7 @@ include(CheckLLVMVersion OPTIONAL)
 include(CheckCXXCompilerFlag)
 
 if(COMMAND check_llvm_version)
-    set(LLVM_MIN_REQUIRED_VERSION "19" CACHE STRING "Minimum required LLVM version")
+    set(LLVM_MIN_REQUIRED_VERSION "20" CACHE STRING "Minimum required LLVM version")
     check_llvm_version(${LLVM_MIN_REQUIRED_VERSION})
 else()
     message(WARNING "check_llvm_version() not available, skipping LLVM version check")
