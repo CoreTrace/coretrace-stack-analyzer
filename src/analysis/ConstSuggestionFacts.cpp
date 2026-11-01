@@ -74,7 +74,8 @@ namespace ctrace::stack::analysis
         // turns on silently: the rewritten code must not add any.
         constexpr const char* kCheckedWarnings[] = {
             "incompatible-pointer-types-discards-qualifiers", "incompatible-pointer-types",
-            "incompatible-function-pointer-types", "int-conversion", "overloaded-virtual"};
+            "incompatible-function-pointer-types", "int-conversion", "overloaded-virtual",
+            "pointer-type-mismatch"};
 
         // Errors, and the checked warnings, by place and kind: their texts name types that the
         // rewrite changes.

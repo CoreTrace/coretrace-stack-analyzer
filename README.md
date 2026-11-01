@@ -703,9 +703,11 @@ The check runs these steps:
      tried, or another declaration of a rewritten file whose type changes, leaves it not checked;
    - an error, or one of these warnings, that the rewrite adds: refuted. The tracked warnings are
      `incompatible-pointer-types-discards-qualifiers`, `incompatible-pointer-types`,
-     `incompatible-function-pointer-types`, `int-conversion` and `overloaded-virtual`. Whatever the
-     compile command says, the check enables them and keeps the level Clang gives them by default:
-     a warning stays a warning under `-Werror`, and an error stays an error;
+     `incompatible-function-pointer-types`, `int-conversion`, `overloaded-virtual` and
+     `pointer-type-mismatch` (in C, a conditional between two callbacks that the rewrite of one
+     makes differ). Whatever the compile command says, the check enables them and keeps the level
+     Clang gives them by default: a warning stays a warning under `-Werror`, and an error stays an
+     error;
    - a compilation with the rewrite that fails without an error that the rewrite adds: not checked;
    - a call or a reference that targets another function, a method of that name that overrides
      other methods, an `if constexpr` condition or a `_Generic` selection that changes: refuted.
