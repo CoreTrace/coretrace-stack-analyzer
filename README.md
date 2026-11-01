@@ -261,6 +261,7 @@ A model path given to one of these three options that is not a readable file sto
 --no-resource-cross-tu disables cross-TU resource summaries
 --resource-summary-cache-dir=<path> sets cache directory for cross-TU resource summaries (default: .cache/resource-lifetime)
 --resource-summary-cache-memory-only keeps cross-TU summary cache in memory only (process-local, no files)
+--experimental-const-suggestion-check checks each const parameter suggestion with Clang before reporting it (experimental, off by default; see "Experimental: const parameter suggestions checked with Clang")
 --compile-ir-cache-dir=<path> enables dependency-aware LLVM IR compile cache for unchanged source files
 --compile-ir-format=bc|ll selects source compilation IR format (`bc` default, `ll` for textual LLVM IR)
 --timing prints compile/analysis timings to stderr, including aggregated hotspot ranking
@@ -352,6 +353,7 @@ Supported keys:
 - `uninitialized-cross-tu`
 - `resource-summary-cache-dir`
 - `resource-summary-cache-memory-only`
+- `experimental-const-suggestion-check`
 - `compile-ir-cache-dir`
 - `compile-ir-format` (`bc` or `ll`)
 
@@ -637,6 +639,178 @@ Example run:
 
 For test files, `run_test.py` also supports per-file model selection with:
 `// resource-model: <path>`.
+
+### Experimental: const parameter suggestions checked with Clang
+
+`ConstParameterNotModified` finds, in the LLVM IR, the pointer and reference parameters through
+which nothing is written. The IR does not show every constraint that C and C++ put on a parameter:
+the suggested `const` type may not compile (a callback of the old type, or `&p` passed as `int**`
+in C++), may only drop a qualifier with a warning (the same `&p` in C), or may compile and select
+other code (an overload, an override, `sizeof`, `if constexpr`, `_Generic`).
+
+Without `--experimental-const-suggestion-check`, the default, nothing beyond the IR analysis is
+checked: every suggestion is reported as the IR analysis finds it, without a check line, including
+those whose suggested type does not compile, drops a qualifier, or changes the generated code.
+
+With `--experimental-const-suggestion-check` (or `experimental-const-suggestion-check=true` in a
+config file), each suggestion is checked with Clang before it is reported. The check is
+experimental:
+- it judges the rewrite from what Clang compiles before and after it: its errors and warnings,
+  what calls and references target, what methods override, constant conditions, and the generated
+  code. A difference that the facts do not explain keeps the suggestion as not checked. A change
+  that they show removes it, even when the program would behave the same;
+- it compiles each file that sees the change once as it is, for all the suggestions of an analyzed
+  file, and once more for each suggestion. On this repository's self-analysis, on 4 CPUs, it adds
+  about 25 to 30% to the wall time.
+
+The option is a trade-off, not a fix: with it, a valid suggestion can still be removed or kept as
+not checked; without it, suggestions whose type does not compile, drops a qualifier, or changes the
+generated code are reported.
+
+Each suggestion gets one of three verdicts, which step 3 below decides in its order:
+- verified: the suggestion is kept, with a `checked ...` line. In every file that sees the change,
+  the rewrite compiles, adds none of the tracked warnings, changes none of the facts below, and the
+  generated code matches;
+- refuted: the suggestion is removed. In one of these files, the rewrite adds an error or a tracked
+  warning, or changes what a call or a reference targets, what a method of that name overrides, an
+  `if constexpr` condition, or the association that a `_Generic` selection chooses;
+- indeterminate: the suggestion is kept, with `not checked with Clang: <reason>`. It then rests on
+  the IR analysis alone: it is not shown to be valid.
+
+The check runs these steps:
+
+1. The plan. The function is found in the defining file's compilation by its symbol. Every
+   declaration of it that this file sees, in the file and its headers, is rewritten in memory with
+   the type the check tries: a pointer to const (`const T *p`; `T *const p` becomes
+   `const T *const p`), or a reference to const (`const T &r`, for an rvalue reference `T &&r` too):
+   - a type written in a macro argument is rewritten where it is written;
+   - a type written by a macro that writes only the parameter gets `const` before the invocation;
+   - a typedef of a plain pointer is replaced by the type it names, made const, with the
+     qualifiers written beside it; one written by a macro leaves the suggestion not checked.
+
+   A macro definition is never rewritten, nor a macro argument that writes another parameter's type
+   too: the suggestion is then not checked.
+2. The files. Every file that sees the change is compiled as it is and with the rewrite, with its
+   own compile command, at `-O0`. The files considered are the analyzed ones and, with
+   `--compile-commands`, every C or C++ file of the compilation database, analyzed or not. A file
+   sees the change when it reads a rewritten file, when its analyzed code references the function,
+   or, for a function outside any class with external linkage, when it names the function after
+   preprocessing, in its own text or in any header it includes, system headers included. An
+   operator's name is not an identifier: for an operator, a file sees the change when it writes the
+   keyword `operator`, which most C++ files do through the standard headers they include. A
+   suggestion on such an operator then compiles most C++ files of the compilation database as they
+   are and with the rewrite, which can cost far more than for a function named by an identifier,
+   and any of them that Clang cannot compile as it is leaves the suggestion not checked. A function
+   with internal linkage (`static`, anonymous namespace) and a function of the same name in another
+   file are two functions, whichever of them has internal linkage. Preprocessing does not read a
+   module that a file imports: a Clang header module, a C++20 header unit or named module, the
+   interface that a module implementation unit imports included. A file that imports one, and does
+   not see the change otherwise, leaves the suggestion not checked, unless another file refutes it.
+   This does not apply when the rewrite changes only the defining file and the function is not a
+   free function with external linkage: no other file can declare it then.
+3. The judgement, in each file, in this order:
+   - a file that cannot be preprocessed, or does not compile as it is, cannot be checked, nor a file
+     whose compilation with the rewrite stops at a fatal error: not checked;
+   - the rewrite changes only what it plans: a rewritten declaration that does not get the type
+     tried, or another declaration of a rewritten file whose type changes, leaves it not checked;
+   - an error, or one of these warnings, that the rewrite adds: refuted. The tracked warnings are
+     `incompatible-pointer-types-discards-qualifiers`, `incompatible-pointer-types`,
+     `incompatible-function-pointer-types`, `int-conversion`, `overloaded-virtual` and
+     `pointer-type-mismatch` (in C, a conditional between two callbacks that the rewrite of one
+     makes differ). Whatever the compile command says, the check enables them and keeps the level
+     Clang gives them by default: a warning stays a warning under `-Werror`, and an error stays an
+     error;
+   - a compilation with the rewrite that fails without an error that the rewrite adds: not checked;
+   - a call or a reference that targets another function, a method of that name that overrides
+     other methods, an `if constexpr` condition or a `_Generic` selection that changes: refuted.
+     Facts that cannot be compared one to one leave the file not checked;
+   - a file that declares the function itself, outside the rewritten files, with its current type,
+     or that converts the function's address with an explicit cast, other than to `void`: not
+     checked;
+   - the symbols that the rewrite renames are paired from these facts, and from what Clang
+     identifies of the lambdas and local classes nested in paired functions: their members, the
+     specializations whose template arguments or type hold them, and the implicit members of the
+     classes that hold them. Every other part of such an identity must match. One left without a
+     pair, or two that would pair with the same symbol, leaves the file not checked;
+   - the generated code is compared through those pairs. It matches: verified, unless a symbol
+     that the rewrite renames, other than the function's own and those of the constructors that
+     inherit it, is only declared in the file, before and after the rewrite: nothing shows that
+     another file defines the renamed one (`h<int *>` becoming `h<const int *>`), so not checked.
+     A difference that none of these facts explains: not checked.
+
+   Once every file is judged, a symbol that the rewrite gives the function and that another file
+   defines, or another declaration that the rewrite merges into the function, could collide if the
+   files are linked together: not checked, and the reason states that assumption. The suggestion is
+   refuted if one file refutes it, otherwise not checked if one file or one collision leaves it
+   so, otherwise verified. Only a refutation stops the check of the other files.
+
+Generated code is compared function by function and global by global, after these
+normalizations:
+- debug information is not generated;
+- two kinds of metadata that do not change what the program does are removed: the source position
+  of inline assembly (`!srcloc`), used only to report errors, and annotations (`!annotation`),
+  which the LLVM Language Reference defines as without effect on the program;
+- alias scopes and their domains lose their descriptive names, which identify nothing: each one
+  stays a distinct scope;
+- every other metadata, module flags included, is compared by contents, not by number;
+- attribute groups are compared by contents, not by numbers;
+- values are numbered, not named, and comments of the printed IR are ignored;
+- the symbols that the rewrite renames are paired, as step 3 establishes them: the function's own
+  symbols, the constructors that inherit it, what is named inside it (lambdas, local classes,
+  static locals), and the specializations that its calls instantiate. A renamed symbol without a
+  pair is a difference.
+
+Two differences that a program can observe are accepted, each only once verified, and the message
+lists them:
+- the name that `typeid` gives a type named after the function: it holds the function's mangled
+  name;
+- a string constant whose only change is the signature that `__PRETTY_FUNCTION__` prints.
+
+The check covers only:
+- the suggestions it checks. A suggestion marked `not checked with Clang: ...` rests on the IR
+  analysis alone, and its reason says why;
+- the files that see the change, with their compile commands, and the code those configurations
+  compile. Other configurations, other targets, code that the preprocessor excludes, and files
+  outside both the analysis and the compilation database are not checked.
+
+Its limits:
+- it does not know which files are linked together, and does not decide the one-definition rule: a
+  possible collision between files keeps the suggestion as not checked;
+- it checks the one configuration that the analysis loads for each file: a file that the
+  compilation database lists twice is checked with one of its commands;
+- a rewrite that changes the program's behavior in a way that calls, overrides and constant
+  conditions do not show is kept as not checked, not removed: `sizeof(__PRETTY_FUNCTION__)`, for
+  example, changes with the rewrite;
+- a file that sees the changes of two analyzed files is compiled as it is once for each, and a hit
+  of the IR cache gives no syntax tree: the check always compiles from the sources.
+
+A CI job that enables the option checks the projects and configurations it analyzes, and nothing
+else: an analysis run without the option, by a user or by another job, is not checked.
+
+In this repository, `ci.yml` runs the whole `run_test.py` suite on Linux and macOS. It checks the
+default behavior, and the check's tests with the option: the const-suggestion fixtures declare it
+(`// analyzer-arg:`), and the checks pass it. These tests expect suggestions kept once checked,
+suggestions removed, and suggestions kept as not checked, and analyze the same inputs without the
+option too. They cover these fixtures, with their compile commands and the LLVM 20 of each runner;
+they do not check this repository's sources, other projects or other configurations.
+
+The message says how the suggestion was checked:
+- `checked in the analyzed files only, with their compile commands: ...`, without a compilation
+  database;
+- `checked in every file of the compilation database that sees the change, with its compile
+  command: ...`, with one;
+- `difference: ...`, for each accepted difference;
+- `ABI: ...`, for a C++ function with external linkage: its symbol changes, so code compiled
+  separately must use the updated declaration and be recompiled;
+- `not checked with Clang: ...`, when the check could not run or could not conclude: for example on
+  an LLVM IR input (`.ll`, `.bc`), which has no source, for a file of the compilation database that
+  cannot be preprocessed, or for a possible collision between files. The suggestion then rests on
+  the IR analysis alone.
+
+With `--verbose`, the trace gives each verdict's grounds, on `[const-suggestion]` lines: the
+suggestion (its rule, its function, the parameter's position among those the source declares), the
+type it tries, where the rewrite writes it, each file judged with its configuration and its
+verdict, then the verdict and its reason.
 
 ### Example
 
