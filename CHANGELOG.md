@@ -4,6 +4,19 @@ Notable changes are grouped by release. See [all releases](https://github.com/Co
 
 ## Unreleased
 
+- Building requires LLVM 20. CMake rejects an older LLVM when it configures the build, where
+  LLVM 19 passed that check and then failed to compile. On macOS, `scripts/build.sh` looks for
+  Homebrew `llvm@20` before `llvm`, a later version, and no longer for `llvm@19` or `llvm@18`.
+- The GitHub Action accepts `llvm-version: 20` only. On a runner for which apt.llvm.org
+  publishes no LLVM 20 packages, such as `ubuntu-26.04`, it stops with an error before
+  installing LLVM (#255).
+- StackBufferOverflow and MultipleStoresToStackBuffer resolve each pointer variable to its
+  stack array once per function, by strongly connected components: pointer variables
+  assigned from one another no longer make the analysis walk every path between them,
+  which never finished on zlib's `crc32.c` and cppcheck's `simplecpp.cpp` (#215). Pointers
+  assigned from one another in a cycle that reaches two different arrays now resolve to no
+  array, as any pointer with several possible arrays does, where each used to be reported
+  against its own array.
 - Added an authors file and linked the repository documents from the README.
 - SARIF rules carry a title (`shortDescription`) and a description (`fullDescription`) instead
   of their id, and `describeRule` (`RuleCatalog.hpp`) gives them to programs linking the analyzer.

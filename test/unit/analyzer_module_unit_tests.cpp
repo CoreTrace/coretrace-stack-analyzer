@@ -46,6 +46,7 @@
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/DebugInfoMetadata.h>
 #include <llvm/IR/Function.h>
+#include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/InstIterator.h>
 #include <llvm/IR/Instruction.h>
 #include <llvm/IR/Instructions.h>
@@ -2779,6 +2780,131 @@ namespace
         }
         return report.failures == 0;
     }
+    /// A loop whose two pointer PHIs take each other's value, as mem2reg leaves optimized code:
+    /// a cycle through PHIs. Both analyses that use the resolver must find the array through it.
+    bool testStackBufferPhiCycle(const std::filesystem::path& repoRoot, TestReport& report)
+    {
+        using namespace ctrace::stack::analysis;
+        const ctrace::stack::AnalysisConfig config;
+        LoadedModule loaded;
+        std::string loadError;
+        if (!loadModuleFromSource(repoRoot / "test/unit/alias_phi_cycle_input.ll", config, loaded,
+                                  loadError))
+        {
+            report.expect(false,
+                          "stack-buffer PHI cycle setup: failed to load module: " + loadError);
+            return false;
+        }
+        const auto all = [](const llvm::Function&) { return true; };
+
+        std::map<std::uint64_t, std::string> pathByIndex;
+        for (const StackBufferOverflowIssue& issue :
+             analyzeStackBufferOverflows(*loaded.module, all, config))
+        {
+            if (issue.indexIsConstant && issue.varName == "buf")
+                pathByIndex[issue.indexOrUpperBound] = issue.aliasPath;
+        }
+        report.expect(pathByIndex.size() == 2 && pathByIndex[20] == "buf -> start -> p" &&
+                          pathByIndex[21] == "buf -> start -> q",
+                      "StackBufferOverflow: each PHI of a cycle resolves to the array through "
+                      "its decay");
+
+        const std::vector<MultipleStoreIssue> stores =
+            analyzeMultipleStores(*loaded.module, all, config);
+        report.expect(stores.size() == 1 && stores[0].varName == "buf" &&
+                          stores[0].storeCount == 2 && stores[0].distinctIndexCount == 2,
+                      "MultipleStores: both stores through the PHI cycle reach the buffer");
+        return report.failures == 0;
+    }
+
+    /// A ring of pointer variables with one array source, as -O0 code leaves it: p0 = buf,
+    /// p1 = p0, ..., p0 = p(n-1). Every pointer must find the array, however far from it; the
+    /// order of the accesses must not change the alias paths; and the walk must finish on a
+    /// component of thousands of nodes.
+    bool testStackBufferPointerRing(TestReport& report)
+    {
+        using namespace llvm;
+        using namespace ctrace::stack::analysis;
+        constexpr unsigned kRing = 5000;
+        const unsigned accessed[] = {0, kRing / 2, kRing - 1};
+
+        LLVMContext context;
+        Module module("pointer_ring", context);
+        const auto build = [&](const char* name, bool reversed)
+        {
+            Function* F = Function::Create(FunctionType::get(Type::getVoidTy(context), false),
+                                           Function::ExternalLinkage, name, module);
+            IRBuilder<> builder(BasicBlock::Create(context, "entry", F));
+            Type* bufType = ArrayType::get(builder.getInt8Ty(), 16);
+            AllocaInst* buf = builder.CreateAlloca(bufType, nullptr, "buf");
+            std::vector<AllocaInst*> pointers;
+            for (unsigned i = 0; i < kRing; ++i)
+                pointers.push_back(
+                    builder.CreateAlloca(builder.getPtrTy(), nullptr, "p" + std::to_string(i)));
+            Value* decay = builder.CreateInBoundsGEP(
+                bufType, buf, {builder.getInt64(0), builder.getInt64(0)}, "arraydecay");
+            builder.CreateStore(decay, pointers[0]);
+            for (unsigned i = 1; i < kRing; ++i)
+                builder.CreateStore(builder.CreateLoad(builder.getPtrTy(), pointers[i - 1]),
+                                    pointers[i]);
+            builder.CreateStore(builder.CreateLoad(builder.getPtrTy(), pointers[kRing - 1]),
+                                pointers[0]);
+            for (unsigned a = 0; a < 3; ++a)
+            {
+                // One out-of-bounds constant index per access (16, 17, 18), so the accesses can
+                // be told apart and MultipleStores sees distinct index expressions.
+                const unsigned which = reversed ? 2 - a : a;
+                Value* pointer = builder.CreateLoad(builder.getPtrTy(), pointers[accessed[which]]);
+                Value* slot = builder.CreateInBoundsGEP(builder.getInt8Ty(), pointer,
+                                                        builder.getInt64(16 + which));
+                builder.CreateStore(builder.getInt8(1), slot);
+            }
+            builder.CreateRetVoid();
+        };
+        build("ring", false);
+        build("ring_reversed", true);
+
+        const ctrace::stack::AnalysisConfig config;
+        const auto pathsOf = [&](const char* name)
+        {
+            std::map<std::uint64_t, std::vector<std::string>> paths;
+            for (const StackBufferOverflowIssue& issue : analyzeStackBufferOverflows(
+                     module, [&](const Function& F) { return F.getName() == name; }, config))
+            {
+                if (issue.indexIsConstant && issue.varName == "buf")
+                    paths[issue.indexOrUpperBound] = issue.aliasPathVec;
+            }
+            return paths;
+        };
+        const auto ring = pathsOf("ring");
+        const auto reversed = pathsOf("ring_reversed");
+        const auto reaches = [&](std::uint64_t index, unsigned k)
+        {
+            const auto path = ring.find(index);
+            return path != ring.end() && path->second.size() == k + 3 &&
+                   path->second.front() == "p" + std::to_string(k) && path->second.back() == "buf";
+        };
+        report.expect(ring.size() == 3 && reaches(16, 0) && reaches(17, kRing / 2) &&
+                          reaches(18, kRing - 1),
+                      "StackBufferOverflow: every pointer of a ring of 5000 finds the array, "
+                      "2500 and 4999 steps away included");
+        report.expect(reversed == ring, "StackBufferOverflow: the alias paths of a ring do not "
+                                        "depend on the order of the accesses");
+
+        const std::vector<MultipleStoreIssue> stores =
+            analyzeMultipleStores(module, [](const Function&) { return true; }, config);
+        report.expect(stores.size() == 2 && std::all_of(stores.begin(), stores.end(),
+                                                        [](const MultipleStoreIssue& issue)
+                                                        {
+                                                            return issue.varName == "buf" &&
+                                                                   issue.storeCount == 3 &&
+                                                                   issue.distinctIndexCount == 3;
+                                                        }),
+                      "MultipleStores: the three stores through the ring reach the buffer in "
+                      "both functions");
+        return report.failures == 0;
+    }
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -2822,6 +2948,8 @@ int main(int argc, char** argv)
     (void)testZ3SymbolsWithOneNameStayApart(report);
 #endif
     (void)testDuplicateIfIndexWidths(repoRoot, report);
+    (void)testStackBufferPhiCycle(repoRoot, report);
+    (void)testStackBufferPointerRing(report);
     (void)testResourceModelConditions(report);
     (void)testOwnershipFactCollector(repoRoot, report);
     (void)testOwnershipCollectorExceptions(repoRoot, report);
