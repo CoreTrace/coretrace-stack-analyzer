@@ -2,6 +2,10 @@
 
 #### BUILD (macOS/Linux)
 
+The analyzer builds with LLVM and Clang 20 only. On macOS, install them with
+`brew install llvm@20`, not `llvm`, which is a later version. On Ubuntu, install
+`llvm-20-dev`, `libclang-20-dev` and `clang-20` from apt.llvm.org.
+
 ```zsh
 ./build.sh
 ```
