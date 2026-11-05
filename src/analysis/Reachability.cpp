@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "analysis/Reachability.hpp"
 
+#include "analysis/FunctionFacts.hpp"
 #include "analysis/IRValueUtils.hpp"
+
+#include <optional>
 
 #include <llvm/IR/CFG.h>
 #include <llvm/IR/Constants.h>
@@ -19,6 +22,7 @@ namespace ctrace::stack::analysis
         if (!block || pred_empty(block))
             return false;
 
+        std::optional<FunctionFacts> facts;
         // Unreachable only when no edge into the block can be taken.
         for (const BasicBlock* predecessor : predecessors(block))
         {
@@ -29,11 +33,12 @@ namespace ctrace::stack::analysis
             if (!compare)
                 return false;
 
-            const Function& function = *block->getParent();
-            const ConstantInt* lhs = tryGetConstFromValue(compare->getOperand(0), function);
-            const ConstantInt* rhs = tryGetConstFromValue(compare->getOperand(1), function);
-            // The operands may stand behind casts of different widths.
-            if (!lhs || !rhs || lhs->getBitWidth() != rhs->getBitWidth())
+            // FunctionFacts needs a mutable function for its analyses; they do not change it.
+            if (!facts)
+                facts.emplace(const_cast<Function&>(*block->getParent()));
+            const ConstantInt* lhs = tryGetConstFromValue(compare->getOperand(0), *facts);
+            const ConstantInt* rhs = tryGetConstFromValue(compare->getOperand(1), *facts);
+            if (!lhs || !rhs)
                 return false;
 
             const bool holds =
