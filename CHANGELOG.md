@@ -4,6 +4,13 @@ Notable changes are grouped by release. See [all releases](https://github.com/Co
 
 ## Unreleased
 
+- VLA sizes, local stack sizes and the "this access appears unreachable" note on buffer
+  overflows read a local variable from the store that last wrote it, as MemorySSA finds it, and
+  apply casts to it. They used to take the last constant stored anywhere in the function. A
+  store after the read, a store on one branch only, or a store of another width changed the
+  result then, and `(unsigned char)300` read as 300. The note now also requires every edge into
+  the access to be dead. It no longer appears on accesses that run, such as an access after a
+  loop.
 - Building requires LLVM 20. CMake rejects an older LLVM when it configures the build, where
   LLVM 19 passed that check and then failed to compile. On macOS, `scripts/build.sh` looks for
   Homebrew `llvm@20` before `llvm`, a later version, and no longer for `llvm@19` or `llvm@18`.
