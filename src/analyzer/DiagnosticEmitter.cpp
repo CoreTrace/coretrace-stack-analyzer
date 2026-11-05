@@ -1071,6 +1071,8 @@ namespace ctrace::stack::analyzer
                 body << kDiagIndentArrow << "the callee's body is not checked: it may still modify "
                      << "the " << object << " object through a cast\n";
             }
+            for (const std::string& line : issue.checkLines)
+                body << kDiagIndentArrow << line << "\n";
 
             DiagnosticBuilder builder;
             builder.function(issue.funcName)

@@ -24,7 +24,12 @@ namespace ctrace::stack::analysis
         std::string currentType;
         std::string suggestedType;
         std::string suggestedTypeAlt;
+        // Lines that say how the suggestion was checked with Clang, or why it could not be (#217).
+        std::vector<std::string> checkLines;
         double confidence = -1.0;
+        // The parameter's number in the debug information (1 is the first, `this` included).
+        std::uint32_t debugArgNo = 0;
+        std::uint32_t reservedArgPadding = 0;
         std::uint64_t pointerConstOnly : 1 = false; // ex: T * const param
         std::uint64_t isReference : 1 = false;
         std::uint64_t isRvalueRef : 1 = false;

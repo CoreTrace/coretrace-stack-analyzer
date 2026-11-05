@@ -3,6 +3,7 @@
 
 #include "analyzer/AnalysisPipeline.hpp"
 #include "analyzer/HotspotProfiler.hpp"
+#include "analysis/ConstSuggestionCheck.hpp"
 #include "analysis/InputPipeline.hpp"
 
 #include <chrono>
@@ -44,7 +45,9 @@ namespace ctrace::stack
         AnalysisResult result;
         {
             const analyzer::ScopedHotspot hotspot(config.timing, "analyze.pipeline");
-            result = analyzeModule(*load.module, config);
+            AnalysisConfig unitConfig = config;
+            unitConfig.analyzedUnits = analysis::analyzedUnitOf(filename, *load.module);
+            result = analyzeModule(*load.module, unitConfig);
         }
         if (!load.frontendDiagnostics.empty())
         {
