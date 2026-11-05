@@ -1258,6 +1258,7 @@ namespace
             {"ns::Handle::open(", "_ZN2ns6Handle4openEPKc", false},
             {"acquire_buf", "_Z11acquire_bufPPv", true},
             {"acquire_buf(void**)", "_Z11acquire_bufPPv", true},
+            {"ns::Handle::close()", "_ZN2ns6Handle5closeEv", true},
             {"float", "f", true},
             {"f", "f", true},
             // Globs against each of the three names.
