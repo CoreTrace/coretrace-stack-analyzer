@@ -10,6 +10,7 @@
 #include "analysis/InputPipelineRevision.hpp"
 #include "analysis/IntRanges.hpp"
 #include "analysis/IRValueUtils.hpp"
+#include "analysis/PromotedValues.hpp"
 #include "analysis/ParameterDebugBinding.hpp"
 #include "analysis/Reachability.hpp"
 #include "analysis/ResourceLifetimeAnalysis.hpp"
@@ -1692,6 +1693,111 @@ define i32 @entry_value(ptr %q) {
         return report.failures == 0;
     }
 
+    bool testPromotedValues(TestReport& report)
+    {
+        using ctrace::stack::analysis::IndexValues;
+        using ctrace::stack::analysis::PromotedValues;
+        llvm::LLVMContext context;
+        llvm::SMDiagnostic error;
+        // The same -O0 loop, `for (i = 0; i < 11; i++) buf[i] = 'a';`, without and with
+        // lifetime markers.
+        const std::unique_ptr<llvm::Module> module = llvm::parseAssemblyString(R"(
+define void @counted() {
+entry:
+  %buf = alloca [10 x i8]
+  %i = alloca i32
+  store i32 0, ptr %i
+  br label %cond
+cond:
+  %v = load i32, ptr %i
+  %c = icmp slt i32 %v, 11
+  br i1 %c, label %body, label %end
+body:
+  %w = load i32, ptr %i
+  %idx = sext i32 %w to i64
+  %p = getelementptr [10 x i8], ptr %buf, i64 0, i64 %idx
+  store i8 97, ptr %p
+  %n = add nsw i32 %w, 1
+  store i32 %n, ptr %i
+  br label %cond
+end:
+  ret void
+}
+define void @with_lifetime_markers() {
+entry:
+  %buf = alloca [10 x i8]
+  %i = alloca i32
+  call void @llvm.lifetime.start.p0(i64 10, ptr %buf)
+  store i32 0, ptr %i
+  br label %cond
+cond:
+  %v = load i32, ptr %i
+  %c = icmp slt i32 %v, 11
+  br i1 %c, label %body, label %end
+body:
+  %w = load i32, ptr %i
+  %idx = sext i32 %w to i64
+  %p = getelementptr [10 x i8], ptr %buf, i64 0, i64 %idx
+  store i8 97, ptr %p
+  %n = add nsw i32 %w, 1
+  store i32 %n, ptr %i
+  br label %cond
+end:
+  call void @llvm.lifetime.end.p0(i64 10, ptr %buf)
+  ret void
+}
+declare void @llvm.lifetime.start.p0(i64, ptr)
+declare void @llvm.lifetime.end.p0(i64, ptr)
+)",
+                                                                               error, context);
+        if (!module)
+        {
+            report.expect(false, "PromotedValues setup: the IR does not parse");
+            return false;
+        }
+
+        const auto gepOf = [&](const char* name)
+        {
+            for (const llvm::Instruction& inst : llvm::instructions(*module->getFunction(name)))
+            {
+                if (const auto* gep = llvm::dyn_cast<llvm::GetElementPtrInst>(&inst))
+                    return gep;
+            }
+            return static_cast<const llvm::GetElementPtrInst*>(nullptr);
+        };
+        const llvm::Function& counted = *module->getFunction("counted");
+        const std::size_t instructionsBefore = counted.getInstructionCount();
+
+        PromotedValues values(*module, [](const llvm::Function&) { return true; });
+        const llvm::GetElementPtrInst* access = gepOf("counted");
+        const IndexValues range = values.indexValuesAt(*access, *access->getOperand(2));
+        report.expect(range.kind == IndexValues::Kind::Range && range.min == 0 && range.max == 10,
+                      "PromotedValues: the counter of an 11-iteration loop takes 0..10");
+        report.expect(range.minOnEveryRun && range.maxOnEveryRun,
+                      "PromotedValues: an unconditional constant-count loop takes both endpoints");
+        report.expect(values.provesWithin(*access, *access->getOperand(2), 0, 11) &&
+                          !values.provesWithin(*access, *access->getOperand(2), 0, 10),
+                      "PromotedValues: the counter is proven below 11, not below 10");
+
+        const llvm::GetElementPtrInst* marked = gepOf("with_lifetime_markers");
+        report.expect(values.indexValuesAt(*marked, *marked->getOperand(2)).kind ==
+                          IndexValues::Kind::Unknown,
+                      "PromotedValues: a function with lifetime markers is left out");
+
+        const bool keepsFlags = llvm::any_of(llvm::instructions(counted),
+                                             [](const llvm::Instruction& inst)
+                                             {
+                                                 const auto* add =
+                                                     llvm::dyn_cast<llvm::BinaryOperator>(&inst);
+                                                 return add && add->hasNoSignedWrap();
+                                             });
+        report.expect(counted.getInstructionCount() == instructionsBefore &&
+                          llvm::isa<llvm::AllocaInst>(counted.getEntryBlock().front()) &&
+                          keepsFlags,
+                      "PromotedValues: the original function keeps its slots, loads and flags");
+        return report.failures == 0;
+    }
+
     using ctrace::stack::analysis::smt::ConstraintIR;
     using ctrace::stack::analysis::smt::ExprId;
     using ctrace::stack::analysis::smt::ExprKind;
@@ -3027,6 +3133,7 @@ int main(int argc, char** argv)
     (void)testSmtEvaluatorEncodesLazily(report);
     (void)testFunctionFactsClobberingAccess(repoRoot, report);
     (void)testTryGetConstFromValue(report);
+    (void)testPromotedValues(report);
     (void)testSmtEncoderMemoryModel(repoRoot, report);
     (void)testSmtEncoderPathCondition(repoRoot, report);
 #ifdef CTRACE_STACK_ENABLE_Z3_BACKEND
