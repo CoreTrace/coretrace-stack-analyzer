@@ -20,7 +20,7 @@ void loop_counter(void)
 }
 
 // at line 17, column 16
-// [ !!Warn ] potential stack buffer overflow on variable 'buf' (size 16)
+// [ !!Warn ] stack buffer overflow on variable 'buf' (size 16)
 // ↳ alias path: buf
-// ↳ index variable may go up to 19 (array last valid index: 15)
+// ↳ index reaches 19 on every run of the function that returns (array last valid index: 15)
 // ↳ (this is a write access)

@@ -31,15 +31,15 @@ int main(void)
 }
 
 // at line 8, column 17
-// [ !!Warn ] potential stack buffer overflow on variable 'test' (size 10)
+// [ !!Warn ] stack buffer overflow on variable 'test' (size 10)
 // ↳ alias path: test
-// ↳ index variable may go up to 19 (array last valid index: 9)
+// ↳ index reaches 19 on every run of the function that returns (array last valid index: 9)
 // ↳ (this is a write access)
 
 // at line 12, column 17
-// [ !!Warn ] potential stack buffer overflow on variable 'test' (size 10)
+// [ !!Warn ] stack buffer overflow on variable 'test' (size 10)
 // ↳ alias path: test
-// ↳ index variable may go up to 10 (array last valid index: 9)
+// ↳ index reaches 10 on every run of the function that returns (array last valid index: 9)
 // ↳ (this is a write access)
 
 // at line 22, column 16

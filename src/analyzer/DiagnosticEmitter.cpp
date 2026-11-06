@@ -370,7 +370,11 @@ namespace ctrace::stack::analyzer
         for (const auto& issue : bufferIssues)
         {
             const ResolvedLocation loc = resolveFromInstruction(issue.inst, true);
-            const bool isUnreachable = analysis::isStaticallyUnreachableStackAccess(issue);
+            const bool isUnreachable =
+                issue.neverRuns || analysis::isStaticallyUnreachableStackAccess(issue);
+            // Shown by the index-bounds pilot: the access goes out of bounds on every run that
+            // returns, so the report is not "potential".
+            const bool everyRun = issue.reachedOnEveryRun;
 
             std::ostringstream body;
             DiagnosticBuilder builder;
@@ -379,23 +383,32 @@ namespace ctrace::stack::analyzer
             {
                 builder.errCode(DescriptiveErrorCode::NegativeStackIndex)
                     .cwe(issue.isWrite ? "CWE-124" : "CWE-127");
-                body << "  [!!] potential negative index on variable '" << issue.varName
-                     << "' (size " << issue.arraySize << ")\n";
+                if (everyRun)
+                    builder.ruleId("NegativeStackIndex.EveryRun");
+                body << "  [!!] " << (everyRun ? "" : "potential ")
+                     << "negative index on variable '" << issue.varName << "' (size "
+                     << issue.arraySize << ")\n";
                 if (!issue.aliasPath.empty())
                     body << "\t\t ↳ alias path: " << issue.aliasPath << "\n";
-                body << "\t\t ↳ inferred lower bound for index expression: " << issue.lowerBound
-                     << " (index may be < 0)\n";
+                if (everyRun)
+                    body << "\t\t ↳ index reaches " << issue.lowerBound
+                         << " on every run of the function that returns\n";
+                else
+                    body << "\t\t ↳ inferred lower bound for index expression: " << issue.lowerBound
+                         << " (index may be < 0)\n";
             }
             else
             {
                 builder.errCode(DescriptiveErrorCode::StackBufferOverflow);
+                if (everyRun)
+                    builder.ruleId("StackBufferOverflow.EveryRun");
                 const bool isGlobalStorage =
                     issue.storageClass == analysis::BufferStorageClass::Global;
                 if (!issue.isWrite)
                     builder.cwe("CWE-125");
                 else
                     builder.cwe(isGlobalStorage ? "CWE-787" : "CWE-121");
-                body << "\t[ !!Warn ] potential "
+                body << "\t[ !!Warn ] " << (everyRun ? "" : "potential ")
                      << (isGlobalStorage ? "buffer overflow on global variable '"
                                          : "stack buffer overflow on variable '")
                      << issue.varName << "' (size " << issue.arraySize << ")\n";
@@ -406,6 +419,12 @@ namespace ctrace::stack::analyzer
                     body << "\t\t ↳ constant index " << issue.indexOrUpperBound
                          << " is out of bounds (0.." << (issue.arraySize ? issue.arraySize - 1 : 0)
                          << ")\n";
+                }
+                else if (everyRun)
+                {
+                    body << "\t\t ↳ index reaches " << issue.indexOrUpperBound
+                         << " on every run of the function that returns (array last valid index: "
+                         << (issue.arraySize ? issue.arraySize - 1 : 0) << ")\n";
                 }
                 else
                 {

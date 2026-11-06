@@ -39,9 +39,9 @@ void ne_one_past(void)
 // not contains: at line 26, column 16
 
 // at line 34, column 16
-// [ !!Warn ] potential stack buffer overflow on variable 'buf' (size 12)
+// [ !!Warn ] stack buffer overflow on variable 'buf' (size 12)
 // ↳ alias path: buf
-// ↳ index variable may go up to 12 (array last valid index: 11)
+// ↳ index reaches 12 on every run of the function that returns (array last valid index: 11)
 // ↳ (this is a write access)
 
 // strict-expectation-details: true

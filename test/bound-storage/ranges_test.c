@@ -130,9 +130,9 @@ void loop_ub_overflow(void)
     char buf[10];
 
     // at line 137, column 16
-    // [ !!Warn ] potential stack buffer overflow on variable 'buf' (size 10)
+    // [ !!Warn ] stack buffer overflow on variable 'buf' (size 10)
     // ↳ alias path: buf
-    // ↳ index variable may go up to 10 (array last valid index: 9)
+    // ↳ index reaches 10 on every run of the function that returns (array last valid index: 9)
     // ↳ (this is a write access)
     for (int i = 0; i <= 10; ++i)
         buf[i] = 'H';
@@ -271,3 +271,9 @@ int main(void)
 
     return 0;
 }
+
+// at line 147, column 16
+// [!!] negative index on variable 'buf' (size 10)
+// ↳ alias path: buf
+// ↳ index reaches -3 on every run of the function that returns
+// ↳ (this is a write access)
