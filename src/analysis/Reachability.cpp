@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "analysis/Reachability.hpp"
 
+#include "analysis/FunctionFacts.hpp"
 #include "analysis/IRValueUtils.hpp"
+
+#include <optional>
 
 #include <llvm/IR/CFG.h>
 #include <llvm/IR/Constants.h>
@@ -13,78 +16,38 @@ namespace ctrace::stack::analysis
 
     bool isStaticallyUnreachableStackAccess(const StackBufferOverflowIssue& issue)
     {
-        if (!issue.inst)
-            return false;
-
-        auto* block = issue.inst->getParent();
-        if (!block)
-            return false;
-
         using namespace llvm;
 
-        for (auto* predecessor : predecessors(block))
+        const BasicBlock* block = issue.inst ? issue.inst->getParent() : nullptr;
+        if (!block || pred_empty(block))
+            return false;
+
+        std::optional<FunctionFacts> facts;
+        // Unreachable only when no edge into the block can be taken.
+        for (const BasicBlock* predecessor : predecessors(block))
         {
-            auto* branch = dyn_cast<BranchInst>(predecessor->getTerminator());
-            if (!branch || !branch->isConditional())
-                continue;
-
-            auto* compare = dyn_cast<ICmpInst>(branch->getCondition());
+            const auto* branch = dyn_cast<BranchInst>(predecessor->getTerminator());
+            const auto* compare = branch && branch->isConditional()
+                                      ? dyn_cast<ICmpInst>(branch->getCondition())
+                                      : nullptr;
             if (!compare)
-                continue;
+                return false;
 
-            const llvm::Function& function = *issue.inst->getFunction();
-            auto* lhs = analysis::tryGetConstFromValue(compare->getOperand(0), function);
-            auto* rhs = analysis::tryGetConstFromValue(compare->getOperand(1), function);
+            // FunctionFacts needs a mutable function for its analyses; they do not change it.
+            if (!facts)
+                facts.emplace(const_cast<Function&>(*block->getParent()));
+            const ConstantInt* lhs = tryGetConstFromValue(compare->getOperand(0), *facts);
+            const ConstantInt* rhs = tryGetConstFromValue(compare->getOperand(1), *facts);
             if (!lhs || !rhs)
-                continue;
+                return false;
 
-            bool condTrue = false;
-            const auto& lhsValue = lhs->getValue();
-            const auto& rhsValue = rhs->getValue();
-
-            switch (compare->getPredicate())
-            {
-            case ICmpInst::ICMP_EQ:
-                condTrue = (lhsValue == rhsValue);
-                break;
-            case ICmpInst::ICMP_NE:
-                condTrue = (lhsValue != rhsValue);
-                break;
-            case ICmpInst::ICMP_SLT:
-                condTrue = lhsValue.slt(rhsValue);
-                break;
-            case ICmpInst::ICMP_SLE:
-                condTrue = lhsValue.sle(rhsValue);
-                break;
-            case ICmpInst::ICMP_SGT:
-                condTrue = lhsValue.sgt(rhsValue);
-                break;
-            case ICmpInst::ICMP_SGE:
-                condTrue = lhsValue.sge(rhsValue);
-                break;
-            case ICmpInst::ICMP_ULT:
-                condTrue = lhsValue.ult(rhsValue);
-                break;
-            case ICmpInst::ICMP_ULE:
-                condTrue = lhsValue.ule(rhsValue);
-                break;
-            case ICmpInst::ICMP_UGT:
-                condTrue = lhsValue.ugt(rhsValue);
-                break;
-            case ICmpInst::ICMP_UGE:
-                condTrue = lhsValue.uge(rhsValue);
-                break;
-            default:
-                continue;
-            }
-
-            if (block == branch->getSuccessor(0) && !condTrue)
-                return true;
-            if (block == branch->getSuccessor(1) && condTrue)
-                return true;
+            const bool holds =
+                ICmpInst::compare(lhs->getValue(), rhs->getValue(), compare->getPredicate());
+            if (branch->getSuccessor(holds ? 0 : 1) == block)
+                return false;
         }
 
-        return false;
+        return true;
     }
 
 } // namespace ctrace::stack::analysis

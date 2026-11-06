@@ -1,8 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "analysis/IRValueUtils.hpp"
 
+#include "analysis/FunctionFacts.hpp"
+
 #include <llvm/ADT/SmallPtrSet.h>
 #include <llvm/ADT/SmallVector.h>
+#include <llvm/Analysis/ConstantFolding.h>
+#include <llvm/Analysis/MemorySSA.h>
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/DebugInfo.h>
 #include <llvm/IR/DebugInfoMetadata.h>
@@ -299,46 +303,50 @@ namespace ctrace::stack::analysis
         return AllocaOrigin::Unknown;
     }
 
-    const llvm::ConstantInt* tryGetConstFromValue(const llvm::Value* V, const llvm::Function& F)
+    namespace
     {
-        using namespace llvm;
+        /// Bounds the walk; -O0 copy chains such as `int m = n;` need a few levels, and
+        /// unreachable code may hold a cycle of casts.
+        constexpr unsigned kMaxConstResolutionDepth = 16;
 
-        // First remove casts (sext/zext/trunc, etc.) to reach the real base value.
-        const Value* cur = V;
-        while (auto* cast = dyn_cast<const CastInst>(cur))
+        const llvm::ConstantInt* resolveConstant(const llvm::Value* value,
+                                                 const FunctionFacts& facts, unsigned depth)
         {
-            cur = cast->getOperand(0);
-        }
+            using namespace llvm;
 
-        // Trivial case: already an integer constant.
-        if (auto* C = dyn_cast<const ConstantInt>(cur))
-            return C;
+            if (const auto* constant = dyn_cast<ConstantInt>(value))
+                return constant;
+            if (depth == 0)
+                return nullptr;
 
-        // Typical -O0 case: comparing a load from a local variable.
-        auto* LI = dyn_cast<const LoadInst>(cur);
-        if (!LI)
-            return nullptr;
-
-        const Value* ptr = LI->getPointerOperand();
-        const ConstantInt* found = nullptr;
-
-        // Ultra-simple version: look for a constant store in the function.
-        for (const BasicBlock& BB : F)
-        {
-            for (const Instruction& I : BB)
+            if (const auto* cast = dyn_cast<CastInst>(value))
             {
-                auto* SI = dyn_cast<const StoreInst>(&I);
-                if (!SI)
-                    continue;
-                if (SI->getPointerOperand() != ptr)
-                    continue;
-                if (auto* C = dyn_cast<const ConstantInt>(SI->getValueOperand()))
-                {
-                    // Keep the last constant found (if multiple stores, this is naive).
-                    found = C;
-                }
+                const ConstantInt* operand = resolveConstant(cast->getOperand(0), facts, depth - 1);
+                if (!operand)
+                    return nullptr;
+                return dyn_cast_or_null<ConstantInt>(
+                    ConstantFoldCastOperand(cast->getOpcode(), const_cast<ConstantInt*>(operand),
+                                            cast->getType(), cast->getDataLayout()));
             }
+
+            const auto* load = dyn_cast<LoadInst>(value);
+            if (!load || !load->isSimple())
+                return nullptr;
+            const auto* def = dyn_cast_or_null<MemoryDef>(facts.clobberingAccess(*load));
+            const auto* store = def ? dyn_cast_or_null<StoreInst>(def->getMemoryInst()) : nullptr;
+            if (!store || !store->isSimple() ||
+                store->getPointerOperand()->stripPointerCasts() !=
+                    load->getPointerOperand()->stripPointerCasts() ||
+                store->getValueOperand()->getType() != load->getType())
+            {
+                return nullptr;
+            }
+            return resolveConstant(store->getValueOperand(), facts, depth - 1);
         }
-        return found;
+    } // namespace
+
+    const llvm::ConstantInt* tryGetConstFromValue(const llvm::Value* V, const FunctionFacts& facts)
+    {
+        return V ? resolveConstant(V, facts, kMaxConstResolutionDepth) : nullptr;
     }
 } // namespace ctrace::stack::analysis

@@ -8,7 +8,10 @@
 #include <llvm/IR/Value.h>
 #include <llvm/Support/raw_ostream.h>
 
+#include "analysis/FunctionFacts.hpp"
 #include "analysis/IRValueUtils.hpp"
+
+#include <optional>
 
 namespace ctrace::stack::analysis
 {
@@ -21,6 +24,9 @@ namespace ctrace::stack::analysis
 
             if (F.isDeclaration())
                 return;
+
+            // Built on the first non-constant size only: most functions have no VLA.
+            std::optional<FunctionFacts> facts;
 
             for (BasicBlock& BB : F)
             {
@@ -40,15 +46,15 @@ namespace ctrace::stack::analysis
                     if (llvm::isa<llvm::ConstantInt>(arraySizeVal))
                         continue; // compile-time known size, OK
 
-                    // 2) "Smart" heuristic: try to trace back to a constant
-                    //    via stores into a local variable (tryGetConstFromValue).
-                    //    Typical example:
+                    // 2) The size is a constant stored into a local variable, read back
+                    //    unchanged (tryGetConstFromValue). Typical example:
                     //      int n = 6;
                     //      char buf[n];   // in C: VLA, but here n is actually constant
                     //
                     //    In this case we don't want to spam with a VLA warning:
                     //    treat it as an effectively constant size.
-                    if (tryGetConstFromValue(arraySizeVal, F) != nullptr)
+                    if (tryGetConstFromValue(arraySizeVal, facts ? *facts : facts.emplace(F)) !=
+                        nullptr)
                         continue;
 
                     // 3) Here we consider it a real VLA / dynamic alloca
@@ -97,6 +103,7 @@ namespace ctrace::stack::analysis
     {
         std::vector<DynamicAllocaIssue> out;
         using namespace llvm;
+        std::optional<FunctionFacts> facts;
 
         for (const AllocaInst* AI : allocas)
         {
@@ -105,7 +112,10 @@ namespace ctrace::stack::analysis
             if (llvm::isa<llvm::ConstantInt>(arraySizeVal))
                 continue;
 
-            if (tryGetConstFromValue(arraySizeVal, function) != nullptr)
+            // FunctionFacts needs a mutable function for its analyses; they do not change it.
+            if (!facts)
+                facts.emplace(const_cast<Function&>(function));
+            if (tryGetConstFromValue(arraySizeVal, *facts) != nullptr)
                 continue;
 
             DynamicAllocaIssue issue;
