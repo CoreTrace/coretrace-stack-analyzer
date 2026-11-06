@@ -9,6 +9,8 @@ char vla_size_later_store_is_not_read(void)
     return buf[0] + (char)n;
 }
 
+// strict-expectation-details: true
+
 // not contains: requested stack size: 100 bytes
 
 // at line 6, column 5
