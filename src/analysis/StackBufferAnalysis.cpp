@@ -1057,6 +1057,27 @@ namespace ctrace::stack::analysis
                             GV->hasName() ? GV->getName().str() : std::string("<unnamed-global>");
                     }
 
+                    // The loads and stores through the GEP, each reported on its own.
+                    SmallVector<Instruction*, 4> accesses;
+                    for (User* GU : GEP->users())
+                    {
+                        if (isa<StoreInst>(GU) || isa<LoadInst>(GU))
+                            accesses.push_back(cast<Instruction>(GU));
+                    }
+                    const auto newReport = [&](Instruction& access)
+                    {
+                        StackBufferOverflowIssue report;
+                        report.funcName = F.getName().str();
+                        report.varName = varName;
+                        report.arraySize = arraySize;
+                        report.isWrite = isa<StoreInst>(access);
+                        report.storageClass = storageClass;
+                        report.inst = &access;
+                        report.aliasPathVec = aliasPath;
+                        report.aliasPath = buildAliasPathString(aliasPath);
+                        return report;
+                    };
+
                     // "baseIdxVal" = loop variable "i" without casts (sext/zext...). The cast
                     // applied to the variable itself says how the index reads it: a zext reads
                     // it as unsigned.
@@ -1075,38 +1096,12 @@ namespace ctrace::stack::analysis
                         auto idxValue = CIdx->getSExtValue();
                         if (idxValue < 0 || static_cast<StackSize>(idxValue) >= arraySize)
                         {
-                            for (User* GU : GEP->users())
+                            for (Instruction* access : accesses)
                             {
-                                if (auto* S = dyn_cast<StoreInst>(GU))
-                                {
-                                    StackBufferOverflowIssue report;
-                                    report.funcName = F.getName().str();
-                                    report.varName = varName;
-                                    report.arraySize = arraySize;
-                                    report.indexOrUpperBound = static_cast<StackSize>(idxValue);
-                                    report.isWrite = true;
-                                    report.indexIsConstant = true;
-                                    report.storageClass = storageClass;
-                                    report.inst = S;
-                                    report.aliasPathVec = aliasPath;
-                                    report.aliasPath = buildAliasPathString(aliasPath);
-                                    out.push_back(std::move(report));
-                                }
-                                else if (auto* L = dyn_cast<LoadInst>(GU))
-                                {
-                                    StackBufferOverflowIssue report;
-                                    report.funcName = F.getName().str();
-                                    report.varName = varName;
-                                    report.arraySize = arraySize;
-                                    report.indexOrUpperBound = static_cast<StackSize>(idxValue);
-                                    report.isWrite = false;
-                                    report.indexIsConstant = true;
-                                    report.storageClass = storageClass;
-                                    report.inst = L;
-                                    report.aliasPathVec = aliasPath;
-                                    report.aliasPath = buildAliasPathString(aliasPath);
-                                    out.push_back(std::move(report));
-                                }
+                                StackBufferOverflowIssue report = newReport(*access);
+                                report.indexOrUpperBound = static_cast<StackSize>(idxValue);
+                                report.indexIsConstant = true;
+                                out.push_back(std::move(report));
                             }
                         }
                         continue;
@@ -1194,98 +1189,27 @@ namespace ctrace::stack::analysis
                         else
                             ub = static_cast<StackSize>(R.lower);
 
-                        for (User* GU : GEP->users())
+                        for (Instruction* access : accesses)
                         {
-                            if (auto* S = dyn_cast<StoreInst>(GU))
-                            {
-                                if (isIndexInBoundsBySmt(evaluator, idxVal, arraySize, *S, facts))
-                                {
-                                    continue;
-                                }
-
-                                StackBufferOverflowIssue report;
-                                report.funcName = F.getName().str();
-                                report.varName = varName;
-                                report.arraySize = arraySize;
-                                report.indexOrUpperBound = ub;
-                                report.isWrite = true;
-                                report.indexIsConstant = false;
-                                report.storageClass = storageClass;
-                                report.inst = S;
-                                report.aliasPathVec = aliasPath;
-                                report.aliasPath = buildAliasPathString(aliasPath);
-                                out.push_back(std::move(report));
-                            }
-                            else if (auto* L = dyn_cast<LoadInst>(GU))
-                            {
-                                if (isIndexInBoundsBySmt(evaluator, idxVal, arraySize, *L, facts))
-                                {
-                                    continue;
-                                }
-
-                                StackBufferOverflowIssue report;
-                                report.funcName = F.getName().str();
-                                report.varName = varName;
-                                report.arraySize = arraySize;
-                                report.indexOrUpperBound = ub;
-                                report.isWrite = false;
-                                report.indexIsConstant = false;
-                                report.storageClass = storageClass;
-                                report.inst = L;
-                                report.aliasPathVec = aliasPath;
-                                report.aliasPath = buildAliasPathString(aliasPath);
-                                out.push_back(std::move(report));
-                            }
+                            if (isIndexInBoundsBySmt(evaluator, idxVal, arraySize, *access, facts))
+                                continue;
+                            StackBufferOverflowIssue report = newReport(*access);
+                            report.indexOrUpperBound = ub;
+                            out.push_back(std::move(report));
                         }
                     }
 
                     // 5.b) Negative lower bound: LB < 0  => potentially negative index
                     if (R.hasLower && R.lower < 0)
                     {
-                        for (User* GU : GEP->users())
+                        for (Instruction* access : accesses)
                         {
-                            if (auto* S = dyn_cast<StoreInst>(GU))
-                            {
-                                if (isIndexInBoundsBySmt(evaluator, idxVal, arraySize, *S, facts))
-                                {
-                                    continue;
-                                }
-
-                                StackBufferOverflowIssue report;
-                                report.funcName = F.getName().str();
-                                report.varName = varName;
-                                report.arraySize = arraySize;
-                                report.isWrite = true;
-                                report.indexIsConstant = false;
-                                report.storageClass = storageClass;
-                                report.inst = S;
-                                report.isLowerBoundViolation = true;
-                                report.lowerBound = R.lower;
-                                report.aliasPathVec = aliasPath;
-                                report.aliasPath = buildAliasPathString(aliasPath);
-                                out.push_back(std::move(report));
-                            }
-                            else if (auto* L = dyn_cast<LoadInst>(GU))
-                            {
-                                if (isIndexInBoundsBySmt(evaluator, idxVal, arraySize, *L, facts))
-                                {
-                                    continue;
-                                }
-
-                                StackBufferOverflowIssue report;
-                                report.funcName = F.getName().str();
-                                report.varName = varName;
-                                report.arraySize = arraySize;
-                                report.isWrite = false;
-                                report.indexIsConstant = false;
-                                report.storageClass = storageClass;
-                                report.inst = L;
-                                report.isLowerBoundViolation = true;
-                                report.lowerBound = R.lower;
-                                report.aliasPathVec = aliasPath;
-                                report.aliasPath = buildAliasPathString(aliasPath);
-                                out.push_back(std::move(report));
-                            }
+                            if (isIndexInBoundsBySmt(evaluator, idxVal, arraySize, *access, facts))
+                                continue;
+                            StackBufferOverflowIssue report = newReport(*access);
+                            report.isLowerBoundViolation = true;
+                            report.lowerBound = R.lower;
+                            out.push_back(std::move(report));
                         }
                     }
                     // If R.hasUpper && R.upper < arraySize and (no problematic LB),
