@@ -39,7 +39,12 @@ namespace ctrace::stack::analysis
         std::uint64_t indexIsConstant : 1 = false;
         // Violation based on a lower bound (index potentially negative)
         std::uint64_t isLowerBoundViolation : 1 = false;
-        std::uint64_t reservedFlags : 61 = 0;
+        // The access runs with the index at the reported bound on every run of the function
+        // that returns.
+        std::uint64_t reachedOnEveryRun : 1 = false;
+        // A loop around the access runs no iteration, so the access never runs.
+        std::uint64_t neverRuns : 1 = false;
+        std::uint64_t reservedFlags : 59 = 0;
         // Optional : helper for sync string <- vector
         void rebuildAliasPathString(const std::string& sep = " -> ")
         {

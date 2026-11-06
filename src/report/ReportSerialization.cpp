@@ -641,6 +641,10 @@ namespace ctrace::stack
             {"NegativeStackIndex",
              {"Negative stack index", "An index into a stack array that may be negative, so that "
                                       "the access lands before the array."}},
+            {"NegativeStackIndex.EveryRun",
+             {"Negative stack index on every run",
+              "A read or a write before the start of a stack array that every run of the "
+              "function performs, if the run returns."}},
             {"NullPointerDereference",
              {"Null pointer dereference", "A pointer that may be null is dereferenced."}},
             {"OutOfBoundsRead", {"Out-of-bounds read", "A read past the end of a buffer."}},
@@ -691,6 +695,10 @@ namespace ctrace::stack
             {"StackBufferOverflow",
              {"Stack buffer overflow",
               "A read or a write at an index that may be past the end of a stack array."}},
+            {"StackBufferOverflow.EveryRun",
+             {"Stack buffer overflow on every run",
+              "A read or a write past the end of a stack array that every run of the function "
+              "performs, if the run returns."}},
             {"StackFrameTooLarge",
              {"Stack frame too large",
               "A function whose stack frame exceeds the configured limit."}},

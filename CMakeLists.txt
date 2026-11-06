@@ -92,6 +92,7 @@ set(STACK_ANALYZER_SOURCES
     src/analysis/NullDerefAnalysis.cpp
     src/analysis/OOBReadAnalysis.cpp
     src/analysis/ParameterDebugBinding.cpp
+    src/analysis/PromotedValues.cpp
     src/analysis/ResourceLifetimeAnalysis.cpp
     src/analysis/Reachability.cpp
     src/analysis/SizeMinusKWrites.cpp
@@ -227,6 +228,7 @@ else()
       core
       irreader
       support
+      transformutils
     )
     target_link_libraries(stack_usage_analyzer_lib
         PUBLIC

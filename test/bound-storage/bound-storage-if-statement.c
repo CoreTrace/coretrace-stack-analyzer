@@ -18,7 +18,7 @@ int main(void)
     // at line 25, column 18
     // [ !!Warn ] potential stack buffer overflow on variable 'test1' (size 10)
     // ↳ alias path: test1
-    // ↳ index variable may go up to 10 (array last valid index: 9)
+    // ↳ index variable may go up to 11 (array last valid index: 9)
     // ↳ (this is a write access)
     // ↳ [info] this access appears unreachable at runtime (condition is always false for this branch)
     char test1[10];

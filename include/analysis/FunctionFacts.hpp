@@ -31,8 +31,7 @@ namespace ctrace::stack::analysis
     /// ScalarEvolution is deliberately absent. The analyzer reads -O0 IR, where a loop
     /// counter lives in a multiply-assigned alloca that SCEV cannot see through, and the
     /// arithmetic it would bound carries nsw, which @ref computeIntRanges refuses on purpose.
-    /// Wiring it in changed no result on any fixture; add it back only alongside a pass that
-    /// promotes locals to registers.
+    /// @ref PromotedValues runs it on a promoted, sanitized copy of the module instead.
     class FunctionFacts final
     {
       public:
