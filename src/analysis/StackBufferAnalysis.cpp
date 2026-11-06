@@ -1057,11 +1057,13 @@ namespace ctrace::stack::analysis
                             GV->hasName() ? GV->getName().str() : std::string("<unnamed-global>");
                     }
 
-                    // The loads and stores through the GEP, each reported on its own.
+                    // The loads and stores through the GEP, each reported on its own. A store of
+                    // the address itself (char* p = &buf[i]) accesses nothing.
                     SmallVector<Instruction*, 4> accesses;
                     for (User* GU : GEP->users())
                     {
-                        if (isa<StoreInst>(GU) || isa<LoadInst>(GU))
+                        const auto* store = dyn_cast<StoreInst>(GU);
+                        if (isa<LoadInst>(GU) || (store && store->getPointerOperand() == GEP))
                             accesses.push_back(cast<Instruction>(GU));
                     }
                     const auto newReport = [&](Instruction& access)
