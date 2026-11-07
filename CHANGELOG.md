@@ -16,9 +16,11 @@ Notable changes are grouped by release. See [all releases](https://github.com/Co
   bound the index, the existing result stays.
 - Stack buffer overflow checks no longer take the store of an element's address, such as
   `char* end = &buf[10]` or the end of a range-based `for`, for a write to that element.
-  Forming a pointer one past the end is valid C and C++. A write through such a pointer kept in
-  a local variable is not reported either: it used to be reported only by that mistake, on the
-  line that formed the address.
+  Forming a pointer one past the end is valid C and C++. A read or write through a pointer
+  variable holding the address is checked where it happens instead: `char* p = &buf[10];
+  *p = 42;` is reported on `*p = 42`, with the variable in the alias path. The variable is
+  followed when the store of the address is its last write on every path to the access; one
+  assigned on a single branch is not.
 - VLA sizes, local stack sizes and the "this access appears unreachable" note on buffer
   overflows read a local variable from the store that last wrote it, as MemorySSA finds it, and
   apply casts to it. They used to take the last constant stored anywhere in the function. A
