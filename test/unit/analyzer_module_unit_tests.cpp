@@ -10,6 +10,7 @@
 #include "analysis/InputPipelineRevision.hpp"
 #include "analysis/IntRanges.hpp"
 #include "analysis/IRValueUtils.hpp"
+#include "analysis/ParamAccessSummary.hpp"
 #include "analysis/PromotedValues.hpp"
 #include "analysis/ParameterDebugBinding.hpp"
 #include "analysis/Reachability.hpp"
@@ -1798,6 +1799,250 @@ declare void @llvm.lifetime.end.p0(i64, ptr)
         return report.failures == 0;
     }
 
+    bool testParamAccessSummary(TestReport& report)
+    {
+        using namespace ctrace::stack::analysis;
+        llvm::LLVMContext context;
+        llvm::SMDiagnostic error;
+        const std::unique_ptr<llvm::Module> module = llvm::parseAssemblyString(R"(
+declare void @clobber(ptr)
+
+; The slot of p has one store, but a call gets its address and may rewrite it.
+define void @slot_escapes(ptr %p) {
+entry:
+  %slot = alloca ptr
+  store ptr %p, ptr %slot
+  call void @clobber(ptr %slot)
+  %q = load ptr, ptr %slot
+  store i8 1, ptr %q
+  ret void
+}
+
+; The slot of p is rewritten through an alias of its address.
+define void @slot_aliased(ptr %p, ptr %other) {
+entry:
+  %slot = alloca ptr
+  %alias = alloca ptr
+  store ptr %p, ptr %slot
+  store ptr %slot, ptr %alias
+  %a = load ptr, ptr %alias
+  store ptr %other, ptr %a
+  %q = load ptr, ptr %slot
+  store i8 1, ptr %q
+  ret void
+}
+
+; The load runs before p is stored in the slot.
+define void @read_before_store(ptr %p) {
+entry:
+  %slot = alloca ptr
+  %early = load ptr, ptr %slot
+  store ptr %p, ptr %slot
+  store i8 1, ptr %early
+  ret void
+}
+
+; One store, then loads only: the loads read p.
+define void @plain_slot(ptr %p) {
+entry:
+  %slot = alloca ptr
+  store ptr %p, ptr %slot
+  %q = load ptr, ptr %slot
+  %at = getelementptr i8, ptr %q, i64 3
+  store i16 1, ptr %at
+  ret void
+}
+
+; A write at a variable offset, and one on some runs only.
+define void @conditional_and_variable(ptr %p, i1 %c, i64 %i) {
+entry:
+  %at = getelementptr i8, ptr %p, i64 %i
+  store i8 1, ptr %at
+  br i1 %c, label %write, label %done
+write:
+  store i8 1, ptr %p
+  br label %done
+done:
+  ret void
+}
+
+; Each call writes one byte further on: the rounds stop at their budget.
+define void @walk(ptr %p) {
+entry:
+  store i8 0, ptr %p
+  %next = getelementptr i8, ptr %p, i64 1
+  call void @walk(ptr %next)
+  ret void
+}
+
+define void @calls_walk(ptr %p) {
+entry:
+  call void @walk(ptr %p)
+  ret void
+}
+
+; An offset past the budget.
+define void @far(ptr %p) {
+entry:
+  %at = getelementptr i8, ptr %p, i64 8589934592
+  store i8 1, ptr %at
+  ret void
+}
+
+; A byval parameter points to the callee's own copy.
+define void @by_value(ptr byval([4 x i8]) %p) {
+entry:
+  %at = getelementptr i8, ptr %p, i64 3
+  store i8 1, ptr %at
+  ret void
+}
+)",
+                                                                               error, context);
+        if (!module)
+        {
+            report.expect(false, "ParamAccessSummary setup: the IR does not parse");
+            return false;
+        }
+
+        const ParamAccessSummaries summaries = computeParamAccessSummaries(*module, nullptr);
+        const auto of = [&](const char* name) -> const ParamAccessSummary*
+        {
+            const auto it = summaries.find(module->getFunction(name));
+            return it == summaries.end() ? nullptr : &it->second;
+        };
+        const auto writesNothing = [&](const char* name, unsigned param)
+        {
+            const ParamAccessSummary* summary = of(name);
+            return summary && param < summary->params.size() &&
+                   !summary->params[param].lowestWrite && !summary->params[param].highestWrite;
+        };
+
+        report.expect(writesNothing("slot_escapes", 0),
+                      "ParamAccessSummary: a slot whose address goes to a call is not read as p "
+                      "after the call");
+        report.expect(writesNothing("slot_aliased", 0),
+                      "ParamAccessSummary: a slot rewritten through an alias of its address is "
+                      "not read as p");
+        report.expect(writesNothing("read_before_store", 0),
+                      "ParamAccessSummary: a load before the store of p does not read p");
+
+        const ParamAccessSummary* plain = of("plain_slot");
+        report.expect(plain && plain->complete && plain->params.size() == 1 &&
+                          plain->params[0].highestWrite &&
+                          plain->params[0].highestWrite->offset == 3 &&
+                          plain->params[0].highestWrite->size == 2 && !plain->params[0].highestRead,
+                      "ParamAccessSummary: a slot written once and only loaded reads p: a 2-byte "
+                      "write at offset 3");
+
+        const ParamAccessSummary* partial = of("conditional_and_variable");
+        report.expect(partial && partial->complete && writesNothing("conditional_and_variable", 0),
+                      "ParamAccessSummary: a write at a variable offset or on some runs only is "
+                      "left out, and the summary stays complete");
+
+        const ParamAccessSummary* walk = of("walk");
+        report.expect(walk && !walk->complete && walk->params[0].lowestWrite &&
+                          walk->params[0].lowestWrite->offset == 0,
+                      "ParamAccessSummary: rounds stopped by their budget leave the summary "
+                      "incomplete, with the accesses found");
+        const ParamAccessSummary* callsWalk = of("calls_walk");
+        report.expect(callsWalk && !callsWalk->complete && callsWalk->params[0].lowestWrite,
+                      "ParamAccessSummary: a summary that uses an incomplete one is incomplete");
+        const ParamAccessSummary* far = of("far");
+        report.expect(far && !far->complete && writesNothing("far", 0),
+                      "ParamAccessSummary: an offset past the budget is left out, and the summary "
+                      "is incomplete");
+        report.expect(writesNothing("by_value", 0),
+                      "ParamAccessSummary: a write through a byval parameter is in the callee's "
+                      "copy, not in the caller's object");
+
+        // Across modules: a chain through a declaration, a weak and a twice-defined function,
+        // and a cycle that grows until the budget of rounds.
+        const auto parse = [&](const char* text)
+        { return llvm::parseAssemblyString(text, error, context); };
+        const std::unique_ptr<llvm::Module> callers = parse(R"(
+declare void @leaf(ptr)
+define void @mid(ptr %p) {
+entry:
+  %q = getelementptr i8, ptr %p, i64 2
+  call void @leaf(ptr %q)
+  ret void
+}
+define void @twice(ptr %p) {
+entry:
+  store i8 0, ptr %p
+  ret void
+}
+)");
+        const std::unique_ptr<llvm::Module> callees = parse(R"(
+define void @leaf(ptr %p) {
+entry:
+  store i32 0, ptr %p
+  ret void
+}
+define weak void @weak_leaf(ptr %p) {
+entry:
+  store i8 0, ptr %p
+  ret void
+}
+define void @twice(ptr %p) {
+entry:
+  store i8 0, ptr %p
+  ret void
+}
+)");
+        const std::unique_ptr<llvm::Module> pingModule = parse(R"(
+declare void @pong(ptr)
+define void @ping(ptr %p) {
+entry:
+  %q = getelementptr i8, ptr %p, i64 1
+  call void @pong(ptr %q)
+  ret void
+}
+)");
+        const std::unique_ptr<llvm::Module> pongModule = parse(R"(
+declare void @ping(ptr)
+define void @pong(ptr %p) {
+entry:
+  store i8 0, ptr %p
+  call void @ping(ptr %p)
+  ret void
+}
+)");
+        if (!callers || !callees || !pingModule || !pongModule)
+        {
+            report.expect(false, "ParamAccessSummary setup: the modules do not parse");
+            return false;
+        }
+
+        const ParamAccessIndex chain = paramAccessesAcrossModules({callers.get(), callees.get()});
+        const auto published = [](const ParamAccessIndex& index, const llvm::Module& mod,
+                                  const char* name) -> const ParamAccessSummary*
+        {
+            const llvm::Function* F = mod.getFunction(name);
+            const auto it = F ? index.functions.find(linkerSymbolName(*F)) : index.functions.end();
+            return it == index.functions.end() ? nullptr : &it->second;
+        };
+        const ParamAccessSummary* mid = published(chain, *callers, "mid");
+        report.expect(mid && mid->complete && mid->params[0].highestWrite &&
+                          mid->params[0].highestWrite->offset == 2 &&
+                          mid->params[0].highestWrite->size == 4 &&
+                          mid->params[0].highestWrite->function == "leaf",
+                      "ParamAccessSummary: across modules, mid writes 4 bytes at offset 2 "
+                      "through leaf, which makes the write");
+        report.expect(!published(chain, *callees, "weak_leaf") &&
+                          !published(chain, *callers, "twice"),
+                      "ParamAccessSummary: a weak or twice-defined function publishes no summary");
+
+        const ParamAccessIndex cycle =
+            paramAccessesAcrossModules({pingModule.get(), pongModule.get()});
+        const ParamAccessSummary* ping = published(cycle, *pingModule, "ping");
+        report.expect(ping && !ping->complete && ping->params[0].lowestWrite &&
+                          ping->params[0].lowestWrite->offset == 1,
+                      "ParamAccessSummary: a cycle across modules that grows to the budget of "
+                      "rounds leaves its summaries incomplete, with the accesses found");
+        return report.failures == 0;
+    }
+
     bool testIndexBoundsPerAccess(TestReport& report)
     {
         using ctrace::stack::analysis::StackBufferOverflowIssue;
@@ -3263,6 +3508,7 @@ int main(int argc, char** argv)
     (void)testTryGetConstFromValue(report);
     (void)testPromotedValues(report);
     (void)testIndexBoundsPerAccess(report);
+    (void)testParamAccessSummary(report);
     (void)testSmtEncoderMemoryModel(repoRoot, report);
     (void)testSmtEncoderPathCondition(repoRoot, report);
 #ifdef CTRACE_STACK_ENABLE_Z3_BACKEND

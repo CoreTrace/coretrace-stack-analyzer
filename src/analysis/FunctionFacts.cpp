@@ -179,4 +179,44 @@ namespace ctrace::stack::analysis
         }
         return impl.memoryModel->memorySSA->getWalker()->getClobberingMemoryAccess(&load);
     }
+
+    void FunctionFacts::loadsReadingStore(const llvm::StoreInst& store,
+                                          llvm::SmallVectorImpl<llvm::LoadInst*>& loads) const
+    {
+        using namespace llvm;
+        if (!store.isSimple())
+            return;
+        const Value* slot = store.getPointerOperand();
+        const Type* type = store.getValueOperand()->getType();
+
+        SmallVector<LoadInst*, 4> candidates;
+        const auto* alloca = dyn_cast<AllocaInst>(slot);
+        bool onlyThisStore = alloca && alloca->getFunction() == &impl_->function;
+        for (const Use& use : slot->uses())
+        {
+            if (auto* load = dyn_cast<LoadInst>(use.getUser()))
+            {
+                if (load->isSimple() && load->getType() == type)
+                    candidates.push_back(load);
+                continue;
+            }
+            // Any other use but this store writing the slot may write it, or let an alias or a
+            // call write it.
+            if (use.getUser() != &store || use.getOperandNo() != store.getPointerOperandIndex())
+                onlyThisStore = false;
+        }
+
+        for (LoadInst* load : candidates)
+        {
+            if (onlyThisStore)
+            {
+                if (impl_->dominatorTree.dominates(&store, load))
+                    loads.push_back(load);
+                continue;
+            }
+            const auto* def = dyn_cast_or_null<MemoryDef>(clobberingAccess(*load));
+            if (def && def->getMemoryInst() == &store)
+                loads.push_back(load);
+        }
+    }
 } // namespace ctrace::stack::analysis
