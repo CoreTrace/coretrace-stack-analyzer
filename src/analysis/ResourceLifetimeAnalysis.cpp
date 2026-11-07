@@ -21,6 +21,7 @@
 
 #include <llvm/ADT/SmallPtrSet.h>
 #include <llvm/ADT/SmallVector.h>
+#include <llvm/ADT/StringMap.h>
 #include <llvm/Analysis/CFG.h>
 #include <llvm/Analysis/CaptureTracking.h>
 #include <llvm/Analysis/ValueTracking.h>
@@ -1966,20 +1967,54 @@ namespace ctrace::stack::analysis
 
     using namespace lifetime_detail;
 
+    namespace
+    {
+        struct DemangledNames
+        {
+            std::string demangled;
+            std::string demangledBase;
+        };
+
+        // A rule is matched against a callee once per rule of the model, at every
+        // iteration: demangle each name once instead. The entry is keyed on the mangled
+        // name, of which it is a pure function, so it stays valid after the module that
+        // held the callee is freed. One cache per thread: the analysis threads share
+        // nothing. Cleared when full, which only bounds its memory.
+        const DemangledNames& demangledNamesOf(llvm::StringRef mangled)
+        {
+            constexpr std::size_t kMaxCachedNames = 1u << 16;
+            static thread_local llvm::StringMap<DemangledNames> cache;
+
+            const auto it = cache.find(mangled);
+            if (it != cache.end())
+                return it->second;
+            if (cache.size() >= kMaxCachedNames)
+                cache.clear();
+
+            const std::string mangledName = mangled.str();
+            DemangledNames names;
+            names.demangled = ctrace_tools::demangle(mangledName.c_str());
+            names.demangledBase = names.demangled;
+            if (const std::size_t pos = names.demangledBase.find('('); pos != std::string::npos)
+                names.demangledBase = names.demangledBase.substr(0, pos);
+
+            return cache.try_emplace(mangled, std::move(names)).first->second;
+        }
+    } // namespace
+
     bool ruleMatchesFunction(const ResourceRule& rule, const llvm::Function& callee)
     {
-        const std::string calleeName = callee.getName().str();
-        const std::string demangled = ctrace_tools::demangle(calleeName.c_str());
-        std::string demangledBase = demangled;
-        if (const std::size_t pos = demangledBase.find('('); pos != std::string::npos)
-            demangledBase = demangledBase.substr(0, pos);
+        const llvm::StringRef calleeName = callee.getName();
+        const DemangledNames& names = demangledNamesOf(calleeName);
+        const std::string& demangled = names.demangled;
+        const std::string& demangledBase = names.demangledBase;
 
         const llvm::StringRef pattern(rule.functionPattern);
         const bool hasGlob =
             pattern.contains('*') || pattern.contains('?') || pattern.contains('[');
         if (!hasGlob)
         {
-            return rule.functionPattern == calleeName || rule.functionPattern == demangled ||
+            return pattern == calleeName || rule.functionPattern == demangled ||
                    rule.functionPattern == demangledBase;
         }
 

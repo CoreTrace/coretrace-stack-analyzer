@@ -1218,6 +1218,97 @@ namespace
                       "ResourceModel: an unknown qualifier is an error naming the line");
         return report.failures == 0;
     }
+    // Pins which names a rule's pattern is compared with: the mangled name, the
+    // demangled name and the demangled name up to its first '(', exactly or as a glob.
+    bool testResourceRuleMatchesFunction(TestReport& report)
+    {
+        using namespace ctrace::stack::analysis;
+
+        struct Case
+        {
+            const char* pattern;
+            const char* function;
+            bool expected;
+        };
+        // _ZN2ns6Handle4openEPKc  -> ns::Handle::open(char const*)
+        // _ZN2ns6Handle5closeEv   -> ns::Handle::close()
+        // _Z11acquire_bufPPv      -> acquire_buf(void**)
+        // fopen, _Zbogus          -> left unchanged by the demangler
+        // f                       -> float (the demangler reads it as a type)
+        const Case cases[] = {
+            // A C name the demangler leaves unchanged.
+            {"fopen", "fopen", true},
+            {"fope", "fopen", false},
+            {"FOPEN", "fopen", false},
+            {"fop*", "fopen", true},
+            {"f?pen", "fopen", true},
+            {"*open", "fopen", true},
+            {"fopen*", "fopen", true},
+            {"?open", "fopen", true},
+            {"??open", "fopen", false},
+            {"_Zbogus", "_Zbogus", true},
+            {"_Zbog*", "_Zbogus", true},
+            // Exact patterns against each of the three names.
+            {"_ZN2ns6Handle4openEPKc", "_ZN2ns6Handle4openEPKc", true},
+            {"ns::Handle::open(char const*)", "_ZN2ns6Handle4openEPKc", true},
+            {"ns::Handle::open", "_ZN2ns6Handle4openEPKc", true},
+            {"ns::Handle::open", "_ZN2ns6Handle5closeEv", false},
+            {"open", "_ZN2ns6Handle4openEPKc", false},
+            {"Handle::open", "_ZN2ns6Handle4openEPKc", false},
+            {"ns::Handle::open(", "_ZN2ns6Handle4openEPKc", false},
+            {"acquire_buf", "_Z11acquire_bufPPv", true},
+            {"acquire_buf(void**)", "_Z11acquire_bufPPv", true},
+            {"ns::Handle::close()", "_ZN2ns6Handle5closeEv", true},
+            {"float", "f", true},
+            {"f", "f", true},
+            // Globs against each of the three names.
+            {"_ZN2ns*", "_ZN2ns6Handle4openEPKc", true},
+            {"*4openEPKc", "_ZN2ns6Handle4openEPKc", true},
+            {"ns::Handle::*", "_ZN2ns6Handle4openEPKc", true},
+            {"ns::Handle::*", "_ZN2ns6Handle5closeEv", true},
+            {"*(char const*)", "_ZN2ns6Handle4openEPKc", true},
+            {"*(char const*)", "_ZN2ns6Handle5closeEv", false},
+            {"ns::*::open", "_ZN2ns6Handle4openEPKc", true},
+            {"ns::*::open", "_ZN2ns6Handle5closeEv", false},
+            {"*open", "_ZN2ns6Handle4openEPKc", true},
+            {"*::clos?", "_ZN2ns6Handle5closeEv", true},
+            {"acquire_*", "_Z11acquire_bufPPv", true},
+            {"release_*", "_Z11acquire_bufPPv", false},
+            {"flo*", "f", true},
+            // '[' selects glob matching but is compared literally.
+            {"a[b", "a[b", true},
+            {"a[b", "ab", false},
+            {"a[b*", "a[bc", true},
+        };
+
+        const auto check = [&](const char* round)
+        {
+            llvm::LLVMContext context;
+            llvm::Module module("rule-match", context);
+            llvm::FunctionType* type =
+                llvm::FunctionType::get(llvm::Type::getVoidTy(context), false);
+            for (const Case& c : cases)
+            {
+                llvm::Function* callee = module.getFunction(c.function);
+                if (callee == nullptr)
+                {
+                    callee = llvm::Function::Create(type, llvm::Function::ExternalLinkage,
+                                                    c.function, &module);
+                }
+                ResourceRule rule;
+                rule.functionPattern = c.pattern;
+                report.expect(ruleMatchesFunction(rule, *callee) == c.expected,
+                              std::string("ResourceModel: ") + round + " pattern '" + c.pattern +
+                                  (c.expected ? "' matches '" : "' does not match '") + c.function +
+                                  "'");
+            }
+        };
+        // Twice, each time in a fresh module: results do not depend on what was matched
+        // before nor on which llvm::Function carries the name.
+        check("first round,");
+        check("second round,");
+        return report.failures == 0;
+    }
     bool testOwnershipFactCollector(const std::filesystem::path& repoRoot, TestReport& report)
     {
         using namespace ctrace::stack::analysis;
@@ -2924,6 +3015,7 @@ int main(int argc, char** argv)
     (void)testStackBufferPhiCycle(repoRoot, report);
     (void)testStackBufferPointerRing(report);
     (void)testResourceModelConditions(report);
+    (void)testResourceRuleMatchesFunction(report);
     (void)testOwnershipFactCollector(repoRoot, report);
     (void)testOwnershipCollectorExceptions(repoRoot, report);
     (void)testOwnershipSummaryIndex(repoRoot, report);
