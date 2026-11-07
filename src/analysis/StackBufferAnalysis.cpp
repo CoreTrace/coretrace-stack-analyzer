@@ -8,6 +8,7 @@
 #include <unordered_map>
 
 #include <llvm/ADT/APInt.h>
+#include <llvm/ADT/ArrayRef.h>
 #include <llvm/ADT/SmallPtrSet.h>
 #include <llvm/ADT/SmallVector.h>
 #include <llvm/Analysis/MemorySSA.h>
@@ -15,6 +16,7 @@
 #include <llvm/BinaryFormat/Dwarf.h>
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/CFG.h>
+#include <llvm/IR/DataLayout.h>
 #include <llvm/IR/DebugInfoMetadata.h>
 #include <llvm/IR/Function.h>
 #include <llvm/IR/GlobalVariable.h>
@@ -26,6 +28,7 @@
 #include "analysis/IntRanges.hpp"
 #include "analysis/FunctionFacts.hpp"
 #include "analysis/IRValueUtils.hpp"
+#include "analysis/ParamAccessSummary.hpp"
 #include "analysis/PromotedValues.hpp"
 #include "analysis/smt/SmtEncoding.hpp"
 #include "analysis/smt/SmtRefinement.hpp"
@@ -897,16 +900,29 @@ namespace ctrace::stack::analysis
             return first && first->isZero();
         }
 
+        /// A call that receives a pointer to the address, @p offset bytes from it.
+        struct CallArgument
+        {
+            llvm::CallBase* call = nullptr;
+            std::int64_t offset = 0;
+            unsigned argNo = 0;
+            unsigned reservedPadding = 0;
+        };
+
         /// The loads and stores that use @p address: directly, and with @p followVariables also
         /// through the pointer variables it is stored in (`char* p = &buf[i]; *p = 0;`), from
-        /// one variable to the next. A store of the address is not an access to it.
+        /// one variable to the next. A store of the address is not an access to it. @p calls
+        /// receives the calls that take the address as an argument, with its position, also
+        /// at a constant step from a variable (`char* p = buf; f(p + 8);`).
         ///
-        /// A load of a variable stands for the address only when its MemorySSA clobber is the
-        /// store of the address to that variable, with the same type. The load then reads that
-        /// address, and as the store dominates the load, the values the address was computed
-        /// from still hold the values they had at the store: a load in the next iteration of a
-        /// loop has a merge for clobber, and is left out. Each load has one clobber, so the walk
-        /// meets each load once.
+        /// A load of a variable stands for the address only when it reads exactly the store of
+        /// the address to that variable (FunctionFacts::loadsReadingStore). As the store
+        /// dominates the load, the values the address was computed from still hold the values
+        /// they had at the store: a load in the next iteration of a loop may read another store,
+        /// and is left out. A load reads one store, so the walk meets each load once.
+        ///
+        /// A step from a variable is not an index of the array: the loads and stores through it
+        /// are left to their own GEP. Only the calls get it, with its offset in bytes.
         ///
         /// @p via receives, for each access through variables, the names that come before the
         /// alias path of the address: the variables, the last one first, then the address.
@@ -914,47 +930,203 @@ namespace ctrace::stack::analysis
         collectAccesses(llvm::GetElementPtrInst& address, bool followVariables,
                         const FunctionFacts& facts,
                         llvm::SmallVectorImpl<llvm::Instruction*>& accesses,
+                        llvm::SmallVectorImpl<CallArgument>& calls,
                         std::unordered_map<const llvm::Instruction*, std::vector<std::string>>& via)
         {
             using namespace llvm;
+            constexpr std::int64_t kMaxStepBytes = std::int64_t{1} << 40;
+            const DataLayout& layout = address.getModule()->getDataLayout();
 
-            SmallVector<std::pair<Value*, std::vector<std::string>>, 4> pointers;
-            pointers.emplace_back(&address, std::vector<std::string>{});
+            struct Pointer
+            {
+                Value* value = nullptr;
+                std::vector<std::string> names;
+                std::int64_t offset = 0; // bytes from the address
+                // A step from a variable: only calls count.
+                std::uint64_t stepped : 1 = false;
+                std::uint64_t reservedFlags : 63 = 0;
+            };
+            const auto pointerTo =
+                [](Value* value, std::vector<std::string> names, std::int64_t offset, bool stepped)
+            {
+                Pointer pointer;
+                pointer.value = value;
+                pointer.names = std::move(names);
+                pointer.offset = offset;
+                pointer.stepped = stepped;
+                return pointer;
+            };
+            SmallVector<Pointer, 4> pointers;
+            pointers.push_back(pointerTo(&address, {}, 0, false));
             if (address.hasName())
-                pointers.back().second.push_back(address.getName().str());
+                pointers.back().names.push_back(address.getName().str());
             while (!pointers.empty())
             {
-                auto [pointer, names] = pointers.pop_back_val();
-                for (User* user : pointer->users())
+                Pointer pointer = pointers.pop_back_val();
+                for (Use& use : pointer.value->uses())
                 {
+                    User* user = use.getUser();
                     auto* store = dyn_cast<StoreInst>(user);
-                    if (isa<LoadInst>(user) || (store && store->getPointerOperand() == pointer))
+                    auto* call = dyn_cast<CallBase>(user);
+                    const bool access = !pointer.stepped &&
+                                        (isa<LoadInst>(user) ||
+                                         (store && store->getPointerOperand() == pointer.value));
+                    if (access || (call && call->isArgOperand(&use)))
                     {
-                        accesses.push_back(cast<Instruction>(user));
-                        if (pointer != &address)
-                            via[accesses.back()] = names;
+                        if (call)
+                            calls.push_back({call, pointer.offset, call->getArgOperandNo(&use), 0});
+                        else
+                            accesses.push_back(cast<Instruction>(user));
+                        if (pointer.value != &address)
+                            via[cast<Instruction>(user)] = pointer.names;
                     }
-                    if (!followVariables || !store || !store->isSimple() ||
-                        store->getValueOperand() != pointer)
+
+                    // A constant step from a variable. A GEP on the address itself is checked
+                    // as its own address.
+                    if (auto* step = dyn_cast<GetElementPtrInst>(user);
+                        step && pointer.value != &address &&
+                        use.getOperandNo() == GetElementPtrInst::getPointerOperandIndex())
+                    {
+                        APInt delta(layout.getIndexTypeSizeInBits(step->getType()), 0);
+                        if (!step->accumulateConstantOffset(layout, delta) ||
+                            delta.getSignificantBits() > 41)
+                            continue;
+                        const std::int64_t offset = pointer.offset + delta.getSExtValue();
+                        if (offset < -kMaxStepBytes || offset > kMaxStepBytes)
+                            continue;
+                        std::vector<std::string> stepNames;
+                        if (step->hasName())
+                            stepNames.push_back(step->getName().str());
+                        stepNames.insert(stepNames.end(), pointer.names.begin(),
+                                         pointer.names.end());
+                        pointers.push_back(pointerTo(step, std::move(stepNames), offset, true));
+                        continue;
+                    }
+
+                    if (!followVariables || !store || store->getValueOperand() != pointer.value)
                         continue;
 
                     Value* variable = store->getPointerOperand();
-                    for (User* variableUser : variable->users())
+                    SmallVector<LoadInst*, 4> loads;
+                    facts.loadsReadingStore(*store, loads);
+                    for (LoadInst* load : loads)
                     {
-                        auto* load = dyn_cast<LoadInst>(variableUser);
-                        if (!load || !load->isSimple() || load->getType() != pointer->getType())
-                            continue;
-                        const auto* def =
-                            dyn_cast_or_null<MemoryDef>(facts.clobberingAccess(*load));
-                        if (!def || def->getMemoryInst() != store)
-                            continue;
                         std::vector<std::string> loadNames;
                         if (variable->hasName())
                             loadNames.push_back(variable->getName().str());
-                        loadNames.insert(loadNames.end(), names.begin(), names.end());
-                        pointers.emplace_back(load, std::move(loadNames));
+                        loadNames.insert(loadNames.end(), pointer.names.begin(),
+                                         pointer.names.end());
+                        pointers.push_back(
+                            pointerTo(load, std::move(loadNames), pointer.offset, pointer.stepped));
                     }
                 }
+            }
+        }
+
+        using CalleeAccesses = std::function<const ParamAccessSummary*(const llvm::CallBase&)>;
+
+        /// The bytes of the array @p gep indexes, from the start of @p alloca: the alloca, or the
+        /// array field of a struct the GEP selects. None when they are not fixed.
+        static std::optional<std::pair<std::int64_t, std::uint64_t>>
+        indexedArrayBytes(const llvm::GetElementPtrInst& gep, const llvm::AllocaInst& alloca,
+                          const llvm::DataLayout& layout)
+        {
+            using namespace llvm;
+            constexpr std::uint64_t kMaxBytes = std::uint64_t{1} << 40;
+            std::int64_t begin = 0;
+            Type* type = gep.getSourceElementType();
+            if (auto* record = dyn_cast<StructType>(type))
+            {
+                // [0, field, i]: the array field.
+                const auto* first =
+                    gep.getNumIndices() >= 3 ? dyn_cast<ConstantInt>(gep.getOperand(1)) : nullptr;
+                const auto* field = first ? dyn_cast<ConstantInt>(gep.getOperand(2)) : nullptr;
+                if (!first || !first->isZero() || !field ||
+                    field->getZExtValue() >= record->getNumElements())
+                    return std::nullopt;
+                const auto fieldIndex = static_cast<unsigned>(field->getZExtValue());
+                type = record->getElementType(fieldIndex);
+                if (!isa<ArrayType>(type))
+                    return std::nullopt;
+                begin = static_cast<std::int64_t>(
+                    layout.getStructLayout(record)->getElementOffset(fieldIndex).getFixedValue());
+            }
+            else if (!isa<ArrayType>(type))
+            {
+                // An element pointer from the decayed array: the whole alloca.
+                if (alloca.isArrayAllocation())
+                    return std::nullopt;
+                type = alloca.getAllocatedType();
+            }
+            const TypeSize size = layout.getTypeAllocSize(type);
+            if (size.isScalable() || size.getFixedValue() > kMaxBytes)
+                return std::nullopt;
+            return std::make_pair(begin, size.getFixedValue());
+        }
+
+        /// Reports each call of @p calls whose callee is known to access, through the address
+        /// @p gep it receives, bytes outside the array (#266). @p gep is computed from @p alloca
+        /// itself, at a constant offset. The summary lists accesses that happen on every run of
+        /// the callee that returns; nothing is concluded from what it does not list.
+        template <typename NewReport>
+        static void
+        reportCalleeAccesses(const llvm::GetElementPtrInst& gep, const llvm::AllocaInst& alloca,
+                             llvm::ArrayRef<CallArgument> calls,
+                             const CalleeAccesses& calleeAccesses, const NewReport& newReport,
+                             std::vector<StackBufferOverflowIssue>& out)
+        {
+            using namespace llvm;
+            if (calls.empty())
+                return;
+            const DataLayout& layout = alloca.getModule()->getDataLayout();
+            const auto bytes = indexedArrayBytes(gep, alloca, layout);
+            APInt offset(layout.getIndexTypeSizeInBits(gep.getType()), 0);
+            if (!bytes || !gep.accumulateConstantOffset(layout, offset) ||
+                offset.getSignificantBits() > 41)
+                return;
+            const std::int64_t address = offset.getSExtValue();
+            const std::int64_t arrayBegin = bytes->first;
+            const std::uint64_t arrayBytes = bytes->second;
+            const std::int64_t arrayEnd = arrayBegin + static_cast<std::int64_t>(arrayBytes);
+
+            for (const CallArgument& argument : calls)
+            {
+                CallBase& call = *argument.call;
+                const ParamAccessSummary* summary = calleeAccesses(call);
+                if (!summary || argument.argNo >= summary->params.size())
+                    continue;
+                // The highest end is checked against the array's end, the lowest offset against
+                // its start.
+                const auto report =
+                    [&](const std::optional<ParamAccess>& access, bool write, bool below)
+                {
+                    if (!access)
+                        return;
+                    const std::int64_t begin = address + argument.offset + access->offset;
+                    if (below ? begin >= arrayBegin
+                              : begin + static_cast<std::int64_t>(access->size) <= arrayEnd)
+                        return;
+                    StackBufferOverflowIssue issue = newReport(call);
+                    issue.isWrite = write;
+                    issue.isLowerBoundViolation = below;
+                    issue.lowerBound = begin - arrayBegin;
+                    CalleeAccessOutOfBounds callee;
+                    callee.callee = directCallee(call)->getName().str();
+                    callee.begin = begin - arrayBegin;
+                    callee.size = access->size;
+                    callee.arrayBytes = arrayBytes;
+                    callee.function = access->function;
+                    callee.file = access->file;
+                    callee.line = access->line;
+                    callee.column = access->column;
+                    issue.calleeAccess = std::move(callee);
+                    out.push_back(std::move(issue));
+                };
+                const ParamAccessBounds& bounds = summary->params[argument.argNo];
+                report(bounds.highestWrite, true, false);
+                report(bounds.lowestWrite, true, true);
+                report(bounds.highestRead, false, false);
+                report(bounds.lowestRead, false, true);
             }
         }
 
@@ -962,7 +1134,8 @@ namespace ctrace::stack::analysis
             llvm::Function& F, std::vector<StackBufferOverflowIssue>& out,
             const AnalysisComplexityBudgets& budgets,
             const StackBufferConstraintEvaluator& evaluator,
-            const std::function<PromotedValues&()>& promotedValues)
+            const std::function<PromotedValues&()>& promotedValues,
+            const CalleeAccesses& calleeAccesses)
         {
             using namespace llvm;
 
@@ -1136,22 +1309,29 @@ namespace ctrace::stack::analysis
                             GV->hasName() ? GV->getName().str() : std::string("<unnamed-global>");
                     }
 
-                    // A constant index within bounds is safe wherever the address is used.
+                    // A constant index within bounds is safe wherever the address is used, but
+                    // in a call: the callee may access past the address (#266). Calls are checked
+                    // when the address is computed from a stack array itself, at a constant
+                    // offset.
                     auto* CIdx = dyn_cast<ConstantInt>(idxVal);
-                    if (CIdx && CIdx->getSExtValue() >= 0 &&
-                        static_cast<StackSize>(CIdx->getSExtValue()) < arraySize)
+                    const bool constantInBounds =
+                        CIdx && CIdx->getSExtValue() >= 0 &&
+                        static_cast<StackSize>(CIdx->getSExtValue()) < arraySize;
+                    const Value* array = AI ? static_cast<const Value*>(AI) : GV;
+                    const bool fromArray = GEP->getPointerOperand()->stripPointerCasts() == array;
+                    const bool checkCalls = AI && CIdx && fromArray;
+                    if (constantInBounds && !checkCalls)
                         continue;
 
-                    // The loads and stores that use the address, each reported on its own. The
-                    // pointer variables it is stored in are followed only when it is computed
-                    // from the array itself: the index then counts from the array's start.
+                    // The loads, stores and calls that use the address, each reported on its
+                    // own. The pointer variables it is stored in are followed only when it is
+                    // computed from the array itself: the index then counts from the array's
+                    // start.
                     SmallVector<Instruction*, 4> accesses;
+                    SmallVector<CallArgument, 2> calls;
                     std::unordered_map<const Instruction*, std::vector<std::string>> via;
-                    const Value* array = AI ? static_cast<const Value*>(AI) : GV;
-                    collectAccesses(*GEP,
-                                    allowPointerStoreScan &&
-                                        GEP->getPointerOperand()->stripPointerCasts() == array,
-                                    facts, accesses, via);
+                    collectAccesses(*GEP, allowPointerStoreScan && fromArray, facts, accesses,
+                                    calls, via);
                     const bool pilotAccess = isIndexBoundsPilotAccess(*GEP, AI);
                     const auto newReport = [&](Instruction& access)
                     {
@@ -1164,8 +1344,8 @@ namespace ctrace::stack::analysis
                         report.inst = &access;
                         // The index-bounds pilot may show that the access never runs: its
                         // reports then carry the unreachable-code note.
-                        report.neverRuns =
-                            pilotAccess && promotedValues().indexValuesAt(access, *idxVal).kind ==
+                        report.neverRuns = pilotAccess && !isa<CallBase>(access) &&
+                                           promotedValues().indexValuesAt(access, *idxVal).kind ==
                                                IndexValues::Kind::NeverRuns;
                         std::vector<std::string> path = aliasPath;
                         if (const auto through = via.find(&access); through != via.end())
@@ -1186,6 +1366,13 @@ namespace ctrace::stack::analysis
                         indexReading =
                             isa<ZExtInst>(cast) ? IntReading::Unsigned : IntReading::Signed;
                         baseIdxVal = cast->getOperand(0);
+                    }
+
+                    if (checkCalls)
+                    {
+                        reportCalleeAccesses(*GEP, *AI, calls, calleeAccesses, newReport, out);
+                        if (constantInBounds)
+                            continue;
                     }
 
                     // 4) Constant index case, out of bounds: test[11]
@@ -1502,6 +1689,20 @@ namespace ctrace::stack::analysis
                 promoted.emplace(mod, shouldAnalyze);
             return *promoted;
         };
+        // What the functions of the module access through their parameters, computed on the
+        // first call that needs it.
+        const ParamAccessIndex* elsewhere = config.paramAccessIndex.get();
+        std::optional<ParamAccessSummaries> summaries;
+        const CalleeAccesses calleeAccesses =
+            [&](const llvm::CallBase& call) -> const ParamAccessSummary*
+        {
+            const llvm::Function* callee = directCallee(call);
+            if (!callee || callee->isIntrinsic() || (callee->isDeclaration() && !elsewhere))
+                return nullptr;
+            if (!summaries)
+                summaries = computeParamAccessSummaries(mod, elsewhere);
+            return calleeParamAccesses(call, *summaries, elsewhere);
+        };
 
         for (llvm::Function& F : mod)
         {
@@ -1509,7 +1710,8 @@ namespace ctrace::stack::analysis
                 continue;
             if (!shouldAnalyze(F))
                 continue;
-            analyzeStackBufferOverflowsInFunction(F, out, budgets, evaluator, promotedValues);
+            analyzeStackBufferOverflowsInFunction(F, out, budgets, evaluator, promotedValues,
+                                                  calleeAccesses);
         }
 
         return out;

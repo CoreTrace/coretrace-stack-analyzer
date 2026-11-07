@@ -21,6 +21,13 @@ Notable changes are grouped by release. See [all releases](https://github.com/Co
   *p = 42;` is reported on `*p = 42`, with the variable in the alias path. The variable is
   followed when the store of the address is its last write on every path to the access; one
   assigned on a single branch is not.
+- A call that receives the address of a stack array is checked against what the callee reads or
+  writes through it, in the same file or in another file analyzed with it (#266):
+  `char* p = &buf[8]; f(p);`, where `f` writes `*p` or passes `p` to a function that does, is
+  reported on the call, with the bytes written and the place of the write. Only the accesses
+  the callee makes on every run, at a constant offset from the address it receives, count. An
+  access behind a condition, at a variable offset, or through a function pointer is not
+  followed, and gives no report.
 - VLA sizes, local stack sizes and the "this access appears unreachable" note on buffer
   overflows read a local variable from the store that last wrote it, as MemorySSA finds it, and
   apply casts to it. They used to take the last constant stored anywhere in the function. A
