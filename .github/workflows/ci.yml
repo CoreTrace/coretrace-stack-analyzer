@@ -25,9 +25,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # macos-14 builds with AppleClang 15 (Xcode 15.4), the oldest compiler CoreTrace builds
-        # the analyzer with; macos-latest has a newer one (#228).
-        os: [ubuntu-24.04, macos-latest, macos-14]
+        # macos-15 builds with AppleClang 16 (Xcode 16.0, selected below), the oldest Apple
+        # compiler GitHub's runners still provide; macos-latest has a newer one (#228).
+        # GitHub retires macos-14, the only image with Xcode 15, on November 2, 2026
+        # (actions/runner-images#13518): AppleClang 15 (Xcode 15.4) and the macOS 14 C++ runtime
+        # are no longer tested here. That is a loss of coverage, not a decision to drop them.
+        os: [ubuntu-24.04, macos-latest, macos-15]
 
     steps:
     - uses: actions/checkout@v4
@@ -51,6 +54,16 @@ jobs:
         sudo apt-get install -y llvm-20 llvm-20-dev clang-20 libclang-20-dev
         echo "LLVM_DIR=/usr/lib/llvm-20/lib/cmake/llvm" >> $GITHUB_ENV
         echo "Clang_DIR=/usr/lib/llvm-20/lib/cmake/clang" >> $GITHUB_ENV
+
+    # macos-15: the oldest Xcode of the image, for the compiler the matrix names. CMake's
+    # /usr/bin/c++ follows DEVELOPER_DIR; a missing Xcode 16.0 fails here, not on another one.
+    - name: Select Xcode 16.0 (macos-15)
+      if: matrix.os == 'macos-15'
+      run: |
+        XCODE=/Applications/Xcode_16.0.app/Contents/Developer
+        test -d "$XCODE" || { echo "::error::Xcode 16.0 is not on this image"; exit 1; }
+        echo "DEVELOPER_DIR=$XCODE" >> "$GITHUB_ENV"
+        DEVELOPER_DIR="$XCODE" /usr/bin/c++ --version
 
     # macOS: install toolchain
     - name: Install dependencies (macOS)

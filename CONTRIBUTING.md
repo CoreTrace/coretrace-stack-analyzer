@@ -8,7 +8,7 @@ This document defines the expected workflow for code, tests, and pull requests.
 
 Prerequisites:
 - CMake `>= 3.16`
-- LLVM/Clang `>= 19` (20 recommended)
+- LLVM/Clang 20
 - A C++20 compiler
 
 Build:
