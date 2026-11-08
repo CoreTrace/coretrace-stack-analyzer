@@ -384,8 +384,12 @@ namespace ctrace::stack::analysis::const_suggestion
                 specialization; // variant, pattern site, template arguments with nested types
         };
         std::vector<Identity> identities;
-        std::unique_ptr<llvm::LLVMContext> context;
-        std::unique_ptr<llvm::Module> module;
+        // Shared by the inspections of one compilation (inspectEach).
+        std::shared_ptr<llvm::LLVMContext> context;
+        std::shared_ptr<llvm::Module> module;
+        // The module once prepared: prepared once for all of them, since preparing changes it.
+        std::shared_ptr<std::optional<ModuleText>> prepared =
+            std::make_shared<std::optional<ModuleText>>();
         std::vector<Fact> facts;                   // R and K, in the order of the traversal
         std::set<std::string> instantiations;      // the symbols of those around a fact
         std::vector<Entity> entities;              // indexed like the targets
@@ -412,6 +416,23 @@ namespace ctrace::stack::analysis::const_suggestion
     UnitFacts inspect(const UnitCommand& command, const SuggestionPlan* rewrittenBy,
                       const std::map<std::string, std::string>& rewritten,
                       const std::vector<Target>& targets, std::string_view step, bool timing);
+
+    // What `inspect` looks for in one compilation: its targets, and after the rewrite the plan
+    // that rewrites the files.
+    struct Inspection
+    {
+        const SuggestionPlan* rewrittenBy = nullptr;
+        std::vector<Target> targets;
+    };
+
+    // Compiles a unit once and inspects it once for each of `inspections`, each one as `inspect`
+    // alone would: its own targets, plan and sites. The compilation's diagnostics, module and
+    // prepared code are the same for all. Suggestions with the same rewrite share their
+    // compilations after it this way (#239).
+    std::vector<UnitFacts> inspectEach(const UnitCommand& command,
+                                       const std::map<std::string, std::string>& rewritten,
+                                       const std::vector<Inspection>& inspections,
+                                       std::string_view step, bool timing);
 
     // The text of each file that `plan` rewrites, its edits applied. `failure` names a file that
     // cannot be read, or that has become too short for an edit, so changed after the plan was

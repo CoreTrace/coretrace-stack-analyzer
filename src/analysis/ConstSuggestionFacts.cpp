@@ -81,12 +81,12 @@ namespace ctrace::stack::analysis
             "overloaded-virtual",
             "pointer-type-mismatch"};
 
-        // Errors, and the checked warnings, by place and kind: their texts name types that the
-        // rewrite changes.
+        // Errors, and the checked warnings, by place and kind, into every inspection of the
+        // compilation: their texts name types that the rewrite changes.
         class DiagnosticCollector : public clang::DiagnosticConsumer
         {
           public:
-            explicit DiagnosticCollector(UnitFacts& out) : out_(out) {}
+            explicit DiagnosticCollector(std::vector<UnitFacts>& outs) : outs_(outs) {}
 
             void HandleDiagnostic(clang::DiagnosticsEngine::Level level,
                                   const clang::Diagnostic& info) override
@@ -115,19 +115,22 @@ namespace ctrace::stack::analysis
                     }
                 }
                 const std::string key = place + " #" + std::to_string(info.getID());
-                out_.diagnostics.insert(key);
                 llvm::SmallString<160> text;
                 info.FormatDiagnostic(text);
-                out_.reported.push_back({key, place + ": " + text.str().str(),
-                                         level >= clang::DiagnosticsEngine::Error});
-                if (out_.firstDiagnostic.empty())
-                    out_.firstDiagnostic = out_.reported.back().text;
-                if (level == clang::DiagnosticsEngine::Fatal && out_.fatal.empty())
-                    out_.fatal = out_.reported.back().text;
+                for (UnitFacts& out : outs_)
+                {
+                    out.diagnostics.insert(key);
+                    out.reported.push_back({key, place + ": " + text.str().str(),
+                                            level >= clang::DiagnosticsEngine::Error});
+                    if (out.firstDiagnostic.empty())
+                        out.firstDiagnostic = out.reported.back().text;
+                    if (level == clang::DiagnosticsEngine::Fatal && out.fatal.empty())
+                        out.fatal = out.reported.back().text;
+                }
             }
 
           private:
-            UnitFacts& out_;
+            std::vector<UnitFacts>& outs_;
         };
 
         // An offset of the rewritten text, in the original one. An offset inside inserted text
@@ -1380,13 +1383,14 @@ namespace ctrace::stack::analysis
             std::map<unsigned, bool> rewrittenSpelling_; // by FileID: is it a rewritten file
         };
 
+        // CodeGen, then one Inspector for each inspection, each with its own output.
         class InspectAction : public clang::EmitLLVMOnlyAction
         {
           public:
-            InspectAction(llvm::LLVMContext* context, const std::vector<Target>& targets,
-                          const SuggestionPlan* rewrittenBy, UnitFacts& out)
-                : clang::EmitLLVMOnlyAction(context), targets_(targets), rewrittenBy_(rewrittenBy),
-                  out_(out)
+            InspectAction(llvm::LLVMContext* context,
+                          const std::vector<const_suggestion::Inspection>& inspections,
+                          std::vector<UnitFacts>& outs)
+                : clang::EmitLLVMOnlyAction(context), inspections_(inspections), outs_(outs)
             {
             }
 
@@ -1400,21 +1404,25 @@ namespace ctrace::stack::analysis
                     return nullptr;
                 std::vector<std::unique_ptr<clang::ASTConsumer>> consumers;
                 consumers.push_back(std::move(generator));
-                consumers.push_back(
-                    std::make_unique<Inspector>(*this, targets_, rewrittenBy_, out_));
-                if (std::any_of(targets_.begin(), targets_.end(),
-                                [](const Target& target) { return !target.plan; }))
+                for (std::size_t k = 0; k < inspections_.size(); ++k)
                 {
-                    ci.getPreprocessor().addPPCallbacks(const_suggestion::recordMacroDefinitions(
-                        ci.getSourceManager(), out_.macros));
+                    const std::vector<Target>& targets = inspections_[k].targets;
+                    consumers.push_back(std::make_unique<Inspector>(
+                        *this, targets, inspections_[k].rewrittenBy, outs_[k]));
+                    if (std::any_of(targets.begin(), targets.end(),
+                                    [](const Target& target) { return !target.plan; }))
+                    {
+                        ci.getPreprocessor().addPPCallbacks(
+                            const_suggestion::recordMacroDefinitions(ci.getSourceManager(),
+                                                                     outs_[k].macros));
+                    }
                 }
                 return std::make_unique<clang::MultiplexConsumer>(std::move(consumers));
             }
 
           private:
-            const std::vector<Target>& targets_;
-            const SuggestionPlan* rewrittenBy_;
-            UnitFacts& out_;
+            const std::vector<const_suggestion::Inspection>& inspections_;
+            std::vector<UnitFacts>& outs_;
         };
 
         // An import declaration (`import M;`, `#pragma clang module import`), which gives no
@@ -1479,6 +1487,14 @@ namespace ctrace::stack::analysis
                                         const std::vector<Target>& targets, std::string_view step,
                                         bool timing)
     {
+        return std::move(
+            inspectEach(command, rewritten, {{rewrittenBy, targets}}, step, timing).front());
+    }
+
+    std::vector<UnitFacts> const_suggestion::inspectEach(
+        const UnitCommand& command, const std::map<std::string, std::string>& rewritten,
+        const std::vector<Inspection>& inspections, std::string_view step, bool timing)
+    {
         const analyzer::ScopedHotspot hotspot(timing, step);
         static std::once_flag targetsReady;
         std::call_once(targetsReady,
@@ -1488,16 +1504,22 @@ namespace ctrace::stack::analysis
                            llvm::InitializeAllTargets();
                            llvm::InitializeAllTargetMCs();
                        });
-        UnitFacts out;
-        out.timing = timing;
+        std::vector<UnitFacts> outs(inspections.size());
+        for (UnitFacts& out : outs)
+        {
+            out.timing = timing;
+            out.prepared = outs.front().prepared;
+        }
+        UnitFacts& out = outs.front();
         std::string error;
+        std::string notUnderstood;
         const bool ran = runSerializedCompile(
             command.workingDir,
             [&]
             {
                 llvm::IntrusiveRefCntPtr<llvm::vfs::FileSystem> files =
                     llvm::vfs::getRealFileSystem();
-                DiagnosticCollector collector(out);
+                DiagnosticCollector collector(outs);
                 std::vector<const char*> argv;
                 for (const std::string& arg : command.args)
                     argv.push_back(arg.c_str());
@@ -1510,7 +1532,7 @@ namespace ctrace::stack::analysis
                     clang::createInvocation(argv, options);
                 if (!invocation)
                 {
-                    out.failure = "the compile command is not understood: " + out.firstDiagnostic;
+                    notUnderstood = "the compile command is not understood: " + out.firstDiagnostic;
                     return;
                 }
                 // Nothing is written: no dependency file, no output.
@@ -1549,9 +1571,12 @@ namespace ctrace::stack::analysis
                 }
                 diagnostics.Warnings.insert(diagnostics.Warnings.end(), errors.begin(),
                                             errors.end());
-                out.diagnostics.clear();
-                out.reported.clear();
-                out.firstDiagnostic.clear();
+                for (UnitFacts& each : outs)
+                {
+                    each.diagnostics.clear();
+                    each.reported.clear();
+                    each.firstDiagnostic.clear();
+                }
 
                 clang::CompilerInstance instance;
                 instance.setInvocation(std::move(invocation));
@@ -1565,15 +1590,20 @@ namespace ctrace::stack::analysis
                 instance.getPreprocessorOpts().RetainRemappedFileBuffers = false;
                 instance.getFrontendOpts().DisableFree = false;
                 instance.getCodeGenOpts().DisableFree = false;
-                out.context = std::make_unique<llvm::LLVMContext>();
-                InspectAction action(out.context.get(), targets, rewrittenBy, out);
+                out.context = std::make_shared<llvm::LLVMContext>();
+                InspectAction action(out.context.get(), inspections, outs);
                 instance.ExecuteAction(action);
                 out.module = action.takeModule();
+                for (UnitFacts& each : outs)
+                {
+                    each.context = out.context;
+                    each.module = out.module;
+                }
             },
             error);
-        if (!ran)
-            out.failure = error;
-        return out;
+        for (UnitFacts& each : outs)
+            each.failure = ran ? notUnderstood : error;
+        return outs;
     }
 
     // The files a unit reads and its identifiers, from its preprocessing. Empty when the

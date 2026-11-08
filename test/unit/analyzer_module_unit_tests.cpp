@@ -1043,6 +1043,204 @@ namespace
         return out;
     }
 
+    /// Everything the judgement reads from one compilation, written out.
+    std::string inspectionText(const ctrace::stack::analysis::const_suggestion::UnitFacts& unit)
+    {
+        namespace cs = ctrace::stack::analysis::const_suggestion;
+        std::string out;
+        llvm::raw_string_ostream os(out);
+        const auto site = [&](const cs::DeclarationSite& at)
+        {
+            os << at.expansion.file << ':' << at.expansion.offset << '|' << at.spelling.file << ':'
+               << at.spelling.offset << ' ';
+        };
+        const auto fact = [&](const cs::Fact& one)
+        {
+            for (const std::string& context : one.key.contexts)
+                os << context << ',';
+            site(one.key.site);
+            for (const std::string& item : one.value)
+                os << item << ';';
+            os << one.subject << '|' << one.shown << '|' << one.line << '|'
+               << static_cast<int>(one.kind) << '\n';
+        };
+        const auto named = [&](const cs::Named& one)
+        { os << one.symbol << '|' << one.key << '|' << one.enclosing << '\n'; };
+        const auto linkage = [](const auto& value)
+        { return value ? static_cast<int>(*value) : -1; };
+        os << "failure " << unit.failure << "\nfile " << unit.file << "\nfatal " << unit.fatal
+           << "\nfirst " << unit.firstDiagnostic << '\n';
+        for (const std::string& diagnostic : unit.diagnostics)
+            os << "diagnostic " << diagnostic << '\n';
+        for (const cs::Diagnostic& reported : unit.reported)
+            os << "reported " << reported.key << '|' << reported.text << '|' << reported.error
+               << '\n';
+        for (const auto& [at, all] : unit.writtenTypes)
+        {
+            for (const cs::UnitFacts::Written& written : all)
+            {
+                os << "written ";
+                site(at);
+                os << written.type << '|' << written.name << '|' << written.line << '\n';
+            }
+        }
+        if (unit.writtenOutside)
+        {
+            os << "outside ";
+            site(unit.writtenOutside->site);
+            os << unit.writtenOutside->line << '\n';
+        }
+        for (const cs::UnitFacts::Identity& identity : unit.identities)
+        {
+            os << "identity " << identity.symbol << '|' << identity.nested << '|'
+               << identity.enclosing << '|' << identity.specialization << '\n';
+        }
+        for (const cs::Fact& one : unit.facts)
+        {
+            os << "fact ";
+            fact(one);
+        }
+        for (const std::string& instantiation : unit.instantiations)
+            os << "instantiation " << instantiation << '\n';
+        for (const cs::UnitFacts::Entity& entity : unit.entities)
+        {
+            os << "entity " << entity.found << entity.withoutCandidate << entity.stale << ' '
+               << entity.printedSignature << ' ' << linkage(entity.linkage) << '\n';
+            for (const cs::UnitFacts::Entity::Cast& cast : entity.casts)
+            {
+                os << " cast ";
+                site(cast.site);
+                os << cast.line << '\n';
+            }
+            for (const cs::UnitFacts::Entity::Collision& collision : entity.collisions)
+            {
+                os << " collision " << collision.symbol << ' ';
+                site(collision.site);
+                os << linkage(collision.linkage) << ' ' << collision.line << '\n';
+            }
+            for (const auto& [at, line] : entity.declarations)
+            {
+                os << " declaration ";
+                site(at);
+                os << line << '\n';
+            }
+            for (const auto& [at, type] : entity.expected)
+            {
+                os << " expected ";
+                site(at);
+                os << type << '\n';
+            }
+            for (const cs::Fact& one : entity.overrides)
+            {
+                os << " override ";
+                fact(one);
+            }
+            for (const cs::Named& one : entity.variants)
+            {
+                os << " variant ";
+                named(one);
+            }
+            for (const cs::Named& one : entity.inheriting)
+            {
+                os << " inheriting ";
+                named(one);
+            }
+            for (const cs::Named& one : entity.nested)
+            {
+                os << " nested ";
+                named(one);
+            }
+        }
+        if (unit.module)
+        {
+            os << "module\n";
+            unit.module->print(os, nullptr);
+        }
+        return out;
+    }
+
+    /// #239: suggestions with the same rewrite share their compilations after it. One
+    /// compilation inspected for each of them must give each one what its own compilation gives
+    /// it: facts, declarations, sites, diagnostics, and code. Two specializations of one template,
+    /// after their shared rewrite: one whose address is cast explicitly (D15), and a rewrite that
+    /// does not compile.
+    bool testConstSuggestionSharedInspection(TestReport& report)
+    {
+        namespace cs = ctrace::stack::analysis::const_suggestion;
+        const std::filesystem::path dir =
+            std::filesystem::temp_directory_path() / "ct_const_suggestion_shared_inspection";
+        std::filesystem::create_directories(dir);
+        const std::vector<std::pair<std::string, std::string>> sources = {
+            {"cast.cpp", "template <typename T> T first(T* values)\n{\n    return values[0];\n}\n\n"
+                         "int use_int(int* v)\n{\n    return first(v);\n}\n\n"
+                         "double use_double(double* v)\n{\n    return first(v);\n}\n\n"
+                         "using Erased = void (*)();\n\n"
+                         "Erased erased()\n{\n"
+                         "    return reinterpret_cast<Erased>(&first<int>);\n}\n"},
+            {"error.cpp", "template <typename T> T first(T* values)\n{\n    void* raw = values;\n"
+                          "    return *static_cast<T*>(raw);\n}\n\n"
+                          "int use_int(int* v)\n{\n    return first(v);\n}\n\n"
+                          "double use_double(double* v)\n{\n    return first(v);\n}\n"}};
+        for (const auto& [name, text] : sources)
+        {
+            const std::filesystem::path file = dir / name;
+            std::ofstream(file) << text;
+            const ctrace::stack::analysis::UnitCommand command = cxxCommand(file);
+            std::vector<cs::Target> targets(2);
+            targets[0].symbol = "_Z5firstIiET_PS0_";
+            targets[1].symbol = "_Z5firstIdET_PS0_";
+            for (cs::Target& target : targets)
+                target.sourceIndex = 0;
+            const cs::UnitFacts before = cs::inspect(command, nullptr, {}, targets, "test", false);
+            std::string failure;
+            const std::map<std::string, std::string> rewritten =
+                before.entities.size() == 2 ? cs::rewrite(before.entities[0].plan, failure)
+                                            : std::map<std::string, std::string>();
+            if (rewritten.empty() || !failure.empty() ||
+                cs::rewrite(before.entities[1].plan, failure) != rewritten)
+            {
+                report.expect(false, "ConstSuggestionShared setup: " + name +
+                                         ": the two specializations do not share one rewrite");
+                continue;
+            }
+            std::vector<cs::Inspection> inspections;
+            for (std::size_t k = 0; k < targets.size(); ++k)
+            {
+                cs::Target target = targets[k];
+                target.plan = &before.entities[k].plan;
+                target.expected = before.entities[k].expected;
+                inspections.push_back({target.plan, {target}});
+            }
+            const std::vector<cs::UnitFacts> shared =
+                cs::inspectEach(command, rewritten, inspections, "test", false);
+            for (std::size_t k = 0; k < inspections.size(); ++k)
+            {
+                const cs::UnitFacts alone =
+                    cs::inspect(command, inspections[k].rewrittenBy, rewritten,
+                                inspections[k].targets, "test", false);
+                report.expect(shared.size() == inspections.size() &&
+                                  inspectionText(shared[k]) == inspectionText(alone),
+                              "ConstSuggestionShared: " + name + ": " + targets[k].symbol +
+                                  " gets from the shared compilation what its own gives it");
+            }
+            if (name == "cast.cpp")
+            {
+                report.expect(shared.size() == 2 && shared[0].entities.size() == 1 &&
+                                  shared[0].entities[0].casts.size() == 1 &&
+                                  shared[1].entities.size() == 1 &&
+                                  shared[1].entities[0].casts.empty(),
+                              "ConstSuggestionShared: the cast is first<int>'s only");
+            }
+            else
+            {
+                report.expect(shared.size() == 2 && !shared[0].reported.empty() &&
+                                  !shared[0].module && !shared[1].module,
+                              "ConstSuggestionShared: the rewrite does not compile, for both");
+            }
+        }
+        return report.failures == 0;
+    }
+
     // run_test.py's P2_KEYS_SOURCE with a polymorphic local class, whose destructor has a deleting
     // and a base variant.
     constexpr const char* kNestedKeysSourceWithPoly = R"(#include <vector>
@@ -3838,6 +4036,7 @@ int main(int argc, char** argv)
     (void)testConstSuggestionCodeComparison(report);
     (void)testConstSuggestionNormalizations(report);
     (void)testConstSuggestionTopLevelQualifierLost(report);
+    (void)testConstSuggestionSharedInspection(report);
     (void)testConstSuggestionCorrespondenceIndex(report);
     (void)testConstSuggestionNestedCorrespondences(report);
     (void)testConstSuggestionNestedIdentities(report);
