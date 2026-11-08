@@ -1960,6 +1960,19 @@ header:
 exit:
   ret void
 }
+define i8 @step_back() {
+entry:
+  %buf = alloca [10 x i8]
+  %end = alloca ptr
+  %past = getelementptr [10 x i8], ptr %buf, i64 0, i64 10
+  store ptr %past, ptr %end
+  %e0 = load ptr, ptr %end
+  %last = getelementptr i8, ptr %e0, i64 -1
+  store ptr %last, ptr %end
+  %e1 = load ptr, ptr %end
+  %v = load i8, ptr %e1
+  ret i8 %v
+}
 )",
                                                                                error, context);
         if (!module)
@@ -1998,6 +2011,9 @@ exit:
                       "below 10 is not reported");
         report.expect(issuesOf("stored_address").empty(),
                       "IndexBoundsPerAccess: storing the address &buf[10] does not access buf");
+        report.expect(issuesOf("step_back").empty(),
+                      "IndexBoundsPerAccess: --end from &buf[10] reads buf[9]; the step from a "
+                      "pointer variable is not an index of buf");
         return report.failures == 0;
     }
 

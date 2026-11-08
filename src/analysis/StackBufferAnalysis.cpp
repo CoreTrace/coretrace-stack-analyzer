@@ -10,6 +10,7 @@
 #include <llvm/ADT/APInt.h>
 #include <llvm/ADT/SmallPtrSet.h>
 #include <llvm/ADT/SmallVector.h>
+#include <llvm/Analysis/MemorySSA.h>
 #include <llvm/Analysis/ValueTracking.h>
 #include <llvm/BinaryFormat/Dwarf.h>
 #include <llvm/IR/Constants.h>
@@ -896,6 +897,67 @@ namespace ctrace::stack::analysis
             return first && first->isZero();
         }
 
+        /// The loads and stores that use @p address: directly, and with @p followVariables also
+        /// through the pointer variables it is stored in (`char* p = &buf[i]; *p = 0;`), from
+        /// one variable to the next. A store of the address is not an access to it.
+        ///
+        /// A load of a variable stands for the address only when its MemorySSA clobber is the
+        /// store of the address to that variable, with the same type. The load then reads that
+        /// address, and as the store dominates the load, the values the address was computed
+        /// from still hold the values they had at the store: a load in the next iteration of a
+        /// loop has a merge for clobber, and is left out. Each load has one clobber, so the walk
+        /// meets each load once.
+        ///
+        /// @p via receives, for each access through variables, the names that come before the
+        /// alias path of the address: the variables, the last one first, then the address.
+        static void
+        collectAccesses(llvm::GetElementPtrInst& address, bool followVariables,
+                        const FunctionFacts& facts,
+                        llvm::SmallVectorImpl<llvm::Instruction*>& accesses,
+                        std::unordered_map<const llvm::Instruction*, std::vector<std::string>>& via)
+        {
+            using namespace llvm;
+
+            SmallVector<std::pair<Value*, std::vector<std::string>>, 4> pointers;
+            pointers.emplace_back(&address, std::vector<std::string>{});
+            if (address.hasName())
+                pointers.back().second.push_back(address.getName().str());
+            while (!pointers.empty())
+            {
+                auto [pointer, names] = pointers.pop_back_val();
+                for (User* user : pointer->users())
+                {
+                    auto* store = dyn_cast<StoreInst>(user);
+                    if (isa<LoadInst>(user) || (store && store->getPointerOperand() == pointer))
+                    {
+                        accesses.push_back(cast<Instruction>(user));
+                        if (pointer != &address)
+                            via[accesses.back()] = names;
+                    }
+                    if (!followVariables || !store || !store->isSimple() ||
+                        store->getValueOperand() != pointer)
+                        continue;
+
+                    Value* variable = store->getPointerOperand();
+                    for (User* variableUser : variable->users())
+                    {
+                        auto* load = dyn_cast<LoadInst>(variableUser);
+                        if (!load || !load->isSimple() || load->getType() != pointer->getType())
+                            continue;
+                        const auto* def =
+                            dyn_cast_or_null<MemoryDef>(facts.clobberingAccess(*load));
+                        if (!def || def->getMemoryInst() != store)
+                            continue;
+                        std::vector<std::string> loadNames;
+                        if (variable->hasName())
+                            loadNames.push_back(variable->getName().str());
+                        loadNames.insert(loadNames.end(), names.begin(), names.end());
+                        pointers.emplace_back(load, std::move(loadNames));
+                    }
+                }
+            }
+        }
+
         static void analyzeStackBufferOverflowsInFunction(
             llvm::Function& F, std::vector<StackBufferOverflowIssue>& out,
             const AnalysisComplexityBudgets& budgets,
@@ -1074,15 +1136,22 @@ namespace ctrace::stack::analysis
                             GV->hasName() ? GV->getName().str() : std::string("<unnamed-global>");
                     }
 
-                    // The loads and stores through the GEP, each reported on its own. A store of
-                    // the address itself (char* p = &buf[i]) accesses nothing.
+                    // A constant index within bounds is safe wherever the address is used.
+                    auto* CIdx = dyn_cast<ConstantInt>(idxVal);
+                    if (CIdx && CIdx->getSExtValue() >= 0 &&
+                        static_cast<StackSize>(CIdx->getSExtValue()) < arraySize)
+                        continue;
+
+                    // The loads and stores that use the address, each reported on its own. The
+                    // pointer variables it is stored in are followed only when it is computed
+                    // from the array itself: the index then counts from the array's start.
                     SmallVector<Instruction*, 4> accesses;
-                    for (User* GU : GEP->users())
-                    {
-                        const auto* store = dyn_cast<StoreInst>(GU);
-                        if (isa<LoadInst>(GU) || (store && store->getPointerOperand() == GEP))
-                            accesses.push_back(cast<Instruction>(GU));
-                    }
+                    std::unordered_map<const Instruction*, std::vector<std::string>> via;
+                    const Value* array = AI ? static_cast<const Value*>(AI) : GV;
+                    collectAccesses(*GEP,
+                                    allowPointerStoreScan &&
+                                        GEP->getPointerOperand()->stripPointerCasts() == array,
+                                    facts, accesses, via);
                     const bool pilotAccess = isIndexBoundsPilotAccess(*GEP, AI);
                     const auto newReport = [&](Instruction& access)
                     {
@@ -1098,8 +1167,12 @@ namespace ctrace::stack::analysis
                         report.neverRuns =
                             pilotAccess && promotedValues().indexValuesAt(access, *idxVal).kind ==
                                                IndexValues::Kind::NeverRuns;
-                        report.aliasPathVec = aliasPath;
-                        report.aliasPath = buildAliasPathString(aliasPath);
+                        std::vector<std::string> path = aliasPath;
+                        if (const auto through = via.find(&access); through != via.end())
+                            path.insert(path.begin(), through->second.begin(),
+                                        through->second.end());
+                        report.aliasPath = buildAliasPathString(path);
+                        report.aliasPathVec = std::move(path);
                         return report;
                     };
 
@@ -1115,19 +1188,15 @@ namespace ctrace::stack::analysis
                         baseIdxVal = cast->getOperand(0);
                     }
 
-                    // 4) Constant index case: test[11]
-                    if (auto* CIdx = dyn_cast<ConstantInt>(idxVal))
+                    // 4) Constant index case, out of bounds: test[11]
+                    if (CIdx)
                     {
-                        auto idxValue = CIdx->getSExtValue();
-                        if (idxValue < 0 || static_cast<StackSize>(idxValue) >= arraySize)
+                        for (Instruction* access : accesses)
                         {
-                            for (Instruction* access : accesses)
-                            {
-                                StackBufferOverflowIssue report = newReport(*access);
-                                report.indexOrUpperBound = static_cast<StackSize>(idxValue);
-                                report.indexIsConstant = true;
-                                out.push_back(std::move(report));
-                            }
+                            StackBufferOverflowIssue report = newReport(*access);
+                            report.indexOrUpperBound = static_cast<StackSize>(CIdx->getSExtValue());
+                            report.indexIsConstant = true;
+                            out.push_back(std::move(report));
                         }
                         continue;
                     }
