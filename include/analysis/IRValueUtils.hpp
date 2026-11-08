@@ -16,6 +16,8 @@ namespace llvm
 
 namespace ctrace::stack::analysis
 {
+    class FunctionFacts;
+
     enum class LeadingUnderscores
     {
         One,
@@ -48,7 +50,13 @@ namespace ctrace::stack::analysis
 
     AllocaOrigin classifyAllocaOrigin(const llvm::AllocaInst* AI);
 
-    const llvm::ConstantInt* tryGetConstFromValue(const llvm::Value* V, const llvm::Function& F);
+    /// The integer constant @p V holds wherever it is used, or null when that is not established.
+    ///
+    /// Follows casts, applying them to the constant, and loads whose MemorySSA clobber is a
+    /// store of the same type to the same pointer, so the store wrote exactly the bytes the load
+    /// reads. Any other clobber, such as a merge of several stores, a store that may only
+    /// overlap, a call or the function entry, gives null.
+    const llvm::ConstantInt* tryGetConstFromValue(const llvm::Value* V, const FunctionFacts& facts);
 
     /// The sole store to a slot whose other uses are loads, debug or lifetime intrinsics.
     /// Returns null for multiple stores, address escapes or unsupported uses.

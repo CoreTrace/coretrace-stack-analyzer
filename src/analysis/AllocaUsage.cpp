@@ -171,7 +171,7 @@ namespace ctrace::stack::analysis
                         issue.sizeIsConst = true;
                         issue.sizeBytes = C->getZExtValue() * elemSize;
                     }
-                    else if (auto* C = tryGetConstFromValue(arraySizeVal, F))
+                    else if (auto* C = tryGetConstFromValue(arraySizeVal, facts))
                     {
                         issue.sizeIsConst = true;
                         issue.sizeBytes = C->getZExtValue() * elemSize;

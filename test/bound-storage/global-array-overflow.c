@@ -14,8 +14,10 @@ int main(void)
     // ↳ alias path: gbuf
     // ↳ index variable may go up to 10 (array last valid index: 9)
     // ↳ (this is a write access)
-    // ↳ [info] this access appears unreachable at runtime (condition is always false for this branch)
     gbuf[i] = i;
 
     return gbuf[0];
 }
+
+// The access runs after the loop with i == 10, so it is reachable.
+// not contains: [info] this access appears unreachable at runtime (condition is always false for this branch)

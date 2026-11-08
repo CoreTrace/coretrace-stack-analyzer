@@ -9,6 +9,7 @@
 #include "analysis/InputPipeline.hpp"
 #include "analysis/InputPipelineRevision.hpp"
 #include "analysis/IntRanges.hpp"
+#include "analysis/IRValueUtils.hpp"
 #include "analysis/ParameterDebugBinding.hpp"
 #include "analysis/Reachability.hpp"
 #include "analysis/ResourceLifetimeAnalysis.hpp"
@@ -1671,6 +1672,117 @@ namespace
         return report.failures == 0;
     }
 
+    /// tryGetConstFromValue: a load is constant only when its clobber stored exactly what it reads.
+    bool testTryGetConstFromValue(TestReport& report)
+    {
+        using ctrace::stack::analysis::FunctionFacts;
+        using ctrace::stack::analysis::tryGetConstFromValue;
+        llvm::LLVMContext context;
+        llvm::SMDiagnostic error;
+        const std::unique_ptr<llvm::Module> module = llvm::parseAssemblyString(R"(
+@g = global i32 0
+define i32 @exact() {
+  %p = alloca i32
+  store i32 7, ptr %p
+  %v = load i32, ptr %p
+  ret i32 %v
+}
+define i8 @truncated() {
+  %p = alloca i32
+  store i32 300, ptr %p
+  %v = load i32, ptr %p
+  %t = trunc i32 %v to i8
+  ret i8 %t
+}
+define i64 @sign_extended() {
+  %p = alloca i8
+  store i8 -1, ptr %p
+  %v = load i8, ptr %p
+  %s = sext i8 %v to i64
+  ret i64 %s
+}
+define i32 @later_store() {
+  %p = alloca i32
+  store i32 5, ptr %p
+  %v = load i32, ptr %p
+  store i32 11, ptr %p
+  ret i32 %v
+}
+define i8 @narrower_load() {
+  %p = alloca i32
+  store i32 300, ptr %p
+  %v = load i8, ptr %p
+  ret i8 %v
+}
+define i32 @merged(i1 %c) {
+entry:
+  %p = alloca i32
+  store i32 0, ptr %p
+  br i1 %c, label %then, label %join
+then:
+  store i32 11, ptr %p
+  br label %join
+join:
+  %v = load i32, ptr %p
+  ret i32 %v
+}
+define i32 @may_alias(ptr %q) {
+  store i32 7, ptr @g
+  store i32 9, ptr %q
+  %v = load i32, ptr @g
+  ret i32 %v
+}
+define i32 @volatile_load() {
+  %p = alloca i32
+  store i32 7, ptr %p
+  %v = load volatile i32, ptr %p
+  ret i32 %v
+}
+define i32 @entry_value(ptr %q) {
+  %v = load i32, ptr %q
+  ret i32 %v
+}
+)",
+                                                                               error, context);
+        if (!module)
+        {
+            report.expect(false, "tryGetConstFromValue setup: the IR does not parse");
+            return false;
+        }
+
+        // The constant the function returns, as tryGetConstFromValue sees it.
+        const auto resolve = [&](const char* name) -> const llvm::ConstantInt*
+        {
+            llvm::Function* fn = module->getFunction(name);
+            const auto* ret = llvm::cast<llvm::ReturnInst>(fn->back().getTerminator());
+            const FunctionFacts facts(*fn);
+            return tryGetConstFromValue(ret->getReturnValue(), facts);
+        };
+        const auto holds = [&](const char* name, std::int64_t expected, unsigned width)
+        {
+            const llvm::ConstantInt* constant = resolve(name);
+            return constant && constant->getBitWidth() == width &&
+                   constant->getSExtValue() == expected;
+        };
+
+        report.expect(holds("exact", 7, 32), "tryGetConstFromValue: a store read back unchanged");
+        report.expect(holds("truncated", 44, 8), "tryGetConstFromValue: trunc of 300 to i8 is 44");
+        report.expect(holds("sign_extended", -1, 64), "tryGetConstFromValue: sext of i8 -1 is -1");
+        report.expect(holds("later_store", 5, 32),
+                      "tryGetConstFromValue: a store after the load is not what it reads");
+        report.expect(!resolve("narrower_load"),
+                      "tryGetConstFromValue: a load narrower than the store is unknown");
+        report.expect(!resolve("merged"),
+                      "tryGetConstFromValue: stores merged from two paths are unknown");
+        report.expect(!resolve("may_alias"),
+                      "tryGetConstFromValue: a store that may overlap the slot is unknown");
+        report.expect(!resolve("volatile_load"),
+                      "tryGetConstFromValue: a volatile load is unknown");
+        report.expect(!resolve("entry_value"),
+                      "tryGetConstFromValue: memory as it was on entry is unknown");
+        return report.failures == 0;
+    }
+
     using ctrace::stack::analysis::smt::ConstraintIR;
     using ctrace::stack::analysis::smt::ExprId;
     using ctrace::stack::analysis::smt::ExprKind;
@@ -3005,6 +3117,7 @@ int main(int argc, char** argv)
     (void)testProgramPointRangesUnsignedReadings(repoRoot, report);
     (void)testSmtEvaluatorEncodesLazily(report);
     (void)testFunctionFactsClobberingAccess(repoRoot, report);
+    (void)testTryGetConstFromValue(report);
     (void)testSmtEncoderMemoryModel(repoRoot, report);
     (void)testSmtEncoderPathCondition(repoRoot, report);
 #ifdef CTRACE_STACK_ENABLE_Z3_BACKEND

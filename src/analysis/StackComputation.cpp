@@ -22,6 +22,7 @@
 #include <llvm/Support/Alignment.h>
 
 #include "analysis/AnalyzerUtils.hpp"
+#include "analysis/FunctionFacts.hpp"
 #include "analysis/IntRanges.hpp"
 #include "analysis/IRValueUtils.hpp"
 #include "analysis/smt/SmtEncoding.hpp"
@@ -90,6 +91,8 @@ namespace ctrace::stack::analysis
                                                     const CallResolver* resolver)
         {
             LocalStackInfo info;
+            // Built on the first non-constant array size only: most functions have none.
+            std::optional<analysis::FunctionFacts> facts;
 
             for (llvm::BasicBlock& BB : F)
             {
@@ -113,7 +116,8 @@ namespace ctrace::stack::analysis
                     {
                         count = CI->getZExtValue();
                     }
-                    else if (auto* C = analysis::tryGetConstFromValue(alloca->getArraySize(), F))
+                    else if (auto* C = analysis::tryGetConstFromValue(
+                                 alloca->getArraySize(), facts ? *facts : facts.emplace(F)))
                     {
                         count = C->getZExtValue();
                     }
