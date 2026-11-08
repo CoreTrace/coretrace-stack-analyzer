@@ -129,3 +129,18 @@ jobs:
             dist/*.sha256
           fail_on_unmatched_files: true
           generate_release_notes: true
+
+      # Lets the platform repin itself: coretrace-runner re-resolves this repository's newest
+      # release and opens a pull request for the bump. Best effort, and never fails the
+      # release: the pull request can also be started by hand from that repository's Actions
+      # tab. The payload is a hint; the version is resolved there, not taken from here.
+      - name: Notify coretrace-runner of the release
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.RUNNER_DISPATCH_TOKEN }}
+        run: |
+          set -euo pipefail
+          [ -n "${GH_TOKEN:-}" ] || { echo "no RUNNER_DISPATCH_TOKEN set, skipping"; exit 0; }
+          gh api repos/CoreTrace-Entreprise/coretrace-runner/dispatches \
+            -f event_type=tool-release \
+            -F client_payload[tool]=stack-analyzer
