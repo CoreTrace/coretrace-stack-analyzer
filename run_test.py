@@ -3495,6 +3495,157 @@ def check_const_suggestion_compiles_each_file_once() -> bool:
     return ok
 
 
+def check_const_suggestion_compiles_a_shared_rewrite_once() -> bool:
+    """
+    #239: two suggestions whose rewrites are the same, here the specializations of one template for
+    int and for double, give compilations after the rewrite with the same inputs: the same command,
+    the same directory, and the same file with the same text. That compilation runs once
+    (`--timing`), and each suggestion keeps its own judgement in it: the address of first<int> is
+    cast explicitly, which leaves it not checked (D15), while first<double> is checked.
+    """
+    print("=== Testing that a rewrite shared by two const suggestions is compiled once ===")
+    source = (
+        "template <typename T> T first(T* values)\n{\n    return values[0];\n}\n\n"
+        "int use_int(int* v)\n{\n    return first(v);\n}\n\n"
+        "double use_double(double* v)\n{\n    return first(v);\n}\n\n"
+        "using Erased = void (*)();\n\n"
+        "Erased erased()\n{\n    return reinterpret_cast<Erased>(&first<int>);\n}\n"
+    )
+    calls = re.compile(r"const_suggestion\.compile\.(\w+) .*\bcalls=(\d+)")
+    with tempfile.TemporaryDirectory(prefix="ct_const_suggestion_shared_") as tmp:
+        root = Path(tmp).resolve()
+        file = root / "first.cpp"
+        file.write_text(source)
+        # Every hotspot, not the 20 longest.
+        run = _const_suggestion_run([str(file), "--timing"], {"CTRACE_HOTSPOT_TOP": "200"})
+    if run is None:
+        return fail_check("the analysis did not run")
+    messages, trace, output = run
+    compiled = {m.group(1): int(m.group(2)) for m in calls.finditer(output)}
+    cast = f"{file}:20 converts the address of int first<int>(int*) with an explicit cast"
+    of_int, of_double = "_Z5firstIiET_PS0_ parameter values", "_Z5firstIdET_PS0_ parameter values"
+    units = {
+        name: [line.split(", unit ", 1)[1].split(": ", 1)[0] for line in trace
+               if line.startswith(f"{name}, unit ")]
+        for name in (of_int, of_double)
+    }
+    ok = True
+    for label, good in (
+        (
+            "both suggestions rewrite the same line",
+            all(f"{name}, rewritten at: {file}:1" in trace for name in (of_int, of_double)),
+        ),
+        (
+            "each is judged in the same unit, with the same configuration",
+            len(units[of_int]) == 1 and units[of_int] == units[of_double],
+        ),
+        ("the shared rewrite is compiled once", compiled.get("after") == 1),
+        (
+            "first<int> stays not checked, for its own cast",
+            f"{of_int}, verdict: indeterminate: {cast}" in trace
+            and any(
+                f"not checked with Clang: {cast}" in text
+                for text in messages.get("_Z5firstIiET_PS0_", [])
+            ),
+        ),
+        (
+            "first<double> is checked",
+            f"{of_double}, verdict: verified" in trace
+            and any(
+                "checked in the analyzed files only" in text
+                for text in messages.get("_Z5firstIdET_PS0_", [])
+            ),
+        ),
+    ):
+        print(f"  {'✅' if good else '❌'} {label}" + ("" if good else f": {compiled}, {units}"))
+        ok = ok and good
+    print()
+    return ok
+
+
+def check_const_suggestion_shares_a_rewrite_in_another_file() -> bool:
+    """
+    #239: the same for another file that sees the rewrite. A template defined in a header gives two
+    suggestions with the same rewrite, of the header; the file analyzed defines them, and a file
+    that only the compilation database lists includes the header too. Each file is compiled once
+    after the rewrite for both suggestions (`--timing`), and each suggestion keeps its own
+    judgement in each file: the other file casts the address of first<int> explicitly, which leaves
+    it not checked there (D15), while first<double> is checked in both files.
+    """
+    print("=== Testing that a rewrite shared by two const suggestions is compiled once per file ===")
+    sources = {
+        "first.hpp": "#pragma once\n\ntemplate <typename T> T first(T* values)\n{\n"
+        "    return values[0];\n}\n",
+        "uses.cpp": '#include "first.hpp"\n\nint use_int(int* v)\n{\n    return first(v);\n}\n\n'
+        "double use_double(double* v)\n{\n    return first(v);\n}\n",
+        "erases.cpp": '#include "first.hpp"\n\nusing Erased = void (*)();\n\n'
+        "Erased erased()\n{\n    return reinterpret_cast<Erased>(&first<int>);\n}\n",
+    }
+    calls = re.compile(r"const_suggestion\.compile\.(\w+) .*\bcalls=(\d+)")
+    with tempfile.TemporaryDirectory(prefix="ct_const_suggestion_shared_files_") as tmp:
+        root = Path(tmp).resolve()
+        for name, text in sources.items():
+            (root / name).write_text(text)
+        database = root / "compile_commands.json"
+        database.write_text(
+            json.dumps(
+                [
+                    {
+                        "directory": str(root),
+                        "file": str(root / name),
+                        "arguments": ["clang++", "-std=c++17", "-c", str(root / name)],
+                    }
+                    for name in ("uses.cpp", "erases.cpp")
+                ]
+            )
+        )
+        run = _const_suggestion_run(
+            [str(root / "uses.cpp"), f"--compile-commands={database}", "--timing"],
+            {"CTRACE_HOTSPOT_TOP": "200"},
+        )
+    if run is None:
+        return fail_check("the analysis did not run")
+    messages, trace, output = run
+    compiled = {m.group(1): int(m.group(2)) for m in calls.finditer(output)}
+    cast = f"{root / 'erases.cpp'}:7 converts the address of int first<int>(int*) with an explicit cast"
+    of_int, of_double = "_Z5firstIiET_PS0_ parameter values", "_Z5firstIdET_PS0_ parameter values"
+    verdicts = {
+        name: {
+            line.split(", unit ", 1)[1].split(" [", 1)[0]: line.split("]: ", 1)[1]
+            for line in trace
+            if line.startswith(f"{name}, unit ")
+        }
+        for name in (of_int, of_double)
+    }
+    uses, erases = str(root / "uses.cpp"), str(root / "erases.cpp")
+    ok = True
+    for label, good in (
+        (
+            "both suggestions rewrite the header at the same line",
+            all(f"{name}, rewritten at: {root / 'first.hpp'}:3" in trace for name in (of_int, of_double)),
+        ),
+        ("each file is compiled once after the rewrite", compiled.get("after") == 2),
+        (
+            "first<int> is not checked in the file that casts its address, only there",
+            verdicts[of_int] == {uses: "verified", erases: f"indeterminate: {cast}"}
+            and f"{of_int}, verdict: indeterminate: {cast}" in trace,
+        ),
+        (
+            "first<double> is checked in both files",
+            verdicts[of_double] == {uses: "verified", erases: "verified"}
+            and f"{of_double}, verdict: verified" in trace
+            and any(
+                "checked in every file of the compilation database that sees the change" in text
+                for text in messages.get("_Z5firstIdET_PS0_", [])
+            ),
+        ),
+    ):
+        print(f"  {'✅' if good else '❌'} {label}" + ("" if good else f": {compiled}, {verdicts}"))
+        ok = ok and good
+    print()
+    return ok
+
+
 def check_const_suggestion_operator_used_elsewhere() -> bool:
     """
     #217: a function is found by its declaration in every file that sees the change, not by its
@@ -7755,6 +7906,8 @@ def main() -> int:
         check_const_suggestion_both_modes,
         check_const_suggestion_one_configuration_per_file,
         check_const_suggestion_compiles_each_file_once,
+        check_const_suggestion_compiles_a_shared_rewrite_once,
+        check_const_suggestion_shares_a_rewrite_in_another_file,
         check_const_suggestion_operator_used_elsewhere,
         check_const_suggestion_homonyms_across_files,
         check_const_suggestion_header_read_differently,
