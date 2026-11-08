@@ -20,9 +20,9 @@ int main(void)
     (*pp)[15] = 'a';
 
     // at line 28, column 17
-    // [ !!Warn ] potential stack buffer overflow on variable 'test' (size 10)
+    // [ !!Warn ] stack buffer overflow on variable 'test' (size 10)
     // ↳ alias path: test
-    // ↳ index variable may go up to 19 (array last valid index: 9)
+    // ↳ index reaches 19 on every run of the function that returns (array last valid index: 9)
     // ↳ (this is a write access)
     for (int i = 0; i < 20; i++)
     {
@@ -30,9 +30,9 @@ int main(void)
     }
 
     // at line 37, column 17
-    // [ !!Warn ] potential stack buffer overflow on variable 'test' (size 10)
+    // [ !!Warn ] stack buffer overflow on variable 'test' (size 10)
     // ↳ alias path: test
-    // ↳ index variable may go up to 10 (array last valid index: 9)
+    // ↳ index reaches 10 on every run of the function that returns (array last valid index: 9)
     // ↳ (this is a write access)
     for (int i = 0; i != 11; ++i)
         test[i] = 'a';

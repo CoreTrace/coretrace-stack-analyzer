@@ -25,6 +25,7 @@
 #include "analysis/IntRanges.hpp"
 #include "analysis/FunctionFacts.hpp"
 #include "analysis/IRValueUtils.hpp"
+#include "analysis/PromotedValues.hpp"
 #include "analysis/smt/SmtEncoding.hpp"
 #include "analysis/smt/SmtRefinement.hpp"
 
@@ -879,11 +880,27 @@ namespace ctrace::stack::analysis
                                                      &facts) == SmtFeasibility::Infeasible;
         }
 
-        static void
-        analyzeStackBufferOverflowsInFunction(llvm::Function& F,
-                                              std::vector<StackBufferOverflowIssue>& out,
-                                              const AnalysisComplexityBudgets& budgets,
-                                              const StackBufferConstraintEvaluator& evaluator)
+        /// The index-bounds pilot covers `buf[i]` on a stack array alone: a GEP straight on the
+        /// array's alloca, with indices [0, i]. Aliases, struct fields and globals keep the
+        /// existing heuristics.
+        static bool isIndexBoundsPilotAccess(const llvm::GetElementPtrInst& gep,
+                                             const llvm::AllocaInst* array)
+        {
+            using namespace llvm;
+            if (!array || array->isArrayAllocation() || gep.getPointerOperand() != array ||
+                gep.getNumIndices() != 2 ||
+                gep.getSourceElementType() != array->getAllocatedType() ||
+                !isa<ArrayType>(gep.getSourceElementType()))
+                return false;
+            const auto* first = dyn_cast<ConstantInt>(gep.idx_begin()->get());
+            return first && first->isZero();
+        }
+
+        static void analyzeStackBufferOverflowsInFunction(
+            llvm::Function& F, std::vector<StackBufferOverflowIssue>& out,
+            const AnalysisComplexityBudgets& budgets,
+            const StackBufferConstraintEvaluator& evaluator,
+            const std::function<PromotedValues&()>& promotedValues)
         {
             using namespace llvm;
 
@@ -1057,6 +1074,35 @@ namespace ctrace::stack::analysis
                             GV->hasName() ? GV->getName().str() : std::string("<unnamed-global>");
                     }
 
+                    // The loads and stores through the GEP, each reported on its own. A store of
+                    // the address itself (char* p = &buf[i]) accesses nothing.
+                    SmallVector<Instruction*, 4> accesses;
+                    for (User* GU : GEP->users())
+                    {
+                        const auto* store = dyn_cast<StoreInst>(GU);
+                        if (isa<LoadInst>(GU) || (store && store->getPointerOperand() == GEP))
+                            accesses.push_back(cast<Instruction>(GU));
+                    }
+                    const bool pilotAccess = isIndexBoundsPilotAccess(*GEP, AI);
+                    const auto newReport = [&](Instruction& access)
+                    {
+                        StackBufferOverflowIssue report;
+                        report.funcName = F.getName().str();
+                        report.varName = varName;
+                        report.arraySize = arraySize;
+                        report.isWrite = isa<StoreInst>(access);
+                        report.storageClass = storageClass;
+                        report.inst = &access;
+                        // The index-bounds pilot may show that the access never runs: its
+                        // reports then carry the unreachable-code note.
+                        report.neverRuns =
+                            pilotAccess && promotedValues().indexValuesAt(access, *idxVal).kind ==
+                                               IndexValues::Kind::NeverRuns;
+                        report.aliasPathVec = aliasPath;
+                        report.aliasPath = buildAliasPathString(aliasPath);
+                        return report;
+                    };
+
                     // "baseIdxVal" = loop variable "i" without casts (sext/zext...). The cast
                     // applied to the variable itself says how the index reads it: a zext reads
                     // it as unsigned.
@@ -1075,44 +1121,71 @@ namespace ctrace::stack::analysis
                         auto idxValue = CIdx->getSExtValue();
                         if (idxValue < 0 || static_cast<StackSize>(idxValue) >= arraySize)
                         {
-                            for (User* GU : GEP->users())
+                            for (Instruction* access : accesses)
                             {
-                                if (auto* S = dyn_cast<StoreInst>(GU))
-                                {
-                                    StackBufferOverflowIssue report;
-                                    report.funcName = F.getName().str();
-                                    report.varName = varName;
-                                    report.arraySize = arraySize;
-                                    report.indexOrUpperBound = static_cast<StackSize>(idxValue);
-                                    report.isWrite = true;
-                                    report.indexIsConstant = true;
-                                    report.storageClass = storageClass;
-                                    report.inst = S;
-                                    report.aliasPathVec = aliasPath;
-                                    report.aliasPath = buildAliasPathString(aliasPath);
-                                    out.push_back(std::move(report));
-                                }
-                                else if (auto* L = dyn_cast<LoadInst>(GU))
-                                {
-                                    StackBufferOverflowIssue report;
-                                    report.funcName = F.getName().str();
-                                    report.varName = varName;
-                                    report.arraySize = arraySize;
-                                    report.indexOrUpperBound = static_cast<StackSize>(idxValue);
-                                    report.isWrite = false;
-                                    report.indexIsConstant = true;
-                                    report.storageClass = storageClass;
-                                    report.inst = L;
-                                    report.aliasPathVec = aliasPath;
-                                    report.aliasPath = buildAliasPathString(aliasPath);
-                                    out.push_back(std::move(report));
-                                }
+                                StackBufferOverflowIssue report = newReport(*access);
+                                report.indexOrUpperBound = static_cast<StackSize>(idxValue);
+                                report.indexIsConstant = true;
+                                out.push_back(std::move(report));
                             }
                         }
                         continue;
                     }
 
-                    // 5) Variable index case: test[i] / ptr[i]
+                    // 5) Variable index case. At each access it covers, the index-bounds pilot
+                    // decides whenever it establishes the index values there, under the
+                    // conditions the access runs on: a proof that the index stays in bounds, or
+                    // the range it takes. The heuristics below decide the other accesses.
+                    const bool pilotDecides =
+                        pilotAccess && arraySize <= static_cast<StackSize>(
+                                                        std::numeric_limits<std::int64_t>::max());
+                    SmallVector<Instruction*, 4> undecided;
+                    for (Instruction* access : accesses)
+                    {
+                        IndexValues values;
+                        if (pilotDecides)
+                        {
+                            PromotedValues& promoted = promotedValues();
+                            values = promoted.indexValuesAt(*access, *idxVal);
+                            if (values.kind != IndexValues::Kind::NeverRuns &&
+                                promoted.provesWithin(*access, *idxVal, 0,
+                                                      static_cast<std::int64_t>(arraySize)))
+                                continue;
+                        }
+                        if (values.kind != IndexValues::Kind::Range)
+                        {
+                            undecided.push_back(access);
+                            continue;
+                        }
+
+                        // A potential report yields to a solver proof, as the heuristics'
+                        // reports do; one the index reaches on every run does not.
+                        const auto solverProvesInBounds = [&]
+                        {
+                            return isIndexInBoundsBySmt(evaluator, idxVal, arraySize, *access,
+                                                        facts);
+                        };
+                        if (values.max >= 0 && static_cast<StackSize>(values.max) >= arraySize &&
+                            (values.maxOnEveryRun || !solverProvesInBounds()))
+                        {
+                            StackBufferOverflowIssue report = newReport(*access);
+                            report.indexOrUpperBound = static_cast<StackSize>(values.max);
+                            report.reachedOnEveryRun = values.maxOnEveryRun;
+                            out.push_back(std::move(report));
+                        }
+                        if (values.min < 0 && (values.minOnEveryRun || !solverProvesInBounds()))
+                        {
+                            StackBufferOverflowIssue report = newReport(*access);
+                            report.isLowerBoundViolation = true;
+                            report.lowerBound = values.min;
+                            report.reachedOnEveryRun = values.minOnEveryRun;
+                            out.push_back(std::move(report));
+                        }
+                    }
+                    if (undecided.empty())
+                        continue;
+
+                    // Heuristics: test[i] / ptr[i]
                     // An index computed as x + C or x - C has the bounds of x shifted by C: look
                     // for those of x, and shift them once found.
                     const auto* offsetOp = dyn_cast<BinaryOperator>(baseIdxVal);
@@ -1194,98 +1267,27 @@ namespace ctrace::stack::analysis
                         else
                             ub = static_cast<StackSize>(R.lower);
 
-                        for (User* GU : GEP->users())
+                        for (Instruction* access : undecided)
                         {
-                            if (auto* S = dyn_cast<StoreInst>(GU))
-                            {
-                                if (isIndexInBoundsBySmt(evaluator, idxVal, arraySize, *S, facts))
-                                {
-                                    continue;
-                                }
-
-                                StackBufferOverflowIssue report;
-                                report.funcName = F.getName().str();
-                                report.varName = varName;
-                                report.arraySize = arraySize;
-                                report.indexOrUpperBound = ub;
-                                report.isWrite = true;
-                                report.indexIsConstant = false;
-                                report.storageClass = storageClass;
-                                report.inst = S;
-                                report.aliasPathVec = aliasPath;
-                                report.aliasPath = buildAliasPathString(aliasPath);
-                                out.push_back(std::move(report));
-                            }
-                            else if (auto* L = dyn_cast<LoadInst>(GU))
-                            {
-                                if (isIndexInBoundsBySmt(evaluator, idxVal, arraySize, *L, facts))
-                                {
-                                    continue;
-                                }
-
-                                StackBufferOverflowIssue report;
-                                report.funcName = F.getName().str();
-                                report.varName = varName;
-                                report.arraySize = arraySize;
-                                report.indexOrUpperBound = ub;
-                                report.isWrite = false;
-                                report.indexIsConstant = false;
-                                report.storageClass = storageClass;
-                                report.inst = L;
-                                report.aliasPathVec = aliasPath;
-                                report.aliasPath = buildAliasPathString(aliasPath);
-                                out.push_back(std::move(report));
-                            }
+                            if (isIndexInBoundsBySmt(evaluator, idxVal, arraySize, *access, facts))
+                                continue;
+                            StackBufferOverflowIssue report = newReport(*access);
+                            report.indexOrUpperBound = ub;
+                            out.push_back(std::move(report));
                         }
                     }
 
                     // 5.b) Negative lower bound: LB < 0  => potentially negative index
                     if (R.hasLower && R.lower < 0)
                     {
-                        for (User* GU : GEP->users())
+                        for (Instruction* access : undecided)
                         {
-                            if (auto* S = dyn_cast<StoreInst>(GU))
-                            {
-                                if (isIndexInBoundsBySmt(evaluator, idxVal, arraySize, *S, facts))
-                                {
-                                    continue;
-                                }
-
-                                StackBufferOverflowIssue report;
-                                report.funcName = F.getName().str();
-                                report.varName = varName;
-                                report.arraySize = arraySize;
-                                report.isWrite = true;
-                                report.indexIsConstant = false;
-                                report.storageClass = storageClass;
-                                report.inst = S;
-                                report.isLowerBoundViolation = true;
-                                report.lowerBound = R.lower;
-                                report.aliasPathVec = aliasPath;
-                                report.aliasPath = buildAliasPathString(aliasPath);
-                                out.push_back(std::move(report));
-                            }
-                            else if (auto* L = dyn_cast<LoadInst>(GU))
-                            {
-                                if (isIndexInBoundsBySmt(evaluator, idxVal, arraySize, *L, facts))
-                                {
-                                    continue;
-                                }
-
-                                StackBufferOverflowIssue report;
-                                report.funcName = F.getName().str();
-                                report.varName = varName;
-                                report.arraySize = arraySize;
-                                report.isWrite = false;
-                                report.indexIsConstant = false;
-                                report.storageClass = storageClass;
-                                report.inst = L;
-                                report.isLowerBoundViolation = true;
-                                report.lowerBound = R.lower;
-                                report.aliasPathVec = aliasPath;
-                                report.aliasPath = buildAliasPathString(aliasPath);
-                                out.push_back(std::move(report));
-                            }
+                            if (isIndexInBoundsBySmt(evaluator, idxVal, arraySize, *access, facts))
+                                continue;
+                            StackBufferOverflowIssue report = newReport(*access);
+                            report.isLowerBoundViolation = true;
+                            report.lowerBound = R.lower;
+                            out.push_back(std::move(report));
                         }
                     }
                     // If R.hasUpper && R.upper < arraySize and (no problematic LB),
@@ -1423,6 +1425,14 @@ namespace ctrace::stack::analysis
         std::vector<StackBufferOverflowIssue> out;
         const AnalysisComplexityBudgets budgets = buildAnalysisComplexityBudgets(config);
         const StackBufferConstraintEvaluator evaluator(config);
+        // The promoted copy of the module, built on the first access the pilot asks about.
+        std::optional<PromotedValues> promoted;
+        const std::function<PromotedValues&()> promotedValues = [&]() -> PromotedValues&
+        {
+            if (!promoted)
+                promoted.emplace(mod, shouldAnalyze);
+            return *promoted;
+        };
 
         for (llvm::Function& F : mod)
         {
@@ -1430,7 +1440,7 @@ namespace ctrace::stack::analysis
                 continue;
             if (!shouldAnalyze(F))
                 continue;
-            analyzeStackBufferOverflowsInFunction(F, out, budgets, evaluator);
+            analyzeStackBufferOverflowsInFunction(F, out, budgets, evaluator, promotedValues);
         }
 
         return out;

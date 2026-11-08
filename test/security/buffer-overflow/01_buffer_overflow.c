@@ -86,7 +86,7 @@ int main(void)
 // ↳ declared without initializer and no definite write was found in this function
 
 // at line 41, column 16
-// [ !!Warn ] potential stack buffer overflow on variable 'buf' (size 10)
+// [ !!Warn ] stack buffer overflow on variable 'buf' (size 10)
 // ↳ alias path: buf
-// ↳ index variable may go up to 10 (array last valid index: 9)
+// ↳ index reaches 10 on every run of the function that returns (array last valid index: 9)
 // ↳ (this is a write access)

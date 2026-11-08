@@ -4,6 +4,21 @@ Notable changes are grouped by release. See [all releases](https://github.com/Co
 
 ## Unreleased
 
+- An index-bounds pilot bounds `buf[i]` on a stack array, indexed directly rather than through
+  a pointer, with ScalarEvolution. It works on a copy of the function whose local variables live
+  in registers; the analyzed IR is unchanged. An index the copy proves in bounds no longer gets a
+  report, such as `buf[i + 1]` in `for (i = 0; i < 10; i += 2)`. An index that leaves the array
+  on every run of the function that returns is a Warning under the new rules
+  `StackBufferOverflow.EveryRun` and `NegativeStackIndex.EveryRun`, and its message no longer
+  says "potential". A range that only may leave the array is still a "potential" Warning, now
+  also found when a parameter guarded before the loop sets its count. An access in a loop that
+  runs no iteration gets the "this access appears unreachable" note. Where the copy does not
+  bound the index, the existing result stays.
+- Stack buffer overflow checks no longer take the store of an element's address, such as
+  `char* end = &buf[10]` or the end of a range-based `for`, for a write to that element.
+  Forming a pointer one past the end is valid C and C++. A write through such a pointer kept in
+  a local variable is not reported either: it used to be reported only by that mistake, on the
+  line that formed the address.
 - VLA sizes, local stack sizes and the "this access appears unreachable" note on buffer
   overflows read a local variable from the store that last wrote it, as MemorySSA finds it, and
   apply casts to it. They used to take the last constant stored anywhere in the function. A
