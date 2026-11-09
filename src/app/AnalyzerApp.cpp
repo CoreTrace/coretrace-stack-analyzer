@@ -51,6 +51,7 @@
 #include "analysis/FunctionFilter.hpp"
 #include "analysis/GlobalReadBeforeWriteAnalysis.hpp"
 #include "analysis/InputPipeline.hpp"
+#include "analysis/ParamAccessSummary.hpp"
 #include "analysis/ResourceLifetimeAnalysis.hpp"
 #include "analysis/SizeMinusKWrites.hpp"
 #include "analysis/UninitializedVarAnalysis.hpp"
@@ -1105,6 +1106,12 @@ static AppStatus analyzeWithSharedModuleLoading(const std::vector<std::string>& 
             }
         }
         cfg.sizeMinusKWrapperIndex = std::move(wrappers);
+
+        std::vector<llvm::Module*> modules;
+        for (const auto& loaded : loadedModules)
+            modules.push_back(loaded.module.get());
+        cfg.paramAccessIndex = std::make_shared<const analysis::ParamAccessIndex>(
+            analysis::paramAccessesAcrossModules(modules));
     }
 
     if (needsCrossTUResourceSummaries)

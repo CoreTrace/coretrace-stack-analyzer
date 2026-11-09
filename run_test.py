@@ -3025,6 +3025,47 @@ def check_size_minus_one_cross_tu() -> bool:
     )
 
 
+def check_stack_buffer_callee_cross_tu() -> bool:
+    """
+    #266: what a function defined in another file writes or reads through a pointer parameter
+    reaches its callers, as within one file, whatever the sort order: a call that passes an
+    address one byte past a stack array, to a callee that accesses it, is reported. The accesses
+    follow a chain of files, and never come from a weak definition or a static homonym.
+    """
+    return _check_cross_tu_rule(
+        "stack array accesses through functions defined in another file",
+        "bound-storage",
+        "cross-tu-callee-access-",
+        "StackBufferOverflow",
+        [
+            ("use alone", ["use.c"], []),
+            ("leaf and use", ["leaf.c", "use.c"], ["read_past_end", "write_past_end"]),
+            (
+                "chain over three files",
+                ["leaf.c", "mid.c", "use.c"],
+                ["read_past_end", "write_past_end", "write_through_relay"],
+            ),
+            ("chain without its leaf", ["mid.c", "use.c"], []),
+            ("weak def", ["weak.c", "use.c"], []),
+            ("weak beside the definition", ["leaf.c", "weak.c", "use.c"], ["read_past_end"]),
+            ("static homonym alone", ["static.c", "use.c"], ["use_static"]),
+            (
+                "static homonym beside the definition",
+                ["leaf.c", "static.c", "use.c"],
+                ["read_past_end", "use_static", "write_past_end"],
+            ),
+        ],
+        [
+            ("use sorted first", ["use.c", "leaf.c"], ["read_past_end", "write_past_end"]),
+            (
+                "chain in reverse order",
+                ["use.c", "mid.c", "leaf.c"],
+                ["read_past_end", "write_past_end", "write_through_relay"],
+            ),
+        ],
+    )
+
+
 def check_cross_tu_call_graph() -> bool:
     """
     #157: a call to a declaration reaches the definition of its symbol in another file when that
@@ -5806,6 +5847,7 @@ def main() -> int:
         check_duplicate_if_cross_tu,
         check_global_read_before_write_identity_across_files,
         check_size_minus_one_cross_tu,
+        check_stack_buffer_callee_cross_tu,
         check_cross_tu_call_graph,
         check_null_deref_nested_inter_tu,
         check_integer_overflow_advanced_inter_tu,

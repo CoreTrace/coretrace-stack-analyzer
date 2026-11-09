@@ -15,6 +15,8 @@ namespace llvm
     class LazyValueInfo;
     class LoadInst;
     class MemoryAccess;
+    template <typename T> class SmallVectorImpl;
+    class StoreInst;
     class TargetLibraryInfo;
     class Value;
 } // namespace llvm
@@ -77,6 +79,16 @@ namespace ctrace::stack::analysis
         /// nothing. Loads of one pointer with one clobber read the same value; a clobber that
         /// stores to that pointer is the value they read.
         [[nodiscard]] const llvm::MemoryAccess* clobberingAccess(const llvm::LoadInst& load) const;
+
+        /// @brief Appends to @p loads the simple loads, of the stored type and from the stored
+        /// pointer, that read exactly the value @p store writes.
+        ///
+        /// A load reads it when its clobber is @p store. A local slot that @p store alone
+        /// writes, whose address is only loaded from, needs no MemorySSA: no other store, call
+        /// or alias can change it, so a load reads the stored value wherever @p store dominates
+        /// it. A slot written elsewhere, or whose address goes anywhere else, takes the clobber.
+        void loadsReadingStore(const llvm::StoreInst& store,
+                               llvm::SmallVectorImpl<llvm::LoadInst*>& loads) const;
 
       private:
         struct Impl;

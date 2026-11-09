@@ -3,6 +3,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -22,6 +23,19 @@ namespace ctrace::stack::analysis
     {
         Stack,
         Global,
+    };
+
+    /// An access a call makes through the address it receives, from the callee's summary (#266).
+    struct CalleeAccessOutOfBounds
+    {
+        std::string callee;     // the function the call reaches
+        std::int64_t begin = 0; // bytes from the array's start
+        std::uint64_t size = 0; // bytes
+        std::uint64_t arrayBytes = 0;
+        std::string function; // the function that makes the access
+        std::string file;
+        unsigned line = 0;
+        unsigned column = 0;
     };
 
     struct StackBufferOverflowIssue
@@ -45,6 +59,8 @@ namespace ctrace::stack::analysis
         // A loop around the access runs no iteration, so the access never runs.
         std::uint64_t neverRuns : 1 = false;
         std::uint64_t reservedFlags : 59 = 0;
+        // Set when inst is a call that receives the address.
+        std::optional<CalleeAccessOutOfBounds> calleeAccess;
         // Optional : helper for sync string <- vector
         void rebuildAliasPathString(const std::string& sep = " -> ")
         {

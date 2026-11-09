@@ -91,6 +91,7 @@ set(STACK_ANALYZER_SOURCES
     src/analysis/MemIntrinsicOverflow.cpp
     src/analysis/NullDerefAnalysis.cpp
     src/analysis/OOBReadAnalysis.cpp
+    src/analysis/ParamAccessSummary.cpp
     src/analysis/ParameterDebugBinding.cpp
     src/analysis/PromotedValues.cpp
     src/analysis/ResourceLifetimeAnalysis.cpp

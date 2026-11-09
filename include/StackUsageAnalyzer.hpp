@@ -26,6 +26,7 @@ namespace ctrace::stack::analysis
     struct ConstPointeeParamIndex;
     struct GlobalReadBeforeWriteSummaryIndex;
     struct GlobalStackFacts;
+    struct ParamAccessIndex;
     struct ResourceSummaryIndex;
     struct SizeMinusKWrapperIndex;
     struct UninitializedSummaryIndex;
@@ -78,6 +79,9 @@ namespace ctrace::stack
         // deterministic, and the lengths they all pass to a bounded write.
         std::shared_ptr<const std::set<std::string>> deterministicFunctions;
         std::shared_ptr<const analysis::SizeMinusKWrapperIndex> sizeMinusKWrapperIndex;
+        // What the external functions defined across the modules analyzed together access
+        // through their pointer parameters (#266).
+        std::shared_ptr<const analysis::ParamAccessIndex> paramAccessIndex;
         // Max stacks and recursion over one call graph of the modules analyzed together, which
         // they were prepared for: the pipeline then leaves their IR as it is.
         std::shared_ptr<const analysis::GlobalStackFacts> globalStackFacts;

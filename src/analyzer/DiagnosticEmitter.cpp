@@ -4,6 +4,7 @@
 #include "analyzer/LocationResolver.hpp"
 #include "analysis/AnalyzerUtils.hpp"
 #include "analysis/Reachability.hpp"
+#include "mangle.hpp"
 
 #include <algorithm>
 #include <map>
@@ -379,6 +380,26 @@ namespace ctrace::stack::analyzer
             std::ostringstream body;
             DiagnosticBuilder builder;
 
+            // A call that receives the address: what the callee accesses through it (#266).
+            const auto describeCalleeAccess = [&](const analysis::CalleeAccessOutOfBounds& access)
+            {
+                const auto displayed = [](const std::string& symbol)
+                {
+                    return ctrace_tools::isMangled(symbol) ? ctrace_tools::demangle(symbol.c_str())
+                                                           : symbol;
+                };
+                body << "\t\t ↳ the call to '" << displayed(access.callee) << "' "
+                     << (issue.isWrite ? "writes " : "reads ") << access.size
+                     << (access.size == 1 ? " byte" : " bytes") << " at byte offset "
+                     << access.begin << " (valid byte offsets: 0.."
+                     << (access.arrayBytes ? access.arrayBytes - 1 : 0) << ")\n";
+                body << "\t\t ↳ the " << (issue.isWrite ? "write" : "read") << " is in '"
+                     << displayed(access.function) << "'";
+                if (access.line != 0)
+                    body << " at " << access.file << ":" << access.line << ":" << access.column;
+                body << "\n";
+            };
+
             if (issue.isLowerBoundViolation)
             {
                 builder.errCode(DescriptiveErrorCode::NegativeStackIndex)
@@ -390,7 +411,9 @@ namespace ctrace::stack::analyzer
                      << issue.arraySize << ")\n";
                 if (!issue.aliasPath.empty())
                     body << "\t\t ↳ alias path: " << issue.aliasPath << "\n";
-                if (everyRun)
+                if (issue.calleeAccess)
+                    describeCalleeAccess(*issue.calleeAccess);
+                else if (everyRun)
                     body << "\t\t ↳ index reaches " << issue.lowerBound
                          << " on every run of the function that returns\n";
                 else
@@ -414,7 +437,11 @@ namespace ctrace::stack::analyzer
                      << issue.varName << "' (size " << issue.arraySize << ")\n";
                 if (!issue.aliasPath.empty())
                     body << "\t\t ↳ alias path: " << issue.aliasPath << "\n";
-                if (issue.indexIsConstant)
+                if (issue.calleeAccess)
+                {
+                    describeCalleeAccess(*issue.calleeAccess);
+                }
+                else if (issue.indexIsConstant)
                 {
                     body << "\t\t ↳ constant index " << issue.indexOrUpperBound
                          << " is out of bounds (0.." << (issue.arraySize ? issue.arraySize - 1 : 0)
