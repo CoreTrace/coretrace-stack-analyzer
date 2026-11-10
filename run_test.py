@@ -3563,16 +3563,17 @@ def check_const_suggestion_compiles_a_shared_rewrite_once() -> bool:
     return ok
 
 
-def check_const_suggestion_shares_a_rewrite_in_another_file() -> bool:
+def check_const_suggestion_shares_only_the_defining_file() -> bool:
     """
-    #239: the same for another file that sees the rewrite. A template defined in a header gives two
-    suggestions with the same rewrite, of the header; the file analyzed defines them, and a file
-    that only the compilation database lists includes the header too. Each file is compiled once
-    after the rewrite for both suggestions (`--timing`), and each suggestion keeps its own
-    judgement in each file: the other file casts the address of first<int> explicitly, which leaves
-    it not checked there (D15), while first<double> is checked in both files.
+    #239: only the defining file's compilation after the rewrite is shared. A template defined in a
+    header gives two suggestions with the same rewrite, of the header; the file analyzed defines
+    them, and a file that only the compilation database lists includes the header too. The
+    defining file is compiled once after the rewrite for both suggestions, and the other file once
+    for each, each compilation released before the next (`--timing`: 3 compilations). Each
+    suggestion keeps its own judgement in each file: the other file casts the address of first<int>
+    explicitly, which leaves it not checked there (D15), while first<double> is checked in both.
     """
-    print("=== Testing that a rewrite shared by two const suggestions is compiled once per file ===")
+    print("=== Testing that only the defining file's compilation is shared by const suggestions ===")
     sources = {
         "first.hpp": "#pragma once\n\ntemplate <typename T> T first(T* values)\n{\n"
         "    return values[0];\n}\n",
@@ -3624,7 +3625,10 @@ def check_const_suggestion_shares_a_rewrite_in_another_file() -> bool:
             "both suggestions rewrite the header at the same line",
             all(f"{name}, rewritten at: {root / 'first.hpp'}:3" in trace for name in (of_int, of_double)),
         ),
-        ("each file is compiled once after the rewrite", compiled.get("after") == 2),
+        (
+            "the defining file once after the rewrite, the other file once for each suggestion",
+            compiled.get("after") == 3,
+        ),
         (
             "first<int> is not checked in the file that casts its address, only there",
             verdicts[of_int] == {uses: "verified", erases: f"indeterminate: {cast}"}
@@ -7907,7 +7911,7 @@ def main() -> int:
         check_const_suggestion_one_configuration_per_file,
         check_const_suggestion_compiles_each_file_once,
         check_const_suggestion_compiles_a_shared_rewrite_once,
-        check_const_suggestion_shares_a_rewrite_in_another_file,
+        check_const_suggestion_shares_only_the_defining_file,
         check_const_suggestion_operator_used_elsewhere,
         check_const_suggestion_homonyms_across_files,
         check_const_suggestion_header_read_differently,
