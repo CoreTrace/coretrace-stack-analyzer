@@ -496,7 +496,8 @@ namespace ctrace::stack::analysis
             }
             // A rewrite that does not compile, and adds no error to tell why: it is not shown to be
             // wrong (#239 review, M6). The reason names its first error, not an earlier warning.
-            if (!after.module)
+            // A compilation kept for a later suggestion has its code prepared, without its module.
+            if (!after.module && !*after.prepared)
             {
                 const auto error =
                     std::find_if(after.reported.begin(), after.reported.end(),
@@ -786,9 +787,11 @@ namespace ctrace::stack::analysis
         }
 
         // Each suggestion's rewrite, made once. Suggestions with the same rewrite, such as the
-        // specializations of one template, compile each unit after it with the same inputs: the
-        // same command, the same directory and the same texts. One compilation serves them all,
-        // with an inspection for each, as its own compilation would give it (#239).
+        // specializations of one template, compile the defining unit after it with the same
+        // inputs: the same command, the same directory and the same texts. One compilation serves
+        // them all, with an inspection for each, as its own compilation would give it (#239).
+        // Another unit is compiled for each suggestion and released before the next, so that no
+        // module waits for a later suggestion.
         std::vector<std::map<std::string, std::string>> rewrites(issues.size());
         std::vector<std::string> unreadable(issues.size());
         for (std::size_t i = 0; i < issues.size(); ++i)
@@ -808,49 +811,43 @@ namespace ctrace::stack::analysis
                 }
             }
         }
-        // The compilations after the rewrite made for a later suggestion, by suggestion, each with
-        // its unit's command, until that suggestion reaches the unit.
-        struct Pending
+        // The defining unit's compilation after the rewrite made for a later suggestion, until it
+        // reaches it: what its judgement reads, the facts and the code prepared, without the module.
+        std::map<std::size_t, UnitFacts> pending;
+        // Suggestion i's compilation of the defining unit after its rewrite: the one made for it
+        // with an earlier suggestion, else one made now, which inspects the unit for each later
+        // suggestion of the same rewrite too, with that suggestion's target and the types the
+        // unit's declarations must get for it. The module goes with this suggestion's judgement,
+        // as without sharing; a later suggestion keeps the code prepared from it, once.
+        const auto definingAfter = [&](std::size_t i, const Target& target) -> UnitFacts
         {
-            std::vector<std::string> args;
-            std::string workingDir;
-            UnitFacts facts;
-        };
-        std::map<std::size_t, std::vector<Pending>> pending;
-        // Suggestion i's compilation of a unit after its rewrite: the one made for it with an
-        // earlier suggestion, else one made now, which inspects the unit for each later suggestion
-        // of the same rewrite too, with the target that suggestion builds (`targetOf`, none when it
-        // cannot be known yet) and the types the unit's declarations must get for it.
-        const auto afterRewrite =
-            [&](std::size_t i, const UnitCommand& unit, const Original& original,
-                const Target& target,
-                const std::function<std::optional<Target>(std::size_t)>& targetOf) -> UnitFacts
-        {
-            std::vector<Pending>& mine = pending[i];
-            for (auto it = mine.begin(); it != mine.end(); ++it)
+            const auto made = pending.find(i);
+            if (made != pending.end())
             {
-                if (it->args == unit.args && it->workingDir == unit.workingDir)
-                {
-                    UnitFacts out = std::move(it->facts);
-                    mine.erase(it);
-                    return out;
-                }
+                UnitFacts out = std::move(made->second);
+                pending.erase(made);
+                return out;
             }
             std::vector<const_suggestion::Inspection> inspections{{targets[i].plan, {target}}};
-            std::vector<std::size_t> also;
             for (const std::size_t j : sameRewrite[i])
             {
-                std::optional<Target> other = targetOf(j);
-                if (!other)
-                    continue;
-                other->expected = original.unit.entities[j].expected;
-                inspections.push_back({targets[j].plan, {std::move(*other)}});
-                also.push_back(j);
+                Target other = targets[j];
+                other.expected = before.entities[j].expected;
+                inspections.push_back({targets[j].plan, {std::move(other)}});
             }
             std::vector<UnitFacts> outs = const_suggestion::inspectEach(
-                unit, rewrites[i], inspections, "const_suggestion.compile.after", timing);
-            for (std::size_t k = 0; k < also.size(); ++k)
-                pending[also[k]].push_back({unit.args, unit.workingDir, std::move(outs[k + 1])});
+                command, rewrites[i], inspections, "const_suggestion.compile.after", timing);
+            if (outs.size() > 1 && outs.front().module)
+            {
+                const analyzer::ScopedHotspot hotspot(timing, "const_suggestion.compare");
+                *outs.front().prepared = const_suggestion::prepare(*outs.front().module);
+            }
+            for (std::size_t k = 1; k < outs.size(); ++k)
+            {
+                outs[k].module.reset();
+                outs[k].context.reset();
+                pending.emplace(sameRewrite[i][k - 1], std::move(outs[k]));
+            }
             return std::move(outs.front());
         };
 
@@ -915,14 +912,10 @@ namespace ctrace::stack::analysis
                 unit.prepared.reset();
             };
             const std::string definingFile = canonicalPath(self->filename, config);
-            // A later suggestion of the same rewrite looks in the defining unit for its own target.
-            const auto definingTargetOf = [&](std::size_t j) -> std::optional<Target>
-            { return targets[j]; };
-            std::vector<Judgement> judgements{checkUnit(
-                [&](const Target& target)
-                { return afterRewrite(i, command, *definingBefore, target, definingTargetOf); },
-                definingBefore, i, planned, plan, definingFile, signature, accepted, renamed,
-                inspected.back(), timing)};
+            std::vector<Judgement> judgements{
+                checkUnit([&](const Target& target) { return definingAfter(i, target); },
+                          definingBefore, i, planned, plan, definingFile, signature, accepted,
+                          renamed, inspected.back(), timing)};
             release(inspected.back());
             std::vector<std::string> judged{label(definingFile, &command)};
             // The other units look for the symbols the entity takes after the rewrite, as the
@@ -1036,29 +1029,12 @@ namespace ctrace::stack::analysis
                 std::vector<std::string> otherAccepted;
                 const std::optional<Original>& otherBefore =
                     originalOf(other, key, targets, originals, timing);
-                // A later suggestion of the same rewrite looks in another unit for the symbols its
-                // entity takes, as its own compilation of the defining unit names them; that one
-                // was made with this suggestion's and waits for it.
-                const auto otherTargetOf = [&](std::size_t j) -> std::optional<Target>
-                {
-                    for (const Pending& made : pending[j])
-                    {
-                        if (made.args != command.args || made.workingDir != command.workingDir)
-                            continue;
-                        Target out = targets[j];
-                        if (!made.facts.entities.empty())
-                        {
-                            for (const const_suggestion::Named& variant :
-                                 made.facts.entities[0].variants)
-                                out.takes.push_back(variant.symbol);
-                        }
-                        return out;
-                    }
-                    return std::nullopt;
-                };
                 Judgement judgement = checkUnit(
                     [&](const Target& target)
-                    { return afterRewrite(i, other, *otherBefore, target, otherTargetOf); },
+                    {
+                        return inspect(other, &plan, rewritten, {target},
+                                       "const_suggestion.compile.after", timing);
+                    },
                     otherBefore, i, others, plan, definingFile, signature, otherAccepted, renamed,
                     inspected.emplace_back(), timing);
                 release(inspected.back());
