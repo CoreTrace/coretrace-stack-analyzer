@@ -1416,6 +1416,35 @@ namespace
             report.expect(count(blocks, Kind::AddressEscape) == 1,
                           "OwnershipCollector: passing &h to an unmodelled callee");
         }
+        // The Use events of a function, by the name of the slot each one is read from.
+        const auto usesOf = [&](const char* name)
+        {
+            std::vector<std::string> names;
+            llvm::Function* fn = loaded.module->getFunction(name);
+            if (!fn)
+                return names;
+            const CollectedFunction c =
+                collectOwnershipFacts(*fn, model, noSummaries, loaded.module->getDataLayout());
+            const auto add = [&](const Event& e)
+            {
+                if (e.kind == Kind::Use)
+                    names.push_back(c.locationIsSlot[e.dst] ? c.locationNames[e.dst]
+                                                            : std::string("<value>"));
+            };
+            for (const Block& b : c.facts.blocks)
+                for (const Event& e : b.events)
+                    add(e);
+            for (const Edge& edge : c.facts.edges)
+                for (const Event& e : edge.events)
+                    add(e);
+            return names;
+        };
+        report.expect(usesOf("use_kinds") == std::vector<std::string>{"p", "q", "p"},
+                      "OwnershipCollector: a store through the pointer, a memset and an external "
+                      "callee are uses; a copy, a comparison, the released argument and a "
+                      "reassignment are not");
+        report.expect(usesOf("use_return") == std::vector<std::string>{"<value>"},
+                      "OwnershipCollector: returning the pointer is a use, named by its resource");
         return report.failures == 0;
     }
     bool testOwnershipCollectorExceptions(const std::filesystem::path& repoRoot, TestReport& report)
