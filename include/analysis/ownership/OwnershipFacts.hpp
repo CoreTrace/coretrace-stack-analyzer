@@ -152,7 +152,10 @@ namespace ctrace::stack::analysis::ownership
                            // lists locations whose resources are uncertain *at this exit*
             // Edge event: the conditional contract of acquisition `site` is decided here;
             // unknownValue = true means "did not acquire" (resource NotOwned, holders null).
-            ContractResolved
+            ContractResolved,
+            // The resource `src` holds must be live here (state unchanged); `dst` is the
+            // location to name it by (the slot the pointer was read from).
+            Use
         };
 
         std::vector<LocationId> args;

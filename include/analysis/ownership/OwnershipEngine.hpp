@@ -48,6 +48,20 @@ namespace ctrace::stack::analysis::ownership
         const OwnershipFacts& facts, const OwnershipResult& result, std::uint32_t block,
         const std::function<void(std::uint32_t, const AbstractState&, const AbstractState&)>& cb);
 
+    /// A Use event that may read a released resource.
+    struct ReleasedUse
+    {
+        const Event* use = nullptr; // points into the facts
+        ResourceId resource = 0;
+        std::uint32_t reservedPadding = 0;
+    };
+
+    /// Every (Use, resource) where the resource the Use's `src` may hold may be Released and is
+    /// not uncertain, or is Released on every path where it exists (uncertain or not), read off
+    /// the stabilised states (edges included). Empty when incomplete.
+    std::vector<ReleasedUse> releasedUses(const OwnershipFacts& facts,
+                                          const OwnershipResult& result);
+
     /// Union of t[s] over the states s in `in`.
     StateSet applyTransformer(const ParamTransformer& t, StateSet in);
 

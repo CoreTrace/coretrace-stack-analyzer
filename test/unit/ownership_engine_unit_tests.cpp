@@ -139,6 +139,16 @@ namespace
         e.call.params.push_back({loc, t});
         return e;
     }
+    /// A use of what `src` holds; `id` stands for the instruction, to tell uses apart.
+    Event use(LocationId src, std::uint32_t id)
+    {
+        Event e;
+        e.kind = Event::Kind::Use;
+        e.src = src;
+        e.dst = src;
+        e.instructionIndex = id;
+        return e;
+    }
 
     OwnershipFacts facts(std::size_t blocks, std::vector<Edge> edges, std::size_t locations,
                          std::uint32_t sites)
@@ -981,6 +991,124 @@ namespace
         }
         return r.failures == 0;
     }
+    // Location 0 is the owner `p`, location 1 an alias `q`.
+    bool testUses(TestReport& r)
+    {
+        using Ids = std::vector<std::uint32_t>;
+        const ResourceId n0 = newInstanceOf(0);
+        const ResourceId o0 = oldInstancesOf(0);
+        const auto reported = [](const OwnershipFacts& f, unsigned limit = 0)
+        {
+            const OwnershipResult res = solve(f, entryOf(f), limit);
+            std::vector<std::pair<std::uint32_t, ResourceId>> out;
+            for (const ReleasedUse& u : releasedUses(f, res))
+                out.push_back({u.use->instructionIndex, u.resource});
+            return out;
+        };
+        const auto ids = [&](const OwnershipFacts& f)
+        {
+            Ids out;
+            for (const auto& [id, resource] : reported(f))
+                out.push_back(id);
+            return out;
+        };
+
+        {
+            OwnershipFacts with = facts(1, {}, 1, 1);
+            with.blocks[0].events = {acquire(0, 0), use(0, 1), release(0), use(0, 2), exit()};
+            OwnershipFacts without = facts(1, {}, 1, 1);
+            without.blocks[0].events = {acquire(0, 0), release(0), exit()};
+            const OwnershipResult a = solve(with, entryOf(with));
+            const OwnershipResult b = solve(without, entryOf(without));
+            r.expect(a.out == b.out && a.exits.size() == 1 && a.exits[0].state == b.exits[0].state,
+                     "Uses: a use leaves the state unchanged");
+        }
+        {
+            OwnershipFacts f = facts(1, {}, 1, 1);
+            f.blocks[0].events = {acquire(0, 0), use(0, 1), release(0), use(0, 2), exit()};
+            const auto found = reported(f);
+            r.expect(found.size() == 1 && found[0].first == 2 && found[0].second == n0,
+                     "Uses: only the use after the release is reported");
+        }
+        {
+            // q = p; free(p); p = NULL; use p; use q.
+            OwnershipFacts f = facts(1, {}, 2, 1);
+            f.blocks[0].events = {acquire(0, 0), copy(1, 0), release(0), overwrite(0),
+                                  use(0, 1),     use(1, 2),  exit()};
+            r.expect(ids(f) == Ids{2},
+                     "Uses: the alias still holds the released resource, the cleared owner not");
+        }
+        {
+            // free(p); p = acquire(); use p.
+            OwnershipFacts f = facts(1, {}, 1, 1);
+            f.blocks[0].events = {acquire(0, 0), release(0), acquire(0, 0), use(0, 1), exit()};
+            r.expect(ids(f).empty(), "Uses: a reacquired owner holds the new, live instance");
+        }
+        {
+            // saved = p; p = acquire(); free(saved); use saved.
+            OwnershipFacts f = facts(1, {}, 2, 1);
+            f.blocks[0].events = {acquire(0, 0), copy(1, 0), acquire(0, 0),
+                                  release(1),    use(1, 1),  exit()};
+            const auto found = reported(f);
+            r.expect(found.size() == 1 && found[0].first == 1 && found[0].second == o0,
+                     "Uses: an older instance released through its alias is reported");
+        }
+        {
+            // Loop body: p = acquire(); use p; free(p). Only earlier instances are released.
+            OwnershipFacts f = facts(3, {edge(0, 1), edge(1, 1), edge(1, 2)}, 1, 1);
+            f.blocks[1].events = {acquire(0, 0), use(0, 1), release(0)};
+            f.blocks[2].events = {exit()};
+            r.expect(ids(f).empty(), "Uses: an instance released on an earlier iteration is "
+                                     "not the one used");
+        }
+        {
+            // 0 → 1 (free) → 3, 0 → 2 → 3; 3: use p.
+            OwnershipFacts f =
+                facts(4, {edge(0, 1, {release(0)}), edge(0, 2), edge(1, 3), edge(2, 3)}, 1, 1);
+            f.blocks[0].events = {acquire(0, 0)};
+            f.blocks[3].events = {use(0, 1), exit()};
+            r.expect(ids(f) == Ids{1}, "Uses: a release on one path is a potential use after "
+                                       "release");
+        }
+        {
+            OwnershipFacts f = facts(1, {}, 1, 1);
+            f.blocks[0].events = {acquire(0, 0), addressEscape(0), release(0), use(0, 1), exit()};
+            r.expect(ids(f).empty(), "Uses: an uncertain resource is not judged");
+        }
+        {
+            Event unknown;
+            unknown.kind = Event::Kind::UnknownCall;
+            unknown.args = {0};
+            OwnershipFacts f = facts(1, {}, 1, 1);
+            f.blocks[0].events = {acquire(0, 0), unknown, use(0, 1), exit()};
+            r.expect(ids(f).empty(),
+                     "Uses: an unknown call that may release does not make later uses reported");
+            f.blocks[0].events = {acquire(0, 0), unknown, release(0), use(0, 1), exit()};
+            r.expect(ids(f) == Ids{1},
+                     "Uses: a certain release is judged even after an unknown call");
+        }
+        {
+            // A merged return block split onto its incoming edge.
+            OwnershipFacts f = facts(2, {edge(0, 1, {use(0, 1)})}, 1, 1);
+            f.blocks[0].events = {acquire(0, 0), release(0)};
+            f.blocks[1].events = {exit()};
+            r.expect(ids(f) == Ids{1}, "Uses: a use on an edge is judged with the edge's state");
+        }
+        {
+            OwnershipFacts f = facts(2, {}, 1, 1);
+            f.blocks[0].events = {acquire(0, 0), release(0), exit()};
+            f.blocks[1].events = {use(0, 1)};
+            r.expect(ids(f).empty(), "Uses: an unreachable use is not reported");
+        }
+        {
+            OwnershipFacts f = facts(3, {edge(0, 1), edge(1, 1), edge(1, 2)}, 1, 1);
+            f.blocks[1].events = {acquire(0, 0), release(0), use(0, 1)};
+            f.blocks[2].events = {exit()};
+            r.expect(reported(f, /*limit=*/1).empty(),
+                     "Uses: nothing is reported from an incomplete solve");
+        }
+        return r.failures == 0;
+    }
 } // namespace
 
 int main(int, char**)
@@ -988,6 +1116,7 @@ int main(int, char**)
     TestReport report;
     (void)testDomain(report);
     (void)testEngine(report);
+    (void)testUses(report);
     (void)testContracts(report);
     (void)testEdgeExits(report);
     (void)testExitUncertainty(report);

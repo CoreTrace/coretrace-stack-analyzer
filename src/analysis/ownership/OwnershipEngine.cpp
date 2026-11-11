@@ -263,8 +263,55 @@ namespace ctrace::stack::analysis::ownership
         }
 
         case Event::Kind::Exit:
+        case Event::Kind::Use:
             break;
         }
+    }
+
+    std::vector<ReleasedUse> releasedUses(const OwnershipFacts& facts,
+                                          const OwnershipResult& result)
+    {
+        std::vector<ReleasedUse> found;
+        if (result.incomplete)
+            return found;
+        const auto check = [&](const Event& e, const AbstractState& s)
+        {
+            if (e.kind != Event::Kind::Use)
+                return;
+            for (const ResourceId r : s.locations[e.src].resources)
+            {
+                // Released on every path where it exists: a certain release through an exact
+                // handle came last, whatever was uncertain before it.
+                StateSet existing = s.resources[r];
+                existing.bits &= static_cast<std::uint8_t>(~StateSet::of(OwnState::NotOwned).bits);
+                if (s.resources[r].has(OwnState::Released) &&
+                    (!s.uncertain[r] || existing.isOnly(OwnState::Released)))
+                    found.push_back({&e, r});
+            }
+        };
+        for (std::uint32_t block = 0; block < facts.blocks.size(); ++block)
+        {
+            if (block >= result.in.size() || !result.in[block].reached)
+                continue;
+            AbstractState state = result.in[block];
+            for (const Event& e : facts.blocks[block].events)
+            {
+                check(e, state);
+                applyEvent(facts, e, state);
+            }
+            for (const Edge& edge : facts.edges)
+            {
+                if (edge.from != block)
+                    continue;
+                AbstractState along = state;
+                for (const Event& e : edge.events)
+                {
+                    check(e, along);
+                    applyEvent(facts, e, along);
+                }
+            }
+        }
+        return found;
     }
 
     OwnershipResult solve(const OwnershipFacts& facts, const AbstractState& entry,
