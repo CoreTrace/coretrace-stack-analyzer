@@ -1832,7 +1832,7 @@ static bool writeSummaryCacheFile(const std::filesystem::path& cacheFile,
     }
 
     llvm::json::Object root;
-    root["schema"] = "resource-summary-cache-v5";
+    root["schema"] = "resource-summary-cache-v6";
     root["functions"] = std::move(functionArray);
 
     std::ofstream out(cacheFile, std::ios::out | std::ios::trunc | std::ios::binary);
@@ -1863,7 +1863,7 @@ readSummaryCacheFile(const std::filesystem::path& cacheFile)
     if (!obj)
         return std::nullopt;
     auto schema = obj->getString("schema");
-    if (!schema || *schema != "resource-summary-cache-v5")
+    if (!schema || *schema != "resource-summary-cache-v6")
         return std::nullopt;
 
     const auto* functions = obj->getArray("functions");
@@ -1979,8 +1979,9 @@ struct ResourceSummaryOperations
 
     std::string cacheKey(std::size_t module, const std::string& externalHash) const
     {
-        // Keep the schema and key components identical: this refactor changes no summaries.
-        return md5Hex("cross-tu-resource-summary-v5|" + modelHash + "|" + externalHash + "|" +
+        // The version moves with the file schema whenever the analyzer computes different
+        // summaries (v6: handing a released resource over leaves it released).
+        return md5Hex("cross-tu-resource-summary-v6|" + modelHash + "|" + externalHash + "|" +
                       filterHash + "|" + compileArgsHashes[module] + "|" + irHashes[module]);
     }
     bool usesDiskCache() const

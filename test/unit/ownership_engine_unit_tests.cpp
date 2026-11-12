@@ -1086,6 +1086,9 @@ namespace
             f.blocks[0].events = {acquire(0, 0), unknown, release(0), use(0, 1), exit()};
             r.expect(ids(f) == Ids{1},
                      "Uses: a certain release is judged even after an unknown call");
+            f.blocks[0].events = {acquire(0, 0), release(0), unknown, use(0, 1), exit()};
+            r.expect(ids(f) == Ids{1},
+                     "Uses: unknown code handed a released pointer cannot make it live again");
         }
         {
             // A merged return block split onto its incoming edge.
@@ -1107,6 +1110,76 @@ namespace
             r.expect(reported(f, /*limit=*/1).empty(),
                      "Uses: nothing is reported from an incomplete solve");
         }
+        {
+            // free(p); global = p; use p. Location 1 is a global, then an out parameter.
+            OwnershipFacts f = facts(1, {}, 2, 1);
+            f.locations[1].kind = LocationKind::NonLocal;
+            f.blocks[0].events = {acquire(0, 0), release(0), copy(1, 0), use(0, 1), exit()};
+            r.expect(ids(f) == Ids{1},
+                     "Uses: a released resource copied into a global stays released");
+            f.locations[1].kind = LocationKind::ArgPointee;
+            r.expect(ids(f) == Ids{1},
+                     "Uses: a released resource stored through an out parameter stays released");
+        }
+        {
+            // Released on one path, then global = p: handed over where it was live only.
+            OwnershipFacts f =
+                facts(4, {edge(0, 1, {release(0)}), edge(0, 2), edge(1, 3), edge(2, 3)}, 2, 1);
+            f.locations[1].kind = LocationKind::NonLocal;
+            f.blocks[0].events = {acquire(0, 0)};
+            f.blocks[3].events = {copy(1, 0), use(0, 1), exit()};
+            const StateSet st = solve(f, entryOf(f)).exits.at(0).state.resources[n0];
+            r.expect(st.has(OwnState::Escaped) && st.has(OwnState::Released) &&
+                         !st.has(OwnState::Owned),
+                     "Uses: handing a resource over keeps the path where it was released");
+            r.expect(ids(f) == Ids{1}, "Uses: a use after that hand-over is still judged");
+        }
+        {
+            // free(p); return p.
+            OwnershipFacts f = facts(1, {}, 2, 1);
+            f.blocks[0].events = {acquire(0, 0), release(0), copy(1, 0), ret(1), exit()};
+            r.expect(
+                solve(f, entryOf(f)).exits.at(0).state.resources[n0].isOnly(OwnState::Released),
+                "Uses: returning a released resource leaves it released");
+        }
+        return r.failures == 0;
+    }
+
+    // Which arguments a function may use, read off its summary.
+    bool testUsedArgs(TestReport& r)
+    {
+        using Args = std::vector<unsigned>;
+        {
+            // Argument 2 at location 1, copied to location 2, used on one path only.
+            OwnershipFacts f = facts(3, {edge(0, 1), edge(0, 2)}, 3, 0);
+            f.paramLocations = {{0, 0}, {2, 1}};
+            f.blocks[0].events = {copy(2, 1)};
+            f.blocks[1].events = {use(2, 1), exit()};
+            f.blocks[2].events = {exit()};
+            r.expect(computeSummary(f).usedArgs == Args{2},
+                     "UsedArgs: a use through a copy, on one path, of argument 2 only");
+        }
+        {
+            OwnershipFacts f = facts(2, {}, 1, 0);
+            f.paramLocations = {{0, 0}};
+            f.blocks[0].events = {exit()};
+            f.blocks[1].events = {use(0, 1)};
+            r.expect(computeSummary(f).usedArgs.empty(),
+                     "UsedArgs: an unreachable use does not count");
+        }
+        {
+            OwnershipFacts f = facts(1, {}, 2, 1);
+            f.paramLocations = {{0, 0}};
+            f.blocks[0].events = {acquire(0, 1), use(1, 1), exit()};
+            r.expect(computeSummary(f).usedArgs.empty(),
+                     "UsedArgs: a use of the function's own resource is no argument's");
+        }
+        {
+            FunctionOwnershipSummary a;
+            FunctionOwnershipSummary b;
+            b.usedArgs = {0};
+            r.expect(!sameSummary(a, b), "UsedArgs: two summaries differ by their used arguments");
+        }
         return r.failures == 0;
     }
 } // namespace
@@ -1117,6 +1190,7 @@ int main(int, char**)
     (void)testDomain(report);
     (void)testEngine(report);
     (void)testUses(report);
+    (void)testUsedArgs(report);
     (void)testContracts(report);
     (void)testEdgeExits(report);
     (void)testExitUncertainty(report);

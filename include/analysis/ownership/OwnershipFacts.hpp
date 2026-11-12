@@ -120,6 +120,10 @@ namespace ctrace::stack::analysis::ownership
     {
         ExitTransformer normal;
         ExitTransformer exceptional;
+        // Sorted indices of the pointer arguments a Use of the function may reach: the function
+        // may need what they point to alive. In memory only: a call to a declaration is a use
+        // of its pointer arguments anyway.
+        std::vector<unsigned> usedArgs;
         bool incomplete = false;
         std::uint8_t reservedPadding[7] = {};
     };

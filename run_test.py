@@ -2511,7 +2511,7 @@ def check_ownership_wrapper_metadata() -> bool:
         if checked_output(inputs) != first:
             return fail_check("obsolete summaries changed the wrapper diagnostics")
         # Intermediate fixpoint keys need not be reused; active keys must be rewritten.
-        if not any(json.loads(path.read_text())["schema"] == "resource-summary-cache-v5" for path in cache_files):
+        if not any(json.loads(path.read_text())["schema"] == "resource-summary-cache-v6" for path in cache_files):
             return fail_check("obsolete ownership summaries were not rebuilt")
     print("  ✅ ownership wrapper metadata preserved locally, across TUs and in the cache\n")
     return True
