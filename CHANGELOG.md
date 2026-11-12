@@ -51,6 +51,12 @@ Notable changes are grouped by release. See [all releases](https://github.com/Co
 - Added an authors file and linked the repository documents from the README.
 - SARIF rules carry a title (`shortDescription`) and a description (`fullDescription`) instead
   of their id, and `describeRule` (`RuleCatalog.hpp`) gives them to programs linking the analyzer.
+- With `--jobs` above 1, sources compile in parallel. Each compilation runs in its compile
+  command's directory through coretrace-compiler's `-working-directory`, instead of moving the
+  whole process there under a lock that let one source compile at a time. Compilations that pass
+  `-mllvm`, `-mdebug-pass`, `-mlimit-float-precision`, `-ftime-report` or `-fno-integrated-cc1`
+  still run one at a time. coretrace-compiler is pinned to a commit of
+  CoreTrace/coretrace-compiler#262, which gives each compilation a working directory of its own.
 
 ## v0.22.0
 
