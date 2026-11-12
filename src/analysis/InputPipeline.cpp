@@ -14,7 +14,9 @@
 #include <iostream>
 #include <mutex>
 #include <optional>
+#include <shared_mutex>
 #include <sstream>
+#include <string_view>
 #include <system_error>
 #include <unordered_set>
 #include <vector>
@@ -40,15 +42,29 @@ namespace ctrace::stack::analysis
 {
     namespace
     {
-        // compilerlib drives an in-process clang CompilerInstance. clang/LLVM keep global
-        // mutable state (target registry, cl options, timers); two worker threads compiling
-        // at once hung intermittently on the first compile of a run. Compilation is
-        // serialised here; module analysis stays parallel, and the IR cache makes the
-        // compile step cheap on repeated runs. A compile that needs its compile command's
-        // directory changes the working directory of the whole process: it holds the same
-        // lock from before that change until it is undone, so no other compile runs in a
-        // directory that is not its own, and two changes never interleave.
-        std::mutex gCompileInvokeMutex;
+        // coretrace-compiler compiles from several threads at once, each compilation in the
+        // directory of its -working-directory, without moving the process: compilations share
+        // this lock. Some change state that the whole process shares, and hold it alone: those
+        // with an option that Clang applies to LLVM's state, and those with -fno-integrated-cc1,
+        // whose jobs run as programs, for which coretrace-compiler moves the process to the
+        // directory.
+        std::shared_mutex gCompileInvokeMutex;
+
+        bool compilesAlone(const std::vector<std::string>& args)
+        {
+            static constexpr std::string_view kOptionsOfLLVMState[] = {
+                "-mllvm", "-mdebug-pass", "-mlimit-float-precision", "-ftime-report"};
+            return std::any_of(args.begin(), args.end(),
+                               [](const std::string& arg)
+                               {
+                                   for (std::string_view option : kOptionsOfLLVMState)
+                                   {
+                                       if (std::string_view(arg).starts_with(option))
+                                           return true;
+                                   }
+                                   return arg == "-fno-integrated-cc1";
+                               });
+        }
 
         void appendIfMissing(std::vector<std::string>& args, const std::string& flag)
         {
@@ -745,43 +761,6 @@ namespace ctrace::stack::analysis
             return true;
         }
 
-        class ScopedCurrentPath
-        {
-          public:
-            explicit ScopedCurrentPath(const std::string& path, std::string& error)
-            {
-                if (path.empty())
-                    return;
-                std::error_code ec;
-                previousPath_ = std::filesystem::current_path(ec);
-                if (ec)
-                {
-                    error = "Failed to read current working directory";
-                    return;
-                }
-                std::filesystem::current_path(path, ec);
-                if (ec)
-                {
-                    error = "Failed to change working directory to: " + path;
-                    return;
-                }
-                active_ = true;
-            }
-
-            ~ScopedCurrentPath()
-            {
-                if (!active_)
-                    return;
-                std::error_code ec;
-                std::filesystem::current_path(previousPath_, ec);
-            }
-
-          private:
-            std::filesystem::path previousPath_;
-            std::uint64_t active_ : 1 = false;
-            std::uint64_t reservedFlags_ : 63 = 0;
-        };
-
         class ScopedFileCleanup
         {
           public:
@@ -859,9 +838,7 @@ namespace ctrace::stack::analysis
         using ctrace::stack::analyzer::ScopedHotspot;
         ModuleLoadResult result;
         const ScopedHotspot totalHotspot(config.timing, "input.load_module.total");
-        // A relative input resolves from the directory the analysis started in, not from the
-        // current one: another thread may be compiling from its compile command's directory,
-        // which the whole process shares meanwhile.
+        // A relative input resolves from the directory the analysis started in.
         std::error_code cwdErr;
         const std::filesystem::path baseDir = config.inputBaseDir.empty()
                                                   ? std::filesystem::current_path(cwdErr)
@@ -923,22 +900,35 @@ namespace ctrace::stack::analysis
                 [&](const std::vector<std::string>& compileArgs,
                     compilerlib::OutputMode outputMode) -> std::optional<compilerlib::CompileResult>
             {
-                std::lock_guard<std::mutex> compileLock(gCompileInvokeMutex);
-                if (workingDir.empty())
+                std::vector<std::string> argsInWorkingDir;
+                argsInWorkingDir.reserve(compileArgs.size() + 2);
+                if (!workingDir.empty())
                 {
-                    const ScopedHotspot hotspot(config.timing, "input.compiler.invoke");
-                    return compilerlib::compile(compileArgs, outputMode);
+                    // coretrace-compiler reports a directory it cannot enter, yet compiles to
+                    // memory all the same: the compilation fails here instead.
+                    std::error_code directoryError;
+                    if (!std::filesystem::is_directory(workingDir, directoryError))
+                    {
+                        result.error =
+                            "Failed to change working directory to: " + workingDir + "\n";
+                        return std::nullopt;
+                    }
+                    argsInWorkingDir.push_back("-working-directory");
+                    argsInWorkingDir.push_back(workingDir);
                 }
+                argsInWorkingDir.insert(argsInWorkingDir.end(), compileArgs.begin(),
+                                        compileArgs.end());
 
-                std::string cwdError;
-                ScopedCurrentPath cwdGuard(workingDir, cwdError);
-                if (!cwdError.empty())
-                {
-                    result.error = cwdError + "\n";
-                    return std::nullopt;
-                }
-                const ScopedHotspot hotspot(config.timing, "input.compiler.invoke.cwd");
-                return compilerlib::compile(compileArgs, outputMode);
+                std::shared_lock<std::shared_mutex> shared(gCompileInvokeMutex, std::defer_lock);
+                std::unique_lock<std::shared_mutex> alone(gCompileInvokeMutex, std::defer_lock);
+                if (compilesAlone(compileArgs))
+                    alone.lock();
+                else
+                    shared.lock();
+                const ScopedHotspot hotspot(config.timing, workingDir.empty()
+                                                               ? "input.compiler.invoke"
+                                                               : "input.compiler.invoke.cwd");
+                return compilerlib::compile(argsInWorkingDir, outputMode);
             };
 
             if (cachePaths.enabled)
