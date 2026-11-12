@@ -389,7 +389,7 @@ namespace ctrace::stack::analysis::ownership
 
             /// What `I` needs alive: memory accessed through a pointer, a pointer argument the
             /// callee likely dereferences, a pointer handed back to the caller. A copy, a
-            /// comparison, a reassignment or the argument a call releases only moves or
+            /// comparison, a reassignment or an argument the call only releases moves or
             /// inspects the pointer value: no Use.
             void emitUses(const llvm::Instruction& I)
             {
@@ -423,8 +423,11 @@ namespace ctrace::stack::analysis::ownership
                                : std::vector<unsigned>{};
                     for (unsigned i = 0; i < call->arg_size(); ++i)
                     {
-                        if (std::find(released.begin(), released.end(), i) == released.end() &&
-                            argumentUsed(*call, callee, i))
+                        // A released argument is still used when the callee's summary shows a
+                        // Use of it (`*p = 1; free(p);`), not when the callee only releases it.
+                        const bool isReleased =
+                            std::find(released.begin(), released.end(), i) != released.end();
+                        if (isReleased ? summaryUses(callee, i) : argumentUsed(*call, callee, i))
                             use(I, call->getArgOperand(i));
                     }
                 }
@@ -447,7 +450,15 @@ namespace ctrace::stack::analysis::ownership
                 if (callee->doesNotAccessMemory())
                     return false;
                 const FunctionOwnershipSummary* summary = summaries_.byFunction(*callee);
-                return !summary || summary->incomplete ||
+                return !summary || summary->incomplete || summaryUses(callee, i);
+            }
+
+            /// Whether the summary of `callee` lists a Use of its parameter `i`.
+            bool summaryUses(const llvm::Function* callee, unsigned i) const
+            {
+                const FunctionOwnershipSummary* summary =
+                    callee ? summaries_.byFunction(*callee) : nullptr;
+                return summary &&
                        std::binary_search(summary->usedArgs.begin(), summary->usedArgs.end(), i);
             }
 

@@ -135,8 +135,75 @@ void live_indirect(void (*fp)(int*))
     free(p);
 }
 
-// Reported at the argument of each released_ call except released_keeps; the strict count
-// checks that released_keeps and the live_ functions report nothing.
+// A callee that releases the pointer is still a use when it also accesses it, on the same path
+// or on another one. A callee that only releases it is no use: the second release is reported
+// as a double release only.
+void writes_then_frees(int* p)
+{
+    *p = 42;
+    free(p);
+}
+void frees_or_writes(int* p, int c)
+{
+    if (c)
+        free(p);
+    else
+        *p = 1;
+}
+void frees(int* p)
+{
+    free(p);
+}
+
+void released_writes_then_frees(void)
+{
+    int* p = malloc(sizeof *p);
+    if (!p)
+        return;
+    free(p);
+    writes_then_frees(p);
+}
+void released_frees_or_writes(int c)
+{
+    int* p = malloc(sizeof *p);
+    if (!p)
+        return;
+    free(p);
+    frees_or_writes(p, c);
+}
+void released_frees(void)
+{
+    int* p = malloc(sizeof *p);
+    if (!p)
+        return;
+    free(p);
+    frees(p); /* a double release, not a use */
+}
+void live_writes_then_frees(void)
+{
+    int* p = malloc(sizeof *p);
+    if (!p)
+        return;
+    writes_then_frees(p);
+}
+void live_frees_or_writes(int c)
+{
+    int* p = malloc(sizeof *p);
+    if (!p)
+        return;
+    frees_or_writes(p, c);
+}
+void live_frees(void)
+{
+    int* p = malloc(sizeof *p);
+    if (!p)
+        return;
+    frees(p);
+}
+
+// Reported at the argument of each released_ call except released_keeps and released_frees;
+// the strict count checks that those and the live_ functions report nothing else. The only
+// other diagnostics are the double releases and the leak live_frees_or_writes may cause.
 
 // at line 45, column 12
 // [!!!Error] potential use-after-release: 'HeapAlloc' handle 'p' is used after a release in this function
@@ -155,3 +222,21 @@ void live_indirect(void (*fp)(int*))
 
 // at line 85, column 8
 // [!!!Error] potential use-after-release: 'HeapAlloc' handle 'p' is used after a release in this function
+
+// at line 164, column 23
+// [!!!Error] potential use-after-release: 'HeapAlloc' handle 'p' is used after a release in this function
+
+// at line 164, column 5
+// [!!!Error] potential double release: 'HeapAlloc' handle 'p' is released without a matching acquire in this function
+
+// at line 172, column 21
+// [!!!Error] potential use-after-release: 'HeapAlloc' handle 'p' is used after a release in this function
+
+// at line 172, column 5
+// [!!!Error] potential double release: 'HeapAlloc' handle 'p' is released without a matching acquire in this function
+
+// at line 180, column 5
+// [!!!Error] potential double release: 'HeapAlloc' handle 'p' is released without a matching acquire in this function
+
+// at line 191, column 14
+// [ !!Warn ] potential resource leak: 'HeapAlloc' acquired in handle 'p' may leave the function without being released

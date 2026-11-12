@@ -102,3 +102,22 @@ void offset_reassign(void)
     p = p + 1;
     release_handle(p);
 }
+
+/* A callee that uses its argument and also releases it still uses it; one that only releases
+   it does not. */
+void callee_uses_then_releases(char* p)
+{
+    *p = 1;
+    release_handle(p);
+}
+void callee_releases(char* p)
+{
+    release_handle(p);
+}
+void use_releasing_callees(void)
+{
+    char* p = acquire_ret();
+    callee_uses_then_releases(p); /* a use, though the callee also releases it */
+    char* q = acquire_ret();
+    callee_releases(q); /* not a use: the callee only releases it */
+}

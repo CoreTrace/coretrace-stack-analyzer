@@ -1516,6 +1516,40 @@ namespace
         {
             report.expect(false, "OwnershipCollector: offset_reassign collected");
         }
+
+        // Releasing an argument does not hide a use of it in the same callee.
+        const auto summaryOf = [&](const char* name)
+        {
+            const llvm::Function* fn = loaded.module->getFunction(name);
+            return fn ? computeSummary(collectOwnershipFacts(*fn, model, noSummaries,
+                                                             loaded.module->getDataLayout())
+                                           .facts)
+                      : FunctionOwnershipSummary{};
+        };
+        const FunctionOwnershipSummary usesThenReleases = summaryOf("callee_uses_then_releases");
+        const FunctionOwnershipSummary releasesOnly = summaryOf("callee_releases");
+        const auto releasesFirstArg = [](const FunctionOwnershipSummary& s)
+        {
+            const auto it = s.normal.params.find(0);
+            return it != s.normal.params.end() &&
+                   it->second[static_cast<std::size_t>(OwnState::Owned)].has(OwnState::Released);
+        };
+        report.expect(releasesFirstArg(usesThenReleases) && releasesFirstArg(releasesOnly) &&
+                          usesThenReleases.usedArgs == std::vector<unsigned>{0} &&
+                          releasesOnly.usedArgs.empty(),
+                      "OwnershipSummary: both callees release the argument, one also uses it");
+        const SummaryLookup releasing{
+            [&](const llvm::Function& fn) -> const FunctionOwnershipSummary*
+            {
+                if (fn.getName() == "callee_uses_then_releases")
+                    return &usesThenReleases;
+                if (fn.getName() == "callee_releases")
+                    return &releasesOnly;
+                return nullptr;
+            }};
+        report.expect(usesOf("use_releasing_callees", releasing) == std::vector<std::string>{"p"},
+                      "OwnershipCollector: a callee that uses the argument it releases is a use; "
+                      "one that only releases it is not");
         return report.failures == 0;
     }
     bool testOwnershipCollectorExceptions(const std::filesystem::path& repoRoot, TestReport& report)
