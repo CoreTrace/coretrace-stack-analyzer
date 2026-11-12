@@ -64,3 +64,41 @@ char* use_return(void)
     release_handle(p);
     return p; /* the pointer leaves the function: a use */
 }
+
+/* Calls to defined functions: a use when the callee's body may use the argument. */
+static char* kept;
+void callee_uses(char* p)
+{
+    *p = 1; /* a use of the parameter */
+}
+void callee_keeps(char* p)
+{
+    kept = p; /* only stores the pointer: no use */
+}
+int use_callees(void (*fp)(char*))
+{
+    char* p = acquire_ret();
+    callee_uses(p);  /* a use: the callee's summary says it uses the argument */
+    callee_keeps(p); /* not a use: the callee only keeps it */
+    fp(p);           /* indirect call: an unknown callee, a use */
+    release_handle(p);
+    return 0;
+}
+
+void callee_forwards(char* p)
+{
+    unknown_sink(p); /* unknown code: may use the pointer, may release it */
+}
+void use_wrapped(void)
+{
+    char* p = acquire_ret();
+    callee_forwards(p); /* a use, though the callee's summary says it may release */
+}
+
+/* An address computed from the handle carries its resource. */
+void offset_reassign(void)
+{
+    char* p = acquire_ret();
+    p = p + 1;
+    release_handle(p);
+}

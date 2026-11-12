@@ -418,16 +418,37 @@ namespace ctrace::stack::analysis::ownership
                          call && !llvm::isa<llvm::IntrinsicInst>(call) && !call->isInlineAsm())
                 {
                     const llvm::Function* callee = directCallee(*call);
-                    if (!callee)
-                        return;
-                    const std::vector<unsigned> released = releasedArgs(*call, *callee);
+                    const std::vector<unsigned> released =
+                        callee ? releasedArgs(*call, *callee, /*knownOnly=*/true)
+                               : std::vector<unsigned>{};
                     for (unsigned i = 0; i < call->arg_size(); ++i)
                     {
                         if (std::find(released.begin(), released.end(), i) == released.end() &&
-                            lifetime_detail::callArgumentLikelyDereferenced(*call, callee, i))
+                            argumentUsed(*call, callee, i))
                             use(I, call->getArgOperand(i));
                     }
                 }
+            }
+
+            /// Whether the call may need what argument `i` points to alive. Attributes and the
+            /// library list decide first (a declaration is a use). Otherwise an unknown callee
+            /// (called through a pointer, or defined without a summary) is a use, and a defined
+            /// one is when a Use in its body may reach that parameter.
+            bool argumentUsed(const llvm::CallBase& call, const llvm::Function* callee,
+                              unsigned i) const
+            {
+                if (lifetime_detail::callArgumentLikelyDereferenced(call, callee, i))
+                    return true;
+                if (!call.getArgOperand(i)->getType()->isPointerTy() ||
+                    call.paramHasAttr(i, llvm::Attribute::ReadNone))
+                    return false;
+                if (!callee)
+                    return true;
+                if (callee->doesNotAccessMemory())
+                    return false;
+                const FunctionOwnershipSummary* summary = summaries_.byFunction(*callee);
+                return !summary || summary->incomplete ||
+                       std::binary_search(summary->usedArgs.begin(), summary->usedArgs.end(), i);
             }
 
             /// A Use of the pointer `ptr` is based on, unless that is a local slot, a global or a
@@ -551,9 +572,11 @@ namespace ctrace::stack::analysis::ownership
                     e.unknownValue = !llvm::isa<llvm::ConstantPointerNull>(stripped);
                     return e;
                 }
+                // An address computed from a pointer (p + 1, &p->field) points into the same
+                // resource: copy from the pointer it is computed from.
                 Event e = make(Event::Kind::Copy, I);
                 e.dst = dst;
-                e.src = valueLocation(value);
+                e.src = valueLocation(llvm::getUnderlyingObject(stripped));
                 e.strong = strong;
                 return e;
             }
@@ -740,9 +763,12 @@ namespace ctrace::stack::analysis::ownership
                 return t[static_cast<std::size_t>(OwnState::Owned)].has(OwnState::Released);
             }
 
-            /// Arguments this call may release as passed (model rule or summary).
+            /// Arguments this call may release as passed (model rule or summary). With
+            /// `knownOnly`, a summary counts only where that release is not uncertain: a callee
+            /// that hands the argument to unknown code may also use it.
             std::vector<unsigned> releasedArgs(const llvm::CallBase& call,
-                                               const llvm::Function& callee) const
+                                               const llvm::Function& callee,
+                                               bool knownOnly = false) const
             {
                 std::vector<unsigned> args;
                 for (const ResourceRule& rule : model_.rules)
@@ -756,6 +782,8 @@ namespace ctrace::stack::analysis::ownership
                     for (const auto& [argIndex, transformer] : summary->normal.params)
                     {
                         if (argIndex < call.arg_size() && releases(transformer) &&
+                            (!knownOnly ||
+                             !transformer.isUncertain(StateSet::of(OwnState::Owned))) &&
                             call.getArgOperand(argIndex)->getType()->isPointerTy())
                             args.push_back(argIndex);
                     }
