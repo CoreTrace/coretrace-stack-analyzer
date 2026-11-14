@@ -33,6 +33,26 @@ namespace ctrace::stack::analysis::ownership
             }
         }
 
+        /// Hands what `held` names over to someone else (a global, the caller): a live resource
+        /// becomes Escaped; a released one stays Released, since a new owner does not make freed
+        /// memory live again. Strong only when the contents name exactly one resource.
+        void handOver(AbstractState& s, const Contents& held)
+        {
+            for (const ResourceId r : held.resources)
+            {
+                StateSet next = s.resources[r];
+                if (next.has(OwnState::Owned) || next.has(OwnState::Escaped))
+                {
+                    next.bits &= static_cast<std::uint8_t>(~StateSet::of(OwnState::Owned).bits);
+                    next |= StateSet::of(OwnState::Escaped);
+                }
+                if (held.isExactly(r))
+                    s.resources[r] = next;
+                else
+                    s.resources[r] |= next;
+            }
+        }
+
         void retargetLocations(AbstractState& s, ResourceId from, ResourceId to)
         {
             for (Contents& c : s.locations)
@@ -154,7 +174,7 @@ namespace ctrace::stack::analysis::ownership
                 dst.merge(src);
             const LocationKind kind = facts.locations[e.dst].kind;
             if (kind == LocationKind::NonLocal || kind == LocationKind::ArgPointee)
-                markHeld(s, src, StateSet::of(OwnState::Escaped), /*guaranteed=*/true);
+                handOver(s, src);
             break;
         }
 
@@ -176,7 +196,7 @@ namespace ctrace::stack::analysis::ownership
         case Event::Kind::Return:
         {
             const Contents held = s.locations[e.src];
-            markHeld(s, held, StateSet::of(OwnState::Escaped), /*guaranteed=*/true);
+            handOver(s, held);
             break;
         }
 
@@ -198,6 +218,11 @@ namespace ctrace::stack::analysis::ownership
             {
                 for (const ResourceId r : s.locations[loc].resources)
                 {
+                    // Unknown code may release or keep a live resource; it cannot make a
+                    // released one live again, nor one that was never acquired exist.
+                    if (!s.resources[r].has(OwnState::Owned) &&
+                        !s.resources[r].has(OwnState::Escaped))
+                        continue;
                     s.resources[r] |=
                         StateSet::of(OwnState::Released) | StateSet::of(OwnState::Escaped);
                     s.uncertain[r] = true;
@@ -263,8 +288,65 @@ namespace ctrace::stack::analysis::ownership
         }
 
         case Event::Kind::Exit:
+        case Event::Kind::Use:
             break;
         }
+    }
+
+    namespace
+    {
+        /// Calls visit(useEvent, stateBefore) for each Use of every reached block and of its
+        /// outgoing edges, replayed from the stabilised in-states.
+        template <typename Visit>
+        void forEachUse(const OwnershipFacts& facts, const OwnershipResult& result, Visit visit)
+        {
+            const auto step = [&](const Event& e, AbstractState& s)
+            {
+                if (e.kind == Event::Kind::Use)
+                    visit(e, static_cast<const AbstractState&>(s));
+                applyEvent(facts, e, s);
+            };
+            for (std::uint32_t block = 0; block < facts.blocks.size(); ++block)
+            {
+                if (block >= result.in.size() || !result.in[block].reached)
+                    continue;
+                AbstractState state = result.in[block];
+                for (const Event& e : facts.blocks[block].events)
+                    step(e, state);
+                for (const Edge& edge : facts.edges)
+                {
+                    if (edge.from != block)
+                        continue;
+                    AbstractState along = state;
+                    for (const Event& e : edge.events)
+                        step(e, along);
+                }
+            }
+        }
+    } // namespace
+
+    std::vector<ReleasedUse> releasedUses(const OwnershipFacts& facts,
+                                          const OwnershipResult& result)
+    {
+        std::vector<ReleasedUse> found;
+        if (result.incomplete)
+            return found;
+        forEachUse(facts, result,
+                   [&](const Event& e, const AbstractState& s)
+                   {
+                       for (const ResourceId r : s.locations[e.src].resources)
+                       {
+                           // Released on every path where it exists: a certain release through
+                           // an exact handle came last, whatever was uncertain before it.
+                           StateSet existing = s.resources[r];
+                           existing.bits &=
+                               static_cast<std::uint8_t>(~StateSet::of(OwnState::NotOwned).bits);
+                           if (s.resources[r].has(OwnState::Released) &&
+                               (!s.uncertain[r] || existing.isOnly(OwnState::Released)))
+                               found.push_back({&e, r});
+                       }
+                   });
+        return found;
     }
 
     OwnershipResult solve(const OwnershipFacts& facts, const AbstractState& entry,
@@ -571,8 +653,23 @@ namespace ctrace::stack::analysis::ownership
             }
         }
 
-        // Fresh resources: read off the solve with every parameter Owned.
+        // Fresh resources and used arguments: read off the solve with every parameter Owned.
         const ResourceId paramResourceLowerBound = newInstanceOf(paramSiteBase);
+        forEachUse(facts, res,
+                   [&](const Event& e, const AbstractState& s)
+                   {
+                       for (const ResourceId r : s.locations[e.src].resources)
+                       {
+                           if (r < paramResourceLowerBound)
+                               continue; // one of the function's own resources
+                           const std::size_t p = r / 2u - paramSiteBase;
+                           if (p < facts.paramLocations.size())
+                               summary.usedArgs.push_back(facts.paramLocations[p].first);
+                       }
+                   });
+        std::sort(summary.usedArgs.begin(), summary.usedArgs.end());
+        summary.usedArgs.erase(std::unique(summary.usedArgs.begin(), summary.usedArgs.end()),
+                               summary.usedArgs.end());
         summary.normal.returns.certainty = freshResourceCertainty(
             facts, res, false, LocationKind::Return, ArgPath{}, paramResourceLowerBound);
         summary.normal.returns.kind = freshResourceKind(facts, res, false, LocationKind::Return,
@@ -610,8 +707,8 @@ namespace ctrace::stack::analysis::ownership
             return x.present == y.present && x.returns == y.returns && x.outArgs == y.outArgs &&
                    x.params == y.params && x.pointeeParams == y.pointeeParams;
         };
-        return a.incomplete == b.incomplete && sameExit(a.normal, b.normal) &&
-               sameExit(a.exceptional, b.exceptional);
+        return a.incomplete == b.incomplete && a.usedArgs == b.usedArgs &&
+               sameExit(a.normal, b.normal) && sameExit(a.exceptional, b.exceptional);
     }
 
     std::vector<FunctionOwnershipSummary> computeSummaryFixpoint(

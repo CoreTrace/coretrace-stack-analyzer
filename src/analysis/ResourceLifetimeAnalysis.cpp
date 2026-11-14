@@ -13,8 +13,10 @@
 #include <iostream>
 #include <limits>
 #include <map>
+#include <set>
 #include <sstream>
 #include <string>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -22,7 +24,6 @@
 #include <llvm/ADT/SmallPtrSet.h>
 #include <llvm/ADT/SmallVector.h>
 #include <llvm/ADT/StringMap.h>
-#include <llvm/Analysis/CFG.h>
 #include <llvm/Analysis/CaptureTracking.h>
 #include <llvm/Analysis/ValueTracking.h>
 #include <llvm/IR/Argument.h>
@@ -92,7 +93,6 @@ namespace ctrace::stack::analysis
             std::string resourceKind;
             std::string funcName;
             const llvm::Instruction* firstAcquireInst = nullptr;
-            std::vector<const llvm::Instruction*> releaseInsts;
             int acquires = 0;
             int releases = 0;
             OwnershipState ownership = OwnershipState::Unknown;
@@ -1032,28 +1032,8 @@ namespace ctrace::stack::analysis
                    name == "read";
         }
 
-        static bool callArgumentIsDirectReleaseArg(const llvm::CallBase& CB,
-                                                   const llvm::Function* callee,
-                                                   const ResourceModel& model, unsigned argIndex)
-        {
-            if (!callee)
-                return false;
-
-            for (const ResourceRule& rule : model.rules)
-            {
-                if (rule.action != RuleAction::ReleaseArg)
-                    continue;
-                if (rule.argIndex != argIndex)
-                    continue;
-                if (ruleMatchesFunction(rule, *callee))
-                    return true;
-            }
-
-            return false;
-        }
-
-        static bool callArgumentLikelyDereferenced(const llvm::CallBase& CB,
-                                                   const llvm::Function* callee, unsigned argIndex)
+        bool callArgumentLikelyDereferenced(const llvm::CallBase& CB, const llvm::Function* callee,
+                                            unsigned argIndex)
         {
             if (argIndex >= CB.arg_size())
                 return false;
@@ -1084,135 +1064,6 @@ namespace ctrace::stack::analysis
                 return true;
 
             return false;
-        }
-
-        static bool instructionMayReach(const llvm::Instruction& from, const llvm::Instruction& to)
-        {
-            if (from.getFunction() != to.getFunction())
-                return false;
-            if (&from == &to)
-                return true;
-            if (from.getParent() == to.getParent())
-                return from.comesBefore(&to);
-            return llvm::isPotentiallyReachable(&from, &to);
-        }
-
-        static bool
-        valueFeedsOnlyDirectReleaseArgs(const llvm::Value* value, const ResourceModel& model,
-                                        llvm::SmallPtrSet<const llvm::Value*, 32>& visited,
-                                        bool& sawReleaseUse, unsigned depth = 0)
-        {
-            if (!value || depth > 10)
-                return false;
-
-            value = value->stripPointerCasts();
-            if (!visited.insert(value).second)
-                return true;
-
-            bool sawMeaningfulUse = false;
-            for (const llvm::Use& U : value->uses())
-            {
-                const llvm::User* user = U.getUser();
-                if (const auto* II = llvm::dyn_cast<llvm::IntrinsicInst>(user))
-                {
-                    if (llvm::isa<llvm::DbgInfoIntrinsic>(II) ||
-                        llvm::isa<llvm::LifetimeIntrinsic>(II))
-                    {
-                        continue;
-                    }
-                }
-
-                if (const auto* CB = llvm::dyn_cast<llvm::CallBase>(user))
-                {
-                    const llvm::Function* callee = directCallee(*CB);
-                    if (!callee)
-                        return false;
-
-                    bool callUseIsReleaseOnly = false;
-                    for (unsigned argIdx = 0; argIdx < CB->arg_size(); ++argIdx)
-                    {
-                        if (CB->getArgOperand(argIdx)->stripPointerCasts() != value)
-                            continue;
-
-                        sawMeaningfulUse = true;
-                        if (!callArgumentIsDirectReleaseArg(*CB, callee, model, argIdx))
-                            return false;
-
-                        callUseIsReleaseOnly = true;
-                        sawReleaseUse = true;
-                    }
-                    if (!callUseIsReleaseOnly)
-                        return false;
-                    continue;
-                }
-
-                if (const auto* CI = llvm::dyn_cast<llvm::CastInst>(user))
-                {
-                    sawMeaningfulUse = true;
-                    if (!valueFeedsOnlyDirectReleaseArgs(CI, model, visited, sawReleaseUse,
-                                                         depth + 1))
-                    {
-                        return false;
-                    }
-                    continue;
-                }
-                if (const auto* BC = llvm::dyn_cast<llvm::BitCastOperator>(user))
-                {
-                    sawMeaningfulUse = true;
-                    if (!valueFeedsOnlyDirectReleaseArgs(BC, model, visited, sawReleaseUse,
-                                                         depth + 1))
-                    {
-                        return false;
-                    }
-                    continue;
-                }
-                if (const auto* GEP = llvm::dyn_cast<llvm::GEPOperator>(user))
-                {
-                    sawMeaningfulUse = true;
-                    if (!valueFeedsOnlyDirectReleaseArgs(GEP, model, visited, sawReleaseUse,
-                                                         depth + 1))
-                    {
-                        return false;
-                    }
-                    continue;
-                }
-                if (const auto* PN = llvm::dyn_cast<llvm::PHINode>(user))
-                {
-                    sawMeaningfulUse = true;
-                    if (!valueFeedsOnlyDirectReleaseArgs(PN, model, visited, sawReleaseUse,
-                                                         depth + 1))
-                    {
-                        return false;
-                    }
-                    continue;
-                }
-                if (const auto* Sel = llvm::dyn_cast<llvm::SelectInst>(user))
-                {
-                    sawMeaningfulUse = true;
-                    if (!valueFeedsOnlyDirectReleaseArgs(Sel, model, visited, sawReleaseUse,
-                                                         depth + 1))
-                    {
-                        return false;
-                    }
-                    continue;
-                }
-
-                // Any store/comparison/arithmetic or unknown use means this load
-                // participates in logic other than a pure release call path.
-                return false;
-            }
-
-            return sawMeaningfulUse && sawReleaseUse;
-        }
-
-        static bool loadFeedsOnlyDirectReleaseArgs(const llvm::LoadInst& load,
-                                                   const ResourceModel& model)
-        {
-            llvm::SmallPtrSet<const llvm::Value*, 32> visited;
-            bool sawReleaseUse = false;
-            if (!valueFeedsOnlyDirectReleaseArgs(&load, model, visited, sawReleaseUse))
-                return false;
-            return sawReleaseUse;
         }
 
         static const llvm::AllocaInst*
@@ -2406,11 +2257,11 @@ namespace ctrace::stack::analysis
     namespace
     {
         /// Runs the ownership engine on one function and turns its stabilised states into
-        /// MissingRelease / ReferenceLost / AnalysisIncomplete issues (spec §8).
-        void analyzeMissingReleaseWithEngine(const llvm::Function& F, const ResourceModel& model,
-                                             const ownership::SummaryLookup& summaries,
-                                             const llvm::DataLayout& DL,
-                                             std::vector<ResourceLifetimeIssue>& issues)
+        /// UseAfterRelease / MissingRelease / ReferenceLost / AnalysisIncomplete issues (spec §8).
+        void analyzeWithOwnershipEngine(const llvm::Function& F, const ResourceModel& model,
+                                        const ownership::SummaryLookup& summaries,
+                                        const llvm::DataLayout& DL,
+                                        std::vector<ResourceLifetimeIssue>& issues)
         {
             using namespace ownership;
 
@@ -2468,6 +2319,23 @@ namespace ctrace::stack::analysis
                     issueFor(0, ResourceLifetimeIssueKind::AnalysisIncomplete);
                 issues.push_back(std::move(issue));
                 return;
+            }
+
+            // A use of a resource that may be released: one issue per site and source line.
+            std::set<std::tuple<std::uint32_t, unsigned, const llvm::Instruction*>> usedAt;
+            for (const ReleasedUse& u : releasedUses(collected.facts, result))
+            {
+                const llvm::Instruction* at = collected.eventInstructions[u.use->instructionIndex];
+                const llvm::DebugLoc loc = at->getDebugLoc();
+                if (!usedAt.insert({u.resource / 2u, loc ? loc.getLine() : 0u, loc ? nullptr : at})
+                         .second)
+                    continue;
+                ResourceLifetimeIssue issue =
+                    issueFor(u.resource, ResourceLifetimeIssueKind::UseAfterRelease);
+                issue.inst = at;
+                if (collected.locationIsSlot[u.use->dst])
+                    issue.handleName = collected.locationNames[u.use->dst];
+                issues.push_back(std::move(issue));
             }
 
             const std::size_t resourceCount = entry.resources.size();
@@ -2629,7 +2497,6 @@ namespace ctrace::stack::analysis
             std::unordered_map<std::string, LocalHandleState> localStates;
             std::unordered_map<const llvm::AllocaInst*, bool> unknownAcquireEscapeCache;
             std::unordered_set<std::string> interprocUncertaintyReported;
-            std::unordered_set<std::string> useAfterReleaseReported;
             std::unordered_set<std::string> releasedEscapeReported;
             auto trackAcquire = [&](const StorageKey& storage, const std::string& resourceKind,
                                     const llvm::Instruction* anchorInst)
@@ -2660,76 +2527,6 @@ namespace ctrace::stack::analysis
                                                           resourceKind, F.getName().str(),
                                                           anchorInst};
                     }
-                }
-            };
-
-            auto sameLocalStorage = [&](const StorageKey& lhs, const StorageKey& rhs)
-            {
-                if (lhs.scope != StorageScope::Local || rhs.scope != StorageScope::Local)
-                    return false;
-                if (lhs.key == rhs.key)
-                    return true;
-                return lhs.localAlloca && rhs.localAlloca && lhs.localAlloca == rhs.localAlloca &&
-                       lhs.offset == rhs.offset;
-            };
-
-            auto reportUseAfterReleaseIfNeeded =
-                [&](const StorageKey& storage, const llvm::Instruction* anchorInst)
-            {
-                if (!storage.valid() || storage.scope != StorageScope::Local || !anchorInst)
-                    return;
-
-                for (const auto& entry : localStates)
-                {
-                    const LocalHandleState& state = entry.second;
-                    if (!sameLocalStorage(state.storage, storage))
-                        continue;
-                    if (state.acquires <= 0)
-                        continue;
-                    if (state.releases <= 0)
-                        continue;
-
-                    bool reachableRelease = false;
-                    for (const llvm::Instruction* releaseInst : state.releaseInsts)
-                    {
-                        if (!releaseInst)
-                            continue;
-                        if (instructionMayReach(*releaseInst, *anchorInst))
-                        {
-                            reachableRelease = true;
-                            break;
-                        }
-                    }
-                    if (!reachableRelease)
-                        continue;
-
-                    std::ostringstream dedupKey;
-                    if (state.storage.localAlloca)
-                    {
-                        dedupKey << static_cast<const void*>(state.storage.localAlloca) << ":"
-                                 << state.storage.offset;
-                    }
-                    else
-                    {
-                        dedupKey << state.storage.key;
-                    }
-                    dedupKey << "|";
-                    if (const llvm::DebugLoc loc = anchorInst->getDebugLoc())
-                        dedupKey << loc.getLine();
-                    else
-                        dedupKey << static_cast<const void*>(anchorInst);
-                    if (!useAfterReleaseReported.insert(dedupKey.str()).second)
-                        continue;
-
-                    ResourceLifetimeIssue issue;
-                    issue.funcName = F.getName().str();
-                    issue.resourceKind = state.resourceKind;
-                    issue.handleName = state.storage.displayName.empty()
-                                           ? std::string("<unknown>")
-                                           : state.storage.displayName;
-                    issue.inst = anchorInst;
-                    issue.kind = ResourceLifetimeIssueKind::UseAfterRelease;
-                    issues.push_back(std::move(issue));
                 }
             };
 
@@ -2812,8 +2609,6 @@ namespace ctrace::stack::analysis
                 }
 
                 state.releases += 1;
-                if (anchorInst)
-                    state.releaseInsts.push_back(anchorInst);
                 if (state.releases > state.acquires)
                 {
                     if (state.acquires == 0 && state.storage.localAlloca)
@@ -2914,34 +2709,6 @@ namespace ctrace::stack::analysis
             {
                 for (llvm::Instruction& I : BB)
                 {
-                    if (const auto* LI = llvm::dyn_cast<llvm::LoadInst>(&I))
-                    {
-                        if (loadFeedsOnlyDirectReleaseArgs(*LI, model))
-                            continue;
-                        StorageKey storage =
-                            resolveHandleStorage(LI->getPointerOperand(), F, DL, methodInfo);
-                        reportUseAfterReleaseIfNeeded(storage, &I);
-                    }
-                    else if (const auto* SI = llvm::dyn_cast<llvm::StoreInst>(&I))
-                    {
-                        StorageKey storage =
-                            resolveHandleStorage(SI->getPointerOperand(), F, DL, methodInfo);
-                        reportUseAfterReleaseIfNeeded(storage, &I);
-                    }
-                    else if (const auto* MI = llvm::dyn_cast<llvm::MemIntrinsic>(&I))
-                    {
-                        StorageKey dstStorage =
-                            resolveHandleStorage(MI->getDest(), F, DL, methodInfo);
-                        reportUseAfterReleaseIfNeeded(dstStorage, &I);
-
-                        if (const auto* MTI = llvm::dyn_cast<llvm::MemTransferInst>(MI))
-                        {
-                            StorageKey srcStorage =
-                                resolveHandleStorage(MTI->getSource(), F, DL, methodInfo);
-                            reportUseAfterReleaseIfNeeded(srcStorage, &I);
-                        }
-                    }
-
                     auto* CB = llvm::dyn_cast<llvm::CallBase>(&I);
                     if (!CB)
                         continue;
@@ -2949,20 +2716,6 @@ namespace ctrace::stack::analysis
                     const llvm::Function* callee = directCallee(*CB);
                     if (!callee)
                         continue;
-
-                    for (unsigned argIdx = 0; argIdx < CB->arg_size(); ++argIdx)
-                    {
-                        const llvm::Value* arg = CB->getArgOperand(argIdx);
-                        if (!arg || !arg->getType()->isPointerTy())
-                            continue;
-                        if (callArgumentIsDirectReleaseArg(*CB, callee, model, argIdx))
-                            continue;
-                        if (!callArgumentLikelyDereferenced(*CB, callee, argIdx))
-                            continue;
-
-                        StorageKey storage = resolveHandleStorage(arg, F, DL, methodInfo);
-                        reportUseAfterReleaseIfNeeded(storage, &I);
-                    }
 
                     bool matchedDirectRule = false;
                     for (const ResourceRule& rule : model.rules)
@@ -3096,7 +2849,6 @@ namespace ctrace::stack::analysis
                         continue;
 
                     StorageKey storage = resolveHandleStorage(retVal, F, DL, methodInfo);
-                    reportUseAfterReleaseIfNeeded(storage, RI);
                     for (auto& entry : localStates)
                     {
                         LocalHandleState& state = entry.second;
@@ -3133,9 +2885,9 @@ namespace ctrace::stack::analysis
                 }
             }
 
-            // MissingRelease comes from the ownership engine (spec §8); the counters
-            // above keep serving the other rules.
-            analyzeMissingReleaseWithEngine(F, model, ownershipLookup, DL, issues);
+            // UseAfterRelease and MissingRelease come from the ownership engine (spec §8); the
+            // counters above keep serving the other rules.
+            analyzeWithOwnershipEngine(F, model, ownershipLookup, DL, issues);
 
             if (methodInfo.isDtor && !methodInfo.className.empty())
             {

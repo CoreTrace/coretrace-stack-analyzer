@@ -1633,6 +1633,10 @@ encodeOwnershipSummary(const ctrace::stack::analysis::ownership::FunctionOwnersh
 {
     llvm::json::Object obj;
     obj["incomplete"] = s.incomplete;
+    llvm::json::Array usedArgs;
+    for (const unsigned i : s.usedArgs)
+        usedArgs.push_back(static_cast<int64_t>(i));
+    obj["usedArgs"] = std::move(usedArgs);
     obj["normal"] = encodeExitTransformer(s.normal);
     obj["exceptional"] = encodeExitTransformer(s.exceptional);
     return obj;
@@ -1734,11 +1738,19 @@ decodeOwnershipSummary(const llvm::json::Object& obj,
                        ctrace::stack::analysis::ownership::FunctionOwnershipSummary& out)
 {
     const auto incomplete = obj.getBoolean("incomplete");
+    const auto* usedArgs = obj.getArray("usedArgs");
     const auto* normal = obj.getObject("normal");
     const auto* exceptional = obj.getObject("exceptional");
-    if (!incomplete || !normal || !exceptional)
+    if (!incomplete || !usedArgs || !normal || !exceptional)
         return false;
     out.incomplete = *incomplete;
+    for (const auto& value : *usedArgs)
+    {
+        const auto i = value.getAsInteger();
+        if (!i || *i < 0 || (!out.usedArgs.empty() && *i <= out.usedArgs.back()))
+            return false; // sorted and distinct: the collector searches it
+        out.usedArgs.push_back(static_cast<unsigned>(*i));
+    }
     return decodeExitTransformer(*normal, out.normal) &&
            decodeExitTransformer(*exceptional, out.exceptional);
 }
@@ -1832,7 +1844,7 @@ static bool writeSummaryCacheFile(const std::filesystem::path& cacheFile,
     }
 
     llvm::json::Object root;
-    root["schema"] = "resource-summary-cache-v5";
+    root["schema"] = "resource-summary-cache-v6";
     root["functions"] = std::move(functionArray);
 
     std::ofstream out(cacheFile, std::ios::out | std::ios::trunc | std::ios::binary);
@@ -1863,7 +1875,7 @@ readSummaryCacheFile(const std::filesystem::path& cacheFile)
     if (!obj)
         return std::nullopt;
     auto schema = obj->getString("schema");
-    if (!schema || *schema != "resource-summary-cache-v5")
+    if (!schema || *schema != "resource-summary-cache-v6")
         return std::nullopt;
 
     const auto* functions = obj->getArray("functions");
@@ -1979,8 +1991,10 @@ struct ResourceSummaryOperations
 
     std::string cacheKey(std::size_t module, const std::string& externalHash) const
     {
-        // Keep the schema and key components identical: this refactor changes no summaries.
-        return md5Hex("cross-tu-resource-summary-v5|" + modelHash + "|" + externalHash + "|" +
+        // The version moves with the file schema whenever the analyzer computes different
+        // summaries (v6: handing a released resource over leaves it released, and a summary
+        // lists the arguments the function uses).
+        return md5Hex("cross-tu-resource-summary-v6|" + modelHash + "|" + externalHash + "|" +
                       filterHash + "|" + compileArgsHashes[module] + "|" + irHashes[module]);
     }
     bool usesDiskCache() const

@@ -16,6 +16,7 @@
 #include "analysis/Reachability.hpp"
 #include "analysis/ResourceLifetimeAnalysis.hpp"
 #include "analysis/ResourceModel.hpp"
+#include "analysis/ownership/OwnershipEngine.hpp"
 #include "analysis/ownership/ResourceFactCollector.hpp"
 #include "analysis/StackBufferAnalysis.hpp"
 #include "analysis/UninitializedVarAnalysis.hpp"
@@ -1416,6 +1417,139 @@ namespace
             report.expect(count(blocks, Kind::AddressEscape) == 1,
                           "OwnershipCollector: passing &h to an unmodelled callee");
         }
+        // The Use events of a function, by the name of the slot each one is read from.
+        const auto usesOf = [&](const char* name, const SummaryLookup& summaries)
+        {
+            std::vector<std::string> names;
+            llvm::Function* fn = loaded.module->getFunction(name);
+            if (!fn)
+                return names;
+            const CollectedFunction c =
+                collectOwnershipFacts(*fn, model, summaries, loaded.module->getDataLayout());
+            const auto add = [&](const Event& e)
+            {
+                if (e.kind == Kind::Use)
+                    names.push_back(c.locationIsSlot[e.dst] ? c.locationNames[e.dst]
+                                                            : std::string("<value>"));
+            };
+            for (const Block& b : c.facts.blocks)
+                for (const Event& e : b.events)
+                    add(e);
+            for (const Edge& edge : c.facts.edges)
+                for (const Event& e : edge.events)
+                    add(e);
+            return names;
+        };
+        report.expect(usesOf("use_kinds", noSummaries) == std::vector<std::string>{"p", "q", "p"},
+                      "OwnershipCollector: a store through the pointer, a memset and an external "
+                      "callee are uses; a copy, a comparison, the released argument and a "
+                      "reassignment are not");
+        report.expect(usesOf("use_return", noSummaries) == std::vector<std::string>{"<value>"},
+                      "OwnershipCollector: returning the pointer is a use, named by its resource");
+
+        // A call to a defined function is a use of the arguments its summary uses; without a
+        // summary, or through a pointer, the callee is unknown and the call is a use.
+        FunctionOwnershipSummary usesFirst;
+        usesFirst.usedArgs = {0};
+        FunctionOwnershipSummary keepsOnly;
+        const SummaryLookup bodies{[&](const llvm::Function& fn) -> const FunctionOwnershipSummary*
+                                   {
+                                       if (fn.getName() == "callee_uses")
+                                           return &usesFirst;
+                                       if (fn.getName() == "callee_keeps")
+                                           return &keepsOnly;
+                                       return nullptr;
+                                   }};
+        report.expect(usesOf("use_callees", bodies) == std::vector<std::string>{"p", "p"},
+                      "OwnershipCollector: a defined callee that uses the argument and an "
+                      "indirect call are uses; a callee that only keeps the pointer is not");
+        report.expect(usesOf("use_callees", noSummaries) == std::vector<std::string>{"p", "p", "p"},
+                      "OwnershipCollector: a defined callee without a summary is a use");
+        keepsOnly.incomplete = true;
+        report.expect(usesOf("use_callees", bodies) == std::vector<std::string>{"p", "p", "p"},
+                      "OwnershipCollector: a defined callee with an incomplete summary is a use");
+        const auto usedArgsOf = [&](const char* name)
+        {
+            const llvm::Function* fn = loaded.module->getFunction(name);
+            if (!fn)
+                return std::vector<unsigned>{99};
+            return computeSummary(collectOwnershipFacts(*fn, model, noSummaries,
+                                                        loaded.module->getDataLayout())
+                                      .facts)
+                .usedArgs;
+        };
+        report.expect(usedArgsOf("callee_uses") == std::vector<unsigned>{0},
+                      "OwnershipSummary: a store through the parameter uses it");
+        report.expect(usedArgsOf("callee_keeps").empty(),
+                      "OwnershipSummary: storing the parameter somewhere does not use it");
+        if (const llvm::Function* fn = loaded.module->getFunction("callee_forwards"))
+        {
+            const FunctionOwnershipSummary forwards = computeSummary(
+                collectOwnershipFacts(*fn, model, noSummaries, loaded.module->getDataLayout())
+                    .facts);
+            const SummaryLookup forwarding{
+                [&](const llvm::Function& callee) -> const FunctionOwnershipSummary*
+                { return callee.getName() == "callee_forwards" ? &forwards : nullptr; }};
+            report.expect(usesOf("use_wrapped", forwarding) == std::vector<std::string>{"p"},
+                          "OwnershipCollector: an argument a callee hands to unknown code is a "
+                          "use, though that callee may release it");
+        }
+        else
+        {
+            report.expect(false, "OwnershipCollector: callee_forwards collected");
+        }
+
+        // p = p + 1 keeps the resource in p: releasing p then releases it.
+        if (const llvm::Function* fn = loaded.module->getFunction("offset_reassign"))
+        {
+            const CollectedFunction c =
+                collectOwnershipFacts(*fn, model, noSummaries, loaded.module->getDataLayout());
+            const OwnershipResult res = solve(
+                c.facts, AbstractState::entry(2u * c.facts.siteCount, c.facts.locations.size()));
+            report.expect(
+                res.exits.size() == 1 &&
+                    res.exits[0].state.resources[newInstanceOf(0)].isOnly(OwnState::Released),
+                "OwnershipCollector: an address computed from the handle carries its "
+                "resource");
+        }
+        else
+        {
+            report.expect(false, "OwnershipCollector: offset_reassign collected");
+        }
+
+        // Releasing an argument does not hide a use of it in the same callee.
+        const auto summaryOf = [&](const char* name)
+        {
+            const llvm::Function* fn = loaded.module->getFunction(name);
+            return fn ? computeSummary(collectOwnershipFacts(*fn, model, noSummaries,
+                                                             loaded.module->getDataLayout())
+                                           .facts)
+                      : FunctionOwnershipSummary{};
+        };
+        const FunctionOwnershipSummary usesThenReleases = summaryOf("callee_uses_then_releases");
+        const FunctionOwnershipSummary releasesOnly = summaryOf("callee_releases");
+        const auto releasesFirstArg = [](const FunctionOwnershipSummary& s)
+        {
+            const auto it = s.normal.params.find(0);
+            return it != s.normal.params.end() &&
+                   it->second[static_cast<std::size_t>(OwnState::Owned)].has(OwnState::Released);
+        };
+        report.expect(releasesFirstArg(usesThenReleases) && releasesFirstArg(releasesOnly) &&
+                          usesThenReleases.usedArgs == std::vector<unsigned>{0} &&
+                          releasesOnly.usedArgs.empty(),
+                      "OwnershipSummary: both callees release the argument, one also uses it");
+        const SummaryLookup releasing{
+            [&](const llvm::Function& fn) -> const FunctionOwnershipSummary*
+            {
+                if (fn.getName() == "callee_uses_then_releases")
+                    return &usesThenReleases;
+                if (fn.getName() == "callee_releases")
+                    return &releasesOnly;
+                return nullptr;
+            }};
+        report.expect(usesOf("use_releasing_callees", releasing) == std::vector<std::string>{"p"},
+                      "OwnershipCollector: a callee that uses the argument it releases is a use; "
+                      "one that only releases it is not");
         return report.failures == 0;
     }
     bool testOwnershipCollectorExceptions(const std::filesystem::path& repoRoot, TestReport& report)

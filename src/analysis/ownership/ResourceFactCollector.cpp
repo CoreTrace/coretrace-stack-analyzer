@@ -18,6 +18,7 @@
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/IntrinsicInst.h>
 
+#include <algorithm>
 #include <map>
 #include <optional>
 #include <string>
@@ -165,6 +166,7 @@ namespace ctrace::stack::analysis::ownership
                     case Event::Kind::Overwrite:
                     case Event::Kind::Return:
                     case Event::Kind::Exit:
+                    case Event::Kind::Use:
                         break;
                     default:
                         return;
@@ -385,8 +387,100 @@ namespace ctrace::stack::analysis::ownership
 
             // ---- instruction mapping ---------------------------------------------------
 
+            /// What `I` needs alive: memory accessed through a pointer, a pointer argument the
+            /// callee likely dereferences, a pointer handed back to the caller. A copy, a
+            /// comparison, a reassignment or an argument the call only releases moves or
+            /// inspects the pointer value: no Use.
+            void emitUses(const llvm::Instruction& I)
+            {
+                if (const auto* load = llvm::dyn_cast<llvm::LoadInst>(&I))
+                    use(I, load->getPointerOperand());
+                else if (const auto* store = llvm::dyn_cast<llvm::StoreInst>(&I))
+                    use(I, store->getPointerOperand());
+                else if (const auto* rmw = llvm::dyn_cast<llvm::AtomicRMWInst>(&I))
+                    use(I, rmw->getPointerOperand());
+                else if (const auto* cas = llvm::dyn_cast<llvm::AtomicCmpXchgInst>(&I))
+                    use(I, cas->getPointerOperand());
+                else if (const auto* mem = llvm::dyn_cast<llvm::MemIntrinsic>(&I))
+                {
+                    use(I, mem->getDest());
+                    if (const auto* transfer = llvm::dyn_cast<llvm::MemTransferInst>(mem))
+                        use(I, transfer->getSource());
+                }
+                else if (const auto* ret = llvm::dyn_cast<llvm::ReturnInst>(&I))
+                {
+                    // Named by the resource: the slot of a merged return is no handle.
+                    if (const llvm::Value* v = ret->getReturnValue();
+                        v && v->getType()->isPointerTy())
+                        use(I, v, /*atRead=*/false);
+                }
+                else if (const auto* call = llvm::dyn_cast<llvm::CallBase>(&I);
+                         call && !llvm::isa<llvm::IntrinsicInst>(call) && !call->isInlineAsm())
+                {
+                    const llvm::Function* callee = directCallee(*call);
+                    const std::vector<unsigned> released =
+                        callee ? releasedArgs(*call, *callee, /*knownOnly=*/true)
+                               : std::vector<unsigned>{};
+                    for (unsigned i = 0; i < call->arg_size(); ++i)
+                    {
+                        // A released argument is still used when the callee's summary shows a
+                        // Use of it (`*p = 1; free(p);`), not when the callee only releases it.
+                        const bool isReleased =
+                            std::find(released.begin(), released.end(), i) != released.end();
+                        if (isReleased ? summaryUses(callee, i) : argumentUsed(*call, callee, i))
+                            use(I, call->getArgOperand(i));
+                    }
+                }
+            }
+
+            /// Whether the call may need what argument `i` points to alive. Attributes and the
+            /// library list decide first (a declaration is a use). Otherwise an unknown callee
+            /// (called through a pointer, or defined without a summary) is a use, and a defined
+            /// one is when a Use in its body may reach that parameter.
+            bool argumentUsed(const llvm::CallBase& call, const llvm::Function* callee,
+                              unsigned i) const
+            {
+                if (lifetime_detail::callArgumentLikelyDereferenced(call, callee, i))
+                    return true;
+                if (!call.getArgOperand(i)->getType()->isPointerTy() ||
+                    call.paramHasAttr(i, llvm::Attribute::ReadNone))
+                    return false;
+                if (!callee)
+                    return true;
+                if (callee->doesNotAccessMemory())
+                    return false;
+                const FunctionOwnershipSummary* summary = summaries_.byFunction(*callee);
+                return !summary || summary->incomplete || summaryUses(callee, i);
+            }
+
+            /// Whether the summary of `callee` lists a Use of its parameter `i`.
+            bool summaryUses(const llvm::Function* callee, unsigned i) const
+            {
+                const FunctionOwnershipSummary* summary =
+                    callee ? summaries_.byFunction(*callee) : nullptr;
+                return summary &&
+                       std::binary_search(summary->usedArgs.begin(), summary->usedArgs.end(), i);
+            }
+
+            /// A Use of the pointer `ptr` is based on, unless that is a local slot, a global or a
+            /// constant: those hold no resource themselves. With `atRead`, a pointer just read
+            /// from a slot is reported where it was read, under the slot's name.
+            void use(const llvm::Instruction& I, const llvm::Value* ptr, bool atRead = true)
+            {
+                const llvm::Value* base = llvm::getUnderlyingObject(ptr);
+                if (llvm::isa<llvm::AllocaInst>(base) || llvm::isa<llvm::Constant>(base))
+                    return;
+                const auto* load = atRead ? llvm::dyn_cast<llvm::LoadInst>(base) : nullptr;
+                const auto from = load ? loadedFrom_.find(load) : loadedFrom_.end();
+                Event e = make(Event::Kind::Use, from != loadedFrom_.end() ? *load : I);
+                e.src = valueLocation(base);
+                e.dst = from != loadedFrom_.end() ? from->second : e.src;
+                emit(std::move(e));
+            }
+
             void visit(const llvm::Instruction& I)
             {
+                emitUses(I);
                 if (const auto* store = llvm::dyn_cast<llvm::StoreInst>(&I))
                 {
                     visitStore(*store);
@@ -398,6 +492,7 @@ namespace ctrace::stack::analysis::ownership
                         return;
                     if (const auto slot = slotOf(load->getPointerOperand()))
                     {
+                        loadedFrom_[load] = *slot;
                         Event e = make(Event::Kind::Copy, I);
                         e.dst = valueLocation(load);
                         e.src = *slot;
@@ -488,9 +583,11 @@ namespace ctrace::stack::analysis::ownership
                     e.unknownValue = !llvm::isa<llvm::ConstantPointerNull>(stripped);
                     return e;
                 }
+                // An address computed from a pointer (p + 1, &p->field) points into the same
+                // resource: copy from the pointer it is computed from.
                 Event e = make(Event::Kind::Copy, I);
                 e.dst = dst;
-                e.src = valueLocation(value);
+                e.src = valueLocation(llvm::getUnderlyingObject(stripped));
                 e.strong = strong;
                 return e;
             }
@@ -672,6 +769,39 @@ namespace ctrace::stack::analysis::ownership
                 emitOnEdge(invoke.getParent(), invoke.getUnwindDest(), std::move(weak));
             }
 
+            static bool releases(const ParamTransformer& t)
+            {
+                return t[static_cast<std::size_t>(OwnState::Owned)].has(OwnState::Released);
+            }
+
+            /// Arguments this call may release as passed (model rule or summary). With
+            /// `knownOnly`, a summary counts only where that release is not uncertain: a callee
+            /// that hands the argument to unknown code may also use it.
+            std::vector<unsigned> releasedArgs(const llvm::CallBase& call,
+                                               const llvm::Function& callee,
+                                               bool knownOnly = false) const
+            {
+                std::vector<unsigned> args;
+                for (const ResourceRule& rule : model_.rules)
+                {
+                    if (rule.action == RuleAction::ReleaseArg &&
+                        ruleMatchesFunction(rule, callee) && rule.argIndex < call.arg_size())
+                        args.push_back(rule.argIndex);
+                }
+                if (const FunctionOwnershipSummary* summary = summaries_.byFunction(callee))
+                {
+                    for (const auto& [argIndex, transformer] : summary->normal.params)
+                    {
+                        if (argIndex < call.arg_size() && releases(transformer) &&
+                            (!knownOnly ||
+                             !transformer.isUncertain(StateSet::of(OwnState::Owned))) &&
+                            call.getArgOperand(argIndex)->getType()->isPointerTy())
+                            args.push_back(argIndex);
+                    }
+                }
+                return args;
+            }
+
             /// Locations whose resource this call may release (model rule or summary).
             std::vector<LocationId> releaseTargets(const llvm::CallBase& call,
                                                    const llvm::Function* callee)
@@ -679,25 +809,10 @@ namespace ctrace::stack::analysis::ownership
                 std::vector<LocationId> targets;
                 if (!callee)
                     return targets;
-                for (const ResourceRule& rule : model_.rules)
-                {
-                    if (rule.action != RuleAction::ReleaseArg ||
-                        !ruleMatchesFunction(rule, *callee) || rule.argIndex >= call.arg_size())
-                        continue;
-                    targets.push_back(valueLocation(call.getArgOperand(rule.argIndex)));
-                }
+                for (const unsigned i : releasedArgs(call, *callee))
+                    targets.push_back(valueLocation(call.getArgOperand(i)));
                 if (const FunctionOwnershipSummary* summary = summaries_.byFunction(*callee))
                 {
-                    const auto releases = [](const ParamTransformer& t)
-                    {
-                        return t[static_cast<std::size_t>(OwnState::Owned)].has(OwnState::Released);
-                    };
-                    for (const auto& [argIndex, transformer] : summary->normal.params)
-                    {
-                        if (argIndex < call.arg_size() && releases(transformer) &&
-                            call.getArgOperand(argIndex)->getType()->isPointerTy())
-                            targets.push_back(valueLocation(call.getArgOperand(argIndex)));
-                    }
                     for (const auto& [path, transformer] : summary->normal.pointeeParams)
                     {
                         if (!releases(transformer))
@@ -1008,6 +1123,7 @@ namespace ctrace::stack::analysis::ownership
                 edgeIndex_;
             std::map<std::string, LocationId> slotIds_;
             llvm::DenseMap<const llvm::Value*, LocationId> valueIds_;
+            llvm::DenseMap<const llvm::LoadInst*, LocationId> loadedFrom_; // the slot read
             std::map<const llvm::CallBase*, Event> exceptionalSummaryEvents_;
             std::optional<LocationId> unknownTarget_;
             LocationId returnLocation_ = 0;

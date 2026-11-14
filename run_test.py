@@ -2448,6 +2448,39 @@ def check_ownership_cross_tu() -> bool:
             if outputs[0] != outputs[1]:
                 print(f"  ❌ {name}: cached run differs from the first run")
                 ok = False
+        # Callees that release their argument: the call after a release is a use when the callee
+        # also accesses it (after the release, or on another path), not when it only releases
+        # it. Same result with Z3, and when the summaries are read back from the cache: the
+        # second run may still recompute intermediate rounds of the fixpoint, the third reads
+        # every summary from it.
+        files = [
+            str(fixtures / "cross-tu-use-then-release-def.c"),
+            str(fixtures / "cross-tu-use-then-release-use.c"),
+        ]
+        expected_uses = [
+            f"at line {line}, column {column}\n\t[!!!Error] potential use-after-release: 'HeapAlloc' handle 'p'"
+            for line, column in ((18, 32), (26, 30))
+        ]
+        smt_args = [
+            "--smt=on",
+            "--smt-backend=z3",
+            "--smt-mode=single",
+            f"--smt-rules={','.join(_all_smt_rules())}",
+            f"--smt-timeout-ms={SMT_FIXTURE_TIMEOUT_MS}",
+        ]
+        for mode, extra in (("default", []), ("smt-z3", smt_args)):
+            args = files + common[:-1] + [f"--resource-summary-cache-dir={tmpdir / f'use-then-release-{mode}'}"]
+            for run in ("first", "second", "third"):
+                result = run_analyzer_uncached(args + extra)
+                output = result.stdout or ""
+                if (
+                    result.returncode != 0
+                    or output.count("use-after-release") != len(expected_uses)
+                    or not all(use in output for use in expected_uses)
+                ):
+                    print(f"  ❌ use-then-release ({mode}, {run}): expected the use-after-release at lines 18 and 26 only")
+                    print(output + (result.stderr or ""))
+                    ok = False
     if ok:
         print("  ✅ resource ownership cross-TU transformers OK\n")
     return ok
@@ -2511,7 +2544,7 @@ def check_ownership_wrapper_metadata() -> bool:
         if checked_output(inputs) != first:
             return fail_check("obsolete summaries changed the wrapper diagnostics")
         # Intermediate fixpoint keys need not be reused; active keys must be rewritten.
-        if not any(json.loads(path.read_text())["schema"] == "resource-summary-cache-v5" for path in cache_files):
+        if not any(json.loads(path.read_text())["schema"] == "resource-summary-cache-v6" for path in cache_files):
             return fail_check("obsolete ownership summaries were not rebuilt")
     print("  ✅ ownership wrapper metadata preserved locally, across TUs and in the cache\n")
     return True

@@ -42,3 +42,82 @@ void unknown_call(void)
     unknown_sink(h);
     unknown_out(&h);
 }
+
+/* Which uses of a pointer are Use events. */
+int use_kinds(char* other)
+{
+    char* p = acquire_ret();
+    char* q = p;    /* copy into a slot: not a use */
+    if (p == other) /* comparison: not a use */
+        return 0;
+    *p = 1;                    /* store through the pointer: a use */
+    __builtin_memset(q, 0, 1); /* memory intrinsic: a use */
+    unknown_sink(p);           /* external callee: a use (conservative) */
+    release_handle(p);         /* the released argument: not a use */
+    p = 0;                     /* reassignment: not a use */
+    return 1;
+}
+
+char* use_return(void)
+{
+    char* p = acquire_ret();
+    release_handle(p);
+    return p; /* the pointer leaves the function: a use */
+}
+
+/* Calls to defined functions: a use when the callee's body may use the argument. */
+static char* kept;
+void callee_uses(char* p)
+{
+    *p = 1; /* a use of the parameter */
+}
+void callee_keeps(char* p)
+{
+    kept = p; /* only stores the pointer: no use */
+}
+int use_callees(void (*fp)(char*))
+{
+    char* p = acquire_ret();
+    callee_uses(p);  /* a use: the callee's summary says it uses the argument */
+    callee_keeps(p); /* not a use: the callee only keeps it */
+    fp(p);           /* indirect call: an unknown callee, a use */
+    release_handle(p);
+    return 0;
+}
+
+void callee_forwards(char* p)
+{
+    unknown_sink(p); /* unknown code: may use the pointer, may release it */
+}
+void use_wrapped(void)
+{
+    char* p = acquire_ret();
+    callee_forwards(p); /* a use, though the callee's summary says it may release */
+}
+
+/* An address computed from the handle carries its resource. */
+void offset_reassign(void)
+{
+    char* p = acquire_ret();
+    p = p + 1;
+    release_handle(p);
+}
+
+/* A callee that uses its argument and also releases it still uses it; one that only releases
+   it does not. */
+void callee_uses_then_releases(char* p)
+{
+    *p = 1;
+    release_handle(p);
+}
+void callee_releases(char* p)
+{
+    release_handle(p);
+}
+void use_releasing_callees(void)
+{
+    char* p = acquire_ret();
+    callee_uses_then_releases(p); /* a use, though the callee also releases it */
+    char* q = acquire_ret();
+    callee_releases(q); /* not a use: the callee only releases it */
+}
