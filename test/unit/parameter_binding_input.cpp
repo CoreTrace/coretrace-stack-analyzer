@@ -56,7 +56,8 @@ Varargs::Varargs(int* x, double* y, ...)
     seed = *x + static_cast<int>(*y);
 }
 
-// An empty parameter takes no IR argument, but keeps its debug declaration and its number.
+// An empty parameter keeps its debug declaration and its number; whether it takes an IR argument
+// depends on the ABI: none on x86-64 or Apple arm64, an i8 under AAPCS64 on Linux.
 struct Tag
 {
 };

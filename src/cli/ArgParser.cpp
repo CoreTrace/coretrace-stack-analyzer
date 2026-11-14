@@ -47,7 +47,7 @@ namespace ctrace::stack::cli
             }
 
           private:
-            static constexpr std::array<OptionCandidate, 58> kCandidates = {
+            static constexpr std::array<OptionCandidate, 59> kCandidates = {
                 {{"-h", "-h"},
                  {"--help", "--help"},
                  {"--demangle", "--demangle"},
@@ -89,6 +89,7 @@ namespace ctrace::stack::cli
                  {"--no-uninitialized-cross-tu", "--no-uninitialized-cross-tu"},
                  {"--resource-summary-cache-dir", "--resource-summary-cache-dir"},
                  {"--resource-summary-cache-memory-only", "--resource-summary-cache-memory-only"},
+                 {"--experimental-const-suggestion-check", "--experimental-const-suggestion-check"},
                  {"--compile-ir-cache-dir", "--compile-ir-cache-dir"},
                  {"--compile-ir-format", "--compile-ir-format"},
                  {"--compile-ir-format=bc", "--compile-ir-format=bc"},
@@ -822,12 +823,17 @@ namespace ctrace::stack::cli
             cfg.resourceSummaryMemoryOnly = value;
         }
 
+        void setConfigConstSuggestionCheck(AnalysisConfig& cfg, bool value)
+        {
+            cfg.constSuggestionCheck = value;
+        }
+
         void setParsedIncludeCompdbDeps(ParsedArguments& parsed, bool value)
         {
             parsed.includeCompdbDeps = value;
         }
 
-        constexpr std::array<BoolConfigSpec<AnalysisConfig>, 7> kConfigBoolSpecs = {{
+        constexpr std::array<BoolConfigSpec<AnalysisConfig>, 8> kConfigBoolSpecs = {{
             {"timing", &setConfigTiming},
             {"warnings-only", &setConfigWarningsOnly},
             {"quiet", &setConfigQuiet},
@@ -835,6 +841,7 @@ namespace ctrace::stack::cli
             {"resource-cross-tu", &setConfigResourceCrossTU},
             {"uninitialized-cross-tu", &setConfigUninitializedCrossTU},
             {"resource-summary-cache-memory-only", &setConfigResourceSummaryMemoryOnly},
+            {"experimental-const-suggestion-check", &setConfigConstSuggestionCheck},
         }};
 
         constexpr std::array<BoolConfigSpec<ParsedArguments>, 1> kParsedBoolSpecs = {{
@@ -1558,6 +1565,11 @@ namespace ctrace::stack::cli
             if (argStr == "--resource-summary-cache-memory-only")
             {
                 cfg.resourceSummaryMemoryOnly = true;
+                continue;
+            }
+            if (argStr == "--experimental-const-suggestion-check")
+            {
+                cfg.constSuggestionCheck = true;
                 continue;
             }
             if (argStr == "--compile-commands" || argStr == "--compdb")

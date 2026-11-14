@@ -1,0 +1,540 @@
+// SPDX-License-Identifier: Apache-2.0
+// Comparison of the code generated before and after a const rewrite (#217).
+#include "analysis/ConstSuggestionCheck.hpp"
+#include "ConstSuggestionInternal.hpp"
+
+#include <algorithm>
+#include <cctype>
+#include <cstdlib>
+#include <functional>
+#include <map>
+#include <set>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <llvm/ADT/StringExtras.h>
+#include <llvm/Demangle/Demangle.h>
+#include <llvm/IR/DebugInfo.h>
+#include <llvm/IR/InstIterator.h>
+#include <llvm/IR/IntrinsicInst.h>
+#include <llvm/IR/MDBuilder.h>
+#include <llvm/IR/Module.h>
+#include <llvm/Support/raw_ostream.h>
+
+namespace ctrace::stack::analysis
+{
+    namespace
+    {
+        bool isSymbolChar(char c)
+        {
+            return std::isalnum(static_cast<unsigned char>(c)) || c == '-' || c == '$' ||
+                   c == '.' || c == '_';
+        }
+
+        // The symbol written at text[at] ('@' or '$' excluded), quoted or not, and its length.
+        std::pair<std::string, std::size_t> symbolAt(const std::string& text, std::size_t at)
+        {
+            if (at < text.size() && text[at] == '"')
+            {
+                const std::size_t end = text.find('"', at + 1);
+                if (end == std::string::npos)
+                    return {"", 0};
+                return {text.substr(at + 1, end - at - 1), end - at + 1};
+            }
+            std::size_t end = at;
+            while (end < text.size() && isSymbolChar(text[end]))
+                ++end;
+            return {text.substr(at, end - at), end - at};
+        }
+
+        std::string spellSymbol(const std::string& name)
+        {
+            const bool plain = !name.empty() &&
+                               std::all_of(name.begin(), name.end(), isSymbolChar) &&
+                               !std::isdigit(static_cast<unsigned char>(name.front()));
+            return plain ? name : "\"" + name + "\"";
+        }
+
+        // A printed line without its comment: the predecessors a block label lists follow the
+        // order of uses, which copying a module changes, and say nothing an execution does.
+        llvm::StringRef withoutComment(llvm::StringRef line)
+        {
+            bool quoted = false;
+            for (std::size_t i = 0; i < line.size(); ++i)
+            {
+                if (line[i] == '"')
+                    quoted = !quoted;
+                else if (line[i] == ';' && !quoted)
+                    return line.take_front(i).rtrim();
+            }
+            return line;
+        }
+
+        using const_suggestion::ModuleText;
+
+        // Removes what LLVM says carries no meaning for an execution, so that every other
+        // metadata can be compared by contents:
+        // - debug information (StripDebugInfo, which also removes heapallocsite, a debug type,
+        //   and the debug locations of loop identifiers);
+        // - srcloc, the source position of inline assembly and dontcall diagnostics;
+        // - annotation, which "does not impact the semantics of the program";
+        // - the descriptive string of an alias scope or domain identified by a self-reference.
+        void removeNonSemanticMetadata(llvm::Module& module)
+        {
+            llvm::StripDebugInfo(module);
+            llvm::LLVMContext& context = module.getContext();
+            const unsigned srcloc = context.getMDKindID("srcloc");
+            llvm::MDBuilder builder(context);
+            std::map<const llvm::MDNode*, llvm::MDNode*> unnamed;
+            const auto selfNamed = [](const llvm::MDNode* node)
+            { return node->getNumOperands() > 0 && node->getOperand(0) == node; };
+            std::function<llvm::MDNode*(llvm::MDNode*)> domain = [&](llvm::MDNode* node)
+            {
+                if (!selfNamed(node))
+                    return node;
+                llvm::MDNode*& out = unnamed[node];
+                if (!out)
+                    out = builder.createAnonymousAliasScopeDomain();
+                return out;
+            };
+            const auto scope = [&](llvm::MDNode* node)
+            {
+                auto* parent = node->getNumOperands() > 1
+                                   ? llvm::dyn_cast<llvm::MDNode>(node->getOperand(1).get())
+                                   : nullptr;
+                if (!selfNamed(node) || !parent)
+                    return node;
+                llvm::MDNode*& out = unnamed[node];
+                if (!out)
+                    out = builder.createAnonymousAliasScope(domain(parent));
+                return out;
+            };
+            const auto list = [&](const llvm::MDNode* node)
+            {
+                llvm::SmallVector<llvm::Metadata*> scopes;
+                for (const llvm::MDOperand& operand : node->operands())
+                {
+                    auto* member = llvm::dyn_cast_or_null<llvm::MDNode>(operand.get());
+                    scopes.push_back(member ? scope(member) : operand.get());
+                }
+                return llvm::MDNode::get(context, scopes);
+            };
+            for (llvm::Function& function : module)
+            {
+                for (llvm::Instruction& instruction : llvm::instructions(function))
+                {
+                    instruction.setMetadata(srcloc, nullptr);
+                    instruction.setMetadata(llvm::LLVMContext::MD_annotation, nullptr);
+                    for (const unsigned kind :
+                         {llvm::LLVMContext::MD_alias_scope, llvm::LLVMContext::MD_noalias})
+                    {
+                        if (llvm::MDNode* scopes = instruction.getMetadata(kind))
+                            instruction.setMetadata(kind, list(scopes));
+                    }
+                    auto* declaration = llvm::dyn_cast<llvm::IntrinsicInst>(&instruction);
+                    if (declaration && declaration->getIntrinsicID() ==
+                                           llvm::Intrinsic::experimental_noalias_scope_decl)
+                    {
+                        auto* operand =
+                            llvm::cast<llvm::MetadataAsValue>(declaration->getArgOperand(0));
+                        if (auto* scopes = llvm::dyn_cast<llvm::MDNode>(operand->getMetadata()))
+                        {
+                            declaration->setArgOperand(
+                                0, llvm::MetadataAsValue::get(context, list(scopes)));
+                        }
+                    }
+                }
+            }
+        }
+
+        ModuleText textOf(llvm::Module& module)
+        {
+            removeNonSemanticMetadata(module);
+            std::string printed;
+            llvm::raw_string_ostream os(printed);
+            module.print(os, nullptr);
+            os.flush();
+
+            ModuleText out;
+            std::string current;
+            std::string body;
+            for (llvm::StringRef printedLine : llvm::split(printed, '\n'))
+            {
+                const llvm::StringRef line = withoutComment(printedLine);
+                if (!current.empty())
+                {
+                    body += line.str() + "\n";
+                    if (line == "}")
+                    {
+                        out.globals[current] = body;
+                        current.clear();
+                    }
+                    continue;
+                }
+                // Metadata: compared by contents where they are used, named ones apart.
+                if (line.starts_with("!"))
+                {
+                    const std::size_t equal = line.find(" = ");
+                    if (equal != llvm::StringRef::npos)
+                    {
+                        const std::string name = line.substr(0, equal).str();
+                        const bool numbered =
+                            name.size() > 1 && std::isdigit(static_cast<unsigned char>(name[1]));
+                        (numbered ? out.metadata : out.namedMetadata)[name] =
+                            line.substr(equal + 3).str();
+                    }
+                    continue;
+                }
+                // Comdat selections are left out: each definition names its comdat, renamed and
+                // compared with it.
+                if (line.empty() || line.starts_with(";") || line.starts_with("$") ||
+                    line.starts_with("source_filename") || line.starts_with("target "))
+                {
+                    continue;
+                }
+                if (line.starts_with("attributes #"))
+                {
+                    const std::size_t equal = line.find(" = ");
+                    out.attributeGroups[line.substr(11, equal - 11).str()] =
+                        line.substr(equal + 3).str();
+                    continue;
+                }
+                if (line.starts_with("%"))
+                {
+                    const std::size_t equal = line.find(" = ");
+                    out.types[line.substr(0, equal).str()] = line.str();
+                    continue;
+                }
+                const bool definition = line.starts_with("define ");
+                if (definition || line.starts_with("declare "))
+                {
+                    const std::size_t at = line.find('@');
+                    const std::string name = symbolAt(line.str(), at + 1).first;
+                    if (definition)
+                    {
+                        current = name;
+                        body = line.str() + "\n";
+                        out.defined.insert(name);
+                    }
+                    else
+                    {
+                        out.globals[name] = line.str();
+                    }
+                    continue;
+                }
+                if (line.starts_with("@"))
+                {
+                    const std::string name = symbolAt(line.str(), 1).first;
+                    out.globals[name] = line.str();
+                    if (!line.contains("= external ") && !line.contains("= extern_weak ") &&
+                        !line.contains("= dllimport external "))
+                    {
+                        out.defined.insert(name);
+                    }
+                    continue;
+                }
+                // Module-level assembly.
+                out.globals[line.str()] = line.str();
+            }
+            return out;
+        }
+
+        // Rewrites `text` symbol by symbol and attribute group by contents. Each metadata it uses
+        // is numbered by first use and its definition appended, so metadata are compared by
+        // contents and by the places that use them, not by their numbers. Quoted strings are left
+        // alone.
+        std::string normalized(const std::string& text,
+                               const std::map<std::string, std::string>& rename,
+                               const std::map<std::string, std::string>& attributeGroups,
+                               const std::map<std::string, std::string>& metadata)
+        {
+            std::string out;
+            std::map<std::string, std::size_t> numbers;
+            std::vector<std::string> used;
+            const auto scan = [&](const std::string& piece)
+            {
+                bool quoted = false;
+                for (std::size_t i = 0; i < piece.size();)
+                {
+                    const char c = piece[i];
+                    if (c == '"' && !(i > 0 && piece[i - 1] == '@'))
+                    {
+                        quoted = !quoted;
+                        out += c;
+                        ++i;
+                        continue;
+                    }
+                    if (quoted)
+                    {
+                        out += c;
+                        ++i;
+                        continue;
+                    }
+                    if (c == '@' || c == '$')
+                    {
+                        const auto [name, length] = symbolAt(piece, i + 1);
+                        if (length != 0)
+                        {
+                            const auto renamed = rename.find(name);
+                            out += c;
+                            out += spellSymbol(renamed == rename.end() ? name : renamed->second);
+                            i += 1 + length;
+                            continue;
+                        }
+                    }
+                    const bool numbered = i + 1 < piece.size() &&
+                                          std::isdigit(static_cast<unsigned char>(piece[i + 1]));
+                    if ((c == '!' || c == '#') && numbered)
+                    {
+                        std::size_t end = i + 1;
+                        while (end < piece.size() &&
+                               std::isdigit(static_cast<unsigned char>(piece[end])))
+                            ++end;
+                        const std::string reference = piece.substr(i, end - i);
+                        if (c == '!')
+                        {
+                            const auto [it, first] = numbers.try_emplace(reference, numbers.size());
+                            if (first)
+                                used.push_back(reference);
+                            out += "!m" + std::to_string(it->second);
+                        }
+                        else
+                        {
+                            const auto group = attributeGroups.find(reference);
+                            out += group == attributeGroups.end() ? reference : "#" + group->second;
+                        }
+                        i = end;
+                        continue;
+                    }
+                    out += c;
+                    ++i;
+                }
+            };
+            scan(text);
+            for (std::size_t i = 0; i < used.size(); ++i)
+            {
+                out += "\n!m" + std::to_string(i) + " = ";
+                const auto definition = metadata.find(used[i]);
+                scan(definition == metadata.end() ? "?" : definition->second);
+            }
+            return out;
+        }
+
+        // The contents of a string constant defined on `line`, and where they start and end.
+        bool stringConstant(const std::string& line, std::size_t& begin, std::size_t& end)
+        {
+            const std::size_t marker = line.find(" c\"");
+            if (marker == std::string::npos || line.find(" constant [") == std::string::npos)
+                return false;
+            begin = marker + 3;
+            end = line.find("\\00\"", begin);
+            return end != std::string::npos;
+        }
+
+        std::string escaped(llvm::StringRef text)
+        {
+            std::string out;
+            llvm::raw_string_ostream os(out);
+            llvm::printEscapedString(text, os);
+            os.flush();
+            return out;
+        }
+
+        // `line` with the contents and length of its string constant replaced.
+        std::string withString(const std::string& line, std::size_t begin, std::size_t end,
+                               const std::string& contents, std::size_t length)
+        {
+            std::string out = line.substr(0, begin) + contents + line.substr(end);
+            const std::size_t array = out.find(" constant [");
+            const std::size_t times = out.find(" x i8]", array);
+            if (array != std::string::npos && times != std::string::npos)
+                out.replace(array + 11, times - array - 11, std::to_string(length + 1));
+            return out;
+        }
+
+        std::size_t unescapedLength(llvm::StringRef escapedText)
+        {
+            std::size_t length = 0;
+            for (std::size_t i = 0; i < escapedText.size(); ++i, ++length)
+            {
+                if (escapedText[i] == '\\')
+                    i += 2;
+            }
+            return length;
+        }
+
+        std::string firstDifference(const std::string& before, const std::string& after)
+        {
+            const auto a = llvm::to_vector(llvm::split(before, '\n'));
+            const auto b = llvm::to_vector(llvm::split(after, '\n'));
+            std::size_t i = 0;
+            while (i < a.size() && i < b.size() && a[i] == b[i])
+                ++i;
+            const std::string was = i < a.size() ? a[i].trim().str() : "(end)";
+            const std::string now = i < b.size() ? b[i].trim().str() : "(end)";
+            return "'" + was.substr(0, 160) + "' became '" + now.substr(0, 160) + "'";
+        }
+    } // namespace
+
+    const_suggestion::ModuleText const_suggestion::prepare(llvm::Module& module)
+    {
+        return textOf(module);
+    }
+
+    std::optional<std::string> rewrittenCodeDifference(llvm::Module& before, llvm::Module& after,
+                                                       const std::vector<SymbolPair>& established,
+                                                       const PrintedSignature* signature,
+                                                       std::vector<std::string>* accepted)
+    {
+        return const_suggestion::codeDifference(textOf(before), textOf(after), established,
+                                                signature, accepted);
+    }
+
+    std::optional<std::string> const_suggestion::codeDifference(
+        const ModuleText& was, const ModuleText& now, const std::vector<SymbolPair>& established,
+        const PrintedSignature* signature, std::vector<std::string>* accepted)
+    {
+        std::vector<std::string> removed;
+        std::vector<std::string> added;
+        for (const auto& [name, text] : was.globals)
+        {
+            if (!now.globals.count(name))
+                removed.push_back(name);
+        }
+        for (const auto& [name, text] : now.globals)
+        {
+            if (!was.globals.count(name))
+                added.push_back(name);
+        }
+
+        // The symbols the rewrite renames, by the pairs its correspondences established and by
+        // them only (§5.9): a symbol that only one side has and no pair covers is a difference.
+        std::map<std::string, std::string> rename;
+        std::set<std::string> taken;
+        for (const SymbolPair& pair : established)
+        {
+            if (std::binary_search(removed.begin(), removed.end(), pair.before) &&
+                std::binary_search(added.begin(), added.end(), pair.after))
+            {
+                rename[pair.before] = pair.after;
+                taken.insert(pair.after);
+            }
+        }
+        std::vector<std::string> unpaired;
+        for (const std::string& name : removed)
+        {
+            if (!rename.count(name))
+                unpaired.push_back(name);
+        }
+        std::vector<std::string> unexpected;
+        for (const std::string& name : added)
+        {
+            if (!taken.count(name))
+                unexpected.push_back(name);
+        }
+        if (!unpaired.empty() || !unexpected.empty())
+        {
+            const auto list = [](const std::vector<std::string>& names)
+            { return names.empty() ? std::string("none") : llvm::join(names, ", "); };
+            return "symbols no longer used: " + list(unpaired) +
+                   "; symbols used only after the rewrite: " + list(unexpected);
+        }
+
+        if (was.types != now.types)
+        {
+            for (const auto& [name, definition] : was.types)
+            {
+                const auto other = now.types.find(name);
+                if (other == now.types.end() || other->second != definition)
+                    return "type " + name + " changed";
+            }
+            return "types added by the rewrite";
+        }
+
+        bool signatureAccepted = false;
+        for (const auto& [name, text] : was.globals)
+        {
+            const auto renamed = rename.find(name);
+            const std::string newName = renamed == rename.end() ? name : renamed->second;
+            const std::string expected =
+                normalized(text, rename, was.attributeGroups, was.metadata);
+            std::string actual =
+                normalized(now.globals.at(newName), {}, now.attributeGroups, now.metadata);
+            if (expected == actual)
+                continue;
+
+            std::size_t begin = 0;
+            std::size_t end = 0;
+            std::size_t newBegin = 0;
+            std::size_t newEnd = 0;
+            if (stringConstant(expected, begin, end) && stringConstant(actual, newBegin, newEnd))
+            {
+                const std::string oldText = expected.substr(begin, end - begin);
+                const std::string newText = actual.substr(newBegin, newEnd - newBegin);
+                // A type name holds the mangled name of its type, renamed with the function.
+                const std::string prefix = oldText.starts_with("*") ? "*" : "";
+                const bool typeName = name.starts_with("_ZTS") && renamed != rename.end() &&
+                                      oldText == prefix + name.substr(4) &&
+                                      newText == prefix + newName.substr(4);
+                // A string whose only change is the function's printed signature.
+                bool printedSignature = false;
+                if (!typeName && signature && signature->before != signature->after)
+                {
+                    const std::string from = escaped(signature->before);
+                    const std::string to = escaped(signature->after);
+                    std::string replaced = oldText;
+                    for (std::size_t at = from.empty() ? std::string::npos : replaced.find(from);
+                         at != std::string::npos; at = replaced.find(from, at + to.size()))
+                    {
+                        replaced.replace(at, from.size(), to);
+                        printedSignature = true;
+                    }
+                    printedSignature = printedSignature && replaced == newText;
+                }
+                if (typeName || printedSignature)
+                {
+                    actual =
+                        withString(actual, newBegin, newEnd, oldText, unescapedLength(oldText));
+                    if (actual == expected)
+                    {
+                        if (accepted && typeName)
+                        {
+                            accepted->push_back("difference: the name typeid gives a type named "
+                                                "after the function changes, from \"" +
+                                                oldText + "\" to \"" + newText + "\"");
+                        }
+                        if (accepted && printedSignature && !signatureAccepted)
+                        {
+                            accepted->push_back("difference: the signature printed by "
+                                                "__PRETTY_FUNCTION__ changes, from \"" +
+                                                signature->before + "\" to \"" + signature->after +
+                                                "\"");
+                        }
+                        signatureAccepted = signatureAccepted || printedSignature;
+                        continue;
+                    }
+                }
+            }
+            return "code changed in " + name + ": " + firstDifference(expected, actual);
+        }
+        for (const auto& [name, operands] : was.namedMetadata)
+        {
+            const auto other = now.namedMetadata.find(name);
+            const std::string expected =
+                normalized(operands, rename, was.attributeGroups, was.metadata);
+            const std::string actual =
+                other == now.namedMetadata.end()
+                    ? "(none)"
+                    : normalized(other->second, {}, now.attributeGroups, now.metadata);
+            if (expected != actual)
+                return "metadata " + name + " changed: " + firstDifference(expected, actual);
+        }
+        for (const auto& [name, operands] : now.namedMetadata)
+        {
+            if (!was.namedMetadata.count(name))
+                return "metadata " + name + " only after the rewrite";
+        }
+        return std::nullopt;
+    }
+} // namespace ctrace::stack::analysis
