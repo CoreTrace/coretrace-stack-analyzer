@@ -919,15 +919,13 @@ namespace ctrace::stack::analysis
 
             // A compile command's relative paths are relative to its directory: compile there,
             // even when the current directory also resolves them, to another header.
-            auto compileInWorkingDir =
-                [&](const std::vector<std::string>& compileArgs,
-                    compilerlib::OutputMode outputMode) -> std::optional<compilerlib::CompileResult>
+            auto inWorkingDir = [&](auto&& compileHere) -> std::optional<compilerlib::CompileResult>
             {
                 std::lock_guard<std::mutex> compileLock(gCompileInvokeMutex);
                 if (workingDir.empty())
                 {
                     const ScopedHotspot hotspot(config.timing, "input.compiler.invoke");
-                    return compilerlib::compile(compileArgs, outputMode);
+                    return compileHere();
                 }
 
                 std::string cwdError;
@@ -938,8 +936,11 @@ namespace ctrace::stack::analysis
                     return std::nullopt;
                 }
                 const ScopedHotspot hotspot(config.timing, "input.compiler.invoke.cwd");
-                return compilerlib::compile(compileArgs, outputMode);
+                return compileHere();
             };
+            auto compileInWorkingDir =
+                [&](const std::vector<std::string>& compileArgs, compilerlib::OutputMode outputMode)
+            { return inWorkingDir([&] { return compilerlib::compile(compileArgs, outputMode); }); };
 
             if (cachePaths.enabled)
             {
