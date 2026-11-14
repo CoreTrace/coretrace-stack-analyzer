@@ -1681,6 +1681,9 @@ def check_compile_ir_format_switch() -> bool:
     """
     Validate that --compile-ir-format selects the expected source compile IR path
     and that cache keys invalidate correctly when switching format.
+
+    In the bc format, a compilation gives its module itself: nothing is parsed. Only a
+    module read from the compile IR cache is parsed, from the bitcode the cache stored.
     """
     print("=== Testing compile IR format switch ===")
     sample_c = RUN_CONFIG.test_dir / "alloca/oversized-constant.c"
@@ -1703,12 +1706,16 @@ def check_compile_ir_format_switch() -> bool:
         bc_ok, bc_output = run_and_capture("bc")
         ok = ok and bc_ok
         if bc_ok:
-            if "Bitcode parse done in" not in bc_output:
-                print("  ❌ --compile-ir-format=bc did not use bitcode parse path")
+            if "Compiled to a module in" not in bc_output:
+                print("  ❌ --compile-ir-format=bc did not take the module from the compilation")
+                print(bc_output)
+                ok = False
+            elif "Bitcode parse done in" in bc_output or "IR parse done in" in bc_output:
+                print("  ❌ --compile-ir-format=bc parsed the module it had compiled")
                 print(bc_output)
                 ok = False
             else:
-                print("  ✅ --compile-ir-format=bc uses bitcode parse path")
+                print("  ✅ --compile-ir-format=bc takes the module from the compilation")
 
         ll_ok, ll_output = run_and_capture("ll")
         ok = ok and ll_ok
@@ -1717,8 +1724,8 @@ def check_compile_ir_format_switch() -> bool:
                 print("  ❌ --compile-ir-format=ll did not use textual IR parse path")
                 print(ll_output)
                 ok = False
-            elif "Bitcode parse done in" in ll_output:
-                print("  ❌ --compile-ir-format=ll unexpectedly used bitcode parse path")
+            elif "Bitcode parse done in" in ll_output or "Compiled to a module in" in ll_output:
+                print("  ❌ --compile-ir-format=ll unexpectedly used the bitcode path")
                 print(ll_output)
                 ok = False
             else:
@@ -1729,7 +1736,12 @@ def check_compile_ir_format_switch() -> bool:
         bc2_ok, bc2_output = run_and_capture("bc")
         ok = ok and bc2_ok
         if bc2_ok:
-            if "Bitcode parse done in" not in bc2_output:
+            # With the compile IR cache, the bitcode of the first run is parsed; without
+            # it, the source is compiled to a module again.
+            if (
+                "Bitcode parse done in" not in bc2_output
+                and "Compiled to a module in" not in bc2_output
+            ):
                 print("  ❌ cache invalidation failed when switching back to bc")
                 print(bc2_output)
                 ok = False

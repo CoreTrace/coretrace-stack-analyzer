@@ -33,6 +33,7 @@
 #include <llvm/Support/SourceMgr.h>
 #include <llvm/Support/raw_ostream.h>
 
+#include <compilerlib/compile_module.hpp>
 #include <compilerlib/compiler.h>
 #include <coretrace/logger.hpp>
 
@@ -78,17 +79,16 @@ namespace ctrace::stack::analysis
             args.swap(filtered);
         }
 
+        // The arguments of a bitcode compilation, whose module coretrace-compiler gives
+        // without writing an output file.
         static std::vector<std::string>
-        buildBitcodeCompileArgs(const std::vector<std::string>& baseArgs,
-                                const std::filesystem::path& outputBitcodePath)
+        buildBitcodeCompileArgs(const std::vector<std::string>& baseArgs)
         {
             std::vector<std::string> args = baseArgs;
             args.erase(std::remove(args.begin(), args.end(), "-S"), args.end());
             removeOutputPathArgs(args);
             appendIfMissing(args, "-emit-llvm");
             appendIfMissing(args, "-c");
-            args.push_back("-o");
-            args.push_back(outputBitcodePath.string());
             return args;
         }
 
@@ -781,22 +781,6 @@ namespace ctrace::stack::analysis
             std::uint64_t active_ : 1 = false;
             std::uint64_t reservedFlags_ : 63 = 0;
         };
-
-        class ScopedFileCleanup
-        {
-          public:
-            explicit ScopedFileCleanup(const std::filesystem::path& path) : path_(path) {}
-
-            ~ScopedFileCleanup()
-            {
-                std::error_code ec;
-                if (!path_.empty())
-                    std::filesystem::remove(path_, ec);
-            }
-
-          private:
-            std::filesystem::path path_;
-        };
     } // namespace
 
     static std::string extractExtension(const std::string& path)
@@ -904,18 +888,7 @@ namespace ctrace::stack::analysis
             const CompileIRCachePaths cachePaths = buildCompileIRCachePaths(
                 config, inputPath, result.language, args, workingDir, coretraceCompilerRevision);
 
-            std::error_code tempDirErr;
-            std::filesystem::path tempDir = std::filesystem::temp_directory_path(tempDirErr);
-            if (tempDirErr)
-                tempDir = std::filesystem::path(".");
-            const std::string tempBitcodeName =
-                "coretrace-compile-ir-" +
-                md5Hex(filename + "|" + std::to_string(compileStart.time_since_epoch().count())) +
-                ".bc";
-            const std::filesystem::path tempBitcodePath = tempDir / tempBitcodeName;
-            const ScopedFileCleanup tempBitcodeCleanup(tempBitcodePath);
-            const std::vector<std::string> bitcodeArgs =
-                buildBitcodeCompileArgs(args, tempBitcodePath);
+            const std::vector<std::string> bitcodeArgs = buildBitcodeCompileArgs(args);
 
             // A compile command's relative paths are relative to its directory: compile there,
             // even when the current directory also resolves them, to another header.
@@ -941,6 +914,20 @@ namespace ctrace::stack::analysis
             auto compileInWorkingDir =
                 [&](const std::vector<std::string>& compileArgs, compilerlib::OutputMode outputMode)
             { return inWorkingDir([&] { return compilerlib::compile(compileArgs, outputMode); }); };
+            // A bitcode compilation gives its module itself, created in `ctx`: no bitcode is
+            // written to a file and read back.
+            std::unique_ptr<llvm::Module> compiledModule;
+            auto compileModuleInWorkingDir = [&](const std::vector<std::string>& compileArgs)
+            {
+                return inWorkingDir(
+                    [&]() -> compilerlib::CompileResult
+                    {
+                        compilerlib::ModuleResult compiled =
+                            compilerlib::compileToModule(compileArgs, ctx);
+                        compiledModule = std::move(compiled.module);
+                        return {compiled.success, std::move(compiled.diagnostics), {}, {}};
+                    });
+            };
 
             if (cachePaths.enabled)
             {
@@ -1075,9 +1062,9 @@ namespace ctrace::stack::analysis
                     preferBitcodeCompile ? bitcodeArgs : args;
                 appendDependencyCaptureArgs(cacheCompileArgs, cachePaths.depFile);
 
-                res = compileInWorkingDir(cacheCompileArgs,
-                                          preferBitcodeCompile ? compilerlib::OutputMode::ToFile
-                                                               : compilerlib::OutputMode::ToMemory);
+                res = preferBitcodeCompile ? compileModuleInWorkingDir(cacheCompileArgs)
+                                           : compileInWorkingDir(cacheCompileArgs,
+                                                                 compilerlib::OutputMode::ToMemory);
 
                 if (preferBitcodeCompile && (!res || !res->success))
                 {
@@ -1112,9 +1099,9 @@ namespace ctrace::stack::analysis
             }
             else
             {
-                res = compileInWorkingDir(preferBitcodeCompile ? bitcodeArgs : args,
-                                          preferBitcodeCompile ? compilerlib::OutputMode::ToFile
-                                                               : compilerlib::OutputMode::ToMemory);
+                res = preferBitcodeCompile
+                          ? compileModuleInWorkingDir(bitcodeArgs)
+                          : compileInWorkingDir(args, compilerlib::OutputMode::ToMemory);
                 if (res && res->success)
                 {
                     compiledViaBitcode = preferBitcodeCompile;
@@ -1142,61 +1129,24 @@ namespace ctrace::stack::analysis
             }
             compileDiagnosticsText = res->diagnostics;
 
+            if (compiledViaBitcode)
+                result.module = std::move(compiledModule);
+
             if (config.timing)
             {
                 auto compileEnd = Clock::now();
                 auto ms =
                     std::chrono::duration_cast<std::chrono::milliseconds>(compileEnd - compileStart)
                         .count();
-                coretrace::log(coretrace::Level::Info, "Compilation done in {} ms\n", ms);
+                // No parse follows a compilation that gave its module.
+                if (result.module)
+                    coretrace::log(coretrace::Level::Info, "Compiled to a module in {} ms\n", ms);
+                else
+                    coretrace::log(coretrace::Level::Info, "Compilation done in {} ms\n", ms);
             }
 
             std::string llvmIRForCache;
             std::string llvmBitcodeForCache;
-            if (compiledViaBitcode)
-            {
-                if (readTextFile(tempBitcodePath, llvmBitcodeForCache) &&
-                    !llvmBitcodeForCache.empty())
-                {
-                    const auto parseStart = Clock::now();
-                    auto bcBuffer = llvm::MemoryBuffer::getMemBufferCopy(
-                        llvm::StringRef(llvmBitcodeForCache.data(), llvmBitcodeForCache.size()),
-                        "compiled_bc");
-                    auto bitcodeModule = [&]()
-                    {
-                        const ScopedHotspot hotspot(config.timing,
-                                                    "input.compile.parse_bitcode_output");
-                        return llvm::parseBitcodeFile(bcBuffer->getMemBufferRef(), ctx);
-                    }();
-                    if (bitcodeModule)
-                    {
-                        result.module = std::move(*bitcodeModule);
-                        if (config.timing)
-                        {
-                            const auto parseEnd = Clock::now();
-                            const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                                parseEnd - parseStart)
-                                                .count();
-                            coretrace::log(coretrace::Level::Info, "Bitcode parse done in {} ms\n",
-                                           ms);
-                        }
-                    }
-                    else if (config.timing)
-                    {
-                        std::string bitcodeError = llvm::toString(bitcodeModule.takeError());
-                        coretrace::log(coretrace::Level::Warn,
-                                       "Bitcode output invalid for {}; "
-                                       "falling back to textual IR ({})\n",
-                                       filename, bitcodeError);
-                    }
-                }
-                else if (config.timing)
-                {
-                    coretrace::log(coretrace::Level::Warn,
-                                   "Missing bitcode output for {}; falling back to textual IR\n",
-                                   filename);
-                }
-            }
 
             if (!result.module)
             {
@@ -1260,8 +1210,11 @@ namespace ctrace::stack::analysis
             {
                 if (llvmBitcodeForCache.empty())
                 {
+                    // With the order of each value's uses, which the module then read from the
+                    // cache finds again.
                     llvm::raw_string_ostream bitcodeStream(llvmBitcodeForCache);
-                    llvm::WriteBitcodeToFile(*result.module, bitcodeStream);
+                    llvm::WriteBitcodeToFile(*result.module, bitcodeStream,
+                                             /*ShouldPreserveUseListOrder=*/true);
                     bitcodeStream.flush();
                 }
 
