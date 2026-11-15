@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <array>
 #include <deque>
+#include <map>
 #include <optional>
 #include <string>
 #include <utility>
@@ -347,6 +348,185 @@ namespace ctrace::stack::analysis::ownership
                        }
                    });
         return found;
+    }
+
+    namespace
+    {
+        constexpr StateSet kOwnedInput = StateSet::of(OwnState::Owned);
+
+        /// A parameter that releases an owned resource on some normal exit, knowingly.
+        bool releasesOwned(const ParamTransformer& t)
+        {
+            return t[static_cast<std::size_t>(OwnState::Owned)].has(OwnState::Released) &&
+                   !t.isUncertain(kOwnedInput);
+        }
+
+        /// A parameter that releases an owned resource on every normal exit, knowingly.
+        bool alwaysReleasesOwned(const ParamTransformer& t)
+        {
+            return t[static_cast<std::size_t>(OwnState::Owned)].isOnly(OwnState::Released) &&
+                   !t.isUncertain(kOwnedInput);
+        }
+
+        /// A parameter through which an owned resource may be released, even by unknown code.
+        bool mayReleaseOwned(const ParamTransformer& t)
+        {
+            return t[static_cast<std::size_t>(OwnState::Owned)].has(OwnState::Released) ||
+                   t.isUncertain(kOwnedInput);
+        }
+
+        /// The states of `r` on the paths where it exists.
+        StateSet existingStates(const AbstractState& s, ResourceId r)
+        {
+            StateSet st = s.resources[r];
+            st.bits &= static_cast<std::uint8_t>(~StateSet::of(OwnState::NotOwned).bits);
+            return st;
+        }
+
+        ReleaseOutcome judgeContents(const AbstractState& s, const Contents& held)
+        {
+            if (held.resources.empty())
+                return held.mayNull && !held.mayUnknown ? ReleaseOutcome::Checked
+                                                        : ReleaseOutcome::Unknown;
+            const auto releasedEverywhere = [&](ResourceId r)
+            { return existingStates(s, r).isOnly(OwnState::Released); };
+            const auto owned = [&](ResourceId r)
+            { return existingStates(s, r).isOnly(OwnState::Owned) && !s.uncertain[r]; };
+            if (held.resources.size() == 1 && !held.mayNull && !held.mayUnknown)
+            {
+                // One possible target: "may be Released" means some path releases it twice (or
+                // a correlation the engine does not follow, #105). Same filter as releasedUses.
+                const ResourceId r = held.resources.front();
+                if (s.resources[r].has(OwnState::Released) &&
+                    (!s.uncertain[r] || releasedEverywhere(r)))
+                    return ReleaseOutcome::Detected;
+                return owned(r) ? ReleaseOutcome::Checked : ReleaseOutcome::Unknown;
+            }
+            // Several possibilities: the join may pair "released" with "the location holds
+            // something else", so every resource must be released wherever it exists.
+            if (std::all_of(held.resources.begin(), held.resources.end(), releasedEverywhere))
+                return ReleaseOutcome::Detected;
+            if (!held.mayUnknown &&
+                std::all_of(held.resources.begin(), held.resources.end(), owned))
+                return ReleaseOutcome::Checked;
+            return ReleaseOutcome::Unknown;
+        }
+
+        bool shareResource(const Contents& a, const Contents& b)
+        {
+            return std::any_of(a.resources.begin(), a.resources.end(),
+                               [&](ResourceId r) { return b.holds(r); });
+        }
+    } // namespace
+
+    std::vector<ReleaseVerdict> judgeReleases(const OwnershipFacts& facts,
+                                              const OwnershipResult& result)
+    {
+        std::vector<ReleaseVerdict> verdicts;
+        if (result.incomplete)
+            return verdicts;
+
+        // One verdict per (instruction, location): copies of a release must agree.
+        std::map<std::pair<std::uint32_t, LocationId>, std::size_t> indexOf;
+        const auto record = [&](std::uint32_t instruction, LocationId loc, ReleaseOutcome outcome,
+                                const Contents& held)
+        {
+            const auto [it, inserted] = indexOf.try_emplace({instruction, loc}, verdicts.size());
+            if (inserted)
+            {
+                ReleaseVerdict v;
+                v.instructionIndex = instruction;
+                v.location = loc;
+                // Detected: every resource held is released, the first one names them.
+                v.resource = held.resources.empty() ? 0 : held.resources.front();
+                v.outcome = outcome;
+                verdicts.push_back(v);
+            }
+            else if (verdicts[it->second].outcome != outcome)
+            {
+                verdicts[it->second].outcome = ReleaseOutcome::Unknown;
+            }
+        };
+
+        // Every parameter of a call is judged on the state before the call: a per-parameter
+        // summary does not tell whether two possible releases happen on the same path.
+        const auto judgeCall = [&](const Event& e, const AbstractState& s)
+        {
+            const auto& params = e.call.params;
+            std::vector<std::optional<ReleaseOutcome>> outcome(params.size());
+            for (std::size_t k = 0; k < params.size(); ++k)
+            {
+                if (releasesOwned(params[k].second))
+                    outcome[k] = judgeContents(s, s.locations[params[k].first]);
+            }
+            for (std::size_t k = 0; k < params.size(); ++k)
+            {
+                if (!outcome[k])
+                    continue;
+                const Contents& mine = s.locations[params[k].first];
+                for (std::size_t j = 0; j < params.size(); ++j)
+                {
+                    const Contents& theirs = s.locations[params[j].first];
+                    if (j == k || !shareResource(mine, theirs))
+                        continue;
+                    // Overlapping targets are not the same target on the same path
+                    // (`if (c) { x = a; y = b; } else { x = b; y = a; }`): only one exact
+                    // resource, held by both, is.
+                    const bool sameTarget = mine.resources.size() == 1 &&
+                                            mine.isExactly(mine.resources.front()) &&
+                                            theirs.isExactly(mine.resources.front());
+                    if (sameTarget && outcome[j] && alwaysReleasesOwned(params[k].second) &&
+                        alwaysReleasesOwned(params[j].second))
+                    {
+                        // Both always run on the same resource: the call releases it twice.
+                        // The later parameter carries it (the order inside the callee is
+                        // unknown).
+                        if (k > j)
+                            outcome[k] = ReleaseOutcome::Detected;
+                    }
+                    else if (mayReleaseOwned(params[j].second) &&
+                             *outcome[k] == ReleaseOutcome::Checked)
+                    {
+                        // A second release of the same resource by this call is neither
+                        // established nor excluded: no verdict either way.
+                        outcome[k] = ReleaseOutcome::Unknown;
+                    }
+                }
+            }
+            for (std::size_t k = 0; k < params.size(); ++k)
+            {
+                if (outcome[k])
+                    record(e.instructionIndex, params[k].first, *outcome[k],
+                           s.locations[params[k].first]);
+            }
+        };
+
+        const auto step = [&](const Event& e, AbstractState& s)
+        {
+            if (e.kind == Event::Kind::Release)
+                record(e.instructionIndex, e.src, judgeContents(s, s.locations[e.src]),
+                       s.locations[e.src]);
+            else if (e.kind == Event::Kind::Call)
+                judgeCall(e, s);
+            applyEvent(facts, e, s);
+        };
+        for (std::uint32_t block = 0; block < facts.blocks.size(); ++block)
+        {
+            if (block >= result.in.size() || !result.in[block].reached)
+                continue;
+            AbstractState state = result.in[block];
+            for (const Event& e : facts.blocks[block].events)
+                step(e, state);
+            for (const Edge& edge : facts.edges)
+            {
+                if (edge.from != block)
+                    continue;
+                AbstractState along = state;
+                for (const Event& e : edge.events)
+                    step(e, along);
+            }
+        }
+        return verdicts;
     }
 
     OwnershipResult solve(const OwnershipFacts& facts, const AbstractState& entry,

@@ -62,6 +62,42 @@ namespace ctrace::stack::analysis::ownership
     std::vector<ReleasedUse> releasedUses(const OwnershipFacts& facts,
                                           const OwnershipResult& result);
 
+    /// What the engine can tell about one release (DoubleRelease).
+    enum class ReleaseOutcome : std::uint8_t
+    {
+        Unknown,  // the engine cannot decide: the caller keeps its own checks
+        Checked,  // everything the released location may hold is null or a resource still owned
+        Detected, // the location may hold a resource released before: a potential double release
+    };
+
+    /// The verdict on the location released at one instruction, by a Release event or by a
+    /// parameter of a Call event that releases an owned resource without uncertainty.
+    struct ReleaseVerdict
+    {
+        std::uint32_t instructionIndex = 0;
+        LocationId location = 0;
+        ResourceId resource = 0; // Detected: one of the released resources the location holds
+        ReleaseOutcome outcome = ReleaseOutcome::Unknown;
+        std::uint8_t reservedPadding[3] = {};
+    };
+
+    /// Every release reached in the stabilised states (edges included), in block/event order,
+    /// judged on the state just before it:
+    ///  - one possible resource and nothing else: Detected when it may be Released (the
+    ///    releasedUses filter), Checked when it is only Owned and certain;
+    ///  - several possibilities (resources, null, unknown): Detected when each resource is
+    ///    Released on every path where it exists, Checked when each is only Owned and certain
+    ///    and nothing is unknown;
+    ///  - null only: Checked; unknown only or nothing tracked: Unknown.
+    /// The parameters of one Call are all judged on the state before the call: argument order is
+    /// not execution order. When two of them hold exactly the same single resource and both
+    /// release it on every normal exit, the later one in argument order is Detected. When their
+    /// targets merely overlap, or the other one may release only on some exits, a Checked
+    /// verdict becomes Unknown. Copies of one release (the edges of an invoke) must agree, else
+    /// Unknown. Empty when incomplete.
+    std::vector<ReleaseVerdict> judgeReleases(const OwnershipFacts& facts,
+                                              const OwnershipResult& result);
+
     /// Union of t[s] over the states s in `in`.
     StateSet applyTransformer(const ParamTransformer& t, StateSet in);
 
