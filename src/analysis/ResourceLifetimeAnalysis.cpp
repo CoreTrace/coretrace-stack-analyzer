@@ -13,6 +13,7 @@
 #include <iostream>
 #include <limits>
 #include <map>
+#include <optional>
 #include <set>
 #include <sstream>
 #include <string>
@@ -21,9 +22,12 @@
 #include <unordered_set>
 #include <vector>
 
+#include <llvm/ADT/SCCIterator.h>
 #include <llvm/ADT/SmallPtrSet.h>
 #include <llvm/ADT/SmallVector.h>
 #include <llvm/ADT/StringMap.h>
+#include <llvm/IR/CFG.h>
+#include <llvm/IR/DebugInfoMetadata.h>
 #include <llvm/Analysis/CaptureTracking.h>
 #include <llvm/Analysis/ValueTracking.h>
 #include <llvm/IR/Argument.h>
@@ -2256,22 +2260,189 @@ namespace ctrace::stack::analysis
 
     namespace
     {
-        /// Runs the ownership engine on one function and turns its stabilised states into
-        /// UseAfterRelease / MissingRelease / ReferenceLost / AnalysisIncomplete issues (spec §8).
-        void analyzeWithOwnershipEngine(const llvm::Function& F, const ResourceModel& model,
-                                        const ownership::SummaryLookup& summaries,
-                                        const llvm::DataLayout& DL,
-                                        std::vector<ResourceLifetimeIssue>& issues)
+        /// The engine's DoubleRelease verdict on one release, keyed as the counters see a
+        /// release: the call and the argument (or pointee) it releases.
+        struct ReleaseJudgement
+        {
+            const llvm::Instruction* inst = nullptr;
+            ownership::ArgPath path;
+            std::string resourceKind; // Detected: the kind of the released resource
+            std::string handleName;   // the slot the released pointer was read from
+            bool pointee = false;
+            ownership::ReleaseOutcome outcome = ownership::ReleaseOutcome::Unknown;
+            std::uint8_t reservedPadding[6] = {};
+        };
+
+        /// Verdicts per release, in block/event order, read off `facts` (withUnknownAtEntry) and its
+        /// result. Copies of one release (an invoke's edges, an exceptional summary) must agree,
+        /// else Unknown. Inside a CFG cycle, a release is never Detected: the engine cannot tell
+        /// a loop that repeats it from a guard that runs it once (#275), so the counters keep
+        /// deciding there.
+        std::vector<ReleaseJudgement>
+        judgeReleaseEffects(const llvm::Function& F, const ownership::CollectedFunction& collected,
+                            const ownership::OwnershipFacts& facts,
+                            const ownership::OwnershipResult& result)
         {
             using namespace ownership;
+            std::vector<ReleaseJudgement> judgements;
+            if (collected.releaseEffects.empty())
+                return judgements;
 
-            const CollectedFunction collected = collectOwnershipFacts(F, model, summaries, DL);
-            if (collected.siteInstructions.empty())
-                return; // nothing acquired here: nothing to leak
+            std::map<std::pair<std::uint32_t, LocationId>, std::vector<const ReleaseEffect*>>
+                effectsAt;
+            for (const ReleaseEffect& effect : collected.releaseEffects)
+                effectsAt[{effect.instructionIndex, effect.location}].push_back(&effect);
+
+            std::unordered_set<const llvm::BasicBlock*> cyclic;
+            bool cyclesComputed = false;
+            const auto inCycle = [&](const llvm::Instruction* inst)
+            {
+                if (!cyclesComputed)
+                {
+                    for (auto scc = llvm::scc_begin(&F); !scc.isAtEnd(); ++scc)
+                    {
+                        if (scc.hasCycle())
+                            cyclic.insert((*scc).begin(), (*scc).end());
+                    }
+                    cyclesComputed = true;
+                }
+                return cyclic.count(inst->getParent()) != 0;
+            };
+
+            std::map<std::tuple<const llvm::Instruction*, ArgPath, bool>, std::size_t> indexOf;
+            for (const ReleaseVerdict& verdict : judgeReleases(facts, result))
+            {
+                const auto it = effectsAt.find({verdict.instructionIndex, verdict.location});
+                if (it == effectsAt.end())
+                    continue; // not a release the engine may judge (e.g. an incomplete summary)
+                const llvm::Instruction* inst =
+                    collected.eventInstructions[verdict.instructionIndex];
+                // One location released for two arguments at once cannot be told apart.
+                ReleaseOutcome outcome =
+                    it->second.size() == 1 ? verdict.outcome : ReleaseOutcome::Unknown;
+                if (outcome == ReleaseOutcome::Detected && inCycle(inst))
+                    outcome = ReleaseOutcome::Unknown;
+                for (const ReleaseEffect* effect : it->second)
+                {
+                    const auto [slot, inserted] = indexOf.try_emplace(
+                        std::make_tuple(inst, effect->path, effect->pointee), judgements.size());
+                    if (inserted)
+                    {
+                        ReleaseJudgement judgement;
+                        judgement.inst = inst;
+                        judgement.path = effect->path;
+                        judgement.pointee = effect->pointee;
+                        judgement.outcome = outcome;
+                        const std::uint32_t site = verdict.resource / 2u;
+                        if (site < collected.siteKinds.size())
+                            judgement.resourceKind = collected.siteKinds[site];
+                        judgement.handleName = collected.locationIsSlot[effect->nameLocation]
+                                                   ? collected.locationNames[effect->nameLocation]
+                                                   : std::string("<unknown>");
+                        judgements.push_back(std::move(judgement));
+                    }
+                    else if (judgements[slot->second].outcome != outcome)
+                    {
+                        judgements[slot->second].outcome = ReleaseOutcome::Unknown;
+                    }
+                }
+            }
+            return judgements;
+        }
+
+        /// `[DR-VERDICT] file:line:column function effect verdict`, at Debug level (--verbose):
+        /// the engine's verdicts, read directly on the analysed programs.
+        void traceReleaseJudgements(const llvm::Function& F,
+                                    const std::vector<ReleaseJudgement>& judgements)
+        {
+            for (const ReleaseJudgement& judgement : judgements)
+            {
+                std::string file = "<unknown>";
+                unsigned line = 0;
+                unsigned column = 0;
+                if (const llvm::DILocation* loc = judgement.inst->getDebugLoc().get())
+                {
+                    file = loc->getFilename().str();
+                    line = loc->getLine();
+                    column = loc->getColumn();
+                }
+                std::string effect = judgement.pointee ? "*arg" : "arg";
+                effect += std::to_string(judgement.path.argIndex);
+                if (judgement.path.offset != 0)
+                    effect += "+" + std::to_string(judgement.path.offset);
+                if (judgement.path.viaPointerSlot)
+                    effect += "(via)";
+                const char* verdict = "Unknown";
+                if (judgement.outcome == ownership::ReleaseOutcome::Checked)
+                    verdict = "Checked";
+                else if (judgement.outcome == ownership::ReleaseOutcome::Detected)
+                    verdict = "Detected";
+                coretrace::log(coretrace::Level::Debug, "[DR-VERDICT] {}:{}:{} {} {} {}\n", file,
+                               line, column, F.getName().str(), effect, verdict);
+            }
+        }
+
+        /// One function's ownership engine run: the collected facts, the main solve (when the
+        /// function acquires something) and the DoubleRelease verdicts (when it releases
+        /// something).
+        struct OwnershipRun
+        {
+            ownership::CollectedFunction collected;
+            std::optional<ownership::OwnershipResult> result;
+            std::vector<ReleaseJudgement> judgements;
+        };
+
+        OwnershipRun runOwnershipEngine(const llvm::Function& F, const ResourceModel& model,
+                                        const ownership::SummaryLookup& summaries,
+                                        const llvm::DataLayout& DL)
+        {
+            using namespace ownership;
+            OwnershipRun run;
+            run.collected = collectOwnershipFacts(F, model, summaries, DL);
+            const CollectedFunction& collected = run.collected;
+            const bool acquires = !collected.siteInstructions.empty();
+            if (!acquires && collected.releaseEffects.empty())
+                return run; // nothing acquired or released here
 
             const AbstractState entry = AbstractState::entry(2u * collected.facts.siteCount,
                                                              collected.facts.locations.size());
-            const OwnershipResult result = solve(collected.facts, entry);
+            // A release is judged even where nothing is acquired: freeing a null pointer must
+            // not depend on an unrelated allocation in the same function.
+            std::uint64_t judgeVisits = 0;
+            if (!collected.releaseEffects.empty())
+            {
+                const OwnershipFacts judged =
+                    withUnknownAtEntry(collected.facts, collected.locationIsSlot);
+                const OwnershipResult judgedResult = solve(judged, entry);
+                judgeVisits = judgedResult.blockVisits;
+                run.judgements = judgeReleaseEffects(F, collected, judged, judgedResult);
+                traceReleaseJudgements(F, run.judgements);
+            }
+            std::uint64_t mainVisits = 0;
+            if (acquires)
+            {
+                run.result = solve(collected.facts, entry);
+                mainVisits = run.result->blockVisits;
+            }
+            // The cost of the separate DoubleRelease solve (block visits), for measurement only.
+            coretrace::log(coretrace::Level::Debug, "[DR-COST] {} blocks={} main={} judge={}\n",
+                           F.getName().str(), collected.facts.blocks.size(), mainVisits,
+                           judgeVisits);
+            return run;
+        }
+
+        /// Turns the main solve of `run` into UseAfterRelease / MissingRelease / ReferenceLost /
+        /// AnalysisIncomplete issues (spec §8). Nothing when the function acquires nothing.
+        void reportOwnershipIssues(const llvm::Function& F, const OwnershipRun& run,
+                                   std::vector<ResourceLifetimeIssue>& issues)
+        {
+            using namespace ownership;
+            if (!run.result)
+                return; // nothing acquired here: nothing to leak or to use after a release
+            const CollectedFunction& collected = run.collected;
+            const OwnershipResult& result = *run.result;
+            const AbstractState entry = AbstractState::entry(2u * collected.facts.siteCount,
+                                                             collected.facts.locations.size());
 
             const auto issueFor = [&](ResourceId r, ResourceLifetimeIssueKind kind)
             {
@@ -2498,6 +2669,8 @@ namespace ctrace::stack::analysis
             std::unordered_map<const llvm::AllocaInst*, bool> unknownAcquireEscapeCache;
             std::unordered_set<std::string> interprocUncertaintyReported;
             std::unordered_set<std::string> releasedEscapeReported;
+            // The ownership engine runs first: it judges every release (--verbose traces it).
+            const OwnershipRun ownershipRun = runOwnershipEngine(F, model, ownershipLookup, DL);
             auto trackAcquire = [&](const StorageKey& storage, const std::string& resourceKind,
                                     const llvm::Instruction* anchorInst)
             {
@@ -2887,7 +3060,7 @@ namespace ctrace::stack::analysis
 
             // UseAfterRelease and MissingRelease come from the ownership engine (spec §8); the
             // counters above keep serving the other rules.
-            analyzeWithOwnershipEngine(F, model, ownershipLookup, DL, issues);
+            reportOwnershipIssues(F, ownershipRun, issues);
 
             if (methodInfo.isDtor && !methodInfo.className.empty())
             {
