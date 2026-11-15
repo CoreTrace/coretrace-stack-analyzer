@@ -46,6 +46,7 @@
 
 #include <llvm/Analysis/MemorySSA.h>
 #include <llvm/AsmParser/Parser.h>
+#include <llvm/Bitcode/BitcodeWriter.h>
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/DebugInfoMetadata.h>
 #include <llvm/IR/Function.h>
@@ -3287,6 +3288,108 @@ namespace
         return std::nullopt;
     }
 
+    /// A `.ll` given as input is parsed from its text by the run that fills the compile IR
+    /// cache, and from the bitcode of its cache entry by the next run. Analyses walk the uses of
+    /// a value, and can keep the first match, stop on a budget or report in the order of the
+    /// walk: the module read from the cache must list each value's uses in the order the module
+    /// parsed from the text does.
+    ///
+    /// `callee` is declared after its two callers, as Clang prints declarations. The text parser
+    /// meets its uses before its declaration; a bitcode reader knows every function before it
+    /// reads a body, and lists the callers another way unless it is told the order. The last
+    /// load checks it, on the entry written again without that order: it also shows that a load
+    /// reads the entry.
+    bool testCompileIRCacheKeepsUseOrderOfIRInput(TestReport& report)
+    {
+        char rootTemplate[] = "/tmp/ctrace-ir-use-order-XXXXXX";
+        if (mkdtemp(rootTemplate) == nullptr)
+        {
+            report.expect(false, "Compile IR cache of a .ll input: no temporary directory");
+            return false;
+        }
+        const std::filesystem::path root(rootTemplate);
+        const std::filesystem::path source = root / "callers.ll";
+        std::ofstream(source) << "define i32 @first(i32 %x) {\n"
+                                 "  %r = call i32 @callee(i32 %x)\n"
+                                 "  ret i32 %r\n"
+                                 "}\n"
+                                 "\n"
+                                 "define i32 @second(i32 %x) {\n"
+                                 "  %r = call i32 @callee(i32 %x)\n"
+                                 "  ret i32 %r\n"
+                                 "}\n"
+                                 "\n"
+                                 "declare i32 @callee(i32)\n";
+
+        ctrace::stack::AnalysisConfig config;
+        config.compileIRCacheDir = (root / "cache").string();
+        const auto load = [&](LoadedModule& out)
+        {
+            llvm::SMDiagnostic err;
+            out.module = ctrace::stack::analysis::detail::loadModuleForAnalysis(
+                             source.string(), config, out.context, err, "known")
+                             .module;
+            return out.module != nullptr;
+        };
+        // The functions that call `callee`, in the order of its use list.
+        const auto callers = [](const llvm::Module& module)
+        {
+            std::vector<std::string> names;
+            if (const llvm::Function* callee = module.getFunction("callee"))
+            {
+                for (const llvm::User* user : callee->users())
+                {
+                    if (const auto* call = llvm::dyn_cast<llvm::CallBase>(user))
+                        names.push_back(call->getFunction()->getName().str());
+                }
+            }
+            return names;
+        };
+
+        LoadedModule parsed;
+        std::filesystem::path entry;
+        if (load(parsed))
+        {
+            std::error_code ec;
+            for (const auto& file : std::filesystem::directory_iterator(root / "cache", ec))
+            {
+                if (file.path().extension() == ".bc")
+                    entry = file.path();
+            }
+        }
+        report.expect(
+            !entry.empty(),
+            "Compile IR cache of a .ll input: the first load writes the module's bitcode");
+        LoadedModule cached;
+        if (entry.empty() || !load(cached))
+        {
+            report.expect(false, "Compile IR cache of a .ll input: the second load gives a module");
+            std::filesystem::remove_all(root);
+            return false;
+        }
+
+        const std::vector<std::string> expected = callers(*parsed.module);
+        report.expect(expected.size() == 2,
+                      "Compile IR cache of a .ll input: the parsed text lists the two callers");
+        report.expect(callers(*cached.module) == expected,
+                      "Compile IR cache of a .ll input: the module read from the cache lists the "
+                      "callers of a function as the parsed text does");
+
+        {
+            std::error_code ec;
+            llvm::raw_fd_ostream bitcode(entry.string(), ec);
+            if (!ec)
+                llvm::WriteBitcodeToFile(*parsed.module, bitcode);
+        }
+        LoadedModule unordered;
+        report.expect(load(unordered) && callers(*unordered.module) != expected,
+                      "Compile IR cache of a .ll input: an entry written without the order of "
+                      "uses lists the callers another way");
+
+        std::filesystem::remove_all(root);
+        return report.failures == 0;
+    }
+
     /// The compile IR cache records the coretrace-compiler revision of the build. A build that
     /// does not know it (coretrace-compiler.cmake) must neither read the cache, whose entries
     /// could come from any compiler, nor write it, with entries no build could check.
@@ -3710,6 +3813,7 @@ int main(int argc, char** argv)
     (void)testLocationResolver(repoRoot, report);
     (void)testReachabilityService(repoRoot, report);
     (void)testModulePreparationService(repoRoot, report);
+    (void)testCompileIRCacheKeepsUseOrderOfIRInput(report);
     (void)testIntRangeFacts(repoRoot, report);
     (void)testEveryReportedCweIsScored(repoRoot, report);
     (void)testAnalysisReportContract(repoRoot, report);
