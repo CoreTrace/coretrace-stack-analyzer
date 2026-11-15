@@ -3299,6 +3299,9 @@ namespace
     /// reads a body, and lists the callers another way unless it is told the order. The last
     /// load checks it, on the entry written again without that order: it also shows that a load
     /// reads the entry.
+    ///
+    /// An entry without the order is what a build of the cache schema v4 wrote. Recorded under
+    /// that schema, it must not be reused: the load parses the text and writes the entry again.
     bool testCompileIRCacheKeepsUseOrderOfIRInput(TestReport& report)
     {
         char rootTemplate[] = "/tmp/ctrace-ir-use-order-XXXXXX";
@@ -3385,6 +3388,42 @@ namespace
         report.expect(load(unordered) && callers(*unordered.module) != expected,
                       "Compile IR cache of a .ll input: an entry written without the order of "
                       "uses lists the callers another way");
+
+        // The schema the entry records, which becomes `replacement` when one is given.
+        const std::filesystem::path meta = std::filesystem::path(entry).replace_extension(".json");
+        const auto schema = [&](const char* replacement) -> std::string
+        {
+            std::ostringstream text;
+            text << std::ifstream(meta).rdbuf();
+            llvm::Expected<llvm::json::Value> record = llvm::json::parse(text.str());
+            if (!record)
+            {
+                llvm::consumeError(record.takeError());
+                return {};
+            }
+            llvm::json::Object* object = record->getAsObject();
+            if (object == nullptr)
+                return {};
+            const std::string recorded = object->getString("schema").value_or("").str();
+            if (replacement != nullptr)
+            {
+                (*object)["schema"] = replacement;
+                std::string written;
+                llvm::raw_string_ostream out(written);
+                out << *record;
+                out.flush();
+                std::ofstream(meta, std::ios::trunc) << written;
+            }
+            return recorded;
+        };
+        const std::string current = schema("compile-ir-cache-v4");
+        LoadedModule rebuilt;
+        report.expect(load(rebuilt) && callers(*rebuilt.module) == expected,
+                      "Compile IR cache of a .ll input: an entry of the schema that held no "
+                      "order is not reused");
+        report.expect(!current.empty() && schema(nullptr) == current,
+                      "Compile IR cache of a .ll input: the load writes that entry again, under "
+                      "the current schema");
 
         std::filesystem::remove_all(root);
         return report.failures == 0;
