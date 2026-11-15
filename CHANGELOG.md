@@ -48,6 +48,10 @@ Notable changes are grouped by release. See [all releases](https://github.com/Co
   assigned from one another in a cycle that reaches two different arrays now resolve to no
   array, as any pointer with several possible arrays does, where each used to be reported
   against its own array.
+- With the compile IR cache, a `.ll` input read from the cache lists each value's uses in the
+  order the run that parsed its text had (#279). The entry's bitcode holds that order; it was
+  written without it, and the two runs could list the callers of a function, or the users of
+  a global variable, another way. No diagnostic was seen to change.
 - Added an authors file and linked the repository documents from the README.
 - SARIF rules carry a title (`shortDescription`) and a description (`fullDescription`) instead
   of their id, and `describeRule` (`RuleCatalog.hpp`) gives them to programs linking the analyzer.
