@@ -197,7 +197,9 @@ namespace ctrace::stack::analysis
         // v4: entries record the compiler that produced them (below). Builds of v3 ignore those
         // fields and would reuse such an entry; under v4, they do not even look it up, since the
         // key holds the schema.
-        constexpr llvm::StringLiteral kCompileIRCacheSchema = "compile-ir-cache-v4";
+        // v5: the entry of a `.ll` input holds the order of each value's uses (#279). An entry of
+        // v4 does not, and a build of v5 does not look it up: the first run writes it again.
+        constexpr llvm::StringLiteral kCompileIRCacheSchema = "compile-ir-cache-v5";
 
         // The compiler that produced an entry: compile IR depends on it as much as on the
         // command. An entry another coretrace-compiler revision or LLVM version produced is
