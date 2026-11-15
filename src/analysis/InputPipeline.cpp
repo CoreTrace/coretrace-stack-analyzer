@@ -1210,8 +1210,10 @@ namespace ctrace::stack::analysis
             {
                 if (llvmBitcodeForCache.empty())
                 {
-                    // With the order of each value's uses, which the module then read from the
-                    // cache finds again.
+                    // The order of each value's uses is written too. Some analyses depend on it:
+                    // the first match of a walk, the order of a variable's reports. The reader
+                    // otherwise rebuilds that order its own way, and a run that reads the cache
+                    // would not walk the uses as the run that compiled the source did.
                     llvm::raw_string_ostream bitcodeStream(llvmBitcodeForCache);
                     llvm::WriteBitcodeToFile(*result.module, bitcodeStream,
                                              /*ShouldPreserveUseListOrder=*/true);
