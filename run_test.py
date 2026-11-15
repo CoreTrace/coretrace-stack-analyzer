@@ -3012,6 +3012,49 @@ def check_global_read_before_write_identity_across_files() -> bool:
     return ok
 
 
+def check_global_read_before_write_order() -> bool:
+    """
+    A function's GlobalReadBeforeWrite diagnostics come out in the order of its reads, two globals
+    read by one call in the order of its arguments, at any --jobs. Their order used to follow the
+    globals' addresses, which change from one run to the next.
+    """
+    print("=== Testing GlobalReadBeforeWrite order within a function ===")
+    names = [f"g_{n}" for n in ("alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel")]
+    sources = {
+        "reads.c": "".join(f"int {n}[4];\n" for n in names)
+        + "void use2(const int *a, const int *b);\n"
+        + "int reader(int i)\n{\n    int s = 0;\n"
+        + "".join(f"    s += {n}[i & 3];\n" for n in names[:6])
+        + f"    use2({names[6]}, {names[7]});\n    return s;\n}}\n",
+        "other.c": "int other(int i) { return i; }\n",
+    }
+    ok = True
+    with tempfile.TemporaryDirectory(prefix="ct_global_read_order_") as tmp:
+        root = Path(tmp)
+        for name, text in sources.items():
+            (root / name).write_text(text)
+        for jobs in ("--jobs=1", "--jobs=4"):
+            result = run_analyzer([str(root / "reads.c"), str(root / "other.c"), "--format=json", jobs])
+            try:
+                payload = json.loads(result.stdout or "")
+            except json.JSONDecodeError:
+                ok = fail_check(f"{jobs}: no JSON output", (result.stdout or "") + (result.stderr or ""))
+                continue
+            observed = [
+                match.group(1)
+                for d in payload.get("diagnostics", [])
+                if d.get("ruleId") == "GlobalReadBeforeWrite" and d.get("location", {}).get("function") == "reader"
+                for match in [re.search(r"global buffer '([^']+)'", d.get("details", {}).get("message", ""))]
+                if match
+            ]
+            if observed != names:
+                ok = fail_check(f"{jobs}: expected {names}, got {observed}")
+                continue
+            print(f"  ✅ {jobs}")
+    print()
+    return ok
+
+
 def check_size_minus_one_cross_tu() -> bool:
     """
     #157: the length that a function defined in another file passes to a bounded write reaches
@@ -5879,6 +5922,7 @@ def main() -> int:
         check_const_param_contract_message_across_files,
         check_duplicate_if_cross_tu,
         check_global_read_before_write_identity_across_files,
+        check_global_read_before_write_order,
         check_size_minus_one_cross_tu,
         check_stack_buffer_callee_cross_tu,
         check_cross_tu_call_graph,
