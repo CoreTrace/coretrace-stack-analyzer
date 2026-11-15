@@ -774,6 +774,47 @@ namespace ctrace::stack::analysis::ownership
                 return t[static_cast<std::size_t>(OwnState::Owned)].has(OwnState::Released);
             }
 
+            static ArgPath byValue(unsigned argIndex)
+            {
+                ArgPath path;
+                path.argIndex = argIndex;
+                return path;
+            }
+
+            /// The location to name a released pointer by: the slot it was just loaded from.
+            LocationId nameOf(const llvm::Value* arg, LocationId fallback) const
+            {
+                if (const auto* load = llvm::dyn_cast<llvm::LoadInst>(arg->stripPointerCasts()))
+                {
+                    if (const auto it = loadedFrom_.find(load); it != loadedFrom_.end())
+                        return it->second;
+                }
+                return fallback;
+            }
+
+            void recordRelease(std::uint32_t instructionIndex, LocationId loc, const ArgPath& path,
+                               bool pointee, LocationId nameLocation)
+            {
+                ReleaseEffect effect;
+                effect.path = path;
+                effect.instructionIndex = instructionIndex;
+                effect.location = loc;
+                effect.nameLocation = nameLocation;
+                effect.pointee = pointee;
+                out_.releaseEffects.push_back(effect);
+            }
+
+            /// A summarised parameter the engine may judge for DoubleRelease: a release the
+            /// callee claims knowingly, in a summary that can be trusted.
+            void recordSummaryRelease(const FunctionOwnershipSummary& summary, const Event& e,
+                                      LocationId loc, const ArgPath& path, bool pointee,
+                                      LocationId nameLocation, const ParamTransformer& t)
+            {
+                if (!summary.incomplete && releases(t) &&
+                    !t.isUncertain(StateSet::of(OwnState::Owned)))
+                    recordRelease(e.instructionIndex, loc, path, pointee, nameLocation);
+            }
+
             /// Arguments this call may release as passed (model rule or summary). With
             /// `knownOnly`, a summary counts only where that release is not uncertain: a callee
             /// that hands the argument to unknown code may also use it.
@@ -950,6 +991,10 @@ namespace ctrace::stack::analysis::ownership
                         return std::nullopt;
                     Event e = make(Event::Kind::Release, call);
                     e.src = valueLocation(call.getArgOperand(rule.argIndex));
+                    ArgPath path;
+                    path.argIndex = rule.argIndex;
+                    recordRelease(e.instructionIndex, e.src, path, false,
+                                  nameOf(call.getArgOperand(rule.argIndex), e.src));
                     return e;
                 }
                 case RuleAction::NoEffect:
@@ -984,13 +1029,18 @@ namespace ctrace::stack::analysis::ownership
                     if (argIndex >= call.arg_size() ||
                         !call.getArgOperand(argIndex)->getType()->isPointerTy())
                         continue;
-                    e.call.params.push_back(
-                        {valueLocation(call.getArgOperand(argIndex)), transformer});
+                    const LocationId loc = valueLocation(call.getArgOperand(argIndex));
+                    e.call.params.push_back({loc, transformer});
+                    recordSummaryRelease(summary, e, loc, byValue(argIndex), false,
+                                         nameOf(call.getArgOperand(argIndex), loc), transformer);
                 }
                 for (const auto& [path, transformer] : t.pointeeParams)
                 {
                     if (const auto slot = slotOfArgPath(call, path))
+                    {
                         e.call.params.push_back({*slot, transformer});
+                        recordSummaryRelease(summary, e, *slot, path, true, *slot, transformer);
+                    }
                 }
                 if (t.returns.certainty != Certainty::Unknown && call.getType()->isPointerTy())
                 {
@@ -1030,13 +1080,19 @@ namespace ctrace::stack::analysis::ownership
                         if (argIndex >= call.arg_size() ||
                             !call.getArgOperand(argIndex)->getType()->isPointerTy())
                             continue;
-                        x.call.params.push_back(
-                            {valueLocation(call.getArgOperand(argIndex)), transformer});
+                        const LocationId loc = valueLocation(call.getArgOperand(argIndex));
+                        x.call.params.push_back({loc, transformer});
+                        recordSummaryRelease(summary, x, loc, byValue(argIndex), false,
+                                             nameOf(call.getArgOperand(argIndex), loc),
+                                             transformer);
                     }
                     for (const auto& [path, transformer] : summary.exceptional.pointeeParams)
                     {
                         if (const auto slot = slotOfArgPath(call, path))
+                        {
                             x.call.params.push_back({*slot, transformer});
+                            recordSummaryRelease(summary, x, *slot, path, true, *slot, transformer);
+                        }
                     }
                     for (const auto& [path, fresh] : summary.exceptional.outArgs)
                     {
