@@ -1421,9 +1421,14 @@ namespace ctrace::stack::analysis
                     std::string sourceIR;
                     (void)readTextFile(inputPath, sourceIR);
 
+                    // The order of each value's uses is written too. Some analyses depend on it:
+                    // the first match of a walk, the order of a variable's reports. The reader
+                    // otherwise rebuilds that order its own way, and a run that reads the cache
+                    // would not walk the uses as the run that parsed the text did.
                     std::string llvmBitcode;
                     llvm::raw_string_ostream bitcodeStream(llvmBitcode);
-                    llvm::WriteBitcodeToFile(*result.module, bitcodeStream);
+                    llvm::WriteBitcodeToFile(*result.module, bitcodeStream,
+                                             /*ShouldPreserveUseListOrder=*/true);
                     bitcodeStream.flush();
 
                     std::vector<FileSnapshot> dependencySnapshots;
