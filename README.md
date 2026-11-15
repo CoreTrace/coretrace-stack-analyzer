@@ -295,7 +295,7 @@ To generate `compile_commands.json` with CMake, configure with
 
 If analysis feels slow, `--compdb-fast` disables heavy flags (optimizations,
 sanitizers, profiling) while keeping include paths and macros.
-For multi-file runs, `--jobs=<N|auto>` parallelizes input loading; with cross-TU enabled it also parallelizes summary construction.
+For multi-file runs, `--jobs=<N|auto>` parallelizes input loading and analysis; with cross-TU enabled, inputs are loaded one at a time (their compilations are serialized) and it parallelizes summary construction.
 `--compile-ir-cache-dir=<path>` reuses compiled LLVM IR for unchanged translation units
 based on source/dependency stamps, which reduces repeated C/C++ frontend cost across runs.
 IR that another compiler produced (another coretrace-compiler revision or LLVM version) is compiled again.
@@ -574,7 +574,7 @@ Cross-TU summary behavior:
 - `--no-resource-cross-tu` forces local-only (single-file) resource reasoning.
 - `--resource-summary-cache-dir=<path>` controls where per-module summary cache files are stored.
 - `--resource-summary-cache-memory-only` disables filesystem cache writes and uses an in-process cache only.
-- `--jobs=<N>` parallelizes module loading/compilation and per-module summary extraction during each fixpoint iteration.
+- `--jobs=<N>` parallelizes per-module summary extraction during each fixpoint iteration; modules are loaded one at a time.
 - The CLI prints an explicit status line to `stderr` to indicate whether resource inter-procedural
   analysis is enabled or unavailable/disabled (with reason).
 - If a local release depends on an unmodeled/external callee and no summary is available, the tool
