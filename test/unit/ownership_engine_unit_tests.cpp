@@ -10,6 +10,7 @@
 #include <functional>
 #include <iostream>
 #include <map>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -1208,6 +1209,69 @@ namespace
         return e;
     }
 
+    // The facts the DoubleRelease verdicts are read off: what the engine does not follow starts
+    // unknown, so that a join cannot forget it.
+    bool testUnknownAtEntry(TestReport& r)
+    {
+        using Outcome = ReleaseOutcome;
+        const auto verdictAt = [](const OwnershipFacts& f, std::uint32_t id, LocationId loc)
+        {
+            const OwnershipResult res = solve(f, entryOf(f));
+            for (const ReleaseVerdict& v : judgeReleases(f, res))
+            {
+                if (v.instructionIndex == id && v.location == loc)
+                    return std::optional<Outcome>(v.outcome);
+            }
+            return std::optional<Outcome>();
+        };
+        {
+            // h = NULL; if (c) h = untracked(); free(h). Location 1 is a value no event writes.
+            OwnershipFacts f =
+                facts(4, {edge(0, 1, {copy(0, 1)}), edge(0, 2), edge(1, 3), edge(2, 3)}, 2, 0);
+            f.blocks[0].events = {overwrite(0)};
+            f.blocks[3].events = {releaseAt(0, 1), exit()};
+            const std::vector<bool> isSlot = {true, false};
+            r.expect(verdictAt(f, 1, 0) == Outcome::Checked,
+                     "UnknownAtEntry: on the collector's facts, the untracked path is forgotten");
+            r.expect(verdictAt(withUnknownAtEntry(f, isSlot), 1, 0) == Outcome::Unknown,
+                     "UnknownAtEntry: an untracked value joined with null is unknown");
+            r.expect(f.blocks[0].events.size() == 1,
+                     "UnknownAtEntry: the collector's facts are left as they are");
+        }
+        {
+            // char *h; if (c) h = NULL; free(h): the slot is not written on one path.
+            OwnershipFacts f =
+                facts(4, {edge(0, 1, {overwrite(0)}), edge(0, 2), edge(1, 3), edge(2, 3)}, 1, 0);
+            f.blocks[3].events = {releaseAt(0, 1), exit()};
+            r.expect(verdictAt(withUnknownAtEntry(f, {true}), 1, 0) == Outcome::Unknown,
+                     "UnknownAtEntry: a slot not written on one path is unknown");
+            f.blocks[0].events = {overwrite(0)};
+            r.expect(verdictAt(withUnknownAtEntry(f, {true}), 1, 0) == Outcome::Checked,
+                     "UnknownAtEntry: a slot written on every path keeps what was written");
+        }
+        {
+            // An SSA value defined by an acquisition keeps it: free(v); free(v).
+            OwnershipFacts f = facts(1, {}, 1, 1);
+            f.blocks[0].events = {acquire(0, 0), releaseAt(0, 1), releaseAt(0, 2), exit()};
+            const OwnershipFacts g = withUnknownAtEntry(f, {false});
+            r.expect(verdictAt(g, 1, 0) == Outcome::Checked &&
+                         verdictAt(g, 2, 0) == Outcome::Detected,
+                     "UnknownAtEntry: a value written by its definition keeps it");
+        }
+        {
+            // p = malloc(8) into a slot whose address leaves the function (weak writes).
+            OwnershipFacts f = facts(1, {}, 2, 1);
+            f.locations[1].strongUpdatable = false;
+            f.blocks[0].events = {acquire(0, 0), copy(1, 0), releaseAt(1, 1), exit()};
+            const std::vector<bool> isSlot = {false, true};
+            r.expect(verdictAt(f, 1, 1) == Outcome::Checked,
+                     "UnknownAtEntry: on the collector's facts, the weak slot looks owned");
+            r.expect(verdictAt(withUnknownAtEntry(f, isSlot), 1, 1) == Outcome::Unknown,
+                     "UnknownAtEntry: a slot written weakly keeps unknown");
+        }
+        return r.failures == 0;
+    }
+
     // DoubleRelease verdicts, one per released location and instruction.
     bool testReleaseVerdicts(TestReport& r)
     {
@@ -1519,6 +1583,7 @@ int main(int, char**)
     (void)testUses(report);
     (void)testUsedArgs(report);
     (void)testReleaseVerdicts(report);
+    (void)testUnknownAtEntry(report);
     (void)testContracts(report);
     (void)testEdgeExits(report);
     (void)testExitUncertainty(report);

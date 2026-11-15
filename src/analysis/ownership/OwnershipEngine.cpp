@@ -419,6 +419,55 @@ namespace ctrace::stack::analysis::ownership
         }
     } // namespace
 
+    OwnershipFacts withUnknownAtEntry(const OwnershipFacts& facts, const std::vector<bool>& isSlot)
+    {
+        OwnershipFacts prepared = facts;
+        std::vector<bool> written(facts.locations.size(), false);
+        const auto markWritten = [&written](const Event& e)
+        {
+            switch (e.kind)
+            {
+            case Event::Kind::Acquire:
+            case Event::Kind::Copy:
+            case Event::Kind::Overwrite:
+                written[e.dst] = true;
+                break;
+            case Event::Kind::Call:
+                if (e.call.retDest)
+                    written[*e.call.retDest] = true;
+                for (const auto& [loc, certainty] : e.call.outArgs)
+                    written[loc] = true;
+                break;
+            default:
+                break;
+            }
+        };
+        for (const Block& block : facts.blocks)
+            std::for_each(block.events.begin(), block.events.end(), markWritten);
+        for (const Edge& edge : facts.edges)
+            std::for_each(edge.events.begin(), edge.events.end(), markWritten);
+
+        std::vector<Event> unknownAtEntry;
+        for (LocationId loc = 0; loc < facts.locations.size(); ++loc)
+        {
+            const LocationKind kind = facts.locations[loc].kind;
+            const bool slot = loc < isSlot.size() && isSlot[loc];
+            // An SSA value is written once, before any use, by the event that defines it.
+            const bool definedValue = kind == LocationKind::Local && !slot && written[loc];
+            if (kind == LocationKind::Return || definedValue)
+                continue;
+            Event e;
+            e.kind = Event::Kind::Overwrite;
+            e.dst = loc;
+            e.unknownValue = true;
+            unknownAtEntry.push_back(e);
+        }
+        if (!prepared.blocks.empty())
+            prepared.blocks[0].events.insert(prepared.blocks[0].events.begin(),
+                                             unknownAtEntry.begin(), unknownAtEntry.end());
+        return prepared;
+    }
+
     std::vector<ReleaseVerdict> judgeReleases(const OwnershipFacts& facts,
                                               const OwnershipResult& result)
     {

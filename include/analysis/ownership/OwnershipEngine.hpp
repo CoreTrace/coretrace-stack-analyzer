@@ -94,9 +94,18 @@ namespace ctrace::stack::analysis::ownership
     /// release it on every normal exit, the later one in argument order is Detected. When their
     /// targets merely overlap, or the other one may release only on some exits, a Checked
     /// verdict becomes Unknown. Copies of one release (the edges of an invoke) must agree, else
-    /// Unknown. Empty when incomplete.
+    /// Unknown. Empty when incomplete. Meant to be read off withUnknownAtEntry(facts).
     std::vector<ReleaseVerdict> judgeReleases(const OwnershipFacts& facts,
                                               const OwnershipResult& result);
+
+    /// `facts` with "unknown" written at entry into every location that may hold a value the
+    /// engine does not follow: every storage location (`isSlot[loc]`, or a location that is not
+    /// Local) and every SSA value that no event writes (the result of an unknown call, an
+    /// argument, untracked memory). Such a location is otherwise empty, and a join forgets an
+    /// empty path: joined with a null path it would look "null only". Transitional: only the
+    /// DoubleRelease verdicts solve these facts; the other rules still read an empty location as
+    /// holding nothing.
+    OwnershipFacts withUnknownAtEntry(const OwnershipFacts& facts, const std::vector<bool>& isSlot);
 
     /// Union of t[s] over the states s in `in`.
     StateSet applyTransformer(const ParamTransformer& t, StateSet in);
