@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "StackUsageAnalyzer.hpp"
 #include "analysis/AnalyzerUtils.hpp"
+#include "analysis/CompileCommands.hpp"
 #include "app/CrossTUSummaryDriver.hpp"
 #include "app/AnalyzerApp.hpp"
 #include "cli/ArgParser.hpp"
@@ -3606,6 +3607,57 @@ namespace
         return report.failures == 0;
     }
 
+    /// With -fno-integrated-cc1, the jobs of a compile command run as programs:
+    /// coretrace-compiler moves the process to the command's directory and leaves it there. The
+    /// load must bring the process back. A source without a compile command is compiled by its
+    /// relative path, from the directory the process is in: left in the command's directory,
+    /// the process no longer finds it.
+    bool testLoadLeavesTheProcessDirectory(TestReport& report)
+    {
+        char rootTemplate[] = "/tmp/ctrace-load-directory-XXXXXX";
+        if (mkdtemp(rootTemplate) == nullptr)
+        {
+            report.expect(false, "Load directory: no temporary directory");
+            return false;
+        }
+        std::error_code ec;
+        const std::filesystem::path start = std::filesystem::current_path(ec);
+        const std::filesystem::path root = std::filesystem::canonical(rootTemplate, ec);
+        const std::filesystem::path project = root / "project";
+        std::filesystem::create_directories(project, ec);
+        std::ofstream(project / "unit.c") << "int unit(void) { return 1; }\n";
+        std::ofstream(root / "host.c") << "int host(void) { return 2; }\n";
+        std::ofstream(project / "compile_commands.json")
+            << "[{\"directory\": \"" << project.string() << "\", \"file\": \"unit.c\", "
+            << "\"arguments\": [\"cc\", \"-fno-integrated-cc1\", \"-c\", \"unit.c\"]}]\n";
+
+        ctrace::stack::AnalysisConfig config;
+        std::string error;
+        config.compilationDatabase = ctrace::stack::analysis::CompilationDatabase::loadFromFile(
+            (project / "compile_commands.json").string(), error);
+        config.inputBaseDir = root.string();
+        const auto loads = [&](const char* source)
+        {
+            llvm::LLVMContext context;
+            llvm::SMDiagnostic err;
+            return ctrace::stack::analysis::loadModuleForAnalysis(source, config, context, err)
+                       .module != nullptr;
+        };
+
+        std::filesystem::current_path(root, ec);
+        const bool compiled = config.compilationDatabase && loads("project/unit.c");
+        const bool stayed =
+            std::filesystem::equivalent(std::filesystem::current_path(ec), root, ec);
+        const bool found = loads("host.c");
+        std::filesystem::current_path(start, ec);
+        std::filesystem::remove_all(root, ec);
+
+        report.expect(compiled, "Load directory: a command whose jobs run as programs compiles");
+        report.expect(stayed, "Load directory: the process is where it was before that load");
+        report.expect(found, "Load directory: a relative source without a command then compiles");
+        return compiled && stayed && found;
+    }
+
     /// A ring of pointer variables with one array source, as -O0 code leaves it: p0 = buf,
     /// p1 = p0, ..., p0 = p(n-1). Every pointer must find the array, however far from it; the
     /// order of the accesses must not change the alias paths; and the walk must finish on a
@@ -3743,6 +3795,7 @@ int main(int argc, char** argv)
     (void)testDuplicateIfIndexWidths(repoRoot, report);
     (void)testStackBufferPhiCycle(repoRoot, report);
     (void)testStackBufferPointerRing(report);
+    (void)testLoadLeavesTheProcessDirectory(report);
     (void)testResourceModelConditions(report);
     (void)testResourceRuleMatchesFunction(report);
     (void)testOwnershipFactCollector(repoRoot, report);
