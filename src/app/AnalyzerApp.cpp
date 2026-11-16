@@ -957,17 +957,12 @@ static AppStatus analyzeWithSharedModuleLoading(const std::vector<std::string>& 
         loadSucceeded[index] = 1;
     };
 
-    const unsigned loadJobs = resolveConfiguredJobs(cfg);
-    if (loadJobs <= 1 || inputFilenames.size() <= 1)
-    {
-        for (std::size_t index = 0; index < inputFilenames.size(); ++index)
-            loadSingleModule(index);
-    }
-    else
-    {
-        runParallelWork(inputFilenames.size(), loadJobs,
-                        [&](std::size_t index) { loadSingleModule(index); });
-    }
+    // One input after the other, on this thread, whatever --jobs. The compilations are serialized
+    // (InputPipeline.cpp): a loading worker would only parse its bitcode in parallel, while glibc
+    // would give it an arena of its own and keep there the memory its compilation freed, about one
+    // compilation per worker for the rest of the run. The cross-TU summaries below still use --jobs.
+    for (std::size_t index = 0; index < inputFilenames.size(); ++index)
+        loadSingleModule(index);
 
     std::vector<LoadedInputModule> orderedLoadedModules;
     orderedLoadedModules.reserve(inputFilenames.size());
