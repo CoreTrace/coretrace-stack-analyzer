@@ -3087,16 +3087,22 @@ def check_global_read_before_write_order() -> bool:
     """
     A function's GlobalReadBeforeWrite diagnostics come out in the order of its reads, two globals
     read by one call in the order of its arguments, at any --jobs. Their order used to follow the
-    globals' addresses, which change from one run to the next.
+    globals' addresses, which change from one run to the next. The reads follow neither the
+    alphabetical order of the names, nor their order of declaration, nor their order in the
+    module, which first() sets by using them before reader() does.
     """
     print("=== Testing GlobalReadBeforeWrite order within a function ===")
-    names = [f"g_{n}" for n in ("alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel")]
+    declared = [f"g_{n}" for n in ("alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel")]
+    reads = ["g_delta", "g_alpha", "g_foxtrot", "g_charlie", "g_echo", "g_bravo"]
+    call = ["g_hotel", "g_golf"]
+    names = reads + call
     sources = {
-        "reads.c": "".join(f"int {n}[4];\n" for n in names)
+        "reads.c": "".join(f"int {n}[4];\n" for n in declared)
         + "void use2(const int *a, const int *b);\n"
+        + "int first(void)\n{\n    return " + " + ".join(f"{n}[0]" for n in declared) + ";\n}\n"
         + "int reader(int i)\n{\n    int s = 0;\n"
-        + "".join(f"    s += {n}[i & 3];\n" for n in names[:6])
-        + f"    use2({names[6]}, {names[7]});\n    return s;\n}}\n",
+        + "".join(f"    s += {n}[i & 3];\n" for n in reads)
+        + f"    use2({call[0]}, {call[1]});\n    return s;\n}}\n",
         "other.c": "int other(int i) { return i; }\n",
     }
     ok = True
