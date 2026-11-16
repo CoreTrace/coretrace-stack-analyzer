@@ -7,6 +7,7 @@
 #include "analysis/ResourceModel.hpp"
 #include "analysis/ownership/OwnershipFacts.hpp"
 
+#include <cstdint>
 #include <functional>
 #include <string>
 #include <vector>
@@ -21,6 +22,19 @@ namespace llvm
 
 namespace ctrace::stack::analysis::ownership
 {
+    /// A release the engine judges for DoubleRelease: the location released by one event, and
+    /// the argument path it comes from (a model rule's argument, a summarised parameter passed
+    /// by value, or a summarised pointee). Calls whose summary is incomplete give none.
+    struct ReleaseEffect
+    {
+        ArgPath path;
+        std::uint32_t instructionIndex = 0; // the event's Event::instructionIndex
+        LocationId location = 0;
+        LocationId nameLocation = 0; // the slot the released pointer was read from, to name it
+        bool pointee = false; // the release is of what the argument points to, not of the argument
+        std::uint8_t reservedPadding[3] = {};
+    };
+
     struct CollectedFunction
     {
         OwnershipFacts facts;
@@ -30,6 +44,7 @@ namespace ctrace::stack::analysis::ownership
         std::vector<const llvm::Instruction*> siteInstructions;  // by site id
         std::vector<std::string> siteKinds;                      // resource kind by site id
         std::vector<const llvm::BasicBlock*> blockOf;            // by block id
+        std::vector<ReleaseEffect> releaseEffects;               // in collection order
     };
 
     struct SummaryLookup

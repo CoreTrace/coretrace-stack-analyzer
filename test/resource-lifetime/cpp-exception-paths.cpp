@@ -6,12 +6,9 @@ extern void may_throw();
 extern void never_throws() noexcept;
 
 // resource-model: models/resource-lifetime/generic.txt
-// Only MissingRelease is pinned here. The two `release_handle(h)` calls sit on
-// mutually exclusive paths, which the counter-based DoubleRelease rule (out of
-// scope for the ownership engine) still reports; hence no strict count.
-// strict-diagnostic-count: false
 // The catch releases: neither the normal nor the exceptional path of
-// may_throw() leaves h owned.
+// may_throw() leaves h owned. The two `release_handle(h)` calls sit on
+// mutually exclusive paths: no double release.
 void caught_and_released()
 {
     handle_t h;
@@ -29,3 +26,4 @@ void caught_and_released()
 }
 
 // not contains: potential resource leak
+// not contains: potential double release

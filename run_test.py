@@ -2486,6 +2486,77 @@ def check_ownership_cross_tu() -> bool:
     return ok
 
 
+def check_double_release_cross_tu() -> bool:
+    """
+    DoubleRelease through release wrappers defined in another file, judged by the ownership
+    engine on their summaries: a second release through a wrapper, an alias passed to one, or
+    release_both(p, p) is reported; wrappers on exclusive branches, after a reset to NULL, or on
+    distinct allocations are not. Same result in memory, over three runs sharing a summary cache
+    (the third reads every summary from it), and with Z3. Alone, the caller sees unknown callees
+    and reports no double release.
+    """
+    print("=== Testing DoubleRelease through cross-TU release wrappers ===")
+    model = "models/resource-lifetime/generic.txt"
+    fixtures = RUN_CONFIG.test_dir / "resource-lifetime"
+    files = [
+        str(fixtures / "cross-tu-double-release-def.c"),
+        str(fixtures / "cross-tu-double-release-use.c"),
+    ]
+    reported = ((17, "twice"), (24, "mixed"), (31, "swapped"), (38, "maybe"), (46, "copy"),
+                (53, "chained"), (59, "same"))
+    expected = [
+        f"at line {line}, column 5\n\t[!!!Error] potential double release: 'HeapAlloc' handle '{handle}'"
+        for line, handle in reported
+    ]
+    lines = ", ".join(str(line) for line, _ in reported)
+    smt_args = [
+        "--smt=on",
+        "--smt-backend=z3",
+        "--smt-mode=single",
+        f"--smt-rules={','.join(_all_smt_rules())}",
+        f"--smt-timeout-ms={SMT_FIXTURE_TIMEOUT_MS}",
+    ]
+
+    def as_expected(output: str) -> bool:
+        return (
+            output.count("potential double release") == len(expected)
+            and all(text in output for text in expected)
+            and "inter-procedural resource analysis incomplete" not in output
+        )
+
+    ok = True
+    with tempfile.TemporaryDirectory(prefix="ct_double_release_cross_tu_") as tmp:
+        tmpdir = Path(tmp)
+        common = [
+            f"--resource-model={model}",
+            "--warnings-only",
+            f"--compile-ir-cache-dir={tmpdir / 'compile-ir-cache'}",
+        ]
+        runs = [("memory only", files + common + ["--resource-summary-cache-memory-only"])]
+        for mode, extra in (("default", []), ("smt-z3", smt_args)):
+            cache = tmpdir / f"summaries-{mode}"
+            for run in ("first", "second", "third"):
+                runs.append((f"{mode} ({run})",
+                             files + common + [f"--resource-summary-cache-dir={cache}"] + extra))
+        for label, args in runs:
+            result = run_analyzer_uncached(args)
+            output = result.stdout or ""
+            if result.returncode != 0 or not as_expected(output):
+                print(f"  ❌ {label}: expected exactly the double releases of lines {lines}")
+                print(output + (result.stderr or ""))
+                ok = False
+        result = run_analyzer_uncached(
+            [files[1]] + common + ["--resource-summary-cache-memory-only"])
+        output = result.stdout or ""
+        if result.returncode != 0 or "potential double release" in output:
+            print("  ❌ caller alone: the wrappers are unknown, no double release expected")
+            print(output + (result.stderr or ""))
+            ok = False
+    if ok:
+        print("  ✅ DoubleRelease through cross-TU wrappers OK\n")
+    return ok
+
+
 def check_ownership_wrapper_metadata() -> bool:
     """Wrappers preserve uncertainty and conditional acquisitions, including cached summaries."""
     print("=== Testing ownership wrapper metadata ===")
@@ -5872,6 +5943,7 @@ def main() -> int:
         check_resource_lifetime_cross_tu,
         check_resource_model_across_compile_directories,
         check_ownership_cross_tu,
+        check_double_release_cross_tu,
         check_ownership_wrapper_metadata,
         check_uninitialized_cross_tu,
         check_uninitialized_cross_tu_no_effect,

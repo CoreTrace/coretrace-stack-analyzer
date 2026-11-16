@@ -6,8 +6,7 @@ extern void release_handle(handle_t handle);
 extern int check(void);
 
 // resource-model: models/resource-lifetime/generic.txt
-// Only MissingRelease is pinned here; other rules keep their (counter-based) behaviour.
-// strict-diagnostic-count: false
+// Each path releases h once: no leak and no double release.
 void release_all_paths(int c)
 {
     handle_t h;
@@ -19,3 +18,4 @@ void release_all_paths(int c)
 }
 
 // not contains: potential resource leak
+// not contains: potential double release
