@@ -10,7 +10,9 @@
 #include <functional>
 #include <iostream>
 #include <map>
+#include <optional>
 #include <string>
+#include <vector>
 
 namespace
 {
@@ -1182,6 +1184,395 @@ namespace
         }
         return r.failures == 0;
     }
+
+    Event releaseAt(LocationId src, std::uint32_t id, Certainty c = Certainty::Guaranteed)
+    {
+        Event e = release(src, c);
+        e.instructionIndex = id;
+        return e;
+    }
+    /// A summarised parameter whose Owned input becomes `imageOfOwned`.
+    ParamTransformer releasing(StateSet imageOfOwned, bool uncertain = false)
+    {
+        ParamTransformer t = identityTransformer();
+        t[static_cast<std::size_t>(OwnState::Owned)] = imageOfOwned;
+        if (uncertain)
+            t.uncertainInputs = StateSet::of(OwnState::Owned);
+        return t;
+    }
+    Event callAt(std::uint32_t id, std::vector<std::pair<LocationId, ParamTransformer>> params)
+    {
+        Event e;
+        e.kind = Event::Kind::Call;
+        e.instructionIndex = id;
+        e.call.params = std::move(params);
+        return e;
+    }
+
+    // The facts the DoubleRelease verdicts are read off: what the engine does not follow starts
+    // unknown, so that a join cannot forget it.
+    bool testUnknownAtEntry(TestReport& r)
+    {
+        using Outcome = ReleaseOutcome;
+        const auto verdictAt = [](const OwnershipFacts& f, std::uint32_t id, LocationId loc)
+        {
+            const OwnershipResult res = solve(f, entryOf(f));
+            for (const ReleaseVerdict& v : judgeReleases(f, res))
+            {
+                if (v.instructionIndex == id && v.location == loc)
+                    return std::optional<Outcome>(v.outcome);
+            }
+            return std::optional<Outcome>();
+        };
+        {
+            // h = NULL; if (c) h = untracked(); free(h). Location 1 is a value no event writes.
+            OwnershipFacts f =
+                facts(4, {edge(0, 1, {copy(0, 1)}), edge(0, 2), edge(1, 3), edge(2, 3)}, 2, 0);
+            f.blocks[0].events = {overwrite(0)};
+            f.blocks[3].events = {releaseAt(0, 1), exit()};
+            const std::vector<bool> isSlot = {true, false};
+            r.expect(verdictAt(f, 1, 0) == Outcome::Checked,
+                     "UnknownAtEntry: on the collector's facts, the untracked path is forgotten");
+            r.expect(verdictAt(withUnknownAtEntry(f, isSlot), 1, 0) == Outcome::Unknown,
+                     "UnknownAtEntry: an untracked value joined with null is unknown");
+            r.expect(f.blocks[0].events.size() == 1,
+                     "UnknownAtEntry: the collector's facts are left as they are");
+        }
+        {
+            // char *h; if (c) h = NULL; free(h): the slot is not written on one path.
+            OwnershipFacts f =
+                facts(4, {edge(0, 1, {overwrite(0)}), edge(0, 2), edge(1, 3), edge(2, 3)}, 1, 0);
+            f.blocks[3].events = {releaseAt(0, 1), exit()};
+            r.expect(verdictAt(withUnknownAtEntry(f, {true}), 1, 0) == Outcome::Unknown,
+                     "UnknownAtEntry: a slot not written on one path is unknown");
+            f.blocks[0].events = {overwrite(0)};
+            r.expect(verdictAt(withUnknownAtEntry(f, {true}), 1, 0) == Outcome::Checked,
+                     "UnknownAtEntry: a slot written on every path keeps what was written");
+        }
+        {
+            // An SSA value defined by an acquisition keeps it: free(v); free(v).
+            OwnershipFacts f = facts(1, {}, 1, 1);
+            f.blocks[0].events = {acquire(0, 0), releaseAt(0, 1), releaseAt(0, 2), exit()};
+            const OwnershipFacts g = withUnknownAtEntry(f, {false});
+            r.expect(verdictAt(g, 1, 0) == Outcome::Checked &&
+                         verdictAt(g, 2, 0) == Outcome::Detected,
+                     "UnknownAtEntry: a value written by its definition keeps it");
+        }
+        {
+            // p = malloc(8) into a slot whose address leaves the function (weak writes).
+            OwnershipFacts f = facts(1, {}, 2, 1);
+            f.locations[1].strongUpdatable = false;
+            f.blocks[0].events = {acquire(0, 0), copy(1, 0), releaseAt(1, 1), exit()};
+            const std::vector<bool> isSlot = {false, true};
+            r.expect(verdictAt(f, 1, 1) == Outcome::Checked,
+                     "UnknownAtEntry: on the collector's facts, the weak slot looks owned");
+            r.expect(verdictAt(withUnknownAtEntry(f, isSlot), 1, 1) == Outcome::Unknown,
+                     "UnknownAtEntry: a slot written weakly keeps unknown");
+        }
+        return r.failures == 0;
+    }
+
+    // DoubleRelease verdicts, one per released location and instruction.
+    bool testReleaseVerdicts(TestReport& r)
+    {
+        using Outcome = ReleaseOutcome;
+        using Verdicts = std::map<std::pair<std::uint32_t, LocationId>, Outcome>;
+        const StateSet released = StateSet::of(OwnState::Released);
+        const StateSet mayRelease = StateSet::of(OwnState::Owned) | released;
+        const StateSet handedToUnknown = released | StateSet::of(OwnState::Escaped);
+        const auto judged = [](const OwnershipFacts& f, unsigned limit = 0)
+        {
+            const OwnershipResult res = solve(f, entryOf(f), limit);
+            Verdicts out;
+            for (const ReleaseVerdict& v : judgeReleases(f, res))
+                out[{v.instructionIndex, v.location}] = v.outcome;
+            return out;
+        };
+        const auto is = [](const Verdicts& v, std::uint32_t id, LocationId loc, Outcome o)
+        {
+            const auto it = v.find({id, loc});
+            return it != v.end() && it->second == o;
+        };
+        const auto none = [](const Verdicts& v, std::uint32_t id, LocationId loc)
+        { return v.find({id, loc}) == v.end(); };
+
+        // ---- one possible resource ---------------------------------------------------------
+        {
+            OwnershipFacts f = facts(1, {}, 1, 1);
+            f.blocks[0].events = {acquire(0, 0), releaseAt(0, 1), releaseAt(0, 2), exit()};
+            const Verdicts v = judged(f);
+            r.expect(is(v, 1, 0, Outcome::Checked) && is(v, 2, 0, Outcome::Detected),
+                     "Verdicts: the first release is checked, the second detected");
+            // Site 1, whose resource id is not 0.
+            OwnershipFacts g = facts(1, {}, 1, 2);
+            g.blocks[0].events = {acquire(1, 0), releaseAt(0, 1), releaseAt(0, 2), exit()};
+            bool named = false;
+            for (const ReleaseVerdict& verdict : judgeReleases(g, solve(g, entryOf(g))))
+            {
+                named = named ||
+                        (verdict.instructionIndex == 2 && verdict.outcome == Outcome::Detected &&
+                         verdict.resource == newInstanceOf(1));
+            }
+            r.expect(named, "Verdicts: a detected release names the resource released before");
+        }
+        {
+            // 0 → 1 (release) → 3, 0 → 2 → 3; 3: release.
+            OwnershipFacts f =
+                facts(4, {edge(0, 1, {releaseAt(0, 1)}), edge(0, 2), edge(1, 3), edge(2, 3)}, 1, 1);
+            f.blocks[0].events = {acquire(0, 0)};
+            f.blocks[3].events = {releaseAt(0, 2), exit()};
+            const Verdicts v = judged(f);
+            r.expect(is(v, 1, 0, Outcome::Checked) && is(v, 2, 0, Outcome::Detected),
+                     "Verdicts: a release on one path, then on every path, is detected");
+        }
+        {
+            OwnershipFacts f = facts(4, {edge(0, 1), edge(0, 2), edge(1, 3), edge(2, 3)}, 1, 1);
+            f.blocks[0].events = {acquire(0, 0)};
+            f.blocks[1].events = {releaseAt(0, 1)};
+            f.blocks[2].events = {releaseAt(0, 2)};
+            f.blocks[3].events = {exit()};
+            const Verdicts v = judged(f);
+            r.expect(is(v, 1, 0, Outcome::Checked) && is(v, 2, 0, Outcome::Checked),
+                     "Verdicts: releases on mutually exclusive paths are both checked");
+        }
+        {
+            OwnershipFacts f = facts(1, {}, 1, 1);
+            f.blocks[0].events = {acquire(0, 0), addressEscape(0), releaseAt(0, 1), exit()};
+            r.expect(is(judged(f), 1, 0, Outcome::Unknown),
+                     "Verdicts: a resource unknown code may hold is unknown");
+            Event unknown;
+            unknown.kind = Event::Kind::UnknownCall;
+            unknown.args = {0};
+            f.blocks[0].events = {acquire(0, 0), unknown, releaseAt(0, 1), releaseAt(0, 2), exit()};
+            const Verdicts v = judged(f);
+            r.expect(is(v, 1, 0, Outcome::Unknown) && is(v, 2, 0, Outcome::Detected),
+                     "Verdicts: an uncertain resource is unknown, then detected once certainly "
+                     "released");
+        }
+        {
+            // global = p; free(p). Location 1 is a global.
+            OwnershipFacts f = facts(1, {}, 2, 1);
+            f.locations[1].kind = LocationKind::NonLocal;
+            f.blocks[0].events = {acquire(0, 0), copy(1, 0), releaseAt(0, 1), exit()};
+            r.expect(is(judged(f), 1, 0, Outcome::Unknown),
+                     "Verdicts: a resource handed over to someone else is unknown");
+        }
+
+        // ---- null, unknown, nothing tracked ----------------------------------------------
+        {
+            OwnershipFacts f = facts(1, {}, 1, 1);
+            f.blocks[0].events = {acquire(0, 0), releaseAt(0, 1), overwrite(0), releaseAt(0, 2),
+                                  exit()};
+            r.expect(is(judged(f), 2, 0, Outcome::Checked),
+                     "Verdicts: releasing a location that holds only null is checked");
+            f.blocks[0].events = {acquire(0, 0), releaseAt(0, 1), overwrite(0, /*unknown=*/true),
+                                  releaseAt(0, 2), exit()};
+            r.expect(is(judged(f), 2, 0, Outcome::Unknown),
+                     "Verdicts: releasing an unknown pointer is unknown");
+        }
+        {
+            OwnershipFacts f = facts(1, {}, 1, 0);
+            f.blocks[0].events = {releaseAt(0, 1), overwrite(0), releaseAt(0, 2), exit()};
+            const Verdicts v = judged(f);
+            r.expect(is(v, 1, 0, Outcome::Unknown) && is(v, 2, 0, Outcome::Checked),
+                     "Verdicts: without acquisitions, nothing tracked is unknown, null is checked");
+        }
+        {
+            // free(p); if (c) p = NULL; free(p).
+            OwnershipFacts f =
+                facts(4, {edge(0, 1, {overwrite(0)}), edge(0, 2), edge(1, 3), edge(2, 3)}, 1, 1);
+            f.blocks[0].events = {acquire(0, 0), releaseAt(0, 1)};
+            f.blocks[3].events = {releaseAt(0, 2), exit()};
+            r.expect(is(judged(f), 2, 0, Outcome::Detected),
+                     "Verdicts: null or a resource released on every path is detected");
+        }
+        {
+            // if (err) goto fail; free(p); p = NULL; fail: free(p).
+            OwnershipFacts f = facts(
+                4,
+                {edge(0, 1), edge(0, 2, {releaseAt(0, 1), overwrite(0)}), edge(1, 3), edge(2, 3)},
+                1, 1);
+            f.blocks[0].events = {acquire(0, 0)};
+            f.blocks[3].events = {releaseAt(0, 2), exit()};
+            r.expect(is(judged(f), 2, 0, Outcome::Unknown),
+                     "Verdicts: null or a resource released on some paths only is unknown");
+        }
+
+        // ---- several possible resources --------------------------------------------------
+        {
+            // a, b acquired; [free(a); free(b);] p = c ? a : b; free(p).
+            const auto choice = [&](bool releaseA, bool releaseB)
+            {
+                OwnershipFacts f = facts(
+                    4, {edge(0, 1, {copy(2, 0)}), edge(0, 2, {copy(2, 1)}), edge(1, 3), edge(2, 3)},
+                    3, 2);
+                f.blocks[0].events = {acquire(0, 0), acquire(1, 1)};
+                if (releaseA)
+                    f.blocks[0].events.push_back(releaseAt(0, 1));
+                if (releaseB)
+                    f.blocks[0].events.push_back(releaseAt(1, 2));
+                f.blocks[3].events = {releaseAt(2, 3), exit()};
+                return judged(f);
+            };
+            r.expect(is(choice(true, true), 3, 2, Outcome::Detected),
+                     "Verdicts: both possible resources already released is detected");
+            r.expect(is(choice(true, false), 3, 2, Outcome::Unknown),
+                     "Verdicts: one possible resource released, the other live, is unknown");
+            r.expect(is(choice(false, false), 3, 2, Outcome::Checked),
+                     "Verdicts: both possible resources live is checked");
+        }
+        {
+            // [free(a);] q = c ? a : unknown_ptr(); free(q).
+            const auto orUnknown = [&](bool releaseA)
+            {
+                OwnershipFacts f =
+                    facts(4,
+                          {edge(0, 1, {copy(1, 0)}), edge(0, 2, {overwrite(1, /*unknown=*/true)}),
+                           edge(1, 3), edge(2, 3)},
+                          2, 1);
+                f.blocks[0].events = {acquire(0, 0)};
+                if (releaseA)
+                    f.blocks[0].events.push_back(releaseAt(0, 1));
+                f.blocks[3].events = {releaseAt(1, 2), exit()};
+                return judged(f);
+            };
+            r.expect(is(orUnknown(true), 2, 1, Outcome::Detected),
+                     "Verdicts: an unknown pointer or a resource released everywhere is detected");
+            r.expect(is(orUnknown(false), 2, 1, Outcome::Unknown),
+                     "Verdicts: an unknown pointer or a live resource is unknown");
+        }
+
+        // ---- several releases at one instruction -------------------------------------------
+        {
+            // release_both(p, q) with q = p: both parameters released on every normal exit.
+            OwnershipFacts f = facts(1, {}, 2, 1);
+            f.blocks[0].events = {acquire(0, 0), copy(1, 0),
+                                  callAt(1, {{0, releasing(released)}, {1, releasing(released)}}),
+                                  exit()};
+            const Verdicts v = judged(f);
+            r.expect(is(v, 1, 0, Outcome::Checked) && is(v, 1, 1, Outcome::Detected),
+                     "Verdicts: a call that always releases one resource twice is detected once");
+        }
+        {
+            // if (c) { x = a; y = b; } else { x = b; y = a; } release_both(x, y): both may hold
+            // a or b, but never the same one; each allocation is released exactly once.
+            OwnershipFacts f = facts(4,
+                                     {edge(0, 1, {copy(2, 0), copy(3, 1)}),
+                                      edge(0, 2, {copy(2, 1), copy(3, 0)}), edge(1, 3), edge(2, 3)},
+                                     4, 2);
+            f.blocks[0].events = {acquire(0, 0), acquire(1, 1)};
+            f.blocks[3].events = {callAt(1, {{2, releasing(released)}, {3, releasing(released)}}),
+                                  exit()};
+            const Verdicts v = judged(f);
+            r.expect(is(v, 1, 2, Outcome::Unknown) && is(v, 1, 3, Outcome::Unknown),
+                     "Verdicts: overlapping targets of two parameters are not the same target: "
+                     "unknown, not detected");
+        }
+        {
+            // Three parameters always released, all naming one resource.
+            OwnershipFacts f = facts(1, {}, 3, 1);
+            f.blocks[0].events = {acquire(0, 0), copy(1, 0), copy(2, 0),
+                                  callAt(1, {{0, releasing(released)},
+                                             {1, releasing(released)},
+                                             {2, releasing(released)}}),
+                                  exit()};
+            const Verdicts v = judged(f);
+            r.expect(is(v, 1, 0, Outcome::Checked) && is(v, 1, 1, Outcome::Detected) &&
+                         is(v, 1, 2, Outcome::Detected),
+                     "Verdicts: each later parameter of a triple release is detected");
+        }
+        {
+            // release_one(p, q, c) with q = p: each parameter released on some exits only.
+            OwnershipFacts f = facts(1, {}, 2, 1);
+            f.blocks[0].events = {
+                acquire(0, 0), copy(1, 0),
+                callAt(1, {{0, releasing(mayRelease)}, {1, releasing(mayRelease)}}), exit()};
+            const Verdicts v = judged(f);
+            r.expect(is(v, 1, 0, Outcome::Unknown) && is(v, 1, 1, Outcome::Unknown),
+                     "Verdicts: possible releases of one resource by two parameters are unknown, "
+                     "not a sequence");
+            f.blocks[0].events = {
+                acquire(0, 0), copy(1, 0), releaseAt(0, 1),
+                callAt(2, {{0, releasing(mayRelease)}, {1, releasing(mayRelease)}}), exit()};
+            const Verdicts after = judged(f);
+            r.expect(is(after, 2, 0, Outcome::Detected) && is(after, 2, 1, Outcome::Detected),
+                     "Verdicts: a resource released before the call stays detected");
+        }
+        {
+            // Parameter 1 names the same resource and hands it to unknown code.
+            OwnershipFacts f = facts(1, {}, 2, 1);
+            f.blocks[0].events = {
+                acquire(0, 0), copy(1, 0),
+                callAt(1, {{0, releasing(released)}, {1, releasing(handedToUnknown, true)}}),
+                exit()};
+            const Verdicts v = judged(f);
+            r.expect(is(v, 1, 0, Outcome::Unknown) && none(v, 1, 1),
+                     "Verdicts: a parameter that may release through unknown code makes another "
+                     "unknown, and is not judged itself");
+        }
+        {
+            // Parameter 1 names the same resource and only uses it.
+            OwnershipFacts f = facts(1, {}, 2, 1);
+            f.blocks[0].events = {acquire(0, 0), copy(1, 0),
+                                  callAt(1, {{0, releasing(released)}, {1, identityTransformer()}}),
+                                  exit()};
+            const Verdicts v = judged(f);
+            r.expect(is(v, 1, 0, Outcome::Checked) && none(v, 1, 1),
+                     "Verdicts: a parameter that does not release changes nothing");
+        }
+        {
+            OwnershipFacts f = facts(1, {}, 2, 2);
+            f.blocks[0].events = {acquire(0, 0), acquire(1, 1),
+                                  callAt(1, {{0, releasing(released)}, {1, releasing(released)}}),
+                                  exit()};
+            const Verdicts v = judged(f);
+            r.expect(is(v, 1, 0, Outcome::Checked) && is(v, 1, 1, Outcome::Checked),
+                     "Verdicts: a call releasing two distinct resources checks both");
+        }
+        {
+            // Two model-rule releases of one instruction share the rule's condition.
+            OwnershipFacts f = facts(1, {}, 2, 1);
+            f.blocks[0].events = {acquire(0, 0), copy(1, 0), releaseAt(0, 1), releaseAt(1, 1),
+                                  exit()};
+            const Verdicts v = judged(f);
+            r.expect(is(v, 1, 0, Outcome::Checked) && is(v, 1, 1, Outcome::Detected),
+                     "Verdicts: model-rule releases of one instruction are played in order");
+        }
+
+        // ---- copies, loops, incomplete solves ------------------------------------------------
+        {
+            OwnershipFacts f = facts(3,
+                                     {edge(0, 1, {releaseAt(0, 1)}),
+                                      edge(0, 2, {releaseAt(0, 1, Certainty::Conditional)})},
+                                     1, 1);
+            f.blocks[0].events = {acquire(0, 0)};
+            f.blocks[1].events = {exit()};
+            f.blocks[2].events = {exit(true)};
+            r.expect(is(judged(f), 1, 0, Outcome::Checked),
+                     "Verdicts: copies of one release that agree give one verdict");
+            f.edges[1].events = {releaseAt(0, 9), releaseAt(0, 1, Certainty::Conditional)};
+            const Verdicts v = judged(f);
+            r.expect(is(v, 1, 0, Outcome::Unknown) && is(v, 9, 0, Outcome::Checked),
+                     "Verdicts: copies of one release that disagree are unknown");
+        }
+        {
+            OwnershipFacts f = facts(3, {edge(0, 1), edge(1, 1), edge(1, 2)}, 1, 1);
+            f.blocks[0].events = {acquire(0, 0)};
+            f.blocks[1].events = {releaseAt(0, 1)};
+            f.blocks[2].events = {exit()};
+            r.expect(is(judged(f), 1, 0, Outcome::Detected),
+                     "Verdicts: the engine itself has no loop rule (the analysis applies it)");
+            r.expect(judged(f, /*limit=*/1).empty(), "Verdicts: nothing from an incomplete solve");
+        }
+        {
+            // keep(p): the callee may release p through unknown code.
+            OwnershipFacts f = facts(1, {}, 1, 1);
+            f.blocks[0].events = {acquire(0, 0), callAt(1, {{0, releasing(handedToUnknown, true)}}),
+                                  exit()};
+            r.expect(none(judged(f), 1, 0), "Verdicts: an uncertain release is not judged");
+        }
+        return r.failures == 0;
+    }
 } // namespace
 
 int main(int, char**)
@@ -1191,6 +1582,8 @@ int main(int, char**)
     (void)testEngine(report);
     (void)testUses(report);
     (void)testUsedArgs(report);
+    (void)testReleaseVerdicts(report);
+    (void)testUnknownAtEntry(report);
     (void)testContracts(report);
     (void)testEdgeExits(report);
     (void)testExitUncertainty(report);
