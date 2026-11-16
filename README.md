@@ -295,7 +295,7 @@ To generate `compile_commands.json` with CMake, configure with
 
 If analysis feels slow, `--compdb-fast` disables heavy flags (optimizations,
 sanitizers, profiling) while keeping include paths and macros.
-For multi-file runs, `--jobs=<N|auto>` parallelizes input loading and analysis; with cross-TU enabled, inputs are loaded one at a time (their compilations are serialized) and it parallelizes summary construction.
+For multi-file runs, `--jobs=<N|auto>` parallelizes the construction of cross-TU summaries; the inputs are loaded one at a time, as their compilations are serialized.
 `--compile-ir-cache-dir=<path>` reuses compiled LLVM IR for unchanged translation units
 based on source/dependency stamps, which reduces repeated C/C++ frontend cost across runs.
 IR that another compiler produced (another coretrace-compiler revision or LLVM version) is compiled again.
