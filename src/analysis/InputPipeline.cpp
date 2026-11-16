@@ -197,7 +197,9 @@ namespace ctrace::stack::analysis
         // v4: entries record the compiler that produced them (below). Builds of v3 ignore those
         // fields and would reuse such an entry; under v4, they do not even look it up, since the
         // key holds the schema.
-        constexpr llvm::StringLiteral kCompileIRCacheSchema = "compile-ir-cache-v4";
+        // v5: the entry of a `.ll` input holds the order of each value's uses (#279). An entry of
+        // v4 does not, and a build of v5 does not look it up: the first run writes it again.
+        constexpr llvm::StringLiteral kCompileIRCacheSchema = "compile-ir-cache-v5";
 
         // The compiler that produced an entry: compile IR depends on it as much as on the
         // command. An entry another coretrace-compiler revision or LLVM version produced is
@@ -1421,9 +1423,14 @@ namespace ctrace::stack::analysis
                     std::string sourceIR;
                     (void)readTextFile(inputPath, sourceIR);
 
+                    // The order of each value's uses is written too. Some analyses depend on it:
+                    // the first match of a walk, the order of a variable's reports. The reader
+                    // otherwise rebuilds that order its own way, and a run that reads the cache
+                    // would not walk the uses as the run that parsed the text did.
                     std::string llvmBitcode;
                     llvm::raw_string_ostream bitcodeStream(llvmBitcode);
-                    llvm::WriteBitcodeToFile(*result.module, bitcodeStream);
+                    llvm::WriteBitcodeToFile(*result.module, bitcodeStream,
+                                             /*ShouldPreserveUseListOrder=*/true);
                     bitcodeStream.flush();
 
                     std::vector<FileSnapshot> dependencySnapshots;
