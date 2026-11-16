@@ -47,8 +47,32 @@ namespace ctrace::stack::analysis
         // this lock. Some change state that the whole process shares, and hold it alone: those
         // with an option that Clang applies to LLVM's state, and those with -fno-integrated-cc1,
         // whose jobs run as programs, for which coretrace-compiler moves the process to the
-        // directory.
+        // directory and leaves it there (ProcessDirectoryScope).
         std::shared_mutex gCompileInvokeMutex;
+
+        // Brings the process back to the directory it was in. A compilation that holds
+        // gCompileInvokeMutex alone ends its scope before it releases the lock: the next
+        // compilation, and the relative paths of the host, start from that directory again.
+        class ProcessDirectoryScope
+        {
+          public:
+            ProcessDirectoryScope() : directory_(std::filesystem::current_path(error_)) {}
+
+            ProcessDirectoryScope(const ProcessDirectoryScope&) = delete;
+            ProcessDirectoryScope& operator=(const ProcessDirectoryScope&) = delete;
+
+            ~ProcessDirectoryScope()
+            {
+                if (error_)
+                    return;
+                std::error_code ignored;
+                std::filesystem::current_path(directory_, ignored);
+            }
+
+          private:
+            std::error_code error_;
+            std::filesystem::path directory_;
+        };
 
         bool compilesAlone(const std::vector<std::string>& args)
         {
@@ -921,8 +945,13 @@ namespace ctrace::stack::analysis
 
                 std::shared_lock<std::shared_mutex> shared(gCompileInvokeMutex, std::defer_lock);
                 std::unique_lock<std::shared_mutex> alone(gCompileInvokeMutex, std::defer_lock);
+                // After the locks: it ends before the one it was taken under is released.
+                std::optional<ProcessDirectoryScope> processDirectory;
                 if (compilesAlone(compileArgs))
+                {
                     alone.lock();
+                    processDirectory.emplace();
+                }
                 else
                     shared.lock();
                 const ScopedHotspot hotspot(config.timing, workingDir.empty()
