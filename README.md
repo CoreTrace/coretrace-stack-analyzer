@@ -252,7 +252,7 @@ Ready-to-adapt workflow examples:
 --compdb=<path> alias for --compile-commands
 --compdb-fast drops heavy build flags for faster analysis
 --include-compdb-deps includes `_deps` entries when inputs are auto-discovered from compile_commands.json
---jobs=<N|auto> parallel jobs for multi-file loading/analysis and cross-TU resource summary build (default: 1)
+--jobs=<N|auto> parallel jobs for the cross-TU summaries of multi-file runs (default: auto)
 --escape-model=<path> loads external noescape rules for stack pointer escape analysis (`noescape_arg`)
 --buffer-model=<path> loads external buffer write rules for copy/string overflow checks (`bounded_write`/`unbounded_write`)
 --resource-model=<path> loads external acquire/release rules for generic resource lifetime checks
@@ -295,7 +295,7 @@ To generate `compile_commands.json` with CMake, configure with
 
 If analysis feels slow, `--compdb-fast` disables heavy flags (optimizations,
 sanitizers, profiling) while keeping include paths and macros.
-For multi-file runs, `--jobs=<N|auto>` parallelizes the construction of cross-TU summaries; the inputs are loaded one at a time, as their compilations are serialized.
+For multi-file runs, `--jobs=<N|auto>` parallelizes the construction of cross-TU summaries; the inputs are loaded one at a time.
 `--compile-ir-cache-dir=<path>` reuses compiled LLVM IR for unchanged translation units
 based on source/dependency stamps, which reduces repeated C/C++ frontend cost across runs.
 IR that another compiler produced (another coretrace-compiler revision or LLVM version) is compiled again.
