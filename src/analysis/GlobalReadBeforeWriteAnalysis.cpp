@@ -477,18 +477,20 @@ namespace ctrace::stack::analysis
                 }
             }
 
-            for (const auto& selected : selectedReads)
+            // In the order of the reads, which is the instruction order numbered above (the
+            // arguments of one call in their order). selectedReads' own order follows the
+            // globals' addresses, which change from one run to the next.
+            for (const ReadEvent& readEvent : reads)
             {
-                const auto* global = selected.first;
-                const ReadEvent* readEvent = selected.second;
-                if (!readEvent || !readEvent->inst || !global)
+                const auto* global = readEvent.global;
+                if (selectedReads.lookup(global) != &readEvent)
                     continue;
 
                 GlobalReadBeforeWriteIssue issue;
                 issue.funcName = function.getName().str();
                 issue.globalName =
                     global->hasName() ? global->getName().str() : std::string("<unnamed-global>");
-                issue.readInst = readEvent->inst;
+                issue.readInst = readEvent.inst;
                 issue.firstWriteInst = selectedWrites.lookup(global);
                 issue.kind = selectedKinds.lookup(global);
                 issue.hasNonLocalWrite = hasAnyKnownWriteByGlobal.lookup(global);
