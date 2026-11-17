@@ -162,12 +162,12 @@ def main():
                         writer.writerow(row)
                         f.flush()
                         rows.append(row)
-                        # Keep the report and the log of the first repetition only.
+                        # Keep the log of every run, and the report of the first repetition only.
                         kept = os.path.join(args.out, "runs", os.path.basename(directory))
+                        os.makedirs(kept, exist_ok=True)
+                        shutil.copy(os.path.join(directory, "timing.txt"), kept)
                         if rep == 0:
-                            os.makedirs(kept, exist_ok=True)
-                            for name_ in ("report.json", "timing.txt"):
-                                shutil.copy(os.path.join(directory, name_), kept)
+                            shutil.copy(os.path.join(directory, "report.json"), kept)
                         shutil.rmtree(directory, ignore_errors=True)
                         print("%s j%d %s r%d: real %ss load %ss rss %sMB anon_end %sMB "
                               "anon_load %sMB threads %s drop %ss/%ss %s (%s diagnostics)" % (
