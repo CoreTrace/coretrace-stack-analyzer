@@ -36,6 +36,10 @@
 #define CTRACE_STACK_ANALYZER_HAS_PTHREAD 1
 #endif
 
+#if defined(__GLIBC__)
+#include <malloc.h>
+#endif
+
 #include <llvm/IR/InstrTypes.h>
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
@@ -916,6 +920,18 @@ static void printInterprocStatus(const AnalysisConfig& cfg, std::size_t inputCou
     }
 }
 
+// The most inputs loaded at once: each one compiling holds the memory of a compilation.
+static constexpr unsigned kMaxLoadingWorkers = 4;
+
+// Gives back to the system the memory that the allocator keeps free. After the loading workers,
+// glibc keeps in each one's arena what its compilations freed, for the rest of the run (#285).
+static void releaseFreedMemory()
+{
+#if defined(__GLIBC__)
+    malloc_trim(0);
+#endif
+}
+
 static AppStatus analyzeWithSharedModuleLoading(const std::vector<std::string>& inputFilenames,
                                                 AnalysisConfig& cfg, bool hasFilter,
                                                 bool needsCrossTUResourceSummaries,
@@ -957,12 +973,12 @@ static AppStatus analyzeWithSharedModuleLoading(const std::vector<std::string>& 
         loadSucceeded[index] = 1;
     };
 
-    // One input after the other, on this thread, whatever --jobs. The compilations are serialized
-    // (InputPipeline.cpp): a loading worker would only parse its bitcode in parallel, while glibc
-    // would give it an arena of its own and keep there the memory its compilation freed, about one
-    // compilation per worker for the rest of the run. The cross-TU summaries below still use --jobs.
-    for (std::size_t index = 0; index < inputFilenames.size(); ++index)
-        loadSingleModule(index);
+    // The inputs compile at once (InputPipeline.cpp), on at most kMaxLoadingWorkers workers
+    // whatever --jobs: each compilation in progress holds its own memory, and glibc gives each
+    // worker an arena of its own, which keeps the memory its compilations freed.
+    runParallelWork(inputFilenames.size(), std::min(resolveConfiguredJobs(cfg), kMaxLoadingWorkers),
+                    loadSingleModule);
+    releaseFreedMemory();
 
     std::vector<LoadedInputModule> orderedLoadedModules;
     orderedLoadedModules.reserve(inputFilenames.size());
