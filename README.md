@@ -302,7 +302,7 @@ IR that another compiler produced (another coretrace-compiler revision or LLVM v
 The cache is not used when coretrace-compiler's sources are not a clean checkout FetchContent fetched itself
 (`FETCHCONTENT_SOURCE_DIR_CC`, for instance): the analyzer cannot then tell which revision it was built with.
 `--compile-ir-format=bc|ll` controls source compilation output format before module load:
-- `bc` (default): compile to LLVM bitcode then parse bitcode.
+- `bc` (default): take the module from the compilation itself; no bitcode is written or parsed. The compile IR cache stores that module as bitcode.
 - `ll`: compile to textual LLVM IR then parse text IR.
 `--timing` now also includes pipeline traversal estimates per step
 (`module/function/instruction` estimates) and by execution model

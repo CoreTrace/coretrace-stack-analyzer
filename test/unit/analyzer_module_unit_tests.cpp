@@ -45,7 +45,9 @@
 #include <vector>
 
 #include <llvm/Analysis/MemorySSA.h>
+#include <llvm/ADT/DenseMap.h>
 #include <llvm/AsmParser/Parser.h>
+#include <llvm/Bitcode/BitcodeWriter.h>
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/DebugInfoMetadata.h>
 #include <llvm/IR/Function.h>
@@ -3412,6 +3414,127 @@ namespace
         return report.failures == 0;
     }
 
+    /// Each value an analysis can walk from, with its users in the order of its use list. A
+    /// user is named by its position in the module, which two modules of one source share, and
+    /// by the operand that holds the value; a user that has no position, a constant, is 0.
+    using UseLists = std::vector<std::vector<std::pair<std::size_t, unsigned>>>;
+
+    UseLists useLists(const llvm::Module& module)
+    {
+        llvm::DenseMap<const llvm::Value*, std::size_t> positions;
+        std::vector<const llvm::Value*> values;
+        const auto add = [&](const llvm::Value& value)
+        {
+            values.push_back(&value);
+            positions[&value] = values.size();
+        };
+        for (const llvm::GlobalVariable& global : module.globals())
+            add(global);
+        for (const llvm::Function& function : module)
+            add(function);
+        for (const llvm::Function& function : module)
+        {
+            for (const llvm::Argument& argument : function.args())
+                add(argument);
+            for (const llvm::BasicBlock& block : function)
+            {
+                add(block);
+                for (const llvm::Instruction& instruction : block)
+                    add(instruction);
+            }
+        }
+
+        UseLists lists;
+        lists.reserve(values.size());
+        for (const llvm::Value* value : values)
+        {
+            auto& users = lists.emplace_back();
+            for (const llvm::Use& use : value->uses())
+                users.emplace_back(positions.lookup(use.getUser()), use.getOperandNo());
+        }
+        return lists;
+    }
+
+    /// In the bitcode format, a run analyzes the module of the compilation and writes it in the
+    /// compile IR cache; the next run analyzes the module it reads there. Analyses walk the uses
+    /// of a value, and can keep the first match, stop on a budget or report in the order of the
+    /// walk: the module read from the cache must list each value's uses in the order the
+    /// compiled one does.
+    ///
+    /// `early` calls `late`, defined after `other`. Clang emits the three bodies in the order of
+    /// the source, and the module lists `late`, created by that call, before `other`. Bitcode
+    /// holds the bodies in the module's order, so a reader that is not told the order of uses
+    /// lists the callers of `callee` another way. The last load checks it, on the entry written
+    /// again without that order: it also shows that a load reads the entry.
+    bool testCompileIRCacheKeepsUseOrder(TestReport& report)
+    {
+        char rootTemplate[] = "/tmp/ctrace-use-order-XXXXXX";
+        if (mkdtemp(rootTemplate) == nullptr)
+        {
+            report.expect(false, "Compile IR cache use order: no temporary directory");
+            return false;
+        }
+        const std::filesystem::path root(rootTemplate);
+        const std::filesystem::path source = root / "order.c";
+        std::ofstream(source) << "int callee(int value);\n"
+                                 "int late(int value);\n"
+                                 "int early(int value) { return late(value) + callee(value); }\n"
+                                 "int other(int value) { return callee(value); }\n"
+                                 "int late(int value) { return callee(value); }\n";
+
+        ctrace::stack::AnalysisConfig config;
+        config.compileIRFormat = ctrace::stack::CompileIRFormat::BC;
+        config.compileIRCacheDir = (root / "cache").string();
+        const auto load = [&](LoadedModule& out)
+        {
+            llvm::SMDiagnostic err;
+            out.module = ctrace::stack::analysis::detail::loadModuleForAnalysis(
+                             source.string(), config, out.context, err, "known")
+                             .module;
+            return out.module != nullptr;
+        };
+
+        LoadedModule compiled;
+        std::filesystem::path entry;
+        if (load(compiled))
+        {
+            std::error_code ec;
+            for (const auto& file : std::filesystem::directory_iterator(root / "cache", ec))
+            {
+                if (file.path().extension() == ".bc")
+                    entry = file.path();
+            }
+        }
+        report.expect(!entry.empty(),
+                      "Compile IR cache use order: the compilation writes its module's bitcode");
+        LoadedModule cached;
+        if (entry.empty() || !load(cached))
+        {
+            report.expect(false, "Compile IR cache use order: the second load gives a module");
+            std::filesystem::remove_all(root);
+            return false;
+        }
+
+        const UseLists expected = useLists(*compiled.module);
+        report.expect(useLists(*cached.module) == expected,
+                      "Compile IR cache use order: the module read from the cache lists each "
+                      "value's uses as the compiled module does");
+
+        {
+            std::error_code ec;
+            llvm::raw_fd_ostream bitcode(entry.string(), ec);
+            if (!ec)
+                llvm::WriteBitcodeToFile(*compiled.module, bitcode);
+        }
+        LoadedModule unordered;
+        report.expect(load(unordered) && useLists(*unordered.module) != expected,
+                      "Compile IR cache use order: an entry written without the order of uses "
+                      "lists them another way");
+
+        std::filesystem::remove_all(root);
+        return report.failures == 0;
+    }
+
     /// resolveParameterDebugBinding: each parameter gets its own type, and its position among the
     /// parameters the source declares. The others are artificial: `this`, the vtt that the
     /// base-object constructor (C2) of a class with a virtual base takes, is_most_derived under the
@@ -3749,6 +3872,7 @@ int main(int argc, char** argv)
     (void)testOwnershipCollectorExceptions(repoRoot, report);
     (void)testOwnershipSummaryIndex(repoRoot, report);
     (void)testCompileIRCacheWithoutCompilerRevision(report);
+    (void)testCompileIRCacheKeepsUseOrder(report);
 
     if (report.failures == 0)
     {
