@@ -74,6 +74,12 @@ Notable changes are grouped by release. See [all releases](https://github.com/Co
   source compiled that way logs `Compiled to a module in N ms`, in place of `Compilation done`
   and `Bitcode parse done`. coretrace-compiler is pinned to a commit of
   CoreTrace/coretrace-compiler#265, which adds `compileToModule`.
+- With `--jobs` above 1, sources compile in parallel. Each compilation runs in its compile
+  command's directory through coretrace-compiler's `-working-directory`, instead of moving the
+  whole process there under a lock that let one source compile at a time. Compilations that pass
+  `-mllvm`, `-mdebug-pass`, `-mlimit-float-precision`, `-ftime-report` or `-fno-integrated-cc1`
+  still run one at a time. coretrace-compiler is pinned to a commit of
+  CoreTrace/coretrace-compiler#262, which gives each compilation a working directory of its own.
 
 ## v0.22.0
 
