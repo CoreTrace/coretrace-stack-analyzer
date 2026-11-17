@@ -86,6 +86,8 @@ namespace ctrace::stack::analysis
             std::vector<TrackedMemoryObject> objects;
             llvm::DenseMap<const llvm::AllocaInst*, unsigned> allocaIndex;
             llvm::DenseMap<const llvm::Argument*, unsigned> paramIndex;
+            // The range set of each object once fully initialized, shared by every state.
+            std::vector<RangeSet> fullRanges;
         };
 
         struct MemoryAccess
@@ -95,8 +97,6 @@ namespace ctrace::stack::analysis
             unsigned objectIdx = 0;
             unsigned reserved = 0;
         };
-
-        using InitRangeState = std::vector<RangeSet>;
 
         struct PointerSlotWriteEffect
         {
@@ -1020,6 +1020,7 @@ namespace ctrace::stack::analysis
             tracked.objects.clear();
             tracked.allocaIndex.clear();
             tracked.paramIndex.clear();
+            tracked.fullRanges.clear();
 
             for (const llvm::BasicBlock& BB : F)
             {
@@ -1062,31 +1063,166 @@ namespace ctrace::stack::analysis
                                         .hasNonPaddingLayout = false});
                 tracked.paramIndex[&arg] = idx;
             }
+
+            tracked.fullRanges.reserve(tracked.objects.size());
+            for (const TrackedMemoryObject& obj : tracked.objects)
+            {
+                addRange(tracked.fullRanges.emplace_back(), 0, getObjectFullRangeEnd(obj));
+            }
         }
 
-        static InitRangeState makeBottomState(std::size_t trackedCount)
+        // The initialized byte ranges of every tracked object at one program point. Most range
+        // sets are empty or cover their whole object: those take one bit each, and only the
+        // others are stored. A state holding one vector per object made the memory of a function
+        // grow with its blocks times its objects (#218).
+        class InitRangeState
         {
-            return InitRangeState(trackedCount);
+          public:
+            InitRangeState() = default;
+
+            // Every object uninitialized, or every object initialized over its full range.
+            InitRangeState(const std::vector<RangeSet>& fullRanges, bool fullyInitialized)
+                : fullRanges_(&fullRanges), full_(static_cast<unsigned>(fullRanges.size()))
+            {
+                if (!fullyInitialized)
+                    return;
+                for (unsigned idx = 0; idx < full_.size(); ++idx)
+                {
+                    if (!fullRanges[idx].empty())
+                        full_.set(idx);
+                }
+            }
+
+            std::size_t size() const
+            {
+                return full_.size();
+            }
+
+            const RangeSet& operator[](std::size_t idx) const
+            {
+                static const RangeSet empty;
+                if (full_.test(static_cast<unsigned>(idx)))
+                    return (*fullRanges_)[idx];
+                const std::size_t pos = partialPosition(idx);
+                if (pos < partial_.size() && partial_[pos].first == idx)
+                    return partial_[pos].second;
+                return empty;
+            }
+
+            // Replaces the range set of one object. The encoding stays canonical (a full or
+            // empty set is never stored), so that equal states compare equal.
+            void set(std::size_t idx, RangeSet ranges)
+            {
+                const bool isFull = !ranges.empty() && ranges == (*fullRanges_)[idx];
+                if (isFull)
+                    full_.set(static_cast<unsigned>(idx));
+                else
+                    full_.reset(static_cast<unsigned>(idx));
+
+                const std::size_t pos = partialPosition(idx);
+                const bool stored = pos < partial_.size() && partial_[pos].first == idx;
+                if (isFull || ranges.empty())
+                {
+                    if (stored)
+                        partial_.erase(partial_.begin() + pos);
+                    return;
+                }
+                if (stored)
+                    partial_[pos].second = std::move(ranges);
+                else
+                    partial_.insert(partial_.begin() + pos,
+                                    PartialEntry{static_cast<unsigned>(idx), std::move(ranges)});
+            }
+
+            // Intersects each object's range set with the incoming one. Only objects stored on
+            // either side need a range intersection; the others are full on both sides or not.
+            void meet(const InitRangeState& incoming)
+            {
+                std::vector<PartialEntry> partial;
+                llvm::SmallVector<unsigned, 4> becameFull;
+                auto lhs = partial_.begin();
+                auto rhs = incoming.partial_.begin();
+                while (lhs != partial_.end() || rhs != incoming.partial_.end())
+                {
+                    unsigned idx = 0;
+                    if (rhs == incoming.partial_.end() ||
+                        (lhs != partial_.end() && lhs->first < rhs->first))
+                    {
+                        idx = (lhs++)->first;
+                    }
+                    else if (lhs == partial_.end() || rhs->first < lhs->first)
+                    {
+                        idx = (rhs++)->first;
+                    }
+                    else
+                    {
+                        idx = lhs->first;
+                        ++lhs;
+                        ++rhs;
+                    }
+
+                    RangeSet ranges = intersectRanges((*this)[idx], incoming[idx]);
+                    if (ranges.empty())
+                        continue;
+                    if (ranges == (*fullRanges_)[idx])
+                        becameFull.push_back(idx);
+                    else
+                        partial.emplace_back(idx, std::move(ranges));
+                }
+
+                full_ &= incoming.full_;
+                for (unsigned idx : becameFull)
+                    full_.set(idx);
+                partial_ = std::move(partial);
+            }
+
+            bool operator==(const InitRangeState& other) const
+            {
+                return full_ == other.full_ && partial_ == other.partial_;
+            }
+
+          private:
+            using PartialEntry = std::pair<unsigned, RangeSet>;
+
+            std::size_t partialPosition(std::size_t idx) const
+            {
+                auto it = std::lower_bound(partial_.begin(), partial_.end(), idx,
+                                           [](const PartialEntry& entry, std::size_t value)
+                                           { return entry.first < value; });
+                return static_cast<std::size_t>(it - partial_.begin());
+            }
+
+            const std::vector<RangeSet>* fullRanges_ = nullptr;
+            llvm::BitVector full_;              // objects initialized over their full range
+            std::vector<PartialEntry> partial_; // other non-empty range sets, by object index
+        };
+
+        static void addRange(InitRangeState& state, std::size_t objectIdx, std::uint64_t begin,
+                             std::uint64_t end)
+        {
+            const RangeSet& current = state[objectIdx];
+            if (isRangeCovered(current, begin, end))
+                return;
+            RangeSet updated = current;
+            addRange(updated, begin, end);
+            state.set(objectIdx, std::move(updated));
+        }
+
+        static InitRangeState makeBottomState(const TrackedObjectContext& tracked)
+        {
+            return InitRangeState(tracked.fullRanges, false);
         }
 
         static InitRangeState makeTopState(const TrackedObjectContext& tracked)
         {
-            InitRangeState top(tracked.objects.size());
-            for (std::size_t i = 0; i < tracked.objects.size(); ++i)
-            {
-                addRange(top[i], 0, getObjectFullRangeEnd(tracked.objects[i]));
-            }
-            return top;
+            return InitRangeState(tracked.fullRanges, true);
         }
 
         static void meetMustState(InitRangeState& accum, const InitRangeState& incoming)
         {
             if (accum.size() != incoming.size())
                 return;
-            for (std::size_t idx = 0; idx < accum.size(); ++idx)
-            {
-                accum[idx] = intersectRanges(accum[idx], incoming[idx]);
-            }
+            accum.meet(incoming);
         }
 
         static bool statesEqual(const InitRangeState& lhs, const InitRangeState& rhs)
@@ -1131,7 +1267,7 @@ namespace ctrace::stack::analysis
                        const llvm::DenseMap<const llvm::BasicBlock*, InitRangeState>& outState,
                        const TrackedObjectContext& tracked)
         {
-            InitRangeState in = makeBottomState(tracked.objects.size());
+            InitRangeState in = makeBottomState(tracked);
             if (&BB == entryBlock)
                 return in;
 
@@ -1147,7 +1283,7 @@ namespace ctrace::stack::analysis
                 auto itOut = outState.find(pred);
                 if (itOut == outState.end())
                 {
-                    merged = makeBottomState(tracked.objects.size());
+                    merged = makeBottomState(tracked);
                     break;
                 }
                 meetMustState(merged, itOut->second);
@@ -1729,7 +1865,7 @@ namespace ctrace::stack::analysis
                 std::uint64_t clippedEnd = 0;
                 if (clipRangeToObject(obj, mappedBegin, mappedEnd, clippedBegin, clippedEnd))
                 {
-                    addRange(initialized[objectIdx], clippedBegin, clippedEnd);
+                    addRange(initialized, objectIdx, clippedBegin, clippedEnd);
                 }
             }
 
@@ -2768,7 +2904,7 @@ namespace ctrace::stack::analysis
                         {
                             continue;
                         }
-                        addRange(initialized[objectIdx], clippedBegin, clippedEnd);
+                        addRange(initialized, objectIdx, clippedBegin, clippedEnd);
                         wroteSomething = true;
 
                         if (currentSummary && isParamObject(obj) && obj.param)
@@ -2912,7 +3048,7 @@ namespace ctrace::stack::analysis
                                              access))
                 {
                     const TrackedMemoryObject& obj = tracked.objects[access.objectIdx];
-                    addRange(initialized[access.objectIdx], access.begin, access.end);
+                    addRange(initialized, access.objectIdx, access.begin, access.end);
                     if (isAllocaObject(obj))
                     {
                         if (writeSeen && access.objectIdx < writeSeen->size())
@@ -3092,7 +3228,7 @@ namespace ctrace::stack::analysis
                             return;
                         }
 
-                        addRange(initialized[access.objectIdx], access.begin, access.end);
+                        addRange(initialized, access.objectIdx, access.begin, access.end);
                         if (isAllocaObject(obj))
                         {
                             if (writeSeen && access.objectIdx < writeSeen->size())
@@ -3235,8 +3371,8 @@ namespace ctrace::stack::analysis
                 if (!reachable.lookup(&BB))
                     continue;
                 const bool isEntry = (&BB == &F.getEntryBlock());
-                inState[&BB] = isEntry ? makeBottomState(trackedCount) : makeTopState(tracked);
-                outState[&BB] = isEntry ? makeBottomState(trackedCount) : makeTopState(tracked);
+                inState[&BB] = isEntry ? makeBottomState(tracked) : makeTopState(tracked);
+                outState[&BB] = isEntry ? makeBottomState(tracked) : makeTopState(tracked);
             }
 
             const unsigned reachableBlocks = static_cast<unsigned>(outState.size());
