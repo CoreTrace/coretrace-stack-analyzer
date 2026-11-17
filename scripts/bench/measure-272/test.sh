@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
 # Runs the tests of /work/<variant> as the CI does on Linux (ci.yml), from empty caches.
-#   test.sh <main|rework>
+#   test.sh <main|274|rework>
 set -euo pipefail
 
 cd "/work/$1"

@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Experimental, for the experiment/272-linux-measure branch only, not for main: compares the
-# loading of main with the rework of #272, on one runner. The three analyzers are built as the
-# CI builds them, pass their tests, then are measured in turn in a cgroup of 4 CPUs and 6 GiB.
+# loading of main with #274 alone and with the rework of #272, on one runner. The four analyzers
+# are built as the CI builds them, pass their tests, then are measured in turn in a cgroup of
+# 4 CPUs and 6 GiB.
 name: Measure 272
 
 on:
@@ -17,6 +18,8 @@ concurrency:
 
 env:
   MAIN_SHA: 588e8008df1bc6f125943b4c86262e08a8a3efde
+  # The head of #274, which the rework holds: it tells the effect of #274 from that of the rework.
+  PR274_SHA: aa8b606178e23c337ca61fdd48199b36f82ecbd5
   LUA_SHA256: 7d5ea1b9cb6aa0b59ca3dde1c6adcb57ef83a1ba8e5432c0ecd06bf439b3ad88
   M: /work/rework/scripts/bench/measure-272
 
@@ -26,7 +29,7 @@ defaults:
 
 jobs:
   measure:
-    name: Main against the rework of 272
+    name: Main against 274 and the rework of 272
     runs-on: ubuntu-24.04
     timeout-minutes: 200
     steps:
@@ -47,18 +50,20 @@ jobs:
         sudo apt-get update
         sudo apt-get install -y llvm-20 llvm-20-dev clang-20 libclang-20-dev
 
-    - name: Lay out the two source trees and the Lua corpus
+    - name: Lay out the three source trees and the Lua corpus
       run: |
         sudo mkdir -p /work
         sudo chown "$(id -u):$(id -g)" /work
         mkdir -p /work/lua /work/out
         git worktree add --detach /work/main "$MAIN_SHA"
+        git worktree add --detach /work/274 "$PR274_SHA"
         git worktree add --detach /work/rework HEAD
         curl -fsSL --retry 5 -o /work/lua.tar.gz https://www.lua.org/ftp/lua-5.4.6.tar.gz
         echo "$LUA_SHA256  /work/lua.tar.gz" | sha256sum -c -
         tar -xzf /work/lua.tar.gz -C /work/lua --strip-components=2 lua-5.4.6/src
         {
           echo "main   $MAIN_SHA"
+          echo "274    $PR274_SHA"
           echo "rework $(git rev-parse HEAD)"
           lscpu | grep -E '^ *(Model name|CPU\(s\)):'
           free -m | sed -n 2p
@@ -92,6 +97,14 @@ jobs:
           --corpus lua=/work/corpus/lua/compile_commands.json \
           --variant main=/work/main/build/stack_usage_analyzer
 
+    - name: Build 274
+      run: bash "$M/build.sh" 274
+
+    - name: Test 274
+      timeout-minutes: 20
+      run: |
+        "$M/limited.sh" bash "$M/test.sh" 274 2>&1 | tee /work/out/test-274.log
+
     - name: Build the rework
       run: bash "$M/build.sh" rework
 
@@ -120,6 +133,7 @@ jobs:
           --corpus analyzer=/work/corpus/analyzer/compile_commands.json \
           --corpus lua=/work/corpus/lua/compile_commands.json \
           --variant main=/work/main/build/stack_usage_analyzer \
+          --variant 274=/work/274/build/stack_usage_analyzer \
           --variant rework=/work/rework/build/stack_usage_analyzer.release \
           --variant rework-no-release=/work/rework/build/stack_usage_analyzer.no-release \
           | tee /work/out/measure.log
@@ -128,7 +142,7 @@ jobs:
       if: always()
       run: |
         {
-          echo '### Loading of main against the rework of 272'
+          echo '### Loading of main against 274 and the rework of 272'
           echo '```'
           cat /work/out/machine.txt /work/out/limits.txt 2>/dev/null || true
           sed -n '/^medians/,$p' /work/out/measure.log 2>/dev/null || true
