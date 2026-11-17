@@ -2041,6 +2041,72 @@ def check_uninitialized_optional_receiver_index_repro() -> bool:
     return True
 
 
+def check_uninitialized_large_function_memory() -> bool:
+    """
+    Regression for #218: the uninitialized-read analysis gave every block a state holding one
+    range vector per tracked local, so its memory grew with blocks times locals and killed the
+    run on large functions. In a function of 2000 locals, each written in one case of a first
+    switch and read in one case of a second, every read must still be reported, under a memory
+    bound those states exceeded (about 680 MiB on macOS for this function, under 70 MiB without
+    them).
+    """
+    print("=== Testing uninitialized-read memory on a large function (#218) ===")
+    count = 2000
+    bound_mib = 384
+    source = ["void use(int);", "void f(int c, int d) {"]
+    source += [f"  int v{i};" for i in range(count)]
+    source += ["  switch (c) {"] + [f"  case {i}: v{i} = {i}; break;" for i in range(count)]
+    source += ["  }", "  switch (d) {"] + [f"  case {i}: use(v{i}); break;" for i in range(count)]
+    source += ["  }", "}"]
+
+    with tempfile.TemporaryDirectory(prefix="ct_uninit_memory_") as tmp:
+        sample = Path(tmp) / "large_function.c"
+        sample.write_text("\n".join(source) + "\n")
+        report_path = Path(tmp) / "report.json"
+        errors_path = Path(tmp) / "stderr.txt"
+        cmd = [str(RUN_CONFIG.analyzer)] + _effective_analyzer_args([str(sample), "--format=json"])
+        # os.wait4 gives the peak memory of this analyzer alone: getrusage(RUSAGE_CHILDREN) would
+        # mix in the analyzers that the other checks run in parallel.
+        with report_path.open("w") as report, errors_path.open("w") as errors:
+            proc = subprocess.Popen(cmd, stdout=report, stderr=errors)
+            timer = None
+            if RUN_CONFIG.analyzer_timeout:
+                timer = threading.Timer(RUN_CONFIG.analyzer_timeout, proc.kill)
+                timer.start()
+            _, status, usage = os.wait4(proc.pid, 0)
+            if timer:
+                timer.cancel()
+            proc.returncode = os.waitstatus_to_exitcode(status)
+        output = report_path.read_text()
+        errors_text = errors_path.read_text()
+
+    if proc.returncode != 0:
+        return fail_check(f"analyzer failed (code {proc.returncode})", errors_text[-2000:])
+    try:
+        diagnostics = json.loads(output)["diagnostics"]
+    except (json.JSONDecodeError, KeyError):
+        return fail_check("analyzer output is not a JSON report", output[-2000:])
+
+    names = []
+    for diag in diagnostics:
+        if diag.get("ruleId") != "UninitializedLocalRead":
+            continue
+        match = re.search(r"variable '([^']+)'", diag.get("details", {}).get("message", ""))
+        names.append(match.group(1) if match else "?")
+    if sorted(names) != sorted(f"v{i}" for i in range(count)):
+        return fail_check(
+            f"expected one UninitializedLocalRead per local v0..v{count - 1}, got {len(names)}"
+        )
+
+    peak_mib = usage.ru_maxrss / ((1 << 20) if sys.platform == "darwin" else (1 << 10))
+    if peak_mib > bound_mib:
+        return fail_check(f"analyzer peak memory {peak_mib:.0f} MiB exceeds {bound_mib} MiB")
+
+    print(f"  ✅ {count} uninitialized reads reported, peak memory {peak_mib:.0f} MiB "
+          f"(bound {bound_mib} MiB)\n")
+    return True
+
+
 def check_unknown_alloca_virtual_callback_escape() -> bool:
     """
     Regression: unknown-origin unnamed allocas must not be silently treated as
@@ -5985,6 +6051,7 @@ def main() -> int:
         check_uninitialized_verbose_ctor_trace,
         check_uninitialized_unsummarized_defined_bool_out_param,
         check_uninitialized_optional_receiver_index_repro,
+        check_uninitialized_large_function_memory,
         check_unknown_alloca_virtual_callback_escape,
         check_compdb_as_default_input_source,
         check_exclude_dir_filter,
