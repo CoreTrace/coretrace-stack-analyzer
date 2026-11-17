@@ -68,6 +68,12 @@ Notable changes are grouped by release. See [all releases](https://github.com/Co
 - Added an authors file and linked the repository documents from the README.
 - SARIF rules carry a title (`shortDescription`) and a description (`fullDescription`) instead
   of their id, and `describeRule` (`RuleCatalog.hpp`) gives them to programs linking the analyzer.
+- In the `bc` format of `--compile-ir-format`, the default, each module comes from the
+  compilation itself, through coretrace-compiler's `compileToModule` (#273). The analyzer
+  compiled each source to a temporary `.bc` file, then read and parsed it. With `--timing`, a
+  source compiled that way logs `Compiled to a module in N ms`, in place of `Compilation done`
+  and `Bitcode parse done`. coretrace-compiler is pinned to a commit of
+  CoreTrace/coretrace-compiler#265, which adds `compileToModule`.
 
 ## v0.22.0
 

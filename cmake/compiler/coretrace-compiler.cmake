@@ -13,7 +13,7 @@ endif()
 FetchContent_Declare(
     cc
     GIT_REPOSITORY https://github.com/CoreTrace/coretrace-compiler.git
-    GIT_TAG b4ad33638e9020a93f052a7a299e4105bd48f975 # v0.10.0
+    GIT_TAG 3c715b2907b44a72c9e8c273b082ad4f584576f2 # CoreTrace/coretrace-compiler#265
 )
 FetchContent_MakeAvailable(cc)
 
