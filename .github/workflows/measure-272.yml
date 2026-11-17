@@ -1,0 +1,144 @@
+# SPDX-License-Identifier: Apache-2.0
+# Experimental, for the experiment/272-linux-measure branch only, not for main: compares the
+# loading of main with the rework of #272, on one runner. The three analyzers are built as the
+# CI builds them, pass their tests, then are measured in turn in a cgroup of 4 CPUs and 6 GiB.
+name: Measure 272
+
+on:
+  push:
+    branches: [experiment/272-linux-measure]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: measure-272
+  cancel-in-progress: true
+
+env:
+  MAIN_SHA: 588e8008df1bc6f125943b4c86262e08a8a3efde
+  LUA_SHA256: 7d5ea1b9cb6aa0b59ca3dde1c6adcb57ef83a1ba8e5432c0ecd06bf439b3ad88
+  M: /work/rework/scripts/bench/measure-272
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  measure:
+    name: Main against the rework of 272
+    runs-on: ubuntu-24.04
+    timeout-minutes: 200
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        # main's commit is needed next to the branch's.
+        fetch-depth: 0
+
+    # As ci.yml does on Linux, without ccache: every build here is a cold one.
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential cmake python3 \
+          ninja-build lld libz3-dev pkg-config
+        wget -O - https://apt.llvm.org/llvm-snapshot.gpg.key | sudo apt-key add -
+        UBUNTU_CODENAME=$(lsb_release -cs)
+        sudo apt-add-repository "deb http://apt.llvm.org/${UBUNTU_CODENAME}/ llvm-toolchain-${UBUNTU_CODENAME}-20 main"
+        sudo apt-get update
+        sudo apt-get install -y llvm-20 llvm-20-dev clang-20 libclang-20-dev
+
+    - name: Lay out the two source trees and the Lua corpus
+      run: |
+        sudo mkdir -p /work
+        sudo chown "$(id -u):$(id -g)" /work
+        mkdir -p /work/lua /work/out
+        git worktree add --detach /work/main "$MAIN_SHA"
+        git worktree add --detach /work/rework HEAD
+        curl -fsSL --retry 5 -o /work/lua.tar.gz https://www.lua.org/ftp/lua-5.4.6.tar.gz
+        echo "$LUA_SHA256  /work/lua.tar.gz" | sha256sum -c -
+        tar -xzf /work/lua.tar.gz -C /work/lua --strip-components=2 lua-5.4.6/src
+        {
+          echo "main   $MAIN_SHA"
+          echo "rework $(git rev-parse HEAD)"
+          lscpu | grep -E '^ *(Model name|CPU\(s\)):'
+          free -m | sed -n 2p
+          uname -r
+          ldd --version | head -1
+          c++ --version | head -1
+        } | tee /work/out/machine.txt
+
+    - name: Check the limits
+      run: |
+        limits=$("$M/limited.sh" sh -c '
+          cgroup="/sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup)"
+          echo "$(nproc) CPUs, memory.max $(cat "$cgroup/memory.max"), memory.swap.max $(cat "$cgroup/memory.swap.max"), as $(id -un)"')
+        echo "$limits" | tee /work/out/limits.txt
+        test "$limits" = "4 CPUs, memory.max 6442450944, memory.swap.max 0, as $(id -un)"
+
+    - name: Build main
+      run: bash "$M/build.sh" main
+
+    - name: Test main
+      timeout-minutes: 20
+      run: |
+        "$M/limited.sh" bash "$M/test.sh" main 2>&1 | tee /work/out/test-main.log
+
+    # Not a measure: one run that checks the measuring script, kept apart from the results.
+    - name: Check the measuring script on Lua
+      run: |
+        python3 "$M/corpora.py"
+        "$M/limited.sh" python3 "$M/measure.py" --out /work/out/script-check --reps 1 --jobs 2 \
+          --deadline-min 5 \
+          --corpus lua=/work/corpus/lua/compile_commands.json \
+          --variant main=/work/main/build/stack_usage_analyzer
+
+    - name: Build the rework
+      run: bash "$M/build.sh" rework
+
+    - name: Test the rework
+      timeout-minutes: 20
+      run: |
+        "$M/limited.sh" bash "$M/test.sh" rework 2>&1 | tee /work/out/test-rework.log
+        cp /work/rework/build/stack_usage_analyzer /work/rework/build/stack_usage_analyzer.release
+
+    - name: Build the rework without its release of freed memory
+      run: bash "$M/build.sh" rework no-release
+
+    - name: Test the rework without its release of freed memory
+      timeout-minutes: 20
+      run: |
+        "$M/limited.sh" bash "$M/test.sh" rework 2>&1 | tee /work/out/test-rework-no-release.log
+        cp /work/rework/build/stack_usage_analyzer /work/rework/build/stack_usage_analyzer.no-release
+
+    # The variants rotate from one repetition to the next (measure.py). Past the deadline, the
+    # script stops before the next run and keeps the complete repetitions.
+    - name: Measure
+      timeout-minutes: 110
+      run: |
+        "$M/limited.sh" python3 "$M/measure.py" --out /work/out --reps 3 --jobs 1,2,4 \
+          --deadline-min 90 \
+          --corpus analyzer=/work/corpus/analyzer/compile_commands.json \
+          --corpus lua=/work/corpus/lua/compile_commands.json \
+          --variant main=/work/main/build/stack_usage_analyzer \
+          --variant rework=/work/rework/build/stack_usage_analyzer.release \
+          --variant rework-no-release=/work/rework/build/stack_usage_analyzer.no-release \
+          | tee /work/out/measure.log
+
+    - name: Summary
+      if: always()
+      run: |
+        {
+          echo '### Loading of main against the rework of 272'
+          echo '```'
+          cat /work/out/machine.txt /work/out/limits.txt 2>/dev/null || true
+          sed -n '/^medians/,$p' /work/out/measure.log 2>/dev/null || true
+          echo '```'
+        } >> "$GITHUB_STEP_SUMMARY"
+
+    - name: Keep the results
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: measure-272
+        path: /work/out
+        retention-days: 90
