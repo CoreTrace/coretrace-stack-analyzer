@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "analysis/PromotedValues.hpp"
 
+#include <algorithm>
 #include <optional>
 #include <string>
 #include <vector>
@@ -19,6 +20,7 @@
 #include <llvm/IR/InstIterator.h>
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/Module.h>
+#include <llvm/Support/CheckedArithmetic.h>
 #include <llvm/Support/raw_ostream.h>
 #include <llvm/TargetParser/Triple.h>
 #include <llvm/Transforms/Utils/Cloning.h>
@@ -405,5 +407,84 @@ namespace ctrace::stack::analysis
                                        scev.getConstant(type, lower, /*isSigned=*/true), at) &&
                scev.isKnownPredicateAt(ICmpInst::ICMP_SLT, indexValue,
                                        scev.getConstant(type, upper, /*isSigned=*/true), at);
+    }
+
+    std::optional<LoopWrites> PromotedValues::loopWrites(const llvm::StoreInst& store,
+                                                         const llvm::Value& base)
+    {
+        PromotedFunction* promoted = impl_->promoted(*store.getFunction());
+        const auto* at = dyn_cast_or_null<StoreInst>(impl_->copyOf(&store));
+        const Value* copiedBase = impl_->copyOf(&base);
+        if (!promoted || !at || !copiedBase)
+            return std::nullopt;
+
+        // The store in the loop itself, not in one nested in it. The loop leaves from one block
+        // and goes back to its header from one latch, which the store runs before.
+        const BasicBlock* block = at->getParent();
+        const Loop* loop = promoted->loops.getLoopFor(block);
+        const BasicBlock* exiting = loop ? loop->getExitingBlock() : nullptr;
+        const BasicBlock* latch = loop ? loop->getLoopLatch() : nullptr;
+        if (!exiting || !latch || !promoted->dominators.dominates(block, latch))
+            return std::nullopt;
+
+        // A constant iteration count, and an address that moves by a constant step from a
+        // constant offset of the base.
+        ScalarEvolution& scev = promoted->scev;
+        const auto* count = dyn_cast<SCEVConstant>(scev.getBackedgeTakenCount(loop));
+        const auto* offset = dyn_cast<SCEVAddRecExpr>(
+            scev.getMinusSCEV(scev.getSCEV(const_cast<Value*>(at->getPointerOperand())),
+                              scev.getSCEV(const_cast<Value*>(copiedBase))));
+        if (!count || count->getAPInt().getActiveBits() > 32 || !offset ||
+            offset->getLoop() != loop || !offset->isAffine())
+            return std::nullopt;
+        const auto* start = dyn_cast<SCEVConstant>(offset->getStart());
+        const auto* step = dyn_cast<SCEVConstant>(offset->getStepRecurrence(scev));
+        const TypeSize size =
+            promoted->function.getDataLayout().getTypeStoreSize(at->getValueOperand()->getType());
+        if (!start || !step || start->getAPInt().getBitWidth() > 64 || size.isScalable())
+            return std::nullopt;
+
+        // The store runs on each iteration that goes back to the header, and on the last one
+        // when it lies on every way to the exit. A step no larger than the bytes written leaves
+        // no gap between iterations.
+        const std::int64_t runs = static_cast<std::int64_t>(count->getAPInt().getZExtValue()) +
+                                  (promoted->dominators.dominates(block, exiting) ? 1 : 0);
+        const std::int64_t stride = step->getAPInt().getSExtValue();
+        const auto bytes = static_cast<std::int64_t>(size.getFixedValue());
+        if (runs == 0 || stride > bytes || stride < -bytes)
+            return std::nullopt;
+        const std::int64_t first = start->getAPInt().getSExtValue();
+        const std::optional<std::int64_t> span = checkedMul(runs - 1, stride);
+        const std::optional<std::int64_t> last = span ? checkedAdd(first, *span) : std::nullopt;
+        const std::optional<std::int64_t> end =
+            last ? checkedAdd(std::max(first, *last), bytes) : std::nullopt;
+        if (!end)
+            return std::nullopt;
+
+        // The copy keeps the blocks of the original and the order of their successors.
+        const BasicBlock* originalExiting = nullptr;
+        for (const BasicBlock& candidate : *store.getFunction())
+        {
+            if (impl_->copyOf(&candidate) == exiting)
+            {
+                originalExiting = &candidate;
+                break;
+            }
+        }
+        if (!originalExiting)
+            return std::nullopt;
+
+        LoopWrites out;
+        out.begin = std::min(first, *last);
+        out.end = *end;
+        out.exiting = originalExiting;
+        const Instruction* copiedTerminator = exiting->getTerminator();
+        const Instruction* terminator = originalExiting->getTerminator();
+        for (unsigned idx = 0; idx < copiedTerminator->getNumSuccessors(); ++idx)
+        {
+            if (!loop->contains(copiedTerminator->getSuccessor(idx)))
+                out.exits.push_back(terminator->getSuccessor(idx));
+        }
+        return out;
     }
 } // namespace ctrace::stack::analysis

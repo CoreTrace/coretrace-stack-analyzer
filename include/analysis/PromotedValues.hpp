@@ -4,12 +4,16 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
+#include <vector>
 
 namespace llvm
 {
+    class BasicBlock;
     class Function;
     class Instruction;
     class Module;
+    class StoreInst;
     class Value;
 } // namespace llvm
 
@@ -33,6 +37,17 @@ namespace ctrace::stack::analysis
         std::uint32_t minOnEveryRun : 1 = false;
         std::uint32_t maxOnEveryRun : 1 = false;
         std::uint32_t reservedFlags : 30 = 0;
+    };
+
+    /// @brief The bytes a store writes over every iteration of the loop around it.
+    struct LoopWrites
+    {
+        std::int64_t begin = 0; ///< First byte written, as an offset from the base.
+        std::int64_t end = 0;   ///< One past the last byte written.
+        /// The only block the loop leaves from, and its successors outside the loop: every edge
+        /// from the one to the others leaves the loop with these bytes written.
+        const llvm::BasicBlock* exiting = nullptr;
+        std::vector<const llvm::BasicBlock*> exits;
     };
 
     /// @brief Value queries about the original IR, answered on a copy of the module where
@@ -72,6 +87,13 @@ namespace ctrace::stack::analysis
         /// runs, reading the index as signed.
         [[nodiscard]] bool provesWithin(const llvm::Instruction& access, const llvm::Value& index,
                                         std::int64_t lower, std::int64_t upper);
+
+        /// Bytes @p store writes from @p base over the loop around it, when the loop leaves from
+        /// one block after a constant number of iterations, the store runs on each of them, and
+        /// its address moves by a constant step no larger than what it writes, so that the
+        /// bytes are contiguous. Both belong to the original IR.
+        [[nodiscard]] std::optional<LoopWrites> loopWrites(const llvm::StoreInst& store,
+                                                           const llvm::Value& base);
 
       private:
         struct Impl;

@@ -2,6 +2,7 @@
 #include "analysis/UninitializedVarAnalysis.hpp"
 #include "analysis/ParameterDebugBinding.hpp"
 #include "analysis/AnalyzerUtils.hpp"
+#include "analysis/PromotedValues.hpp"
 
 #include <algorithm>
 #include <array>
@@ -1125,11 +1126,84 @@ namespace ctrace::stack::analysis
             }
         }
 
+        // The bytes counted loops write, by edge leaving the loop (#224). The dataflow sees each
+        // iteration store to an element it cannot name, so it adds nothing; the promoted copy,
+        // where the loop counter lives in a register, gives the bytes of every iteration.
+        using LoopExitWrites =
+            llvm::DenseMap<std::pair<const llvm::BasicBlock*, const llvm::BasicBlock*>,
+                           llvm::SmallVector<MemoryAccess, 2>>;
+
+        class CountedLoopWrites
+        {
+          public:
+            explicit CountedLoopWrites(const llvm::Module& module) : module_(module) {}
+
+            // Found on the first query of @p F: the summary fixpoint analyzes a function several
+            // times, its loops once.
+            const LoopExitWrites& of(const llvm::Function& F, const TrackedObjectContext& tracked,
+                                     const llvm::DataLayout& DL)
+            {
+                auto [it, inserted] = byFunction_.try_emplace(&F);
+                if (inserted)
+                    collect(F, tracked, DL, it->second);
+                return it->second;
+            }
+
+          private:
+            void collect(const llvm::Function& F, const TrackedObjectContext& tracked,
+                         const llvm::DataLayout& DL, LoopExitWrites& out)
+            {
+                for (const llvm::BasicBlock& BB : F)
+                {
+                    for (const llvm::Instruction& I : BB)
+                    {
+                        // A store at a constant offset is already a write of the dataflow.
+                        const auto* SI = llvm::dyn_cast<llvm::StoreInst>(&I);
+                        unsigned objectIdx = 0;
+                        std::uint64_t offset = 0;
+                        bool hasConstOffset = false;
+                        if (!SI || llvm::isa<llvm::UndefValue>(SI->getValueOperand()) ||
+                            !resolveTrackedObjectBase(SI->getPointerOperand(), tracked, DL,
+                                                      objectIdx, offset, hasConstOffset) ||
+                            hasConstOffset)
+                        {
+                            continue;
+                        }
+
+                        const TrackedMemoryObject& obj = tracked.objects[objectIdx];
+                        const llvm::Value* base = obj.alloca;
+                        if (!base)
+                            base = obj.param;
+                        if (!base)
+                            continue;
+                        if (!promoted_)
+                            promoted_.emplace(module_, [](const llvm::Function&) { return true; });
+                        const std::optional<LoopWrites> writes = promoted_->loopWrites(*SI, *base);
+                        MemoryAccess access;
+                        access.objectIdx = objectIdx;
+                        if (!writes || writes->begin < 0 ||
+                            !clipRangeToObject(obj, static_cast<std::uint64_t>(writes->begin),
+                                               static_cast<std::uint64_t>(writes->end),
+                                               access.begin, access.end))
+                        {
+                            continue;
+                        }
+                        for (const llvm::BasicBlock* exit : writes->exits)
+                            out[{writes->exiting, exit}].push_back(access);
+                    }
+                }
+            }
+
+            const llvm::Module& module_;
+            std::optional<PromotedValues> promoted_;
+            llvm::DenseMap<const llvm::Function*, LoopExitWrites> byFunction_;
+        };
+
         static InitRangeState
         computeInState(const llvm::BasicBlock& BB, const llvm::BasicBlock* entryBlock,
                        const llvm::DenseMap<const llvm::BasicBlock*, bool>& reachable,
                        const llvm::DenseMap<const llvm::BasicBlock*, InitRangeState>& outState,
-                       const TrackedObjectContext& tracked)
+                       const TrackedObjectContext& tracked, const LoopExitWrites& loopExitWrites)
         {
             InitRangeState in = makeBottomState(tracked.objects.size());
             if (&BB == entryBlock)
@@ -1150,7 +1224,17 @@ namespace ctrace::stack::analysis
                     merged = makeBottomState(tracked.objects.size());
                     break;
                 }
-                meetMustState(merged, itOut->second);
+                auto itLoop = loopExitWrites.find({pred, &BB});
+                if (itLoop == loopExitWrites.end())
+                {
+                    meetMustState(merged, itOut->second);
+                    continue;
+                }
+                // The edge leaves a counted loop: what the loop wrote holds on it.
+                InitRangeState leaving = itOut->second;
+                for (const MemoryAccess& access : itLoop->second)
+                    addRange(leaving[access.objectIdx], access.begin, access.end);
+                meetMustState(merged, leaving);
             }
 
             if (!havePred)
@@ -3214,13 +3298,15 @@ namespace ctrace::stack::analysis
                                     const FunctionSummaryMap& summaries,
                                     const ExternalSummaryMapByName* externalSummariesByName,
                                     const CalleeSymbolNameMap* calleeSymbolNames,
-                                    unsigned fixpointIterationLimit, FunctionSummary* outSummary,
+                                    CountedLoopWrites& loopWrites, unsigned fixpointIterationLimit,
+                                    FunctionSummary* outSummary,
                                     std::vector<UninitializedLocalReadIssue>* outIssues)
         {
             TrackedObjectContext tracked;
             collectTrackedObjects(F, DL, tracked);
             if (tracked.objects.empty())
                 return;
+            const LoopExitWrites& loopExitWrites = loopWrites.of(F, tracked, DL);
 
             const unsigned trackedCount = static_cast<unsigned>(tracked.objects.size());
 
@@ -3321,8 +3407,8 @@ namespace ctrace::stack::analysis
                     if (!reachable.lookup(&BB))
                         continue;
 
-                    InitRangeState newIn =
-                        computeInState(BB, &F.getEntryBlock(), reachable, outState, tracked);
+                    InitRangeState newIn = computeInState(BB, &F.getEntryBlock(), reachable,
+                                                          outState, tracked, loopExitWrites);
 
                     InitRangeState state = newIn;
                     if (fuseIssueCollection)
@@ -3467,10 +3553,12 @@ namespace ctrace::stack::analysis
             }
         }
 
-        static FunctionSummaryMap computeFunctionSummaries(
-            llvm::Module& mod, const std::function<bool(const llvm::Function&)>& shouldAnalyze,
-            const ExternalSummaryMapByName* externalSummariesByName,
-            const CalleeSymbolNameMap* calleeSymbolNames, unsigned fixpointIterationLimit)
+        static FunctionSummaryMap
+        computeFunctionSummaries(llvm::Module& mod,
+                                 const std::function<bool(const llvm::Function&)>& shouldAnalyze,
+                                 const ExternalSummaryMapByName* externalSummariesByName,
+                                 const CalleeSymbolNameMap* calleeSymbolNames,
+                                 CountedLoopWrites& loopWrites, unsigned fixpointIterationLimit)
         {
             FunctionSummaryMap summaries;
             llvm::SmallVector<const llvm::Function*, 64> analysisFunctions;
@@ -3523,7 +3611,8 @@ namespace ctrace::stack::analysis
 
                     FunctionSummary next = makeEmptySummary(*func);
                     analyzeFunction(*func, mod.getDataLayout(), summaries, externalSummariesByName,
-                                    calleeSymbolNames, fixpointIterationLimit, &next, nullptr);
+                                    calleeSymbolNames, loopWrites, fixpointIterationLimit, &next,
+                                    nullptr);
                     FunctionSummary& cur = summaries[func];
                     if (!(cur == next))
                     {
@@ -3978,8 +4067,10 @@ namespace ctrace::stack::analysis
         {
             externalMap = &preparedExternal->opaque->summariesByName;
         }
-        FunctionSummaryMap summaries = computeFunctionSummaries(
-            mod, shouldSummarize, externalMap, calleeSymbolNames, fixpointIterationLimit);
+        CountedLoopWrites loopWrites(mod);
+        FunctionSummaryMap summaries =
+            computeFunctionSummaries(mod, shouldSummarize, externalMap, calleeSymbolNames,
+                                     loopWrites, fixpointIterationLimit);
         return exportSummaryIndexForModule(mod, summaries);
     }
 
@@ -4084,9 +4175,10 @@ namespace ctrace::stack::analysis
         { return summaryScope.find(&F) != summaryScope.end(); };
         const CalleeSymbolNameMap calleeSymbolNames = buildCalleeSymbolNameMap(mod, summaryScope);
         const ExternalSummaryMapByName externalMap = importExternalSummaryMap(externalSummaries);
+        CountedLoopWrites loopWrites(mod);
         FunctionSummaryMap summaries = computeFunctionSummaries(
             mod, shouldSummarize, externalMap.empty() ? nullptr : &externalMap, &calleeSymbolNames,
-            fixpointIterationLimit);
+            loopWrites, fixpointIterationLimit);
 
         for (const llvm::Function& F : mod)
         {
@@ -4097,7 +4189,7 @@ namespace ctrace::stack::analysis
 
             analyzeFunction(F, mod.getDataLayout(), summaries,
                             externalMap.empty() ? nullptr : &externalMap, &calleeSymbolNames,
-                            fixpointIterationLimit, nullptr, &issues);
+                            loopWrites, fixpointIterationLimit, nullptr, &issues);
         }
 
         return issues;
