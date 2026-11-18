@@ -3,10 +3,12 @@
 
 #include "../ResourceLifetimeInternal.hpp"
 #include "analysis/AnalyzerUtils.hpp"
+#include "analysis/FunctionFacts.hpp"
 #include "analysis/IRValueUtils.hpp"
 
 #include <llvm/ADT/DenseMap.h>
 #include <llvm/ADT/PostOrderIterator.h>
+#include <llvm/Analysis/MemorySSA.h>
 #include <llvm/Analysis/ValueTracking.h>
 #include <llvm/IR/Argument.h>
 #include <llvm/IR/BasicBlock.h>
@@ -31,6 +33,10 @@ namespace ctrace::stack::analysis::ownership
         using lifetime_detail::MethodClassInfo;
         using lifetime_detail::StorageKey;
         using lifetime_detail::StorageScope;
+
+        /// Bounds the walk through reloads; a -O0 copy chain such as `q = p` needs one level
+        /// per copy.
+        constexpr unsigned kMaxReloadDepth = 16;
 
         class Collector
         {
@@ -115,31 +121,45 @@ namespace ctrace::stack::analysis::ownership
                     if (!llvm::isa<llvm::ConstantPointerNull>(other))
                         return nullptr;
                 }
-                // -O0 reloads the pointer from its slot before the test.
+                // -O0 reloads the pointer from its slot before the test, and a copy such as
+                // `q = p` goes through slots too: follow each reload to the value written by the
+                // store it reads, whatever other stores write the slot elsewhere.
                 const llvm::Value* origin = ptr;
-                if (const auto* load = llvm::dyn_cast<llvm::LoadInst>(ptr))
+                for (unsigned depth = 0; depth < kMaxReloadDepth; ++depth)
                 {
-                    if (const auto* slot = llvm::dyn_cast<llvm::AllocaInst>(
-                            load->getPointerOperand()->stripPointerCasts()))
-                    {
-                        const llvm::StoreInst* unique = nullptr;
-                        for (const llvm::User* u : slot->users())
-                        {
-                            if (const auto* st = llvm::dyn_cast<llvm::StoreInst>(u))
-                            {
-                                if (unique)
-                                    return nullptr;
-                                unique = st;
-                            }
-                        }
-                        if (unique)
-                            origin = unique->getValueOperand();
-                    }
+                    const auto* load = llvm::dyn_cast<llvm::LoadInst>(origin);
+                    const llvm::StoreInst* store = load ? storeReadBy(*load) : nullptr;
+                    if (!store)
+                        break;
+                    origin = store->getValueOperand();
                 }
                 if (!llvm::isKnownNonZero(origin, DL_))
                     return nullptr;
                 // eq null → true edge dead; ne null → false edge dead.
                 return br->getSuccessor(icmp->getPredicate() == llvm::CmpInst::ICMP_EQ ? 0 : 1);
+            }
+
+            /// The store whose value `load` reads: its MemorySSA clobber, when that clobber
+            /// stores the loaded type to the loaded pointer. Null for any other clobber, such
+            /// as a merge of stores from several paths, a call or the function entry.
+            const llvm::StoreInst* storeReadBy(const llvm::LoadInst& load)
+            {
+                if (!load.isSimple())
+                    return nullptr;
+                if (!facts_)
+                    facts_.emplace(const_cast<llvm::Function&>(F_));
+                const auto* def =
+                    llvm::dyn_cast_or_null<llvm::MemoryDef>(facts_->clobberingAccess(load));
+                const auto* store =
+                    def ? llvm::dyn_cast_or_null<llvm::StoreInst>(def->getMemoryInst()) : nullptr;
+                if (!store || !store->isSimple() ||
+                    store->getPointerOperand()->stripPointerCasts() !=
+                        load.getPointerOperand()->stripPointerCasts() ||
+                    store->getValueOperand()->getType() != load.getType())
+                {
+                    return nullptr;
+                }
+                return store;
             }
 
             /// Several source `return`s are usually merged into one `ret` block that only
@@ -1181,6 +1201,7 @@ namespace ctrace::stack::analysis::ownership
             llvm::DenseMap<const llvm::Value*, LocationId> valueIds_;
             llvm::DenseMap<const llvm::LoadInst*, LocationId> loadedFrom_; // the slot read
             std::map<const llvm::CallBase*, Event> exceptionalSummaryEvents_;
+            std::optional<FunctionFacts> facts_; // built on the first null test of a reload
             std::optional<LocationId> unknownTarget_;
             LocationId returnLocation_ = 0;
             bool mayUnwind_ = false;
