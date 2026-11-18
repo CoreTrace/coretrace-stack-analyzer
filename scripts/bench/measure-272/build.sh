@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
 # Builds the analyzer of /work/<variant> as the CI does on Linux (ci.yml), unit tests included.
-#   build.sh <main|274|rework>
-#   build.sh rework no-release    the rework again, without its release of freed memory
+#   build.sh <variant>
+#   build.sh rework no-release    the rework of 272 again, without its release of freed memory
 set -euo pipefail
 
 variant=$1

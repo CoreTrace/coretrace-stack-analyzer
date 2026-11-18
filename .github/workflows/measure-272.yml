@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
-# Experimental, for the experiment/272-linux-measure branch only, not for main: compares the
-# loading of main with #274 alone and with the rework of #272, on one runner. The four analyzers
-# are built as the CI builds them, pass their tests, then are measured in turn in a cgroup of
-# 4 CPUs and 6 GiB.
+# Experimental, for the experiment/272-linux-measure branch only, not for main: tells the effect of
+# the compiler's update from that of #274, on one runner. The three analyzers are built as the CI
+# builds them, pass their tests, then are measured in turn in a cgroup of 4 CPUs and 6 GiB:
+#   main    main as it is: the bitcode read back, coretrace-compiler v0.10.0
+#   pin     main with the compiler of #274, v0.13.0, and nothing else of #274
+#   module  main merged with #274: the module taken from the compiler, v0.13.0
 name: Measure 272
 
 on:
@@ -18,10 +20,11 @@ concurrency:
 
 env:
   MAIN_SHA: 588e8008df1bc6f125943b4c86262e08a8a3efde
-  # The head of #274, which the rework holds: it tells the effect of #274 from that of the rework.
   PR274_SHA: aa8b606178e23c337ca61fdd48199b36f82ecbd5
+  # What `git merge-tree --write-tree` gives for these two commits, without a conflict.
+  MERGED_TREE: 8d13225b7d0dc45cb5ac0adbaa670baeee3df16e
   LUA_SHA256: 7d5ea1b9cb6aa0b59ca3dde1c6adcb57ef83a1ba8e5432c0ecd06bf439b3ad88
-  M: /work/rework/scripts/bench/measure-272
+  M: /work/scripts/scripts/bench/measure-272
 
 defaults:
   run:
@@ -29,13 +32,13 @@ defaults:
 
 jobs:
   measure:
-    name: Main against 274 and the rework of 272
+    name: Main against the compiler's update and 274
     runs-on: ubuntu-24.04
-    timeout-minutes: 200
+    timeout-minutes: 120
     steps:
     - uses: actions/checkout@v4
       with:
-        # main's commit is needed next to the branch's.
+        # main's commit and the head of #274 are needed next to the branch's.
         fetch-depth: 0
 
     # As ci.yml does on Linux, without ccache: every build here is a cold one.
@@ -55,16 +58,29 @@ jobs:
         sudo mkdir -p /work
         sudo chown "$(id -u):$(id -g)" /work
         mkdir -p /work/lua /work/out
+        git worktree add --detach /work/scripts HEAD
         git worktree add --detach /work/main "$MAIN_SHA"
-        git worktree add --detach /work/274 "$PR274_SHA"
-        git worktree add --detach /work/rework HEAD
+        # The file of #274 differs from main's by the pinned commit and by nothing else.
+        git worktree add --detach /work/pin "$MAIN_SHA"
+        git -C /work/pin checkout "$PR274_SHA" -- cmake/compiler/coretrace-compiler.cmake
+        test "$(git -C /work/pin diff --cached --numstat)" \
+          = $'1\t1\tcmake/compiler/coretrace-compiler.cmake'
+        # The merge is left uncommitted: its tree is the one checked before the run.
+        merged=$(git merge-tree --write-tree "$MAIN_SHA" "$PR274_SHA")
+        test "$merged" = "$MERGED_TREE"
+        git worktree add --detach /work/module "$MAIN_SHA"
+        git -C /work/module read-tree -u --reset "$merged"
         curl -fsSL --retry 5 -o /work/lua.tar.gz https://www.lua.org/ftp/lua-5.4.6.tar.gz
         echo "$LUA_SHA256  /work/lua.tar.gz" | sha256sum -c -
         tar -xzf /work/lua.tar.gz -C /work/lua --strip-components=2 lua-5.4.6/src
         {
-          echo "main   $MAIN_SHA"
-          echo "274    $PR274_SHA"
-          echo "rework $(git rev-parse HEAD)"
+          echo "main    $MAIN_SHA"
+          echo "pin     $MAIN_SHA with the compiler of $PR274_SHA"
+          echo "module  $MAIN_SHA merged with $PR274_SHA, tree $merged"
+          for variant in main pin module; do
+            echo "$variant $(grep -m1 GIT_TAG "/work/$variant/cmake/compiler/coretrace-compiler.cmake")"
+          done
+          echo "scripts $(git rev-parse HEAD)"
           lscpu | grep -E '^ *(Model name|CPU\(s\)):'
           free -m | sed -n 2p
           uname -r
@@ -92,57 +108,47 @@ jobs:
     - name: Check the measuring script on Lua
       run: |
         python3 "$M/corpora.py"
-        "$M/limited.sh" python3 "$M/measure.py" --out /work/out/script-check --reps 1 --jobs 2 \
+        "$M/limited.sh" python3 "$M/measure.py" --out /work/out/script-check --reps 1 --jobs 1 \
           --deadline-min 5 \
           --corpus lua=/work/corpus/lua/compile_commands.json \
           --variant main=/work/main/build/stack_usage_analyzer
 
-    - name: Build 274
-      run: bash "$M/build.sh" 274
+    - name: Build main with the compiler of 274
+      run: bash "$M/build.sh" pin
 
-    - name: Test 274
+    - name: Test main with the compiler of 274
       timeout-minutes: 20
       run: |
-        "$M/limited.sh" bash "$M/test.sh" 274 2>&1 | tee /work/out/test-274.log
+        "$M/limited.sh" bash "$M/test.sh" pin 2>&1 | tee /work/out/test-pin.log
 
-    - name: Build the rework
-      run: bash "$M/build.sh" rework
+    - name: Build main merged with 274
+      run: bash "$M/build.sh" module
 
-    - name: Test the rework
+    - name: Test main merged with 274
       timeout-minutes: 20
       run: |
-        "$M/limited.sh" bash "$M/test.sh" rework 2>&1 | tee /work/out/test-rework.log
-        cp /work/rework/build/stack_usage_analyzer /work/rework/build/stack_usage_analyzer.release
+        "$M/limited.sh" bash "$M/test.sh" module 2>&1 | tee /work/out/test-module.log
 
-    - name: Build the rework without its release of freed memory
-      run: bash "$M/build.sh" rework no-release
-
-    - name: Test the rework without its release of freed memory
-      timeout-minutes: 20
-      run: |
-        "$M/limited.sh" bash "$M/test.sh" rework 2>&1 | tee /work/out/test-rework-no-release.log
-        cp /work/rework/build/stack_usage_analyzer /work/rework/build/stack_usage_analyzer.no-release
-
-    # The variants rotate from one repetition to the next (measure.py). Past the deadline, the
-    # script stops before the next run and keeps the complete repetitions.
+    # The variants rotate from one repetition to the next (measure.py): in 6 repetitions, each one
+    # runs twice in each place. Past the deadline, the script stops before the next run and keeps
+    # the complete repetitions.
     - name: Measure
-      timeout-minutes: 110
+      timeout-minutes: 75
       run: |
-        "$M/limited.sh" python3 "$M/measure.py" --out /work/out --reps 3 --jobs 1,2,4 \
-          --deadline-min 90 \
+        "$M/limited.sh" python3 "$M/measure.py" --out /work/out --reps 6 --jobs 1 \
+          --deadline-min 60 \
           --corpus analyzer=/work/corpus/analyzer/compile_commands.json \
           --corpus lua=/work/corpus/lua/compile_commands.json \
           --variant main=/work/main/build/stack_usage_analyzer \
-          --variant 274=/work/274/build/stack_usage_analyzer \
-          --variant rework=/work/rework/build/stack_usage_analyzer.release \
-          --variant rework-no-release=/work/rework/build/stack_usage_analyzer.no-release \
+          --variant pin=/work/pin/build/stack_usage_analyzer \
+          --variant module=/work/module/build/stack_usage_analyzer \
           | tee /work/out/measure.log
 
     - name: Summary
       if: always()
       run: |
         {
-          echo '### Loading of main against 274 and the rework of 272'
+          echo "### Main against the compiler's update and 274"
           echo '```'
           cat /work/out/machine.txt /work/out/limits.txt 2>/dev/null || true
           sed -n '/^medians/,$p' /work/out/measure.log 2>/dev/null || true
