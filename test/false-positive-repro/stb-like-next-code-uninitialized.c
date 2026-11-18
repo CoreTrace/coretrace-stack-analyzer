@@ -54,11 +54,5 @@ int fp_stb_like_next_code_uninitialized(Huff* z, const u8* sizelist, int num)
 // at line 43, column 13
 // [ !!Warn ] potential read of uninitialized local variable 'next_code'
 
-// at line 22, column 9
-// [ !!Warn ] potential read of uninitialized local variable 'sizes'
-
-// at line 30, column 24
-// [ !!Warn ] potential read of uninitialized local variable 'sizes'
-
-// at line 33, column 14
-// [ !!Warn ] potential read of uninitialized local variable 'sizes'
+// The loop at line 20 writes every element of 'sizes' before any read of it (#224).
+// not contains: potential read of uninitialized local variable 'sizes'
