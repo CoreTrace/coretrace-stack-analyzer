@@ -1,10 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
-# Experimental, for the experiment/272-linux-measure branch only, not for main: tells the effect of
-# the compiler's update from that of #274, on one runner. The three analyzers are built as the CI
-# builds them, pass their tests, then are measured in turn in a cgroup of 4 CPUs and 6 GiB:
-#   main    main as it is: the bitcode read back, coretrace-compiler v0.10.0
-#   pin     main with the compiler of #274, v0.13.0, and nothing else of #274
-#   module  main merged with #274: the module taken from the compiler, v0.13.0
+# Experimental, for the experiment/272-linux-measure branch only, not for main: tells whether the
+# rework of #272 needs #274, on one runner. The three analyzers build coretrace-compiler v0.13.0,
+# are built as the CI builds them, pass their tests, then are measured in turn at 1, 2 and 4 jobs
+# in a cgroup of 4 CPUs and 6 GiB:
+#   main     main with the compiler of #274 and nothing else of it: the inputs load one at a time
+#   272      main merged with #272, with the loading of the rework: the bitcode read back
+#   272-274  the same with #274 merged too: the module taken from the compiler
+# The two reworks load on the same workers and release the freed memory in the same way. The
+# sources measured are main's, as its build compiles them (corpora.py), as in the earlier runs.
 name: Measure 272
 
 on:
@@ -21,8 +24,13 @@ concurrency:
 env:
   MAIN_SHA: 588e8008df1bc6f125943b4c86262e08a8a3efde
   PR274_SHA: aa8b606178e23c337ca61fdd48199b36f82ecbd5
-  # What `git merge-tree --write-tree` gives for these two commits, without a conflict.
-  MERGED_TREE: 8d13225b7d0dc45cb5ac0adbaa670baeee3df16e
+  PR272_SHA: bbaab08a69bf1562c2806f7da7c0dfdc83671fa5
+  # main, #274 and #272 merged, then the loading on at most four workers and the release.
+  REWORK_SHA: ed8ab5ed0a3cd94ae1d7522429a3c7f1846a8e1d
+  # The source trees of the three variants, computed before the run.
+  MAIN_TREE: 5b38a744c5f23ca359362c9b4ceeec6f5df1ff97
+  TREE_272: 87dd33caa7811fca6ceb18bfed6249a7691c6903
+  TREE_272_274: 97bba0ecbeec64bdbe4fb8e388881d315c27102e
   LUA_SHA256: 7d5ea1b9cb6aa0b59ca3dde1c6adcb57ef83a1ba8e5432c0ecd06bf439b3ad88
   M: /work/scripts/scripts/bench/measure-272
 
@@ -32,13 +40,13 @@ defaults:
 
 jobs:
   measure:
-    name: Main against the compiler's update and 274
+    name: The rework of 272 with and without 274
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
     - uses: actions/checkout@v4
       with:
-        # main's commit and the head of #274 are needed next to the branch's.
+        # main's commit and the heads of #272 and #274 are needed next to the branch's.
         fetch-depth: 0
 
     # As ci.yml does on Linux, without ccache: every build here is a cold one.
@@ -60,24 +68,30 @@ jobs:
         mkdir -p /work/lua /work/out
         git worktree add --detach /work/scripts HEAD
         git worktree add --detach /work/main "$MAIN_SHA"
-        # The file of #274 differs from main's by the pinned commit and by nothing else.
-        git worktree add --detach /work/pin "$MAIN_SHA"
-        git -C /work/pin checkout "$PR274_SHA" -- cmake/compiler/coretrace-compiler.cmake
-        test "$(git -C /work/pin diff --cached --numstat)" \
-          = $'1\t1\tcmake/compiler/coretrace-compiler.cmake'
-        # The merge is left uncommitted: its tree is the one checked before the run.
-        merged=$(git merge-tree --write-tree "$MAIN_SHA" "$PR274_SHA")
-        test "$merged" = "$MERGED_TREE"
-        git worktree add --detach /work/module "$MAIN_SHA"
-        git -C /work/module read-tree -u --reset "$merged"
+        # main and #272 merge but for one sentence of README.md, where main's stays (-X ours).
+        # The rework then changes one file, which neither #272 nor #274 touches.
+        merged=$(git merge-tree --write-tree -X ours "$MAIN_SHA" "$PR272_SHA")
+        git worktree add --detach /work/272 "$MAIN_SHA"
+        git -C /work/272 read-tree -u --reset "$merged"
+        git -C /work/272 checkout "$REWORK_SHA" -- src/app/AnalyzerApp.cpp
+        git worktree add --detach /work/272-274 "$REWORK_SHA"
+        # The file of #274 differs from the others by the pinned commit and by nothing else.
+        for variant in main 272 272-274; do
+          git -C "/work/$variant" checkout "$PR274_SHA" -- cmake/compiler/coretrace-compiler.cmake
+        done
+        # Nothing is committed: each index holds the tree checked before the run.
+        test "$(git -C /work/main write-tree)" = "$MAIN_TREE"
+        test "$(git -C /work/272 write-tree)" = "$TREE_272"
+        test "$(git -C /work/272-274 write-tree)" = "$TREE_272_274"
         curl -fsSL --retry 5 -o /work/lua.tar.gz https://www.lua.org/ftp/lua-5.4.6.tar.gz
         echo "$LUA_SHA256  /work/lua.tar.gz" | sha256sum -c -
         tar -xzf /work/lua.tar.gz -C /work/lua --strip-components=2 lua-5.4.6/src
         {
-          echo "main    $MAIN_SHA"
-          echo "pin     $MAIN_SHA with the compiler of $PR274_SHA"
-          echo "module  $MAIN_SHA merged with $PR274_SHA, tree $merged"
-          for variant in main pin module; do
+          echo "main     $MAIN_SHA with the compiler of $PR274_SHA, tree $MAIN_TREE"
+          echo "272      $MAIN_SHA merged with $PR272_SHA, loading as $REWORK_SHA, tree $TREE_272"
+          echo "272-274  $REWORK_SHA, tree $TREE_272_274"
+          echo "each with the compiler of $PR274_SHA:"
+          for variant in main 272 272-274; do
             echo "$variant $(grep -m1 GIT_TAG "/work/$variant/cmake/compiler/coretrace-compiler.cmake")"
           done
           echo "scripts $(git rev-parse HEAD)"
@@ -96,10 +110,10 @@ jobs:
         echo "$limits" | tee /work/out/limits.txt
         test "$limits" = "4 CPUs, memory.max 6442450944, memory.swap.max 0, as $(id -un)"
 
-    - name: Build main
+    - name: Build main with the compiler v0.13.0
       run: bash "$M/build.sh" main
 
-    - name: Test main
+    - name: Test main with the compiler v0.13.0
       timeout-minutes: 20
       run: |
         "$M/limited.sh" bash "$M/test.sh" main 2>&1 | tee /work/out/test-main.log
@@ -113,42 +127,42 @@ jobs:
           --corpus lua=/work/corpus/lua/compile_commands.json \
           --variant main=/work/main/build/stack_usage_analyzer
 
-    - name: Build main with the compiler of 274
-      run: bash "$M/build.sh" pin
+    - name: Build the rework of 272 without 274
+      run: bash "$M/build.sh" 272
 
-    - name: Test main with the compiler of 274
+    - name: Test the rework of 272 without 274
       timeout-minutes: 20
       run: |
-        "$M/limited.sh" bash "$M/test.sh" pin 2>&1 | tee /work/out/test-pin.log
+        "$M/limited.sh" bash "$M/test.sh" 272 2>&1 | tee /work/out/test-272.log
 
-    - name: Build main merged with 274
-      run: bash "$M/build.sh" module
+    - name: Build the rework of 272 with 274
+      run: bash "$M/build.sh" 272-274
 
-    - name: Test main merged with 274
+    - name: Test the rework of 272 with 274
       timeout-minutes: 20
       run: |
-        "$M/limited.sh" bash "$M/test.sh" module 2>&1 | tee /work/out/test-module.log
+        "$M/limited.sh" bash "$M/test.sh" 272-274 2>&1 | tee /work/out/test-272-274.log
 
-    # The variants rotate from one repetition to the next (measure.py): in 6 repetitions, each one
-    # runs twice in each place. Past the deadline, the script stops before the next run and keeps
+    # The variants rotate from one repetition to the next (measure.py): in 3 repetitions, each one
+    # runs once in each place. Past the deadline, the script stops before the next run and keeps
     # the complete repetitions.
     - name: Measure
-      timeout-minutes: 75
+      timeout-minutes: 95
       run: |
-        "$M/limited.sh" python3 "$M/measure.py" --out /work/out --reps 6 --jobs 1 \
-          --deadline-min 60 \
+        "$M/limited.sh" python3 "$M/measure.py" --out /work/out --reps 3 --jobs 1,2,4 \
+          --deadline-min 80 \
           --corpus analyzer=/work/corpus/analyzer/compile_commands.json \
           --corpus lua=/work/corpus/lua/compile_commands.json \
           --variant main=/work/main/build/stack_usage_analyzer \
-          --variant pin=/work/pin/build/stack_usage_analyzer \
-          --variant module=/work/module/build/stack_usage_analyzer \
+          --variant 272=/work/272/build/stack_usage_analyzer \
+          --variant 272-274=/work/272-274/build/stack_usage_analyzer \
           | tee /work/out/measure.log
 
     - name: Summary
       if: always()
       run: |
         {
-          echo "### Main against the compiler's update and 274"
+          echo '### The rework of 272 with and without 274'
           echo '```'
           cat /work/out/machine.txt /work/out/limits.txt 2>/dev/null || true
           sed -n '/^medians/,$p' /work/out/measure.log 2>/dev/null || true
