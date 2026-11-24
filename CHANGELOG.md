@@ -4,6 +4,23 @@ Notable changes are grouped by release. See [all releases](https://github.com/Co
 
 ## Unreleased
 
+- `ResourceLifetime.DoubleRelease` is decided release by release by the ownership engine where
+  it can. A release of a pointer that holds only NULL or a resource still owned no longer gets a
+  report: a release on each branch of an `if`/`else` or `switch`, in a `catch` that returns,
+  after `p = NULL`, or of a null pointer in a function that allocates nothing. A potential
+  double release is now also reported through an alias, including one passed to a release
+  wrapper (`q = p; free(p); free(q);` only got the "inter-procedural resource analysis
+  incomplete" warning), and when every allocation a pointer may hold was released before. The
+  double releases already reported stay, such as a second call to a release wrapper in the same
+  or another file, or `release_both(p, p)` when the callee always releases both parameters.
+  Where the engine cannot decide (a pointer from unknown code, a resource unknown code may hold,
+  a release inside a loop, two releases in one call that may not run together, or may release
+  different allocations), the previous counters decide as before, including the
+  "released without a matching acquire" check. The message is unchanged; `--verbose` prints the
+  engine's verdict on each release (`[DR-VERDICT]`). Still not handled: conditions correlated
+  across branches (#105), a release repeated by a loop (#275), a reset to NULL joined with a path
+  where the resource is live (#276), a variable given an unrelated pointer (#277), and a callee
+  that resets `*pp` to NULL (#278).
 - An index-bounds pilot bounds `buf[i]` on a stack array, indexed directly rather than through
   a pointer, with ScalarEvolution. It works on a copy of the function whose local variables live
   in registers; the analyzed IR is unchanged. An index the copy proves in bounds no longer gets a

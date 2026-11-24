@@ -68,10 +68,6 @@ int main(void)
 // [!!!Error] potential null pointer dereference on '<pointer>'
 // ↳ a preceding local-slot store sets the pointer to null before use
 
-// at line 31, column 7
-// [!!!Error] potential use-after-release: 'HeapAlloc' handle 'p' is used after a release in this function
-// ↳ a later dereference/call argument use may access invalid memory
-
-// at line 32, column 27
-// [!!!Error] potential use-after-release: 'HeapAlloc' handle 'p' is used after a release in this function
-// ↳ a later dereference/call argument use may access invalid memory
+// vuln_null_after_free: `p = NULL` overwrites the handle and reads no released memory; `*p` then
+// dereferences null (the error above), not the released allocation.
+// not contains: potential use-after-release: 'HeapAlloc' handle 'p' is used after a release in this function

@@ -8,8 +8,10 @@ int new_double_delete()
     return 0;
 }
 
-// at line 6, column 5
+// at line 7, column 5
 // [!!!Error] potential double release: 'CppHeap' handle 'p' is released without a matching acquire in this function
 
-// at line 6, column 12
-// [!!!Error] potential use-after-release: 'CppHeap' handle 'p' is used after a release in this function
+// The second `delete p` releases the memory again (the error above); its null test reads only
+// the pointer value, not the released memory. delete-twice-with-destructor.cpp keeps both
+// diagnostics, because there the destructor runs on the released object.
+// not contains: potential use-after-release: 'CppHeap' handle 'p' is used after a release in this function

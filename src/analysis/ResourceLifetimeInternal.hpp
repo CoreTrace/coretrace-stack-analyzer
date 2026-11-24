@@ -63,4 +63,10 @@ namespace ctrace::stack::analysis::lifetime_detail
                                      std::uint64_t offset, bool viaPointerSlot,
                                      const llvm::Function& caller, const llvm::DataLayout& DL,
                                      const MethodClassInfo& callerMethodInfo);
+    /// Whether `callee` likely reads or writes through pointer argument `argIndex`: the
+    /// parameter's attributes say so, the callee is a known libc accessor, or it is an
+    /// external declaration (conservative). False for a defined callee without such
+    /// attributes and for an indirect call (callee null).
+    bool callArgumentLikelyDereferenced(const llvm::CallBase& CB, const llvm::Function* callee,
+                                        unsigned argIndex);
 } // namespace ctrace::stack::analysis::lifetime_detail

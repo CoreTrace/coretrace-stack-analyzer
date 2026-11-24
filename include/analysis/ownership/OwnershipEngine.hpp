@@ -48,6 +48,65 @@ namespace ctrace::stack::analysis::ownership
         const OwnershipFacts& facts, const OwnershipResult& result, std::uint32_t block,
         const std::function<void(std::uint32_t, const AbstractState&, const AbstractState&)>& cb);
 
+    /// A Use event that may read a released resource.
+    struct ReleasedUse
+    {
+        const Event* use = nullptr; // points into the facts
+        ResourceId resource = 0;
+        std::uint32_t reservedPadding = 0;
+    };
+
+    /// Every (Use, resource) where the resource the Use's `src` may hold may be Released and is
+    /// not uncertain, or is Released on every path where it exists (uncertain or not), read off
+    /// the stabilised states (edges included). Empty when incomplete.
+    std::vector<ReleasedUse> releasedUses(const OwnershipFacts& facts,
+                                          const OwnershipResult& result);
+
+    /// What the engine can tell about one release (DoubleRelease).
+    enum class ReleaseOutcome : std::uint8_t
+    {
+        Unknown,  // the engine cannot decide: the caller keeps its own checks
+        Checked,  // everything the released location may hold is null or a resource still owned
+        Detected, // the location may hold a resource released before: a potential double release
+    };
+
+    /// The verdict on the location released at one instruction, by a Release event or by a
+    /// parameter of a Call event that releases an owned resource without uncertainty.
+    struct ReleaseVerdict
+    {
+        std::uint32_t instructionIndex = 0;
+        LocationId location = 0;
+        ResourceId resource = 0; // Detected: one of the released resources the location holds
+        ReleaseOutcome outcome = ReleaseOutcome::Unknown;
+        std::uint8_t reservedPadding[3] = {};
+    };
+
+    /// Every release reached in the stabilised states (edges included), in block/event order,
+    /// judged on the state just before it:
+    ///  - one possible resource and nothing else: Detected when it may be Released (the
+    ///    releasedUses filter), Checked when it is only Owned and certain;
+    ///  - several possibilities (resources, null, unknown): Detected when each resource is
+    ///    Released on every path where it exists, Checked when each is only Owned and certain
+    ///    and nothing is unknown;
+    ///  - null only: Checked; unknown only or nothing tracked: Unknown.
+    /// The parameters of one Call are all judged on the state before the call: argument order is
+    /// not execution order. When two of them hold exactly the same single resource and both
+    /// release it on every normal exit, the later one in argument order is Detected. When their
+    /// targets merely overlap, or the other one may release only on some exits, a Checked
+    /// verdict becomes Unknown. Copies of one release (the edges of an invoke) must agree, else
+    /// Unknown. Empty when incomplete. Meant to be read off withUnknownAtEntry(facts).
+    std::vector<ReleaseVerdict> judgeReleases(const OwnershipFacts& facts,
+                                              const OwnershipResult& result);
+
+    /// `facts` with "unknown" written at entry into every location that may hold a value the
+    /// engine does not follow: every storage location (`isSlot[loc]`, or a location that is not
+    /// Local) and every SSA value that no event writes (the result of an unknown call, an
+    /// argument, untracked memory). Such a location is otherwise empty, and a join forgets an
+    /// empty path: joined with a null path it would look "null only". Transitional: only the
+    /// DoubleRelease verdicts solve these facts; the other rules still read an empty location as
+    /// holding nothing.
+    OwnershipFacts withUnknownAtEntry(const OwnershipFacts& facts, const std::vector<bool>& isSlot);
+
     /// Union of t[s] over the states s in `in`.
     StateSet applyTransformer(const ParamTransformer& t, StateSet in);
 

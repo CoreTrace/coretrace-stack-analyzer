@@ -2448,8 +2448,112 @@ def check_ownership_cross_tu() -> bool:
             if outputs[0] != outputs[1]:
                 print(f"  ❌ {name}: cached run differs from the first run")
                 ok = False
+        # Callees that release their argument: the call after a release is a use when the callee
+        # also accesses it (after the release, or on another path), not when it only releases
+        # it. Same result with Z3, and when the summaries are read back from the cache: the
+        # second run may still recompute intermediate rounds of the fixpoint, the third reads
+        # every summary from it.
+        files = [
+            str(fixtures / "cross-tu-use-then-release-def.c"),
+            str(fixtures / "cross-tu-use-then-release-use.c"),
+        ]
+        expected_uses = [
+            f"at line {line}, column {column}\n\t[!!!Error] potential use-after-release: 'HeapAlloc' handle 'p'"
+            for line, column in ((18, 32), (26, 30))
+        ]
+        smt_args = [
+            "--smt=on",
+            "--smt-backend=z3",
+            "--smt-mode=single",
+            f"--smt-rules={','.join(_all_smt_rules())}",
+            f"--smt-timeout-ms={SMT_FIXTURE_TIMEOUT_MS}",
+        ]
+        for mode, extra in (("default", []), ("smt-z3", smt_args)):
+            args = files + common[:-1] + [f"--resource-summary-cache-dir={tmpdir / f'use-then-release-{mode}'}"]
+            for run in ("first", "second", "third"):
+                result = run_analyzer_uncached(args + extra)
+                output = result.stdout or ""
+                if (
+                    result.returncode != 0
+                    or output.count("use-after-release") != len(expected_uses)
+                    or not all(use in output for use in expected_uses)
+                ):
+                    print(f"  ❌ use-then-release ({mode}, {run}): expected the use-after-release at lines 18 and 26 only")
+                    print(output + (result.stderr or ""))
+                    ok = False
     if ok:
         print("  ✅ resource ownership cross-TU transformers OK\n")
+    return ok
+
+
+def check_double_release_cross_tu() -> bool:
+    """
+    DoubleRelease through release wrappers defined in another file, judged by the ownership
+    engine on their summaries: a second release through a wrapper, an alias passed to one, or
+    release_both(p, p) is reported; wrappers on exclusive branches, after a reset to NULL, or on
+    distinct allocations are not. Same result in memory, over three runs sharing a summary cache
+    (the third reads every summary from it), and with Z3. Alone, the caller sees unknown callees
+    and reports no double release.
+    """
+    print("=== Testing DoubleRelease through cross-TU release wrappers ===")
+    model = "models/resource-lifetime/generic.txt"
+    fixtures = RUN_CONFIG.test_dir / "resource-lifetime"
+    files = [
+        str(fixtures / "cross-tu-double-release-def.c"),
+        str(fixtures / "cross-tu-double-release-use.c"),
+    ]
+    reported = ((17, "twice"), (24, "mixed"), (31, "swapped"), (38, "maybe"), (46, "copy"),
+                (53, "chained"), (59, "same"))
+    expected = [
+        f"at line {line}, column 5\n\t[!!!Error] potential double release: 'HeapAlloc' handle '{handle}'"
+        for line, handle in reported
+    ]
+    lines = ", ".join(str(line) for line, _ in reported)
+    smt_args = [
+        "--smt=on",
+        "--smt-backend=z3",
+        "--smt-mode=single",
+        f"--smt-rules={','.join(_all_smt_rules())}",
+        f"--smt-timeout-ms={SMT_FIXTURE_TIMEOUT_MS}",
+    ]
+
+    def as_expected(output: str) -> bool:
+        return (
+            output.count("potential double release") == len(expected)
+            and all(text in output for text in expected)
+            and "inter-procedural resource analysis incomplete" not in output
+        )
+
+    ok = True
+    with tempfile.TemporaryDirectory(prefix="ct_double_release_cross_tu_") as tmp:
+        tmpdir = Path(tmp)
+        common = [
+            f"--resource-model={model}",
+            "--warnings-only",
+            f"--compile-ir-cache-dir={tmpdir / 'compile-ir-cache'}",
+        ]
+        runs = [("memory only", files + common + ["--resource-summary-cache-memory-only"])]
+        for mode, extra in (("default", []), ("smt-z3", smt_args)):
+            cache = tmpdir / f"summaries-{mode}"
+            for run in ("first", "second", "third"):
+                runs.append((f"{mode} ({run})",
+                             files + common + [f"--resource-summary-cache-dir={cache}"] + extra))
+        for label, args in runs:
+            result = run_analyzer_uncached(args)
+            output = result.stdout or ""
+            if result.returncode != 0 or not as_expected(output):
+                print(f"  ❌ {label}: expected exactly the double releases of lines {lines}")
+                print(output + (result.stderr or ""))
+                ok = False
+        result = run_analyzer_uncached(
+            [files[1]] + common + ["--resource-summary-cache-memory-only"])
+        output = result.stdout or ""
+        if result.returncode != 0 or "potential double release" in output:
+            print("  ❌ caller alone: the wrappers are unknown, no double release expected")
+            print(output + (result.stderr or ""))
+            ok = False
+    if ok:
+        print("  ✅ DoubleRelease through cross-TU wrappers OK\n")
     return ok
 
 
@@ -2511,7 +2615,7 @@ def check_ownership_wrapper_metadata() -> bool:
         if checked_output(inputs) != first:
             return fail_check("obsolete summaries changed the wrapper diagnostics")
         # Intermediate fixpoint keys need not be reused; active keys must be rewritten.
-        if not any(json.loads(path.read_text())["schema"] == "resource-summary-cache-v5" for path in cache_files):
+        if not any(json.loads(path.read_text())["schema"] == "resource-summary-cache-v6" for path in cache_files):
             return fail_check("obsolete ownership summaries were not rebuilt")
     print("  ✅ ownership wrapper metadata preserved locally, across TUs and in the cache\n")
     return True
@@ -2975,6 +3079,55 @@ def check_global_read_before_write_identity_across_files() -> bool:
                 ok = fail_check(f"{label}: expected {sorted(expected)}, got {sorted(observed)}")
                 continue
             print(f"  ✅ {label}")
+    print()
+    return ok
+
+
+def check_global_read_before_write_order() -> bool:
+    """
+    A function's GlobalReadBeforeWrite diagnostics come out in the order of its reads, two globals
+    read by one call in the order of its arguments, at any --jobs. Their order used to follow the
+    globals' addresses, which change from one run to the next. The reads follow neither the
+    alphabetical order of the names, nor their order of declaration, nor their order in the
+    module, which first() sets by using them before reader() does.
+    """
+    print("=== Testing GlobalReadBeforeWrite order within a function ===")
+    declared = [f"g_{n}" for n in ("alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel")]
+    reads = ["g_delta", "g_alpha", "g_foxtrot", "g_charlie", "g_echo", "g_bravo"]
+    call = ["g_hotel", "g_golf"]
+    names = reads + call
+    sources = {
+        "reads.c": "".join(f"int {n}[4];\n" for n in declared)
+        + "void use2(const int *a, const int *b);\n"
+        + "int first(void)\n{\n    return " + " + ".join(f"{n}[0]" for n in declared) + ";\n}\n"
+        + "int reader(int i)\n{\n    int s = 0;\n"
+        + "".join(f"    s += {n}[i & 3];\n" for n in reads)
+        + f"    use2({call[0]}, {call[1]});\n    return s;\n}}\n",
+        "other.c": "int other(int i) { return i; }\n",
+    }
+    ok = True
+    with tempfile.TemporaryDirectory(prefix="ct_global_read_order_") as tmp:
+        root = Path(tmp)
+        for name, text in sources.items():
+            (root / name).write_text(text)
+        for jobs in ("--jobs=1", "--jobs=4"):
+            result = run_analyzer([str(root / "reads.c"), str(root / "other.c"), "--format=json", jobs])
+            try:
+                payload = json.loads(result.stdout or "")
+            except json.JSONDecodeError:
+                ok = fail_check(f"{jobs}: no JSON output", (result.stdout or "") + (result.stderr or ""))
+                continue
+            observed = [
+                match.group(1)
+                for d in payload.get("diagnostics", [])
+                if d.get("ruleId") == "GlobalReadBeforeWrite" and d.get("location", {}).get("function") == "reader"
+                for match in [re.search(r"global buffer '([^']+)'", d.get("details", {}).get("message", ""))]
+                if match
+            ]
+            if observed != names:
+                ok = fail_check(f"{jobs}: expected {names}, got {observed}")
+                continue
+            print(f"  ✅ {jobs}")
     print()
     return ok
 
@@ -5839,6 +5992,7 @@ def main() -> int:
         check_resource_lifetime_cross_tu,
         check_resource_model_across_compile_directories,
         check_ownership_cross_tu,
+        check_double_release_cross_tu,
         check_ownership_wrapper_metadata,
         check_uninitialized_cross_tu,
         check_uninitialized_cross_tu_no_effect,
@@ -5846,6 +6000,7 @@ def main() -> int:
         check_const_param_contract_message_across_files,
         check_duplicate_if_cross_tu,
         check_global_read_before_write_identity_across_files,
+        check_global_read_before_write_order,
         check_size_minus_one_cross_tu,
         check_stack_buffer_callee_cross_tu,
         check_cross_tu_call_graph,
