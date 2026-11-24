@@ -1786,6 +1786,8 @@ def check_loading_jobs() -> bool:
     The inputs of a multi-file run load at once, their sources compiling in parallel, on fewer
     workers than --jobs allows, as each compilation in progress holds its own memory: two when
     the count is left to the machine (no --jobs, or --jobs=auto), and min(N, 4) with --jobs=N.
+    The bound holds without the cross-TU summaries that the options can turn off: every
+    multi-file run loads its inputs that way.
     """
     print("=== Testing how many inputs load at once ===")
     automatic = min(2, os.cpu_count() or 1)
@@ -1802,8 +1804,9 @@ def check_loading_jobs() -> bool:
             (["--jobs=3"], 3),
             (["--jobs=4"], 4),
             (["--jobs=8"], 4),
+            (["--jobs=8", "--no-resource-cross-tu", "--no-uninitialized-cross-tu"], 4),
         ):
-            label = jobs[0] if jobs else "no --jobs"
+            label = " ".join(jobs) if jobs else "no --jobs"
             try:
                 result = subprocess.run([analyzer, "--timing", *jobs, *map(str, sources)], cwd=root,
                                         capture_output=True, text=True,
