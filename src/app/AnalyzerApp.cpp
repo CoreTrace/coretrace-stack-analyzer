@@ -36,6 +36,10 @@
 #define CTRACE_STACK_ANALYZER_HAS_PTHREAD 1
 #endif
 
+#if defined(__GLIBC__)
+#include <malloc.h>
+#endif
+
 #include <llvm/IR/InstrTypes.h>
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
@@ -117,6 +121,15 @@ static unsigned resolveLoadingJobs(const AnalysisConfig& cfg)
 {
     return std::min(resolveConfiguredJobs(cfg),
                     cfg.jobsAuto ? kAutomaticLoadingJobs : kMaxLoadingJobs);
+}
+
+// Gives back to the system the memory that the allocator keeps free. glibc keeps what the
+// compilations freed, in the arena of the thread that ran them, for the rest of the run (#285).
+static void releaseFreedMemory()
+{
+#if defined(__GLIBC__)
+    malloc_trim(0);
+#endif
 }
 
 #if defined(CTRACE_STACK_ANALYZER_HAS_PTHREAD)
@@ -972,8 +985,10 @@ static AppStatus analyzeWithSharedModuleLoading(const std::vector<std::string>& 
     // The inputs compile at once (InputPipeline.cpp), on fewer workers than --jobs allows
     // (resolveLoadingJobs): each compilation in progress holds its own memory, and glibc gives each
     // worker an arena of its own, which keeps the memory its compilations freed, about one
-    // compilation per worker for the rest of the run. The cross-TU summaries below still use --jobs.
+    // compilation per worker, until it is released here. The cross-TU summaries below still use
+    // --jobs.
     runParallelWork(inputFilenames.size(), resolveLoadingJobs(cfg), loadSingleModule);
+    releaseFreedMemory();
 
     std::vector<LoadedInputModule> orderedLoadedModules;
     orderedLoadedModules.reserve(inputFilenames.size());
