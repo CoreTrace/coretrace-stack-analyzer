@@ -252,7 +252,7 @@ Ready-to-adapt workflow examples:
 --compdb=<path> alias for --compile-commands
 --compdb-fast drops heavy build flags for faster analysis
 --include-compdb-deps includes `_deps` entries when inputs are auto-discovered from compile_commands.json
---jobs=<N|auto> parallel jobs for the cross-TU summaries of multi-file runs (default: auto)
+--jobs=<N|auto> parallel jobs of multi-file runs: N for the cross-TU summaries, min(N, 4) to load the inputs, or 2 with auto (default: auto)
 --escape-model=<path> loads external noescape rules for stack pointer escape analysis (`noescape_arg`)
 --buffer-model=<path> loads external buffer write rules for copy/string overflow checks (`bounded_write`/`unbounded_write`)
 --resource-model=<path> loads external acquire/release rules for generic resource lifetime checks
@@ -295,7 +295,9 @@ To generate `compile_commands.json` with CMake, configure with
 
 If analysis feels slow, `--compdb-fast` disables heavy flags (optimizations,
 sanitizers, profiling) while keeping include paths and macros.
-For multi-file runs, `--jobs=<N|auto>` parallelizes the construction of cross-TU summaries; the inputs are loaded one at a time.
+For multi-file runs, `--jobs=<N|auto>` parallelizes the construction of cross-TU summaries and the loading of the inputs, compilations included.
+Each compilation in progress holds its own memory, so the loading is bounded apart from the summaries:
+it takes `min(N, 4)` workers with `--jobs=N`, and 2 with `auto`, the default.
 `--compile-ir-cache-dir=<path>` reuses compiled LLVM IR for unchanged translation units
 based on source/dependency stamps, which reduces repeated C/C++ frontend cost across runs.
 IR that another compiler produced (another coretrace-compiler revision or LLVM version) is compiled again.
@@ -574,7 +576,7 @@ Cross-TU summary behavior:
 - `--no-resource-cross-tu` forces local-only (single-file) resource reasoning.
 - `--resource-summary-cache-dir=<path>` controls where per-module summary cache files are stored.
 - `--resource-summary-cache-memory-only` disables filesystem cache writes and uses an in-process cache only.
-- `--jobs=<N>` parallelizes per-module summary extraction during each fixpoint iteration; modules are loaded one at a time.
+- `--jobs=<N>` parallelizes per-module summary extraction during each fixpoint iteration; modules are loaded on `min(N, 4)` workers, or on 2 with `--jobs=auto`.
 - The CLI prints an explicit status line to `stderr` to indicate whether resource inter-procedural
   analysis is enabled or unavailable/disabled (with reason).
 - If a local release depends on an unmodeled/external callee and no summary is available, the tool
