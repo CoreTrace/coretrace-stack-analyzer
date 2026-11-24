@@ -1744,6 +1744,142 @@ def check_compile_ir_format_switch() -> bool:
     return ok
 
 
+def _write_loading_sources(root: Path, count: int = 12) -> list[Path]:
+    """
+    Write `count` C files for the checks of the loading. Each one reads a global of its own before
+    any write, which the analyzer reports, calls the next one, and includes three standard
+    headers, so that its compilation lasts long enough to overlap the others'.
+    """
+    sources = []
+    for index in range(count):
+        callee = f"unit_{index + 1:02d}" if index + 1 < count else None
+        source = root / f"unit_{index:02d}.c"
+        source.write_text(
+            "#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n"
+            f"int table_{index:02d}[4];\n"
+            + (f"int {callee}(int i);\n" if callee else "")
+            + f"int unit_{index:02d}(int i)\n{{\n    int s = 0;\n    s += table_{index:02d}[i & 3];\n"
+            + (f"    return s + {callee}(i);\n" if callee else "    return s;\n")
+            + "}\n"
+        )
+        sources.append(source)
+    return sources
+
+
+def _most_loads_at_once(timing_log: str) -> int:
+    """
+    The most inputs loading at once, from the log of --timing: an input logs `Compiling` when its
+    load starts, and `Bitcode parse done in` once its module is there.
+    """
+    in_flight = most = 0
+    for line in timing_log.splitlines():
+        if "Compiling " in line:
+            in_flight += 1
+            most = max(most, in_flight)
+        elif "Bitcode parse done in" in line:
+            in_flight -= 1
+    return most
+
+
+def check_loading_jobs() -> bool:
+    """
+    The inputs of a multi-file run load at once, their sources compiling in parallel, on fewer
+    workers than --jobs allows, as each compilation in progress holds its own memory: two when
+    the count is left to the machine (no --jobs, or --jobs=auto), and min(N, 4) with --jobs=N.
+    The bound holds without the cross-TU summaries that the options can turn off: every
+    multi-file run loads its inputs that way.
+    """
+    print("=== Testing how many inputs load at once ===")
+    automatic = min(2, os.cpu_count() or 1)
+    ok = True
+    with tempfile.TemporaryDirectory(prefix="ct_loading_jobs_") as tmp:
+        root = Path(tmp)
+        sources = _write_loading_sources(root)
+        analyzer = str(Path(RUN_CONFIG.analyzer).resolve())
+        for jobs, expected in (
+            ([], automatic),
+            (["--jobs=auto"], automatic),
+            (["--jobs=1"], 1),
+            (["--jobs=2"], 2),
+            (["--jobs=3"], 3),
+            (["--jobs=4"], 4),
+            (["--jobs=8"], 4),
+            (["--jobs=8", "--no-resource-cross-tu", "--no-uninitialized-cross-tu"], 4),
+        ):
+            label = " ".join(jobs) if jobs else "no --jobs"
+            try:
+                result = subprocess.run([analyzer, "--timing", *jobs, *map(str, sources)], cwd=root,
+                                        capture_output=True, text=True,
+                                        timeout=RUN_CONFIG.analyzer_timeout)
+            except subprocess.TimeoutExpired:
+                ok = fail_check(f"{label}: the analyzer timed out")
+                continue
+            started = result.stderr.count("Compiling ")
+            loaded = result.stderr.count("Bitcode parse done in")
+            if result.returncode != 0 or (started, loaded) != (len(sources), len(sources)):
+                ok = fail_check(f"{label}: exit code {result.returncode}, {started} loads started and "
+                                f"{loaded} done for {len(sources)} inputs", result.stderr)
+                continue
+            most = _most_loads_at_once(result.stderr)
+            if most != expected:
+                ok = fail_check(f"{label}: {most} at once, expected {expected}")
+                continue
+            print(f"  ✅ {label}: {most} at once")
+    print()
+    return ok
+
+
+def check_reports_of_an_empty_and_a_filled_compile_ir_cache() -> bool:
+    """
+    A multi-file run gives the diagnostics and the functions of a run that loads its inputs one
+    at a time without a cache, when its inputs load at once from an empty compile IR cache, which
+    they fill together, and when they load from the cache they filled.
+    """
+    print("=== Testing the reports of an empty and a filled compile IR cache ===")
+    ok = True
+    with tempfile.TemporaryDirectory(prefix="ct_loading_cache_") as tmp:
+        root = Path(tmp)
+        sources = _write_loading_sources(root)
+        analyzer = str(Path(RUN_CONFIG.analyzer).resolve())
+
+        def run(*args):
+            try:
+                result = subprocess.run(
+                    [analyzer, "--timing", "--format=json", *args, *map(str, sources)], cwd=root,
+                    capture_output=True, text=True, timeout=RUN_CONFIG.analyzer_timeout)
+                payload = json.loads(result.stdout)
+            except (subprocess.TimeoutExpired, json.JSONDecodeError):
+                return None, 0
+            # A diagnostic's id follows its place in the report, which is not compared.
+            report = (
+                sorted(json.dumps({key: value for key, value in d.items() if key != "id"}, sort_keys=True)
+                       for d in payload.get("diagnostics", [])),
+                sorted(json.dumps(f, sort_keys=True) for f in payload.get("functions", [])),
+            )
+            return report, result.stderr.count("Compilation cache hit for")
+
+        reference, _ = run("--jobs=1")
+        if reference is None or not all(reference):
+            print("  ❌ no diagnostics or no functions without a cache, at --jobs=1")
+            print()
+            return False
+        for index, jobs in enumerate(([], ["--jobs=4"])):
+            label = jobs[0] if jobs else "no --jobs"
+            cache = f"--compile-ir-cache-dir={root / f'compile-ir-{index}'}"
+            for state, expected_hits in (("an empty cache", 0), ("the cache it filled", len(sources))):
+                report, hits = run(*jobs, cache)
+                if report == reference and hits == expected_hits:
+                    print(f"  ✅ {label}, {state}: the report of a run without a cache, "
+                          f"{hits} of {len(sources)} inputs read from the cache")
+                else:
+                    ok = False
+                    print(f"  ❌ {label}, {state}: the report of a run without a cache: "
+                          f"{report == reference}; {hits} inputs read from the cache, "
+                          f"expected {expected_hits}")
+    print()
+    return ok
+
+
 def check_pipeline_subscriber_rollout_parity() -> bool:
     """
     Integration check: diagnostics must remain stable when toggling the
@@ -5978,6 +6114,8 @@ def main() -> int:
         check_unresolved_call_max_stack,
         check_cycle_max_stack,
         check_compile_ir_format_switch,
+        check_loading_jobs,
+        check_reports_of_an_empty_and_a_filled_compile_ir_cache,
         check_pipeline_subscriber_rollout_parity,
         check_pipeline_timing_traversal_instrumentation,
         check_only_func_uninitialized,

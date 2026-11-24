@@ -68,6 +68,16 @@ Notable changes are grouped by release. See [all releases](https://github.com/Co
 - Added an authors file and linked the repository documents from the README.
 - SARIF rules carry a title (`shortDescription`) and a description (`fullDescription`) instead
   of their id, and `describeRule` (`RuleCatalog.hpp`) gives them to programs linking the analyzer.
+- In a multi-file run, the inputs load at once and their sources compile in parallel: on at
+  most two workers when `--jobs` is left to the machine (the default, or `--jobs=auto`), and on
+  `min(N, 4)` with `--jobs=N`, as each compilation in progress holds its own memory. The other
+  phases use `--jobs` as before. Each compilation runs in its compile command's directory through
+  coretrace-compiler's `-working-directory`, instead of moving the whole process there under a
+  lock that let one source compile at a time. Compilations that pass `-mllvm`, `-mdebug-pass`,
+  `-mlimit-float-precision`, `-ftime-report` or `-fno-integrated-cc1` still run one at a time.
+  Under glibc, the memory the compilations freed is given back to the system once the inputs are
+  loaded. coretrace-compiler is updated to v0.13.0, which gives each compilation a working
+  directory of its own.
 
 ## v0.22.0
 
