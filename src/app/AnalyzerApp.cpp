@@ -107,6 +107,18 @@ static unsigned resolveConfiguredJobs(const AnalysisConfig& cfg)
     return hw == 0 ? 1u : hw;
 }
 
+// The inputs of a multi-file run that load at once. Each one compiling holds the memory of a
+// compilation, so fewer load than --jobs allows: two when the count is left to the machine, and
+// at most four when --jobs gives it.
+static constexpr unsigned kAutomaticLoadingJobs = 2;
+static constexpr unsigned kMaxLoadingJobs = 4;
+
+static unsigned resolveLoadingJobs(const AnalysisConfig& cfg)
+{
+    return std::min(resolveConfiguredJobs(cfg),
+                    cfg.jobsAuto ? kAutomaticLoadingJobs : kMaxLoadingJobs);
+}
+
 #if defined(CTRACE_STACK_ANALYZER_HAS_PTHREAD)
 static std::size_t resolveParallelWorkerStackBytes()
 {
@@ -957,12 +969,11 @@ static AppStatus analyzeWithSharedModuleLoading(const std::vector<std::string>& 
         loadSucceeded[index] = 1;
     };
 
-    // One input after the other, on this thread, whatever --jobs. The compilations are serialized
-    // (InputPipeline.cpp): a loading worker would only parse its bitcode in parallel, while glibc
-    // would give it an arena of its own and keep there the memory its compilation freed, about one
+    // The inputs compile at once (InputPipeline.cpp), on fewer workers than --jobs allows
+    // (resolveLoadingJobs): each compilation in progress holds its own memory, and glibc gives each
+    // worker an arena of its own, which keeps the memory its compilations freed, about one
     // compilation per worker for the rest of the run. The cross-TU summaries below still use --jobs.
-    for (std::size_t index = 0; index < inputFilenames.size(); ++index)
-        loadSingleModule(index);
+    runParallelWork(inputFilenames.size(), resolveLoadingJobs(cfg), loadSingleModule);
 
     std::vector<LoadedInputModule> orderedLoadedModules;
     orderedLoadedModules.reserve(inputFilenames.size());
