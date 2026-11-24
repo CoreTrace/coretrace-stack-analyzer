@@ -1,8 +1,29 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "mangle.hpp"
 
+#include <llvm/Demangle/Demangle.h>
+
 namespace ctrace_tools
 {
+    namespace
+    {
+        // A symbol, demangled by the C++ runtime's demangler, or by LLVM's when the runtime's
+        // predates the symbol's mangling (#240); empty when neither reads it.
+        std::string demangled(const std::string& name)
+        {
+            int status = 0;
+            std::unique_ptr<char, void (*)(void*)> out(
+                abi::__cxa_demangle(name.c_str(), nullptr, nullptr, &status), std::free);
+            if (status != 0 || !out)
+                out.reset(llvm::itaniumDemangle(name));
+            return out ? out.get() : "";
+        }
+    } // namespace
+
+    bool isMangled(std::string_view name) noexcept
+    {
+        return name.starts_with("_Z") && !demangled(std::string(name)).empty();
+    }
 
     std::string mangleFunction(const std::string& namespaceName, const std::string& functionName,
                                const std::vector<std::string>& paramTypes)
@@ -71,14 +92,8 @@ namespace ctrace_tools
 
     std::string demangle(const char* name)
     {
-        int status = 0;
-        char* demangled = abi::__cxa_demangle(name, nullptr, nullptr, &status);
-
-        std::string result = (status == 0 && demangled) ? demangled : name;
-
-        free(demangled);
-
-        return result;
+        std::string result = demangled(name);
+        return result.empty() ? name : result;
     }
 
     std::string canonicalizeMangledName(std::string_view name)

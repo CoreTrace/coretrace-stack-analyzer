@@ -24,6 +24,8 @@ namespace ctrace::stack::analysis
         std::string currentType;
         std::string suggestedType;
         std::string suggestedTypeAlt;
+        // Lines that say how the suggestion was checked with Clang, or why it could not be (#217).
+        std::vector<std::string> checkLines;
         double confidence = -1.0;
         std::uint64_t pointerConstOnly : 1 = false; // ex: T * const param
         std::uint64_t isReference : 1 = false;
